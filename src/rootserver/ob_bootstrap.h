@@ -34,6 +34,7 @@ class ObISQLClient;
 namespace obrpc
 {
 class ObSrvRpcProxy;
+class ObAdminStorageArg;
 }
 
 namespace share
@@ -44,6 +45,7 @@ namespace schema
 class ObMultiVersionSchemaService;
 class ObTableSchema;
 class ObTenantSchema;
+class ObSimpleTableSchemaV2;
 }
 }
 
@@ -103,6 +105,9 @@ private:
   virtual int check_is_all_server_empty(bool &is_empty);
   virtual int check_all_server_bootstrap_mode_match(bool &match);
   virtual int notify_sys_tenant_root_key();
+#ifdef OB_BUILD_SHARED_STORAGE
+  virtual int check_and_notify_shared_storage_info();
+#endif
   virtual int notify_sys_tenant_server_unit_resource();
   virtual int create_ls();
   virtual int wait_elect_ls(common::ObAddr &master_rs);
@@ -125,10 +130,10 @@ public:
   public:
     TableIdCompare() : ret_(common::OB_SUCCESS) {}
     ~TableIdCompare() {}
-    bool operator() (const share::schema::ObTableSchema* left,
-                     const share::schema::ObTableSchema* right);
+    bool operator() (const share::schema::ObSimpleTableSchemaV2* left,
+                     const share::schema::ObSimpleTableSchemaV2* right);
     int get_ret() const { return ret_; }
-  private:
+private:
     int ret_;
   };
   explicit ObBootstrap(obrpc::ObSrvRpcProxy &rpc_proxy,
@@ -177,6 +182,11 @@ private:
   virtual int init_multiple_zone_deployment_table(common::ObISQLClient &sql_client);
   virtual int add_servers_in_rs_list(rootserver::ObServerZoneOpService &server_zone_op_service);
   virtual int wait_all_rs_in_service();
+#ifdef OB_BUILD_SHARED_STORAGE
+  virtual int write_shared_storage_args();
+  virtual int write_shared_storage_args_for_zone(const ObZone &zone, const ObRegion &region,
+      const obrpc::ObAdminStorageArg &storage_args);
+#endif
   template<typename SCHEMA>
     int set_replica_options(SCHEMA &schema);
   int build_zone_region_list(

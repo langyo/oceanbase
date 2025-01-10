@@ -26,6 +26,11 @@
 #include "sql/plan_cache/ob_lib_cache_object_manager.h"
 namespace oceanbase
 {
+namespace observer
+{
+  class ObGVSql;
+  class ObAllVirtualSqlPlan;
+}
 namespace rpc
 {
   class ObLoadBaselineArg;
@@ -50,6 +55,7 @@ class ObILibCacheObject;
 class ObPhysicalPlan;
 class ObLibCacheAtomicOp;
 class ObEvolutionPlan;
+class ObSpmBaselineLoader;
 
 typedef common::hash::ObHashMap<uint64_t, ObPlanCache *> PlanCacheMap;
 #ifdef OB_BUILD_SPM
@@ -221,6 +227,8 @@ class ObPlanCache
 {
 friend class ObCacheObjectFactory;
 friend class ObPlanCacheEliminationTask;
+friend class observer::ObAllVirtualSqlPlan;
+friend class observer::ObGVSql;
 
 public:
   static const int64_t MAX_PLAN_SIZE = 20*1024*1024; //20M
@@ -354,10 +362,14 @@ public:
   template<typename CallBack = ObKVEntryTraverseOp>
   int foreach_cache_evict(CallBack &cb);
 #ifdef OB_BUILD_SPM
-  int cache_evict_baseline_by_sql_id(uint64_t db_id, common::ObString sql_id);
+  int cache_evict_baseline(uint64_t db_id, common::ObString sql_id);
   // load plan baseline from plan cache
   // int load_plan_baseline();
   int load_plan_baseline(const obrpc::ObLoadPlanBaselineArg &arg, uint64_t &load_count);
+  int batch_load_plan_baseline(const obrpc::ObLoadPlanBaselineArg &arg,
+                               const PlanIdArray &plan_ids,
+                               int64_t &pos,
+                               uint64_t &load_count);
   int check_baseline_finish();
 #endif
   void destroy();
@@ -417,9 +429,15 @@ public:
 public:
   int flush_plan_cache();
   int flush_plan_cache_by_sql_id(uint64_t db_id, common::ObString sql_id);
+  template<typename GETPLKVEntryOp, typename EvictAttr>
+  int flush_pl_cache_single_cache_obj(uint64_t db_id, EvictAttr &attr);
   int flush_lib_cache();
   int flush_lib_cache_by_ns(const ObLibCacheNameSpace ns);
   int flush_pl_cache();
+
+protected:
+  int ref_alloc_obj(const ObCacheObjID obj_id, ObCacheObjGuard& guard);
+  int ref_alloc_plan(const ObCacheObjID obj_id, ObCacheObjGuard& guard);
 
 private:
   DISALLOW_COPY_AND_ASSIGN(ObPlanCache);

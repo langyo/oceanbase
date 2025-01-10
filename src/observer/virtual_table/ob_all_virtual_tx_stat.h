@@ -85,6 +85,14 @@ private:
     GTRID,
     BQUAL,
     FORMAT_ID,
+    START_SCN,
+    END_SCN,
+    REC_SCN,
+    TRANSFER_BLOCKING,
+    BUSY_CBS_CNT,
+    REPLAY_COMPLETE,
+    SERIAL_LOG_FINAL_SCN,
+    CALLBACK_LIST_STATS,
   };
 
   static const int64_t OB_MAX_BUFFER_SIZE = 1024;
@@ -99,6 +107,7 @@ private:
   transaction::ObTxStatIterator tx_stat_iter_;
   common::ObArray<uint64_t> all_tenants_;
   transaction::ObXATransID xid_;
+  ObCStringHelper cstring_helper_;
 private:
   DISALLOW_COPY_AND_ASSIGN(ObGVTxStat);
 };

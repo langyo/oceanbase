@@ -65,30 +65,33 @@ class ObEventHistoryTableOperator
 {
 public:
   static const int64_t EVENT_TABLE_CLEAR_INTERVAL = 2L * 3600L * 1000L * 1000L; // 2 Hours
+  template<bool Truncate, typename T>
+  struct ValueConverter {};
   class ObEventTableUpdateTask : public common::IObDedupTask
   {
   public:
     ObEventTableUpdateTask(ObEventHistoryTableOperator &table_operator, const bool is_delete,
-        const int64_t create_time);
+        const int64_t create_time, const uint64_t exec_tenant_id);
     virtual ~ObEventTableUpdateTask() {}
-    int init(const char *ptr, const int64_t buf_size);
+    int init(const char *ptr, const int64_t buf_size, const uint64_t exec_tenant_id = OB_SYS_TENANT_ID);
     bool is_valid() const;
     virtual int64_t hash() const;
     virtual bool operator==(const common::IObDedupTask &other) const;
     virtual int64_t get_deep_copy_size() const { return sizeof(*this) + sql_.length(); }
     virtual common::IObDedupTask *deep_copy(char *buf, const int64_t buf_size) const;
     virtual int64_t get_abs_expired_time() const { return 0; }
+    virtual uint64_t get_exec_tenant_id() const { return exec_tenant_id_; }
     virtual int process();
   public:
     void assign_ptr(char *ptr, const int64_t buf_size)
     { sql_.assign_ptr(ptr, static_cast<int32_t>(buf_size));}
-
-    TO_STRING_KV(K_(sql), K_(is_delete), K_(create_time));
+    TO_STRING_KV(K_(sql), K_(is_delete), K_(create_time), K_(exec_tenant_id));
   private:
     ObEventHistoryTableOperator &table_operator_;
     common::ObString sql_;
     bool is_delete_;
     int64_t create_time_;
+    uint64_t exec_tenant_id_;
 
     DISALLOW_COPY_AND_ASSIGN(ObEventTableUpdateTask);
   };
@@ -99,37 +102,12 @@ public:
   void stop();
   void wait();
   void destroy();
-  template<typename T1, typename T2, typename T3, typename T4,
-      typename T5, typename T6, typename T7>
-  int add_event(const char *module, const char *event, const char *name1, const T1 &value1,
-      const char *name2, const T2 &value2, const char *name3, const T3 &value3,
-      const char *name4, const T4 &value4, const char *name5, const T5 &value5,
-      const char *name6, const T6 &value6, const T7 &extra_value);
-  template<typename T1, typename T2, typename T3, typename T4,
-      typename T5, typename T6>
-  int add_event(const char *module, const char *event, const char *name1, const T1 &value1,
-      const char *name2, const T2 &value2, const char *name3, const T3 &value3,
-      const char *name4, const T4 &value4, const char *name5, const T5 &value5,
-      const char *name6, const T6 &value6);
-  template<typename T1, typename T2, typename T3, typename T4,
-      typename T5>
-  int add_event(const char *module, const char *event, const char *name1, const T1 &value1,
-      const char *name2, const T2 &value2, const char *name3, const T3 &value3,
-      const char *name4, const T4 &value4, const char *name5, const T5 &value5);
-  template<typename T1, typename T2, typename T3, typename T4>
-  int add_event(const char *module, const char *event, const char *name1, const T1 &value1,
-      const char *name2, const T2 &value2, const char *name3, const T3 &value3,
-      const char *name4, const T4 &value4);
-  template<typename T1, typename T2, typename T3>
-  int add_event(const char *module, const char *event, const char *name1, const T1 &value1,
-      const char *name2, const T2 &value2, const char *name3, const T3 &value3);
-  template<typename T1, typename T2>
-  int add_event(const char *module, const char *event, const char *name1, const T1 &value1,
-      const char *name2, const T2 &value2);
-  template<typename T1>
-  int add_event(const char *module, const char *event, const char *name1, const T1 &value1);
-  int add_event(const char *module, const char *event);
-
+  // number of others should not less than 0, or more than 13
+  // if number of others is not 13, should be even, every odd of them are name, every even of them are value
+  // If Truncate is true, then too long value will be truncated to fit in the field.
+  // Note: Only enable Truncate for rootservice_event_history!
+  template <bool Truncate, typename ...Rest>
+  int add_event(const char *module, const char *event, Rest &&...others);
   // number of others should not less than 0, or more than 13
   // if number of others is not 13, should be even, every odd of them are name, every even of them are value 
   template <typename ...Rest>
@@ -137,20 +115,24 @@ public:
   // number of others should not less than 0, or more than 13
   // if number of others is not 13, should be even, every odd of them are name, every even of them are value
   template <typename ...Rest>
+  int async_add_tenant_event(const uint64_t tenant_id, const char *module, const char *event,
+      const int64_t event_timestamp, const int user_ret, const int64_t cost_sec, Rest &&...others);
+  // number of others should not less than 0, or more than 13
+  template <typename ...Rest>
   int add_event_with_retry(const char *module, const char *event, Rest &&...others);
 
   virtual int async_delete() = 0;
 protected:
   virtual int default_async_delete();
   // recursive begin
-  template <int Floor, typename Name, typename Value, typename ...Rest>
-  int sync_add_event_helper_(share::ObDMLSqlSplicer &dml, Name &&name, Value &&value, Rest &&...others);
+  template <int Floor, bool Truncate, typename Name, typename Value, typename ...Rest>
+  int add_event_helper_(share::ObDMLSqlSplicer &dml, Name &&name, Value &&value, Rest &&...others);
   // recursive end if there is no extra_info
-  template <int Floor>
-  int sync_add_event_helper_(share::ObDMLSqlSplicer &dml);
+  template <int Floor, bool Truncate>
+  int add_event_helper_(share::ObDMLSqlSplicer &dml);
   // recursive end if there is an extra_info
-  template <int Floor, typename Value>
-  int sync_add_event_helper_(share::ObDMLSqlSplicer &dml, Value &&extro_info);
+  template <int Floor, bool Truncate, typename Value>
+  int add_event_helper_(share::ObDMLSqlSplicer &dml, Value &&extro_info);
   int add_event_to_timer_(const common::ObSqlString &sql);
   void set_addr(const common::ObAddr self_addr,
                 bool is_rs_ev,
@@ -164,7 +146,7 @@ protected:
   void set_event_table(const char* tname) { event_table_name_ = tname; }
   const char *get_event_table() const { return event_table_name_; }
   int add_task(const common::ObSqlString &sql, const bool is_delete = false,
-      const int64_t create_time = OB_INVALID_TIMESTAMP);
+      const int64_t create_time = OB_INVALID_TIMESTAMP, const uint64_t exec_tenant_id = OB_SYS_TENANT_ID);
   int gen_event_ts(int64_t &event_ts);
 protected:
   static constexpr const char * names[7] = {"name1", "name2", "name3", "name4", "name5", "name6", "extra_info"}; // only valid in compile time
@@ -176,7 +158,7 @@ protected:
   static const int64_t TASK_QUEUE_SIZE = 20 *1024;
   static const int64_t MAX_RETRY_COUNT = 12;
 
-  virtual int process_task(const common::ObString &sql, const bool is_delete, const int64_t create_time);
+  virtual int process_task(const common::ObString &sql, const bool is_delete, const int64_t create_time, const uint64_t exec_tenant_id);
 private:
   bool inited_;
   volatile bool stopped_;
@@ -196,14 +178,44 @@ private:
   DISALLOW_COPY_AND_ASSIGN(ObEventHistoryTableOperator);
 };
 
-template<typename T1, typename T2, typename T3, typename T4,
-    typename T5, typename T6, typename T7>
-int ObEventHistoryTableOperator::add_event(const char *module, const char *event,
-    const char *name1, const T1 &value1, const char *name2, const T2 &value2,
-    const char *name3, const T3 &value3, const char *name4, const T4 &value4,
-    const char *name5, const T5 &value5, const char *name6, const T6 &value6,
-    const T7 &extra_info_value)
+template<typename T>
+struct ObEventHistoryTableOperator::ValueConverter<true, T>
 {
+  const ObString & convert(const char *value) {
+    truncated_str_.assign_ptr(value, min(static_cast<int64_t>(STRLEN(value)), MAX_ROOTSERVICE_EVENT_VALUE_LENGTH));
+    return truncated_str_;
+  }
+
+  template<typename U = T, typename std::enable_if<common::__has_to_string__<U>::value, bool>::type = true>
+  const ObString & convert(const U &value) {
+    int64_t len = value.to_string(buffer_, sizeof(buffer_));
+    truncated_str_.assign_ptr(buffer_, len);
+    return truncated_str_;
+  }
+
+  template<typename U = T, typename std::enable_if<!common::__has_to_string__<U>::value, bool>::type = true>
+  inline const U & convert(const U &value) {
+    return value;
+  }
+
+  char buffer_[MAX_ROOTSERVICE_EVENT_VALUE_LENGTH + 1];
+  ObString truncated_str_;
+};
+
+template<typename T>
+struct ObEventHistoryTableOperator::ValueConverter<false, T>
+{
+  inline const T & convert(const T &value) {
+    return value;
+  }
+};
+
+template <bool Truncate, typename ...Rest>
+int ObEventHistoryTableOperator::add_event(const char *module, const char *event, Rest &&...others)
+{
+  static_assert(sizeof...(others) >= 0 && sizeof...(others) <= 13 &&
+                (sizeof...(others) == 13 || (sizeof...(others) % 2 == 0)),
+                "max support 6 pair of name-value args and 1 extra info, if number of others is not 13, should be even");
   int ret = common::OB_SUCCESS;
   int64_t event_ts = 0;
   common::ObSqlString sql;
@@ -222,43 +234,7 @@ int ObEventHistoryTableOperator::add_event(const char *module, const char *event
         || OB_FAIL(dml.add_column("module", module))
         || OB_FAIL(dml.add_column("event", event))) {
       SHARE_LOG(WARN, "add column failed", K(ret));
-    }
-    if (common::OB_SUCCESS == ret && NULL != name1) {
-      if (OB_FAIL(dml.add_column("name1", name1))
-          || OB_FAIL(dml.add_column("value1", value1))) {
-        SHARE_LOG(WARN, "add column failed", K(ret));
-      }
-    }
-    if (common::OB_SUCCESS == ret && NULL != name2) {
-      if (OB_FAIL(dml.add_column("name2", name2))
-          || OB_FAIL(dml.add_column("value2", value2))) {
-        SHARE_LOG(WARN, "add column failed", K(ret));
-      }
-    }
-    if (common::OB_SUCCESS == ret && NULL != name3) {
-      if (OB_FAIL(dml.add_column("name3", name3))
-          || OB_FAIL(dml.add_column("value3", value3))) {
-        SHARE_LOG(WARN, "add column failed", K(ret));
-      }
-    }
-    if (common::OB_SUCCESS == ret && NULL != name4) {
-      if (OB_FAIL(dml.add_column("name4", name4))
-          || OB_FAIL(dml.add_column("value4", value4))) {
-        SHARE_LOG(WARN, "add column failed", K(ret));
-      }
-    }
-    if (common::OB_SUCCESS == ret && NULL != name5) {
-      if (OB_FAIL(dml.add_column("name5", name5))
-          || OB_FAIL(dml.add_column("value5", value5))) {
-        SHARE_LOG(WARN, "add column failed", K(ret));
-      }
-    }
-    if (common::OB_SUCCESS == ret && NULL != name6) {
-      if (OB_FAIL(dml.add_column("name6", name6))
-          || OB_FAIL(dml.add_column("value6", value6))
-          || OB_FAIL(dml.add_column("extra_info", extra_info_value))) {
-        SHARE_LOG(WARN, "add column failed", K(ret));
-      }
+    } else if (OB_FAIL((add_event_helper_<0, Truncate>(dml, std::forward<Rest>(others)...)))) {// recursive call
     }
     char ip_buf[common::MAX_IP_ADDR_LENGTH];
     if (common::OB_SUCCESS == ret && self_addr_.is_valid()) {
@@ -291,137 +267,6 @@ int ObEventHistoryTableOperator::add_event(const char *module, const char *event
   return ret;
 }
 
-template<typename T1, typename T2, typename T3, typename T4,
-    typename T5, typename T6>
-int ObEventHistoryTableOperator::add_event(const char *module, const char *event,
-    const char *name1, const T1 &value1, const char *name2, const T2 &value2,
-    const char *name3, const T3 &value3, const char *name4, const T4 &value4,
-    const char *name5, const T5 &value5, const char *name6, const T6 &value6)
-{
-  int ret = common::OB_SUCCESS;
-  if (!inited_) {
-    ret = common::OB_NOT_INIT;
-    SHARE_LOG(WARN, "not init", K(ret));
-  } else if (NULL == module || NULL == event || NULL == name1 || NULL == name2
-      || NULL == name3 || NULL == name4 || NULL == name5 || NULL == name6) {
-    ret = common::OB_INVALID_ARGUMENT;
-    SHARE_LOG(WARN, "invalid argument", KP(module), KP(event), KP(name1), KP(name2),
-        KP(name3), KP(name4), KP(name5), KP(name6), K(ret));
-  } else if (OB_FAIL(add_event(module, event, name1, value1, name2, value2, name3, value3,
-      name4, value4, name5, value5, name6, value6, ""))) {
-    SHARE_LOG(WARN, "add event failed", KP(module), KP(event), KP(name1), K(value1),
-        KP(name2), K(value2), KP(name3), K(value3), KP(name4), K(value4),
-        KP(name5), K(value5), KP(name6), K(value6), K(ret));
-  }
-  return ret;
-}
-
-template<typename T1, typename T2, typename T3, typename T4,
-    typename T5>
-int ObEventHistoryTableOperator::add_event(const char *module, const char *event,
-    const char *name1, const T1 &value1, const char *name2, const T2 &value2,
-    const char *name3, const T3 &value3, const char *name4, const T4 &value4,
-    const char *name5, const T5 &value5)
-{
-  int ret = common::OB_SUCCESS;
-  if (!inited_) {
-    ret = common::OB_NOT_INIT;
-    SHARE_LOG(WARN, "not init", K(ret));
-  } else if (NULL == module || NULL == event || NULL == name1 || NULL == name2
-      || NULL == name3 || NULL == name4 || NULL == name5) {
-    ret = common::OB_INVALID_ARGUMENT;
-    SHARE_LOG(WARN, "invalid argument", KP(module), KP(event), KP(name1), KP(name2),
-        KP(name3), KP(name4), KP(name5), K(ret));
-  } else if (OB_FAIL(add_event(module, event, name1, value1, name2, value2, name3, value3,
-      name4, value4, name5, value5, NULL, "", ""))) {
-    SHARE_LOG(WARN, "add event failed", KP(module), KP(event), KP(name1), K(value1),
-        KP(name2), K(value2), KP(name3), K(value3), KP(name4), K(value4),
-        KP(name5), K(value5), K(ret));
-  }
-  return ret;
-}
-
-template<typename T1, typename T2, typename T3, typename T4>
-int ObEventHistoryTableOperator::add_event(const char *module, const char *event,
-    const char *name1, const T1 &value1, const char *name2, const T2 &value2,
-    const char *name3, const T3 &value3, const char *name4, const T4 &value4)
-{
-  int ret = common::OB_SUCCESS;
-  if (!inited_) {
-    ret = common::OB_NOT_INIT;
-    SHARE_LOG(WARN, "not init", K(ret));
-  } else if (NULL == module || NULL == event || NULL == name1 || NULL == name2
-      || NULL == name3 || NULL == name4) {
-    ret = common::OB_INVALID_ARGUMENT;
-    SHARE_LOG(WARN, "invalid argument", KP(module), KP(event), KP(name1), KP(name2),
-        KP(name3), KP(name4), K(ret));
-  } else if (OB_FAIL(add_event(module, event, name1, value1, name2, value2, name3, value3,
-      name4, value4, NULL, "", NULL, "", ""))) {
-    SHARE_LOG(WARN, "add event failed", KP(module), KP(event), KP(name1), K(value1),
-        KP(name2), K(value2), KP(name3), K(value3), KP(name4), K(value4), K(ret));
-  }
-  return ret;
-}
-
-template<typename T1, typename T2, typename T3>
-int ObEventHistoryTableOperator::add_event(const char *module, const char *event,
-    const char *name1, const T1 &value1, const char *name2, const T2 &value2,
-    const char *name3, const T3 &value3)
-{
-  int ret = common::OB_SUCCESS;
-  if (!inited_) {
-    ret = common::OB_NOT_INIT;
-    SHARE_LOG(WARN, "not init", K(ret));
-  } else if (NULL == module || NULL == event || NULL == name1 || NULL == name2
-      || NULL == name3) {
-    ret = common::OB_INVALID_ARGUMENT;
-    SHARE_LOG(WARN, "invalid argument", KP(module), KP(event), KP(name1), KP(name2),
-        KP(name3), K(ret));
-  } else if (OB_FAIL(add_event(module, event, name1, value1, name2, value2, name3, value3,
-      NULL, "", NULL, "", NULL, "", ""))) {
-    SHARE_LOG(WARN, "add event failed", KP(module), KP(event), KP(name1), K(value1),
-        KP(name2), K(value2), KP(name3), K(value3), K(ret));
-  }
-  return ret;
-}
-
-template<typename T1, typename T2>
-int ObEventHistoryTableOperator::add_event(const char *module, const char *event,
-    const char *name1, const T1 &value1, const char *name2, const T2 &value2)
-{
-  int ret = common::OB_SUCCESS;
-  if (!inited_) {
-    ret = common::OB_NOT_INIT;
-    SHARE_LOG(WARN, "not init", K(ret));
-  } else if (NULL == module || NULL == event || NULL == name1 || NULL == name2) {
-    ret = common::OB_INVALID_ARGUMENT;
-    SHARE_LOG(WARN, "invalid argument", KP(module), KP(event), KP(name1), KP(name2), K(ret));
-  } else if (OB_FAIL(add_event(module, event, name1, value1, name2, value2, NULL, "",
-      NULL, "", NULL, "", NULL, "", ""))) {
-    SHARE_LOG(WARN, "add event failed", KP(module), KP(event), KP(name1), K(value1),
-        KP(name2), K(value2), K(ret));
-  }
-  return ret;
-}
-
-template<typename T1>
-int ObEventHistoryTableOperator::add_event(const char *module, const char *event,
-    const char *name1, const T1 &value1)
-{
-  int ret = common::OB_SUCCESS;
-  if (!inited_) {
-    ret = common::OB_NOT_INIT;
-    SHARE_LOG(WARN, "not init", K(ret));
-  } else if (NULL == module || NULL == event || NULL == name1) {
-    ret = common::OB_INVALID_ARGUMENT;
-    SHARE_LOG(WARN, "invalid argument", KP(module), KP(event), KP(name1), K(ret));
-  } else if (OB_FAIL(add_event(module, event, name1, value1, NULL, "", NULL, "",
-      NULL, "", NULL, "", NULL, "", ""))) {
-    SHARE_LOG(WARN, "add event failed", KP(module), KP(event), KP(name1), K(value1), K(ret));
-  }
-  return ret;
-}
-
 template <typename ...Rest>
 int ObEventHistoryTableOperator::sync_add_event(const char *module, const char *event, Rest &&...others)
 {
@@ -446,7 +291,7 @@ int ObEventHistoryTableOperator::sync_add_event(const char *module, const char *
              OB_FAIL(dml.add_column("module", module)) ||
              OB_FAIL(dml.add_column("event", event))) {
     SHARE_LOG(WARN, "add column failed", K(ret));
-  } else if (OB_FAIL(sync_add_event_helper_<0>(dml, std::forward<Rest>(others)...))) {// recursive call
+  } else if (OB_FAIL((add_event_helper_<0, false>(dml, std::forward<Rest>(others)...)))) {// recursive call
   } else if (common::OB_SUCCESS == ret && self_addr_.is_valid()) {
     if (is_rootservice_event_history_) {
       //Add rs_svr_ip, rs_svr_port to the __all_rootservice_event_history table
@@ -481,6 +326,80 @@ int ObEventHistoryTableOperator::sync_add_event(const char *module, const char *
 }
 
 template <typename ...Rest>
+int ObEventHistoryTableOperator::async_add_tenant_event(
+	  const uint64_t tenant_id, const char *module, const char *event, const int64_t event_timestamp,
+    const int user_ret, const int64_t cost_sec, Rest &&...others)
+{
+  static_assert(sizeof...(others) >= 0 && sizeof...(others) <= 13 &&
+      (sizeof...(others) == 13 || (sizeof...(others) % 2 == 0)),
+      "max support 6 pair of name-value args and 1 extra info, if number of others is not 13, should be even");
+  int ret = common::OB_SUCCESS;
+  int64_t affected_rows = 0;
+  common::ObSqlString sql;
+  share::ObDMLSqlSplicer dml;
+  char ip_buf[common::MAX_IP_ADDR_LENGTH];
+  uint64_t compat_version = 0;
+  if (OB_FAIL(GET_MIN_DATA_VERSION(tenant_id, compat_version))) {
+    SHARE_LOG(WARN, "fail to get data version", KR(ret), K(tenant_id));
+  } else if (OB_UNLIKELY(!(compat_version >= DATA_VERSION_4_3_3_0
+      || (compat_version >= DATA_VERSION_4_2_2_0 && compat_version < DATA_VERSION_4_3_0_0)
+      || (compat_version >= MOCK_DATA_VERSION_4_2_1_8 && compat_version < DATA_VERSION_4_2_2_0)))) {
+    ret = common::OB_NOT_SUPPORTED;
+    SHARE_LOG(WARN, "only (version >= 4_2_1_8 and version < 4_2_2_0) "
+      "or version >= 4_2_2_0 and version < 4_3_0_0 "
+      "or version >= 4_3_3_0 support this operation", KR(ret), K(compat_version));
+  } else if (OB_UNLIKELY(!inited_)) {
+    ret = common::OB_NOT_INIT;
+    SHARE_LOG(WARN, "not init", KR(ret));
+  } else if (OB_ISNULL(module) || OB_ISNULL(event)) {
+    ret = common::OB_INVALID_ARGUMENT;
+    SHARE_LOG(WARN, "neither module or event can be NULL", KR(ret), KP(module), KP(event));
+  } else if (OB_UNLIKELY(OB_INVALID_TENANT_ID == tenant_id)) {
+    ret = OB_INVALID_ARGUMENT;
+    SHARE_LOG(WARN, "tenant_id is invalid", KR(ret), K(tenant_id));
+  } else if (OB_FAIL(dml.add_gmt_create(event_timestamp))
+      || OB_FAIL(dml.add_column("module", module))
+      || OB_FAIL(dml.add_column("event", event)
+      || OB_FAIL(dml.add_column("tenant_id", tenant_id))
+      || OB_FAIL(dml.add_column("ret_code", user_ret))
+      ||  OB_FAIL(dml.add_column("cost_time", cost_sec)))) {
+    SHARE_LOG(WARN, "add column failed", KR(ret), K(event_timestamp), "module", module, "event", event, K(tenant_id), KR(user_ret), K(cost_sec));
+  } else if (OB_FAIL((add_event_helper_<0, false>(dml, std::forward<Rest>(others)...)))) {// recursive call
+  } else if (common::OB_SUCCESS == ret && self_addr_.is_valid()) {
+    (void)self_addr_.ip_to_string(ip_buf, common::MAX_IP_ADDR_LENGTH);
+    if (OB_FAIL(dml.add_column("svr_ip", ip_buf))
+        || OB_FAIL(dml.add_column("svr_port", self_addr_.get_port()))) {
+      SHARE_LOG(WARN, "add column failed", KR(ret), K(ip_buf), K(self_addr_.get_port()));
+    }
+  }
+
+  if (OB_SUCC(ret)) {
+    const int64_t MAX_TRACE_ID_LENGTH = 64;
+    char trace_id_buf[MAX_TRACE_ID_LENGTH] = {0};
+    ::oceanbase::common::ObCurTraceId::TraceId *trace_id = ObCurTraceId::get_trace_id();
+    if (OB_NOT_NULL(trace_id)) {
+      if (FALSE_IT(trace_id->to_string(trace_id_buf, sizeof(trace_id_buf)))) {
+      } else if (OB_FAIL(dml.add_column("trace_id", trace_id_buf))) {
+        SHARE_LOG(WARN, "add trace_id column failed", KR(ret), K(trace_id_buf), KPC(trace_id));
+      }
+    }
+  }
+
+  if (OB_SUCC(ret)) {
+    uint64_t exec_tenant_id = gen_meta_tenant_id(tenant_id);
+    if (OB_FAIL(dml.splice_insert_sql(event_table_name_, sql))) {
+      SHARE_LOG(WARN, "splice_insert_sql failed", KR(ret), K(sql));
+    } else if (OB_FAIL(add_task(sql, false, OB_INVALID_TIMESTAMP, exec_tenant_id))) {
+      SHARE_LOG(WARN, "add_task failed", K(sql), K(exec_tenant_id), KR(ret));
+    } else {
+      ObTaskController::get().allow_next_syslog();
+      SHARE_LOG(INFO, "event table async add event success", KR(ret), K_(event_table_name), K(sql), K(tenant_id), K(exec_tenant_id));
+    }
+  }
+  return ret;
+}
+
+template <typename ...Rest>
 int ObEventHistoryTableOperator::add_event_with_retry(const char *module, const char *event, Rest &&...others)
 {
   static_assert(sizeof...(others) >= 0 && sizeof...(others) <= 13 &&
@@ -507,7 +426,7 @@ int ObEventHistoryTableOperator::add_event_with_retry(const char *module, const 
              CLICK_FAIL(dml.add_column("module", module)) ||
              CLICK_FAIL(dml.add_column("event", event))) {
     SHARE_LOG(WARN, "add column failed", K(ret));
-  } else if (CLICK_FAIL(sync_add_event_helper_<0>(dml, std::forward<Rest>(others)...))) {// recursive call
+  } else if (CLICK_FAIL((add_event_helper_<0, false>(dml, std::forward<Rest>(others)...)))) {// recursive call
   } else if (common::OB_SUCCESS == ret && self_addr_.is_valid()) {
     if (is_rootservice_event_history_) {
       //Add rs_svr_ip, rs_svr_port to the __all_rootservice_event_history table
@@ -537,30 +456,48 @@ int ObEventHistoryTableOperator::add_event_with_retry(const char *module, const 
   return ret;
 }
 // recursive begin
-template <int Floor, typename Name, typename Value, typename ...Rest>
-int ObEventHistoryTableOperator::sync_add_event_helper_(share::ObDMLSqlSplicer &dml, Name &&name, Value &&value, Rest &&...others)
+template <int Floor, bool Truncate, typename Name, typename Value, typename ...Rest>
+int ObEventHistoryTableOperator::add_event_helper_(share::ObDMLSqlSplicer &dml, Name &&name, Value &&value, Rest &&...others)
 {
   int ret = OB_SUCCESS;
   common::ObSqlString sql;
+  ValueConverter<Truncate, Value> converter;
+  #if Truncate
+  // Truncate can be true only for __all_rootservice_event_history
+  if (OB_UNLIKELY(OB_ALL_ROOTSERVICE_EVENT_HISTORY_TNAME != event_table_name_)) {
+    ret = OB_NOT_SUPPORTED;
+    SHARE_LOG(WARN, "Truncate event only available for __all_rootservice_event_history",
+              KR(ret), "actual_table", event_table_name_);
+  } else
+  #endif
   if (OB_FAIL(dml.add_column(names[Floor], name))) {
     SHARE_LOG(WARN, "add column failed", K(ret), K(Floor));
-  } else if (OB_FAIL(dml.add_column(values[Floor], value))) {
+  } else if (OB_FAIL(dml.add_column(values[Floor], converter.convert(value)))) {
     SHARE_LOG(WARN, "add column failed", K(ret), K(Floor));
-  } else if (OB_FAIL(sync_add_event_helper_<Floor + 1>(dml, std::forward<Rest>(others)...))) {
+  } else if (OB_FAIL((add_event_helper_<Floor + 1, Truncate>(dml, std::forward<Rest>(others)...)))){
   }
   return ret;
 }
 
 // recursive end if there is no extra_info
-template <int Floor>
-int ObEventHistoryTableOperator::sync_add_event_helper_(share::ObDMLSqlSplicer &)
+// if not all columns are user-specified, set rest fields empty
+template <int Floor, bool Truncate>
+int ObEventHistoryTableOperator::add_event_helper_(share::ObDMLSqlSplicer &dml)
 {
-  return OB_SUCCESS;
+  int ret = OB_SUCCESS;
+  if (Floor < 6) {
+    for (int64_t idx = Floor; OB_SUCCESS == ret && idx < 6; ++idx) {
+      if (OB_FAIL(dml.add_column(values[idx], ""))) {
+        SHARE_LOG(WARN, "add column failed", K(ret), K(idx));
+      }
+    }
+  }
+  return ret;
 }
 
 // recursive end if there is an extra_info
-template <int Floor, typename Value>
-int ObEventHistoryTableOperator::sync_add_event_helper_(share::ObDMLSqlSplicer &dml, Value &&extra_info)
+template <int Floor, bool Truncate, typename Value>
+int ObEventHistoryTableOperator::add_event_helper_(share::ObDMLSqlSplicer &dml, Value &&extra_info)
 {
   static_assert(Floor == 6, "if there is an extra_info column, it must be 13th args in this row, no more, no less");
   int ret = OB_SUCCESS;

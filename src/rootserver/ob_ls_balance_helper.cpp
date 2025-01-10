@@ -352,7 +352,8 @@ int ObLSBalanceTaskHelper::generate_migrate_task_()
         //get one unit group, which less than primary_zone_unit_num
         const ObLSStatusInfo &ls_status = balance_info.get_redundant_ls_array().at(j);
         new_task = false;
-        for (int64_t k = 0; OB_SUCC(ret) && k < unit_group_balance_array_.count(); ++k) {
+        //一个ls_status只能生成一个ls_alter任务，在生成任务后，要跳出循环
+        for (int64_t k = 0; OB_SUCC(ret) && k < unit_group_balance_array_.count() && !new_task; ++k) {
           ObUnitGroupBalanceInfo &dest_balance_info = unit_group_balance_array_.at(k);
           if (dest_balance_info.get_lack_ls_count() > 0) {
             new_task = true;
@@ -524,7 +525,7 @@ int ObLSBalanceTaskHelper::generate_task_for_shrink_(
     for (int64_t i = 0; OB_SUCC(ret) && i < src_split_param.count(); ++i) {
       const ObSplitLSParam &param = src_split_param.at(i);
       ObLSID merge_ls_id;
-      if (1 == param.get_current_factor()) {
+      if (fabs(param.get_current_factor() - 1.0) < OB_DOUBLE_EPSINON) {
         //nothing
         merge_ls_id = param.get_ls_info()->ls_id_;
       } else {
@@ -623,7 +624,7 @@ int ObLSBalanceTaskHelper::construct_shrink_src_param_(const int64_t target_coun
       for (int64_t j = 0; OB_SUCC(ret) && j < src_ls.count() && need_factor > OB_DOUBLE_EPSINON; ++j) {
         ObSplitLSParam &param = src_ls.at(j);
         double get_factor = param.reduce_enough_factor(need_factor);
-        if (0 == get_factor) {
+        if (!(get_factor)) { // strictly equal to zero
           //empty
         } else if (OB_DOUBLE_EPSINON >= get_factor) {
           ret = OB_ERR_UNEXPECTED;

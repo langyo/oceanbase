@@ -250,7 +250,11 @@ DEF_TO_STRING(ObDMLBaseParam)
        K_(write_flag),
        K_(spec_seq_no),
        K_(snapshot),
-       K_(check_schema_version));
+       K_(branch_id),
+       K_(direct_insert_task_id),
+       K_(check_schema_version),
+       K_(ddl_task_id),
+       KPC_(data_row_for_lob));
   J_OBJ_END();
   return pos;
 }
@@ -294,9 +298,12 @@ DEF_TO_STRING(ObTableScanParam)
        K_(sample_info),
        K_(need_scn),
        K_(need_switch_param),
+       K_(is_mds_query),
        K_(fb_read_tx_uncommitted),
        K_(external_file_format),
-       K_(external_file_location));
+       K_(external_file_location),
+       K_(tx_seq_base),
+       K_(need_update_tablet_param));
   J_OBJ_END();
   return pos;
 }

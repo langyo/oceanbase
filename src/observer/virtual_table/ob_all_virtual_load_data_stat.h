@@ -40,6 +40,9 @@ public:
   }
 
 private:
+  int64_t calc_remaining_time(sql::ObLoadDataStat &job_status) const;
+
+private:
   enum TABLE_COLUMN
   {
     TENANT_ID = common::OB_APP_MIN_COLUMN_ID,
@@ -74,7 +77,8 @@ private:
     STORE_PROCESSED_ROWS,
     STORE_LAST_COMMIT_SEGMENT_ID,
     STORE_STATUS,
-    STORE_TRANS_STATUS
+    STORE_TRANS_STATUS,
+    MESSAGE
   };
   common::ObAddr addr_;
   char ip_buf_[common::OB_IP_STR_BUFF];

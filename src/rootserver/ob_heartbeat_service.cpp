@@ -35,7 +35,6 @@ namespace oceanbase
 {
 using namespace common;
 using namespace share;
-using observer::ObServerHealthStatus;
 namespace rootserver
 {
 #define HBS_LOG_INFO(fmt, args...) FLOG_INFO("[HEARTBEAT_SERVICE] " fmt, ##args)
@@ -254,6 +253,7 @@ int ObHeartbeatService::send_heartbeat_()
             timeout,
             GCONF.cluster_id,
             OB_SYS_TENANT_ID,
+            share::OBCG_HB_SERVICE,
             hb_requests.at(i)))) {
           // error code will be ignored here.
           // send rpc to some offline servers will return error, however, it's acceptable
@@ -285,22 +285,28 @@ int ObHeartbeatService::set_hb_responses_(const int64_t whitelist_epoch_id, ObSe
   } else if (OB_ISNULL(proxy)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("proxy is null", KR(ret), KP(proxy));
+  } else if (OB_UNLIKELY(proxy->get_dests().count() != proxy->get_results().count())) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("dest addr count != result count", KR(ret), "dest addr count", proxy->get_dests().count(),
+        "result count", proxy->get_results().count());
   } else {
     int tmp_ret = OB_SUCCESS;
     SpinWLockGuard guard_for_hb_responses(hb_responses_rwlock_);
     need_process_hb_responses_ = true;
     hb_responses_epoch_id_ = whitelist_epoch_id;
     hb_responses_.reset();
+    // don't use arg/dest here because call() may has failue.
     ARRAY_FOREACH_X(proxy->get_results(), idx, cnt, OB_SUCC(ret)) {
       const ObHBResponse *hb_response = proxy->get_results().at(idx);
+      const ObAddr &dest_addr = proxy->get_dests().at(idx);
       if (OB_ISNULL(hb_response)) {
         tmp_ret = OB_ERR_UNEXPECTED;
         LOG_WARN("hb_response is null", KR(ret), KR(tmp_ret), KP(hb_response));
       } else if (OB_UNLIKELY(!hb_response->is_valid())) {
         // if an observer does not reply the rpc, we will get an invalid hb_response.
         tmp_ret = OB_INVALID_ARGUMENT;
-        LOG_WARN("there might be servers which haven't replied to heartbeat requests",
-            KR(ret), KR(tmp_ret), KPC(hb_response));
+        LOG_WARN("There exists a server not responding to the hb service",
+            KR(ret), KR(tmp_ret), KPC(hb_response), K(dest_addr));
       } else if (OB_FAIL(hb_responses_.push_back(*hb_response))) {
         LOG_WARN("fail to push an element into hb_responses_", KR(ret), KPC(hb_response));
       } else {

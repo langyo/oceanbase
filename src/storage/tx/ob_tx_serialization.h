@@ -53,7 +53,10 @@ public:
 
 private:
   void clear_compat_bytes_();
-  int cal_object_location_(int64_t object_index, int64_t &byte_index, uint8_t &bit_index) const;
+  int cal_object_location_(int64_t object_index,
+                           int64_t &byte_index,
+                           uint8_t &bit_index,
+                           const bool ignore_compat_warn = false) const;
   void set_object_flag_(int64_t byte_index, uint8_t bit_index, bool is_valid);
   void is_object_valid_(int64_t byte_index, uint8_t bit_index, bool &is_valid) const;
   int init_all_bytes_valid_(const int64_t total_byte_cnt);
@@ -210,13 +213,6 @@ private:
     if (OB_FAIL(NS_::encode(buf, buf_len, pos, obj))) {                              \
       RPC_WARN("encode object fail", "name", MSTR(obj), K(buf_len), K(pos), K(ret)); \
     }                                                                                \
-  }
-
-#define OB_TX_UNIS_DECODEx(obj, IDX, arg)                                             \
-  if (OB_SUCC(ret) && TX_IS_NEED_SER_OR_DE(arg, IDX)) {                               \
-    if (OB_FAIL(NS_::decode(buf, data_len, pos, obj))) {                              \
-      RPC_WARN("decode object fail", "name", MSTR(obj), K(data_len), K(pos), K(ret)); \
-    }                                                                                 \
   }
 
 #define OB_TX_UNIS_DECODE(obj, IDX, arg)                                              \

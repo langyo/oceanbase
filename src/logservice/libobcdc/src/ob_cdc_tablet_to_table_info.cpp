@@ -15,7 +15,8 @@
 #define USING_LOG_PREFIX OBLOG_PARSER
 
 #include "ob_cdc_tablet_to_table_info.h"
-
+#include "ob_log_hbase_mode.h"
+#include "rootserver/ob_partition_exchange.h"
 #include "share/ob_errno.h"
 
 namespace oceanbase
@@ -55,8 +56,33 @@ bool DeleteTabletOp::is_valid() const
   return tablet_id_.is_valid();
 }
 
+void ExchangeTabletOp::reset()
+{
+  tablet_ids_.reset();
+  table_ids_.reset();
+}
+
+bool ExchangeTabletOp::is_valid() const
+{
+  return !tablet_ids_.empty() && !table_ids_.empty();
+}
+
+int ExchangeTabletOp::push_back_tablet_to_table(const common::ObTabletID &tablet_id, const uint64_t table_id)
+{
+  int ret = OB_SUCCESS;
+  if (OB_FAIL(tablet_ids_.push_back(tablet_id))) {
+    LOG_ERROR("tablet_ids push_back fail", KR(ret), K_(tablet_ids), "count", tablet_ids_.count());
+  } else if (OB_FAIL(table_ids_.push_back(table_id))) {
+    LOG_ERROR("table_ids push_back fail", KR(ret), K_(table_ids), "count", table_ids_.count());
+  } else {
+    // succ
+  }
+
+  return ret;
+}
+
 ObCDCTabletChangeInfo::ObCDCTabletChangeInfo() :
-    cmd_(TabletChangeCmd::CMD_UNKNOWN), create_tablet_op_arr_(), delete_tablet_op_arr_()
+    cmd_(TabletChangeCmd::CMD_UNKNOWN), create_tablet_op_arr_(), delete_tablet_op_arr_(), exchange_tablet_op_arr_()
 {}
 
 void ObCDCTabletChangeInfo::reset()
@@ -64,6 +90,7 @@ void ObCDCTabletChangeInfo::reset()
   cmd_ = TabletChangeCmd::CMD_MAX;
   create_tablet_op_arr_.reset();
   delete_tablet_op_arr_.reset();
+  exchange_tablet_op_arr_.reset();
 }
 
 void ObCDCTabletChangeInfo::reset(const TabletChangeCmd cmd)
@@ -112,6 +139,19 @@ int ObCDCTabletChangeInfo::parse_from_multi_data_source_buf(
         }
         break;
       }
+      case transaction::ObTxDataSourceType::CHANGE_TABLET_TO_TABLE_MDS:
+      {
+        rootserver::ObChangeTabletToTableArg exchange_tablet_arg;
+
+        if (OB_FAIL(exchange_tablet_arg.deserialize(buf, buf_len, pos))) {
+          LOG_ERROR("deserialize exchange_tablet_arg failed", KR(ret), K(tls_id), K(multi_data_source_node),
+              K(exchange_tablet_arg), K(buf_len), K(pos));
+        } else if (OB_FAIL(parse_exchange_tablet_op_(tls_id, exchange_tablet_arg))) {
+          LOG_ERROR("parse_exchange_tablet_op_ failed", KR(ret), K(tls_id), K(multi_data_source_node),
+              K(exchange_tablet_arg), KPC(this));
+        }
+        break;
+      }
       default:
       {
         ret = OB_NOT_SUPPORTED;
@@ -135,7 +175,9 @@ int ObCDCTabletChangeInfo::parse_create_tablet_op_(
     ret = OB_ERR_UNEXPECTED;
     LOG_ERROR("ObBatchCreateTabletArg is invalid", KR(ret), K(tls_id), K(create_tablet_arg));
   } else {
+    // the schema in create tablet arg is ObCreateTabletSchema after 4.2.2.0, the previous is ObTableSchema
     const common::ObSArray<share::schema::ObTableSchema> &table_schemas = create_tablet_arg.table_schemas_;
+    const ObSArray<ObCreateTabletSchema*> &create_tablet_schemas = create_tablet_arg.create_tablet_schemas_;
     const common::ObSArray<obrpc::ObCreateTabletInfo> &tablets_info = create_tablet_arg.tablets_;
 
     for (int64_t create_tablet_idx = 0; OB_SUCC(ret) && create_tablet_idx < tablets_info.count(); create_tablet_idx++) {
@@ -146,13 +188,28 @@ int ObCDCTabletChangeInfo::parse_create_tablet_op_(
       for (int64_t tablet_id_idx = 0; OB_SUCC(ret) && tablet_id_idx < tablet_ids.count(); tablet_id_idx++) {
         const common::ObTabletID &tablet_id = tablet_ids.at(tablet_id_idx);
         const int64_t table_schema_idx = tb_schema_index_arr.at(tablet_id_idx);
-        if (OB_UNLIKELY(0 > table_schema_idx || table_schemas.count() <= table_schema_idx)) {
+        uint64_t table_id = common::OB_INVALID_ID;
+        share::schema::ObTableType table_type = share::schema::MAX_TABLE_TYPE;
+        if (OB_UNLIKELY(0 > table_schema_idx
+              || (create_tablet_schemas.count() <= table_schema_idx && table_schemas.count() <= table_schema_idx))) {
           ret = OB_ERR_UNEXPECTED;
           LOG_ERROR("invalid table_schema_index", KR(ret), K(tls_id), K(ob_create_tablet_info), K(table_schemas), K(table_schema_idx));
-        } else {
+        } else if (create_tablet_schemas.count() > 0) {
+          const ObCreateTabletSchema *create_tablet_schema = create_tablet_schemas.at(table_schema_idx);
+          if (OB_ISNULL(create_tablet_schema)) {
+            ret = OB_INVALID_ARGUMENT;
+            LOG_ERROR("create_tablet_schema is NULL", KR(ret), K(tls_id), K(create_tablet_idx), K(tablet_id_idx),
+                K(table_schema_idx), K(ob_create_tablet_info), K(tablet_ids), K(tb_schema_index_arr));
+          } else {
+            table_id = create_tablet_schema->get_table_id();
+            table_type = create_tablet_schema->get_table_type();
+          }
+        } else if (table_schemas.count() > 0) {
           const ObTableSchema &table_schema = table_schemas.at(table_schema_idx);
-          const uint64_t table_id = table_schema.get_table_id();
-          const share::schema::ObTableType table_type = table_schema.get_table_type();
+          table_id = table_schema.get_table_id();
+          table_type = table_schema.get_table_type();
+        }
+        if (OB_SUCC(ret)) {
           ObCDCTableInfo table_info;
           table_info.reset(table_id, table_type);
           CreateTabletOp create_tablet_op;
@@ -202,6 +259,42 @@ int ObCDCTabletChangeInfo::parse_remove_tablet_op_(
   return ret;
 }
 
+int ObCDCTabletChangeInfo::parse_exchange_tablet_op_(
+    const logservice::TenantLSID &tls_id,
+    const rootserver::ObChangeTabletToTableArg &exchange_tablet_arg)
+{
+  int ret = OB_SUCCESS;
+  cmd_ = TabletChangeCmd::CMD_EXCHANGE;
+
+  if (OB_UNLIKELY(! exchange_tablet_arg.is_valid())
+      || OB_UNLIKELY(tls_id.get_ls_id() != exchange_tablet_arg.ls_id_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_ERROR("ObChangeTabletToTableArg is invalid", KR(ret), K(tls_id), K(exchange_tablet_arg));
+  } else {
+    const common::ObSArray<common::ObTabletID> &tablet_ids = exchange_tablet_arg.tablet_ids_;
+    const common::ObSArray<uint64_t> &table_ids = exchange_tablet_arg.table_ids_;
+    ExchangeTabletOp exchange_tablet_op;
+
+    ARRAY_FOREACH_N(tablet_ids, tablet_id_idx, count) {
+      const common::ObTabletID &tablet_id = tablet_ids.at(tablet_id_idx);
+      const uint64_t table_id = table_ids.at(tablet_id_idx);
+      if (OB_FAIL(exchange_tablet_op.push_back_tablet_to_table(tablet_id, table_id))) {
+        LOG_ERROR("exchange_tablet_op push back failed", KR(ret), K(tablet_id), K(table_id));
+      }
+    }
+
+    if (OB_SUCC(ret)) {
+      if (OB_FAIL(push_exchange_tablet_op_(exchange_tablet_op))) {
+        LOG_ERROR("push_exchange_tablet_op failed", KR(ret), K(tls_id), K(exchange_tablet_op), KPC(this));
+      } else {
+        LOG_DEBUG("[EXCHANGE_TABLET_INFO]", K(tls_id), K(exchange_tablet_op));
+      }
+    }
+  }
+
+  return ret;
+}
+
 int ObCDCTabletChangeInfo::push_create_tablet_op_(const CreateTabletOp &create_tablet_op)
 {
   int ret = OB_SUCCESS;
@@ -236,12 +329,31 @@ int ObCDCTabletChangeInfo::push_delete_tablet_op_(const DeleteTabletOp &delete_t
   return ret;
 }
 
+int ObCDCTabletChangeInfo::push_exchange_tablet_op_(const ExchangeTabletOp &exchange_tablet_op)
+{
+  int ret = OB_SUCCESS;
+
+  if (OB_UNLIKELY(!exchange_tablet_op.is_valid())) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_ERROR("invalid arg for push_exchange_tablet_op", KR(ret), K(exchange_tablet_op));
+  } else if (OB_FAIL(exchange_tablet_op_arr_.push_back(exchange_tablet_op))) {
+    LOG_ERROR("push_exchange_tablet_op into exchange_tablet_op_arr_ failed",
+        KR(ret), K(exchange_tablet_op), K_(exchange_tablet_op_arr));
+  } else {
+    // success
+  }
+
+  return ret;
+}
+
 void ObCDCTabletChangeInfo::print_detail_for_debug() const
 {
   if (is_create_tablet_op()) {
     LOG_DEBUG("tablet_change_info", "create_cnt", create_tablet_op_arr_.count(), K_(create_tablet_op_arr));
   } else if (is_delete_tablet_op()) {
     LOG_DEBUG("tablet_change_info", "delete_cnt", delete_tablet_op_arr_.count(),  K_(delete_tablet_op_arr));
+  } else if (is_exchange_tablet_op()) {
+    LOG_DEBUG("tablet_change_info", K_(exchange_tablet_op_arr));
   } else {
     LOG_DEBUG("tablet_change_info: None");
   }
@@ -338,6 +450,51 @@ int TabletToTableInfo::insert_tablet_table_info(const common::ObTabletID &tablet
     }
   } else {
     LOG_DEBUG("[TABLET_ID_TO_TABLE_ID][INSERT]", K_(tenant_id), "tablet_id", tablet_id.id(), K(table_info));
+  }
+
+  return ret;
+}
+
+int TabletToTableInfo::exchange_tablet_table_info(const common::ObSArray<common::ObTabletID> &tablet_ids, const common::ObSArray<uint64_t> &table_ids)
+{
+  int ret = OB_SUCCESS;
+  common::ObLinearHashMap<ObLogHbaseUtil::TableID, ObCDCTableInfo> table_to_table_info_map;
+
+  if (IS_NOT_INIT) {
+    ret = OB_NOT_INIT;
+    LOG_ERROR("TabletIDToTableIDInfo is not inited", KR(ret), K_(is_inited));
+  } else if (OB_FAIL(table_to_table_info_map.init("TableToTable"))) {
+    LOG_ERROR("table_to_table_info_map init failed", KR(ret));
+  } else {
+    ARRAY_FOREACH_N(tablet_ids, idx, count) {
+      const common::ObTabletID &tablet_id = tablet_ids.at(idx);
+      ObCDCTableInfo tmp_table_info;
+      if (OB_FAIL(tablet_to_table_map_.get(tablet_id, tmp_table_info))) {
+        LOG_ERROR("tablet_to_table_map_ get failed", KR(ret), K(tablet_id));
+      } else if (OB_FAIL(table_to_table_info_map.insert(ObLogHbaseUtil::TableID(tmp_table_info.get_table_id()), tmp_table_info))) {
+        // insert overwrite may exchange more than one partition
+        if (OB_ENTRY_EXIST != ret) {
+          LOG_ERROR("table_to_table_info_map insert failed", KR(ret), K(tablet_id), K(tmp_table_info));
+        } else {
+          ret = OB_SUCCESS;
+        }
+      } else {
+        LOG_INFO("table_to_table_info_map insert success", K(tablet_id), K(tmp_table_info));
+      }
+    }
+
+    ARRAY_FOREACH_N(tablet_ids, idx, count) {
+      const common::ObTabletID &tablet_id = tablet_ids.at(idx);
+      const uint64_t table_id = table_ids.at(idx);
+      ObCDCTableInfo tmp_table_info;
+      if (OB_FAIL(table_to_table_info_map.get(ObLogHbaseUtil::TableID(table_id), tmp_table_info))) {
+        LOG_ERROR("table_to_table_info_map get failed", KR(ret), K(table_id));
+      } else if (OB_FAIL(tablet_to_table_map_.insert_or_update(tablet_id, tmp_table_info))) {
+        LOG_ERROR("tablet_to_table_map_ update failed", KR(ret), K(tablet_id), K(tmp_table_info));
+      } else {
+        LOG_INFO("tablet_to_table_map_ update success", K(tablet_id), K(table_id), K(tmp_table_info));
+      }
+    }
   }
 
   return ret;

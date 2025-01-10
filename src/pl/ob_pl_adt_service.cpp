@@ -687,7 +687,13 @@ int ObPLADTService::get_seg_pointer_array(jit::ObLLVMType &type)
     } else if (OB_FAIL(get_memory_context(memory_context))) {
       LOG_WARN("failed to get memory_context", K(ret));
     } else if (OB_FAIL(ObLLVMHelper::get_array_type(int64_type,
-                                                    common::OB_BLOCK_POINTER_ARRAY_SIZE,
+                                                    // typedef Ob2DArray<ObObjParam, OB_MALLOC_BIG_BLOCK_SIZE,
+                                                    //                           ObWrapperAllocator,false,
+                                                    //                           ObSEArray<ObObjParam *, 1, ObWrapperAllocator, false>
+                                                    //                           > ParamStore;
+                                                    // whose BlockPointerArrayT = ObSEArray<ObObjParam *, 1, ObWrapperAllocator, false>
+                                                    // so LOCAL_ARRAY_SIZE is 1
+                                                    1,
                                                     local_data_buf))) {
       LOG_WARN("failed to get_llvm_type", K(ret));
     } else if (OB_FAIL(local_data_buf.get_pointer_to(pointer_carray_pointer))) {
@@ -805,6 +811,37 @@ int ObPLADTService::get_memory_context(ObLLVMType &type)
   }
   if (OB_SUCC(ret)) {
     type = memory_context_;
+  }
+  return ret;
+}
+
+int ObPLADTService::get_pl_composite_write_value(ObLLVMType &type)
+{
+  int ret = OB_SUCCESS;
+  if (NULL == pl_composite_write_value_.get_v()) {
+    ObLLVMType struct_type;
+    ObSEArray<ObLLVMType, 2> pl_compite_write;
+    ObLLVMType int64_type;
+    if (OB_FAIL(helper_.get_llvm_type(ObIntType, int64_type))) {
+      LOG_WARN("failed to get_llvm_type", K(ret));
+    } else {
+      /*
+        int64_t allocator_;
+        int64_t value_addr_;
+       */
+      if (OB_FAIL(pl_compite_write.push_back(int64_type))) {
+        LOG_WARN("push_back error", K(ret));
+      } else if (OB_FAIL(pl_compite_write.push_back(int64_type))) {
+        LOG_WARN("push_back error", K(ret));
+      } else if (OB_FAIL(helper_.create_struct_type(ObString("pl_composite_write"), pl_compite_write, struct_type))) {
+        LOG_WARN("failed to create struct type", K(ret));
+      } else {
+        pl_composite_write_value_.set_v(struct_type.get_v());
+      }
+    }
+  }
+  if (OB_SUCC(ret)) {
+    type = pl_composite_write_value_;
   }
   return ret;
 }

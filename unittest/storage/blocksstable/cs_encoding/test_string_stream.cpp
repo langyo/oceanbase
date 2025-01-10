@@ -122,6 +122,7 @@ public:
   {
     LOG_INFO("test_and_check_string_encoding", K(size), K(type), K(use_zero_len_as_null), K(has_null), K(is_fix_len),
         K(use_nullbitmap), K(all_null), K(half_null_half_empty), K(use_null_replaced_ref));
+    ObArenaAllocator local_arena;
     ObStringStreamEncoderCtx ctx;
     ObCSEncodingOpt encoding_opt;
     bool is_use_zero_len_as_null = use_zero_len_as_null;
@@ -140,7 +141,7 @@ public:
 
     ObStringStreamEncoder encoder;
     uint32_t *data = nullptr;
-    ObColDatums *datums = new ObColDatums();
+    ObColDatums *datums = new ObColDatums(local_arena);
     ASSERT_EQ(OB_SUCCESS, datums->resize(max_count));
     datums->reuse();
     if (half_null_half_empty) {
@@ -166,7 +167,7 @@ public:
       total_len = datums->count() * fixed_len;
     }
     ctx.build_string_stream_meta(fixed_len, is_use_zero_len_as_null, total_len);
-    ctx.build_string_stream_encoder_info(type, false, &encoding_opt, nullptr, -1, &allocator_);
+    ctx.build_string_stream_encoder_info(type, false, &encoding_opt, nullptr, -1, DATA_VERSION_4_3_2_1, &allocator_);
     int64_t bitmap_size = pad8(size);
     char *bitmap = new char[bitmap_size];
     memset(bitmap, 0, bitmap_size);
@@ -203,7 +204,7 @@ public:
     str_data.set(all_string_writer.data(), all_string_writer.length());
 
     // 3. decode str
-    ObColDatums *datums2 = new ObColDatums();
+    ObColDatums *datums2 = new ObColDatums(local_arena);
     ASSERT_EQ(OB_SUCCESS, datums2->resize(max_count));
     datums2->reuse();
     for (int64_t i = 0; i < size; i++) {
@@ -212,8 +213,8 @@ public:
     }
 
     // test batch decode
-    int64_t *row_ids = new int64_t[size];
-    for (int64_t i = 0; i < size; i++) {
+    int32_t *row_ids = new int32_t[size];
+    for (int32_t i = 0; i < size; i++) {
       row_ids[i] = i;
     }
     ObDatum *datums3 = new ObDatum[size];
@@ -272,7 +273,7 @@ public:
       datums3[i].reset();
     }
     int64_t random_idx = ObTimeUtility::current_time()%size;
-    int64_t row_id = 0;
+    int32_t row_id = 0;
     for (int64_t i = 0; i < size; i++) {
       row_id = (i + random_idx) % size;
       row_ids[i] = row_id;

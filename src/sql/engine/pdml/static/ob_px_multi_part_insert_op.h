@@ -93,7 +93,10 @@ public:
 public:
   virtual bool has_foreign_key() const  { return false; } // 默认实现，先不考虑外键的问题
 
-  int read_row(ObExecContext &ctx, const ObExprPtrIArray *&row, common::ObTabletID &tablet_id) override;
+  int read_row(ObExecContext &ctx,
+               const ObExprPtrIArray *&row,
+               common::ObTabletID &tablet_id,
+               bool &is_skipped) override;
   int write_rows(ObExecContext &ctx,
                  const ObDASTabletLoc *tablet_loc,
                  ObPDMLOpRowIterator &iterator) override;
@@ -101,12 +104,16 @@ public:
   virtual int inner_get_next_row();
   virtual int inner_open();
   virtual int inner_close();
-private:
-  int process_row();
+  virtual void destroy()
+  {
+    // destroy
+    ins_rtdef_.~ObInsRtDef();
+    ObTableModifyOp::destroy();
+  }
 protected:
   ObPDMLOpDataDriver data_driver_;
   ObInsRtDef ins_rtdef_;
-  observer::ObTableLoadTableCtx *table_ctx_;
+  observer::ObTableLoadTableCtx *table_ctx_; // deprecated
   DISALLOW_COPY_AND_ASSIGN(ObPxMultiPartInsertOp);
 };
 

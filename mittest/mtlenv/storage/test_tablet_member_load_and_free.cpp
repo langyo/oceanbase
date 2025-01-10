@@ -1,3 +1,6 @@
+// owner: gaishun.gs
+// owner group: storage
+
 /**
  * Copyright (c) 2021 OceanBase
  * OceanBase CE is licensed under Mulan PubL v2.
@@ -80,7 +83,7 @@ void TestTabletMemberLoadAndFree::SetUpTestCase()
   ret = MockTenantModuleEnv::get_instance().init();
   ASSERT_EQ(OB_SUCCESS, ret);
 
-  ObServerCheckpointSlogHandler::get_instance().is_started_ = true;
+  SERVER_STORAGE_META_SERVICE.is_started_ = true;
 
   // create ls
   ObLSHandle ls_handle;
@@ -109,7 +112,7 @@ int TestTabletMemberLoadAndFree::create_ls(const uint64_t tenant_id, const share
 int TestTabletMemberLoadAndFree::remove_ls(const share::ObLSID &ls_id)
 {
   int ret = OB_SUCCESS;
-  ret = MTL(ObLSService*)->remove_ls(ls_id, false);
+  ret = MTL(ObLSService*)->remove_ls(ls_id);
   return ret;
 }
 
@@ -156,19 +159,23 @@ TEST_F(TestTabletMemberLoadAndFree, storage_schema)
 
   // load storage schema, memory type
   ASSERT_TRUE(tablet->storage_schema_addr_.is_memory_object());
-  const ObStorageSchema *storage_schema = nullptr;
+  ObStorageSchema *storage_schema = nullptr;
   ret = tablet->load_storage_schema(arena_allocator, storage_schema);
   ASSERT_EQ(OB_SUCCESS, ret);
   ASSERT_NE(nullptr, storage_schema);
 
   ASSERT_NE(0, arena_allocator.used());
-  ObTablet::free_storage_schema(arena_allocator, storage_schema);
+  ObTabletObjLoadHelper::free(arena_allocator, storage_schema);
   arena_allocator.clear();
   ASSERT_EQ(0, arena_allocator.used());
 
   // tablet persist
   ObTabletHandle new_tablet_handle;
-  ret = ObTabletPersister::persist_and_transform_tablet(*tablet, new_tablet_handle);
+  ObLSHandle ls_handle;
+  ASSERT_EQ(OB_SUCCESS, MTL(ObLSService*)->get_ls(LS_ID, ls_handle, ObLSGetMod::STORAGE_MOD));
+  ObTabletPersisterParam  persister_param(
+      ls_handle.get_ls()->get_ls_id(), ls_handle.get_ls()->get_ls_epoch(), tablet_id, tablet->get_transfer_seq());
+  ret = ObTabletPersister::persist_and_transform_tablet(persister_param, *tablet, new_tablet_handle);
   ASSERT_EQ(OB_SUCCESS, ret);
   ObTablet *new_tablet = new_tablet_handle.get_obj();
   ASSERT_NE(nullptr, new_tablet);
@@ -181,7 +188,7 @@ TEST_F(TestTabletMemberLoadAndFree, storage_schema)
   ASSERT_NE(nullptr, storage_schema);
 
   ASSERT_NE(0, arena_allocator.used());
-  ObTablet::free_storage_schema(arena_allocator, storage_schema);
+  ObTabletObjLoadHelper::free(arena_allocator, storage_schema);
   arena_allocator.clear();
   ASSERT_EQ(0, arena_allocator.used());
 }

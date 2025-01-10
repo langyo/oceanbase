@@ -15,6 +15,7 @@
 #include "lib/thread/thread_mgr.h"
 #include "lib/alloc/alloc_assist.h"
 #include "observer/ob_server_struct.h"
+#include "share/ob_zone_table_operation.h"
 
 using namespace oceanbase::common;
 using namespace oceanbase::share;
@@ -240,9 +241,30 @@ int ObServerTraceMap::get_rpc_port_status(const ObAddr &addr, const int64_t sql_
 
 int ObServerTraceMap::is_server_stopped(const ObAddr &addr, bool &is_stopped) const
 {
-  int ret = OB_NOT_SUPPORTED;
-  UNUSED(addr);
-  UNUSED(is_stopped);
+  int ret = OB_SUCCESS;
+  ObServerInfoInTable server_info;
+  if (IS_NOT_INIT) {
+    ret = OB_NOT_INIT;
+    LOG_WARN("addr trace map has not inited", KR(ret));
+  } else if (OB_UNLIKELY(!addr.is_valid())) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid addr", KR(ret), K(addr));
+  } else {
+    SpinRLockGuard guard(lock_);
+    if (OB_FAIL(find_server_info(addr, server_info))) {
+      LOG_WARN("fail to find server info", KR(ret), K(addr));
+    } else if (server_info.is_stopped()) {
+      is_stopped = true;
+    } else {
+
+      for (int64_t j = 0; OB_SUCC(ret) && j < inactive_zone_list_.count(); ++j) {
+        if (server_info.get_zone() == inactive_zone_list_.at(j)) {
+          is_stopped = true;
+          break;
+        }
+      }
+    }
+  }
   return ret;
 }
 
@@ -413,6 +435,33 @@ int ObServerTraceMap::get_alive_servers(const ObZone &zone, ObIArray<ObAddr> &se
 
   return ret;
 }
+
+int ObServerTraceMap::get_alive_and_not_stopped_servers(const ObZone &zone, ObIArray<ObAddr> &server_list) const
+{
+  int ret = OB_SUCCESS;
+
+  server_list.reset();
+  if (IS_NOT_INIT) {
+    ret = OB_NOT_INIT;
+    LOG_WARN("server trace map has not inited", KR(ret));
+  } else {
+    SpinRLockGuard guard(lock_);
+    for (int64_t i = 0; OB_SUCC(ret) && i < server_info_arr_.count(); ++i) {
+      const ObServerInfoInTable &server_info = server_info_arr_.at(i);
+      const ObAddr &server = server_info.get_server();
+      if ((server_info.get_zone() == zone || zone.is_empty())
+           && !server_info.is_stopped()
+           && server_info.is_alive()) {
+        if (OB_FAIL(server_list.push_back(server))) {
+          LOG_WARN("fail to push an element into server_list", KR(ret), K(server));
+        }
+      }
+    }
+  }
+
+  return ret;
+}
+
 int ObServerTraceMap::check_server_active(const ObAddr &server, bool &is_active) const
 {
   int ret = OB_SUCCESS;
@@ -502,11 +551,14 @@ int ObServerTraceMap::get_servers_by_status(
   return ret;
 }
 
-int ObServerTraceMap::get_min_server_version(char min_server_version[OB_SERVER_VERSION_LENGTH])
+int ObServerTraceMap::get_min_server_version(
+    char min_server_version[OB_SERVER_VERSION_LENGTH],
+    uint64_t &min_observer_version)
 {
   int ret = OB_SUCCESS;
   ObZone zone; // empty zone, get all server statuses
   ObArray<ObServerInfoInTable> servers_info;
+  min_observer_version = 0;
   if (IS_NOT_INIT) {
     ret = OB_NOT_INIT;
     LOG_WARN("server trace map has not inited", KR(ret));
@@ -539,6 +591,7 @@ int ObServerTraceMap::get_min_server_version(char min_server_version[OB_SERVER_V
           MEMCPY(min_server_version, version, len);
           min_server_version[len] = '\0';
           cur_min_version = version_parser.get_cluster_version();
+          min_observer_version = cur_min_version;
         }
       }
       if (OB_SUCC(ret) && UINT64_MAX == cur_min_version) {
@@ -554,6 +607,7 @@ int ObServerTraceMap::refresh()
 {
   int ret = OB_SUCCESS;
   ObArray<ObServerInfoInTable> servers_info;
+  common::ObSEArray<common::ObZone, 4> inactive_zone_list;
   if (OB_UNLIKELY(!is_inited_)) {
     ret = OB_NOT_INIT;
     LOG_WARN("ObServerTraceMap has not been inited", KR(ret), K(is_inited_));
@@ -562,10 +616,19 @@ int ObServerTraceMap::refresh()
     LOG_WARN("GCTX.sql_proxy_ is null", KR(ret), KP(GCTX.sql_proxy_));
   } else if (OB_FAIL(ObServerTableOperator::get(*GCTX.sql_proxy_, servers_info))) {
     LOG_WARN("fail to get servers_info", KR(ret), KP(GCTX.sql_proxy_));
+  } else if (OB_UNLIKELY(servers_info.count() <= 0)) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("read nothing in table", KR(ret), K(servers_info));
+  } else if (OB_FAIL(ObZoneTableOperation::get_inactive_zone_list(*GCTX.sql_proxy_, inactive_zone_list))) {
+    LOG_WARN("failed to get inactive zone list", K(ret));
   } else {
     SpinWLockGuard guard(lock_);
     // reuse memory
     server_info_arr_.reuse();
+    inactive_zone_list_.reuse();
+    if (OB_FAIL(inactive_zone_list_.assign(inactive_zone_list))) {
+      LOG_WARN("failed to assign inactive zone list", K(ret));
+    }
     // can not use ObArray's assign, which will reallocate memory
     for (int64_t i = 0; i < servers_info.count() && OB_SUCC(ret); ++i) {
       const ObServerInfoInTable &server_info_i = servers_info.at(i);
@@ -575,6 +638,7 @@ int ObServerTraceMap::refresh()
     }
     if (OB_SUCC(ret) && !has_build_) {
       has_build_ = true;
+      FLOG_INFO("server tracer has built", KR(ret), K(has_build_), K(server_info_arr_));
     }
   }
   return ret;
@@ -753,6 +817,11 @@ int ObAllServerTracer::get_alive_servers_count(const common::ObZone &zone, int64
   return trace_map_.get_alive_servers_count(zone, count);
 }
 
+int ObAllServerTracer::get_alive_and_not_stopped_servers(const ObZone &zone, ObIArray<ObAddr> &server_list) const
+{
+  return trace_map_.get_alive_and_not_stopped_servers(zone, server_list);
+}
+
 int ObAllServerTracer::refresh()
 {
   return trace_map_.refresh();
@@ -766,9 +835,11 @@ int ObAllServerTracer::get_servers_by_status(
   return trace_map_.get_servers_by_status(zone, alive_server_list, not_alive_server_list);
 }
 
-int ObAllServerTracer::get_min_server_version(char min_server_version[OB_SERVER_VERSION_LENGTH])
+int ObAllServerTracer::get_min_server_version(
+    char min_server_version[OB_SERVER_VERSION_LENGTH],
+    uint64_t &min_observer_version)
 {
-  return trace_map_.get_min_server_version(min_server_version);
+  return trace_map_.get_min_server_version(min_server_version, min_observer_version);
 }
 
 bool ObAllServerTracer::has_build() const

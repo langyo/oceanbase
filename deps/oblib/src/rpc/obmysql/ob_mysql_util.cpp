@@ -25,10 +25,8 @@
 #include "lib/json_type/ob_json_bin.h"
 #include "lib/json_type/ob_json_base.h"
 #include "lib/geo/ob_geo_bin.h"
-#ifdef OB_BUILD_ORACLE_XML
 #include "lib/xml/ob_xml_util.h"
 #include "lib/xml/ob_xml_bin.h"
-#endif
 using namespace oceanbase::common;
 
 namespace oceanbase
@@ -1083,7 +1081,6 @@ int ObMySQLUtil::urowid_cell_str(char *buf, const int64_t len, const ObURowIDDat
 int ObMySQLUtil::sql_utd_cell_str(uint64_t tenant_id, char *buf, const int64_t len, const ObString &val, int64_t &pos)
 {
   INIT_SUCC(ret);
-#ifdef OB_BUILD_ORACLE_XML
   lib::ObMemAttr mem_attr(tenant_id, "XMLModule");
   lib::ObMallocHookAttrGuard malloc_guard(mem_attr);
   ObArenaAllocator allocator(mem_attr);
@@ -1120,9 +1117,6 @@ int ObMySQLUtil::sql_utd_cell_str(uint64_t tenant_id, char *buf, const int64_t l
       ret = OB_SIZE_OVERFLOW;
     }
   }
-#else
-  ret = OB_NOT_SUPPORTED;
-#endif
   return ret;
 }
 
@@ -1134,6 +1128,7 @@ int ObMySQLUtil::json_cell_str(uint64_t tenant_id, char *buf, const int64_t len,
   ObJsonBin j_bin(val.ptr(), val.length(), &allocator);
   ObIJsonBase *j_base = &j_bin;
   ObJsonBuffer jbuf(&allocator);
+  static_cast<ObJsonBin*>(j_base)->set_seek_flag(true);
   if (OB_ISNULL(buf)) {
     ret = OB_INVALID_ARGUMENT;
     OB_LOG(WARN, "invalid input args", K(ret), KP(buf));
@@ -1143,7 +1138,7 @@ int ObMySQLUtil::json_cell_str(uint64_t tenant_id, char *buf, const int64_t len,
     }
   } else if (OB_FAIL(j_bin.reset_iter())) {
     OB_LOG(WARN, "fail to reset json bin iter", K(ret), K(val));
-  } else if (OB_FAIL(j_base->print(jbuf, true))) {
+  } else if (OB_FAIL(j_base->print(jbuf, true, val.length()))) {
     OB_LOG(WARN, "json binary to string failed in mysql mode", K(ret), K(val), K(*j_base));
   } else {
     int64_t new_length = jbuf.length();
@@ -1223,7 +1218,14 @@ int ObMySQLUtil::geometry_cell_str(char *buf, const int64_t len, const ObString 
       ret = OB_SIZE_OVERFLOW;
     }
   } else {
-    length = val.length() - WKB_VERSION_SIZE;
+    uint8_t version = (*(val.ptr() + WKB_GEO_SRID_SIZE));
+    uint8_t offset = WKB_GEO_SRID_SIZE;
+    if (IS_GEO_VERSION(version)) {
+      // version exist
+      length = val.length() - WKB_VERSION_SIZE;
+      offset += WKB_VERSION_SIZE;
+    }
+
     if (OB_LIKELY(length < len - pos)) {
       int64_t pos_bk = pos;
       if (OB_FAIL(ObMySQLUtil::store_length(buf, len, length, pos))) {
@@ -1232,7 +1234,7 @@ int ObMySQLUtil::geometry_cell_str(char *buf, const int64_t len, const ObString 
         if (OB_LIKELY(length <= len - pos)) {
           MEMCPY(buf + pos, val.ptr(), WKB_GEO_SRID_SIZE); // srid
           pos += WKB_GEO_SRID_SIZE;
-          MEMCPY(buf + pos, val.ptr() + WKB_OFFSET, length - WKB_GEO_SRID_SIZE);
+          MEMCPY(buf + pos, val.ptr() + offset, length - WKB_GEO_SRID_SIZE);
           pos += (length - WKB_GEO_SRID_SIZE);
         } else {
           pos = pos_bk;

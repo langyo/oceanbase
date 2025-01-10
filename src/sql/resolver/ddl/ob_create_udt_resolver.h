@@ -41,6 +41,7 @@ public:
   explicit ObCreateUDTResolver(ObResolverParams &params) : ObDDLResolver(params) {}
   virtual int resolve(const ParseNode &parse_tree);
 private:
+  int resolve_without_check_valid(const ParseNode &parse_tree);
   int create_udt_arg(obrpc::ObCreateUDTArg *&crt_udt_arg);
   int resolve_oid_clause(const ParseNode *oid_node,
                          share::schema::ObUDTTypeInfo *udt_info);
@@ -51,7 +52,7 @@ private:
                         const share::schema::ObUDTTypeInfo* type_info,
                         int64_t position,
                         share::schema::ObUDTTypeAttr& type_attr,
-                        ObString &db_name);
+                        const ObString& db_name);
   int resolve_final_node(const ParseNode *final_node);
   int resolve_type_attr(const ParseNode *attr_node,
                         int64_t position,
@@ -68,12 +69,13 @@ private:
                         obrpc::ObCreateUDTArg &crt_udt_arg,
                         const ObString &object_spec);
   int resolve_udt_data_type(const ParseNode *type_node,
-                        share::schema::ObUDTCollectionType& coll_type,
-                        ObString &db_name);
+                            share::schema::ObUDTCollectionType& coll_type,
+                            const ObString& type_name,
+                            const ObString& db_name);
   int resolve_type_varray(const ParseNode *varray_node,
-                        share::schema::ObUDTTypeInfo *udt_info);
+                          obrpc::ObCreateUDTArg &crt_udt_arg);
   int resolve_type_nested_table(const ParseNode *nested_node,
-                        share::schema::ObUDTTypeInfo* udt_info);
+                                obrpc::ObCreateUDTArg &crt_udt_arg);
   int resolve_type_define(const ParseNode *type_def_node,
                         obrpc::ObCreateUDTArg &crt_udt_arg,
                         const ObString &object_spec);
@@ -82,10 +84,24 @@ private:
                         obrpc::ObCreateUDTArg &crt_udt_arg,
                         const ObString &db_name,
                         const ObString &object_spec);
-  int detect_loop_dependency(const ObString &udt_name,
-                             const share::schema::ObUDTTypeInfo *udt_info,
-                             bool &is_dep);
+  int detect_loop_dependency(const ObString &target_udt_name,
+                             uint64_t target_database_id,
+                             const ObUDTTypeInfo *udt_info,
+                             bool &has_mutual_dep);
 public:
+  static int check_udt_validation(const ObSQLSessionInfo& session_info,
+                                  ObSchemaGetterGuard& schema_guard,
+                                  ObResolverParams &params,
+                                  const ObString& db_name,
+                                  const ObUDTTypeInfo& new_udt_info,
+                                  bool& valid);
+  static int check_udt_validation(const ObSQLSessionInfo& session_info,
+                                  ObSchemaGetterGuard& schema_guard,
+                                  ObResolverParams &params,
+                                  const ObString& db_name,
+                                  const ObString& new_udt_name,
+                                  ObUDTTypeCode type_code,
+                                  bool& valid);
   static int package_info_to_object_info(const share::schema::ObPackageInfo &pkg_info,
                                          share::schema::ObUDTObjectType &obj_info);
   static int object_info_to_package_info(const share::schema::ObUDTObjectType &obj_info,

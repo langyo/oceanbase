@@ -43,7 +43,35 @@ public:
     }
   }
   bool is_replace() const { return table_info_.is_replace_; }
+  void set_overwrite(const bool is_overwrite) {
+    table_info_.is_overwrite_ = is_overwrite;
+    set_stmt_type(stmt::T_INSERT);
+  }
+  bool is_overwrite() const { return table_info_.is_overwrite_; }
+  bool is_normal_table_overwrite() const {
+    bool result = false;
+    if (is_overwrite()) {
+      TableItem *insert_table = NULL;
+      if (OB_NOT_NULL(insert_table = get_table_item_by_id(table_info_.table_id_))
+          && (share::schema::EXTERNAL_TABLE != insert_table->table_type_)) {
+        result = true;
+      }
+    }
+    return result;
+  }
+  bool is_external_table_overwrite() const {
+    bool result = false;
+    if (is_overwrite()) {
+      TableItem *insert_table = NULL;
+      if (OB_NOT_NULL(insert_table = get_table_item_by_id(table_info_.table_id_))
+          && (share::schema::EXTERNAL_TABLE == insert_table->table_type_)) {
+        result = true;
+      }
+    }
+    return result;
+  }
   bool value_from_select() const { return !from_items_.empty(); }
+  int get_all_assignment_exprs(common::ObIArray<ObRawExpr*> &assignment_exprs);
   common::ObIArray<ObAssignment> &get_table_assignments() { return table_info_.assignments_; }
   const common::ObIArray<ObAssignment> &get_table_assignments() const { return table_info_.assignments_; }
   inline const common::ObIArray<ObColumnRefRawExpr*> &get_values_desc() const { return table_info_.values_desc_;}
@@ -73,6 +101,8 @@ public:
   int part_key_has_subquery(bool &has) const ;
   int part_key_has_auto_inc(bool &has) const;
   int part_key_is_updated(bool &is_updated) const;
+  int check_pdml_disabled(const bool is_online_ddl, bool &disable_pdml, bool &is_pk_auto_inc) const;
+  int find_first_auto_inc_expr(const ObRawExpr *expr, const ObRawExpr *&auto_inc) const;
   virtual int get_value_exprs(ObIArray<ObRawExpr *> &value_exprs) const override;
   // use this only when part_generated_col_dep_cols_.count() is not zero
   int get_values_desc_for_heap_table(common::ObIArray<ObColumnRefRawExpr*> &arr) const;

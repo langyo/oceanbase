@@ -18,7 +18,6 @@
 #include "sql/monitor/ob_monitor_info_manager.h"
 #include "sql/monitor/ob_phy_plan_monitor_info.h"
 #include "share/diagnosis/ob_sql_plan_monitor_node_list.h"
-#include "observer/ob_server.h"
 #include <algorithm> // std::sort
 
 using namespace oceanbase::observer;
@@ -493,7 +492,7 @@ int ObVirtualSqlPlanMonitor::extract_tenant_ids()
       if (is_always_false) {
         tenant_id_array_.reset();
       } else {
-        std::sort(tenant_id_array_.begin(), tenant_id_array_.end());
+        lib::ob_sort(tenant_id_array_.begin(), tenant_id_array_.end());
         SERVER_LOG(DEBUG, "get tenant ids from req mgr map", K(tenant_id_array_));
       }
     }
@@ -563,7 +562,7 @@ int ObVirtualSqlPlanMonitor::extract_tenant_ids()
       if (is_always_false) {
         tenant_id_array_.reset();
       } else {
-        std::sort(tenant_id_array_.begin(), tenant_id_array_.end());
+        lib::ob_sort(tenant_id_array_.begin(), tenant_id_array_.end());
         SERVER_LOG(DEBUG, "get tenant ids from req mgr map", K(tenant_id_array_));
       }
     }
@@ -825,6 +824,44 @@ int ObVirtualSqlPlanMonitor::convert_node_to_row(ObMonitorNode &node, ObNewRow *
       case SKIPPED_ROWS_COUNT: { // for batch
         int64_t int_value = node.skipped_rows_count_;
         cells[cell_idx].set_int(int_value);
+        break;
+      }
+      case WORKAREA_MEM: {
+        if(need_rt_node_) {
+          int64_t int_value = node.workarea_mem_;
+          cells[cell_idx].set_int(int_value);
+        } else {
+          cells[cell_idx].set_null();
+        }
+        break;
+      }
+      case WORKAREA_MAX_MEM: {
+        int64_t int_value = node.workarea_max_mem_;
+        cells[cell_idx].set_int(int_value);
+        break;
+      }
+      case WORKAREA_TEMPSEG: {
+        if (need_rt_node_) {
+          int64_t int_value = node.workarea_tempseg_;
+          cells[cell_idx].set_int(int_value);
+        } else {
+          cells[cell_idx].set_null();
+        }
+        break;
+      }
+      case WORKAREA_MAX_TEMPSEG: {
+        int64_t int_value = node.workarea_max_tempseg_;
+        cells[cell_idx].set_int(int_value);
+        break;
+      }
+      case SQL_ID: {
+        cells[cell_idx].set_varchar("");
+        cells[cell_idx].set_collation_type(ObCharset::get_default_collation(
+                                    ObCharset::get_default_charset()));
+        break;
+      }
+      case PLAN_HASH_VALUE: {
+        cells[cell_idx].set_uint64(0);
         break;
       }
       default: {

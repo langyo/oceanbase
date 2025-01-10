@@ -70,12 +70,12 @@ private:
   int create_session_pool_safe();
   int create_session_pool_unsafe();
 private:
-  static const int64_t ELIMINATE_SESSION_DELAY = 60 * 1000 * 1000; // 60s
+  static const int64_t ELIMINATE_SESSION_DELAY = 5 * 1000 * 1000; // 5s
   bool is_inited_;
   common::ObArenaAllocator allocator_;
   ObTableApiSessPool *pool_;
   ObTableApiSessEliminationTask elimination_task_;
-  ObSpinLock lock_; // for get_or_create_sess_pool
+  ObSpinLock lock_; // for double check pool creating
 private:
   DISALLOW_COPY_AND_ASSIGN(ObTableApiSessPoolMgr);
 };
@@ -87,13 +87,15 @@ class ObTableApiSessPool final
 public:
   // key is ObTableApiCredential.hash_val_
   typedef common::hash::ObHashMap<uint64_t, ObTableApiSessNode*> CacheKeyNodeMap;
-  static const int64_t SESS_POOL_DEFAULT_BUCKET_NUM = 10; // 取决于客户端登录的用户数量
-  static const int64_t SESS_RETIRE_TIME = 300 * 1000000; // 超过300s未被访问的session会被标记淘汰
-  static const int64_t BACKCROUND_TASK_DELETE_SESS_NUM = 1000; // 后台任务每次删除淘汰的session node数量
+  static const int64_t SESS_POOL_DEFAULT_BUCKET_NUM = 10; // default user number
+  static const int64_t SESS_RETIRE_TIME = 300 * 1000 * 1000; // marked as retired more than 300 seconds are not accessed
+  static const int64_t BACKCROUND_TASK_DELETE_SESS_NUM = 2000; // number of eliminated session nodes in background task per time
+  static const int64_t SESS_UPDATE_TIME_INTERVAL = 5 * 1000 * 1000; // the update interval cannot exceed 5 seconds
 public:
   explicit ObTableApiSessPool()
-      : allocator_("TbSessPool", OB_MALLOC_NORMAL_BLOCK_SIZE, MTL_ID()),
-        is_inited_(false)
+      : allocator_(MTL_ID()),
+        is_inited_(false),
+        last_update_ts_(0)
   {}
   ~ObTableApiSessPool() { destroy(); };
   TO_STRING_KV(K_(is_inited),
@@ -111,13 +113,14 @@ private:
   int create_and_add_node_safe(ObTableApiCredential &credential);
   int get_sess_node(uint64_t key, ObTableApiSessNode *&node);
 private:
-  common::ObArenaAllocator allocator_;
+  common::ObFIFOAllocator allocator_;
   bool is_inited_;
   CacheKeyNodeMap key_node_map_;
   // 已经淘汰的node，等待被后台删除
   // 前台login时、后台淘汰时都会操作retired_nodes_，因此需要加锁
   common::ObDList<ObTableApiSessNode> retired_nodes_;
-  ObSpinLock lock_;; // for lock retired_nodes_/allocator_
+  ObSpinLock retired_nodes_lock_; // for lock retired_nodes_
+  int64_t last_update_ts_;
 private:
   DISALLOW_COPY_AND_ASSIGN(ObTableApiSessPool);
 };
@@ -127,9 +130,10 @@ class ObTableApiSessNodeVal : public common::ObDLinkBase<ObTableApiSessNodeVal>
 friend class ObTableApiSessNode;
 friend class ObTableApiSessGuard;
 public:
-  explicit ObTableApiSessNodeVal(ObTableApiSessNode *owner)
-      : allocator_("TbSessNodeVal", OB_MALLOC_NORMAL_BLOCK_SIZE, MTL_ID()),
-        is_inited_(false),
+  explicit ObTableApiSessNodeVal(ObTableApiSessNode *owner, uint64_t tenant_id)
+      : is_inited_(false),
+        tenant_id_(tenant_id),
+        sess_info_(tenant_id_), // sess_info_ use 500 tenant default, so we must set tenant_id
         owner_node_(owner)
   {}
   TO_STRING_KV(K_(is_inited),
@@ -144,8 +148,8 @@ public:
   }
   void give_back_to_free_list();
 private:
-  common::ObArenaAllocator allocator_;
   bool is_inited_;
+  uint64_t tenant_id_;
   sql::ObSQLSessionInfo sess_info_;
   ObTableApiSessNode *owner_node_;
 private:
@@ -158,14 +162,16 @@ friend class ObTableApiSessPool;
 friend class ObTableApiSessNodeVal;
 public:
   explicit ObTableApiSessNode(ObTableApiCredential &credential)
-      : allocator_("TbSessNode", OB_MALLOC_NORMAL_BLOCK_SIZE, MTL_ID()),
+      : is_inited_(false),
+        mem_ctx_(nullptr),
         sess_lists_(),
         last_active_ts_(0),
         credential_(credential)
   {
   }
   ~ObTableApiSessNode() { destroy(); }
-  TO_STRING_KV(K_(sess_lists),
+  TO_STRING_KV(K_(is_inited),
+               K_(sess_lists),
                K_(last_active_ts),
                K_(credential));
   class SessList
@@ -183,20 +189,27 @@ public:
     DISALLOW_COPY_AND_ASSIGN(SessList);
   };
 public:
+  int init();
   void destroy();
   bool is_empty() const { return sess_lists_.is_empty(); }
   int get_sess_node_val(ObTableApiSessNodeVal *&val);
   OB_INLINE const ObTableApiCredential& get_credential() const { return credential_; }
   OB_INLINE int64_t get_last_active_ts() const { return last_active_ts_; }
   int remove_unused_sess();
+  OB_INLINE const ObString& get_tenant_name() const { return tenant_name_; }
+  OB_INLINE const ObString& get_database_name() const { return db_name_; }
+  OB_INLINE const ObString& get_user_name() const { return user_name_; }
 private:
   int extend_and_get_sess_val(ObTableApiSessGuard &guard);
 private:
-  common::ObArenaAllocator allocator_;
+  bool is_inited_;
+  lib::MemoryContext mem_ctx_;
   SessList sess_lists_;
   int64_t last_active_ts_;
   ObTableApiCredential credential_;
-  ObSpinLock lock_;; // for lock allocator_
+  ObString tenant_name_;
+  ObString db_name_;
+  ObString user_name_;
 private:
   DISALLOW_COPY_AND_ASSIGN(ObTableApiSessNode);
 };
@@ -215,11 +228,13 @@ public:
   ~ObTableApiSessGuard()
   {
     if (OB_NOT_NULL(sess_node_val_)) {
+      sess_node_val_->get_sess_info().get_trans_result().reset();
       sess_node_val_->reset_tx_desc();
       sess_node_val_->give_back_to_free_list();
       sess_node_val_ = nullptr;
     }
   }
+  TO_STRING_KV(KPC_(sess_node_val));
 public:
   ObTableApiSessNodeVal* get_sess_node_val() const { return sess_node_val_; }
   sql::ObSQLSessionInfo& get_sess_info() { return sess_node_val_->get_sess_info(); }
@@ -235,6 +250,30 @@ public:
       credential = &sess_node_val_->owner_node_->get_credential();
     }
     return ret;
+  }
+  OB_INLINE const ObString get_tenant_name() const
+  {
+    ObString tenant_name = ObString::make_empty_string();
+    if (OB_NOT_NULL(sess_node_val_) && OB_NOT_NULL(sess_node_val_->owner_node_)) {
+      tenant_name = sess_node_val_->owner_node_->get_tenant_name();
+    }
+    return tenant_name;
+  }
+  OB_INLINE const ObString get_database_name() const
+  {
+    ObString database_name = ObString::make_empty_string();
+    if (OB_NOT_NULL(sess_node_val_) && OB_NOT_NULL(sess_node_val_->owner_node_)) {
+      database_name = sess_node_val_->owner_node_->get_database_name();
+    }
+    return database_name;
+  }
+  OB_INLINE const ObString get_user_name() const
+  {
+    ObString user_name = ObString::make_empty_string();
+    if (OB_NOT_NULL(sess_node_val_) && OB_NOT_NULL(sess_node_val_->owner_node_)) {
+      user_name = sess_node_val_->owner_node_->get_user_name();
+    }
+    return user_name;
   }
 private:
   ObTableApiSessNodeVal *sess_node_val_;
@@ -312,7 +351,6 @@ class ObTableApiSessUtil final
 public:
   static int init_sess_info(uint64_t tenant_id,
                             const common::ObString &tenant_name,
-                            common::ObIAllocator *allocator,
                             share::schema::ObSchemaGetterGuard &schema_guard,
                             sql::ObSQLSessionInfo &sess_info);
 private:

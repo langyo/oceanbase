@@ -56,7 +56,7 @@ private:
   const int64_t co_major_snapshot_version_;
 };
 
-typedef oceanbase::common::ObSEArray<oceanbase::compaction::ObCOMergeWriter *, ObCOTabletMergeCtx::DEFAULT_CG_MERGE_BATCH_SIZE, common::ObIAllocator&> MERGEWRITERS;
+typedef oceanbase::common::ObSEArray<oceanbase::compaction::ObCOMergeWriter *, DEFAULT_CG_MERGE_BATCH_SIZE, common::ObIAllocator&> MERGEWRITERS;
 
 class ObCOMerger : public ObMerger
 {
@@ -88,12 +88,22 @@ private:
       const common::ObIArray<ObStorageColumnGroupSchema> &cg_array,
       ObTabletMergeInfo **merge_infos,
       ObSSTable &sstable);
+  int alloc_single_writer(
+      const blocksstable::ObDatumRow &default_row,
+      const common::ObIArray<ObStorageColumnGroupSchema> &cg_array,
+      ObTabletMergeInfo **merge_infos,
+      ObSSTable &sstable);
+  int alloc_row_writers(
+      const blocksstable::ObDatumRow &default_row,
+      const common::ObIArray<ObStorageColumnGroupSchema> &cg_array,
+      ObTabletMergeInfo **merge_infos,
+      ObSSTable &sstable);
   int write_residual_data();
 private:
   ObPartitionMergeIter *row_store_iter_;
   ObPartitionMergeProgress *merge_progress_;
   MERGEWRITERS merge_writers_;
-  ObSEArray<storage::ObCGTableWrapper, 16, common::ObIAllocator&> cg_wrappers_;
+  ObSEArray<storage::ObSSTableWrapper, 16, common::ObIAllocator&> cg_wrappers_;
   ObPartitionMergeLoserTreeCmp *cmp_;
   const uint32_t start_cg_idx_;
   const uint32_t end_cg_idx_;

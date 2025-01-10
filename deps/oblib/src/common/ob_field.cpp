@@ -31,10 +31,13 @@ int ObParamedSelectItemCtx::deep_copy(const ObParamedSelectItemCtx &other, ObIAl
     LOG_WARN("invalid null allocator", K(ret));
   } else if (OB_FAIL(ob_write_string(*allocator, other.paramed_cname_, paramed_cname_))) {
     LOG_WARN("failed to write stirng", K(ret));
+  } else if (OB_FAIL(param_str_offsets_.assign(other.param_str_offsets_))) {
+    LOG_WARN("failed to deep copy param string offsets", K(ret));
+  } else if (OB_FAIL(param_idxs_.assign(other.param_idxs_))) {
+    LOG_WARN("failed to deep copy param idxs", K(ret));
+  } else if (OB_FAIL(neg_param_idxs_.assign(other.neg_param_idxs_))) {
+    LOG_WARN("failed to deep copy neg param idxs", K(ret));
   } else {
-    param_str_offsets_ = other.param_str_offsets_;
-    param_idxs_ = other.param_idxs_;
-    neg_param_idxs_ = other.neg_param_idxs_;
     esc_str_flag_ = other.esc_str_flag_;
     need_check_dup_name_ = other.need_check_dup_name_;
     is_column_field_ = other.is_column_field_;
@@ -189,18 +192,19 @@ int64_t ObField::to_string(char *buffer, int64_t len) const
   int64_t pos = 0;
   databuff_printf(buffer, len, pos,
                   "dname:%.*s, tname: %.*s, org_tname: %.*s, "
-                  "cname: %.*s, org_cname: %.*s, type: %s, "
-                  "type_owner: %.*s, type_name: %.*s,"
-                  "charset: %hu, "
-                  "decimal_scale: %hu, flags: %x, inout_mode_: %x"
-                  "is_paramed_select_item: %d,"
-                  "is_hidden_rowid: %d",
+                  "cname: %.*s, org_cname: %.*s, type: ",
                   dname_.length(), dname_.ptr(),
                   tname_.length(), tname_.ptr(),
                   org_tname_.length(), org_tname_.ptr(),
                   cname_.length(), cname_.ptr(),
-                  org_cname_.length(), org_cname_.ptr(),
-                  to_cstring(type_),
+                  org_cname_.length(), org_cname_.ptr());
+  databuff_printf(buffer, len, pos, type_);
+  databuff_printf(buffer, len, pos,
+                  ", type_owner: %.*s, type_name: %.*s,"
+                  "charset: %hu, "
+                  "decimal_scale: %hu, flags: %x, inout_mode_: %x"
+                  "is_paramed_select_item: %d,"
+                  "is_hidden_rowid: %d",
                   type_owner_.length(), type_owner_.ptr(),
                   type_name_.length(), type_name_.ptr(),
                   charsetnr_, accuracy_.get_scale(), flags_,
@@ -278,6 +282,7 @@ int ObField::update_field_mb_length()
     case ObNullTC:
     case ObJsonTC:
     case ObGeometryTC:
+    case ObRoaringBitmapTC:
       break; // do nothing
     default:
       ret = OB_ERR_UNEXPECTED;
@@ -346,6 +351,7 @@ int ObField::get_field_mb_length(const ObObjType type,
     case ObLobTC:
     case ObJsonTC:
     case ObGeometryTC:
+    case ObRoaringBitmapTC:
     case ObStringTC: {
       // This if branch is a patch because the generation process of Operators such as CAST and CONV is not standardized.
       // As a result, length, collation, etc. are not set correctly
@@ -457,6 +463,7 @@ int ObField::get_field_mb_length(const ObObjType type,
       break;
     case ObExtendTC:
     case ObUserDefinedSQLTC:
+    case ObCollectionSQLTC:
       ret = OB_NOT_SUPPORTED;
       LOG_WARN("not supported get_field_mb_length for extend type", K(ret));
       break;

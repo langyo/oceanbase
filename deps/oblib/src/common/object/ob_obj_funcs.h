@@ -194,6 +194,8 @@ template <>
       case ObJsonType:
       case ObGeometryType:
       case ObUserDefinedSQLType:
+      case ObCollectionSQLType:
+      case ObRoaringBitmapType:
       default:
         break;
     }
@@ -1187,6 +1189,9 @@ inline int obj_print_plain_str<ObHexStringType>(const ObObj &obj, char *buffer,
     ObCharsetType dst_type = ObCharset::charset_type_by_coll(params.cs_type_);              \
     if (CHARSET_BINARY == src_type && lib::is_mysql_mode()) {               \
       ret = obj_print_sql<ObHexStringType>(obj, buffer, length, pos, params);      \
+    } else if (params.character_hex_safe_represent_                                       \
+      && ob_is_character_type(obj.get_type(), obj.get_collation_type())) {                 \
+         ret = ObObjCharacterUtil::print_safe_hex_represent(obj, buffer, length, pos, params.accuracy_); \
     } else if (OB_FAIL(databuff_printf(buffer, length, pos, "'"))) {                        \
     } else if (src_type == dst_type || src_type == CHARSET_INVALID) { \
       ObHexEscapeSqlStr sql_str(obj.get_string(), params.skip_escape_);                     \
@@ -1270,6 +1275,11 @@ inline int obj_print_plain_str<ObHexStringType>(const ObObj &obj, char *buffer,
       } else {                                                                              \
         ret = databuff_printf(buffer, length, pos, "%.*s", obj.get_string_len(), obj.get_string_ptr()); \
       }                                                                                     \
+      if (OB_SUCC(ret) && params.refine_range_max_value_) {                                 \
+        int64_t tails = 0;                                                                  \
+        while (pos > 0 && (char)(0xff) == buffer[pos-1]) { pos--; tails++; }                \
+        if (tails > 0) { ret = databuff_printf(buffer, length, pos, "<FF><repeat %ld times>", tails); } \
+      }                                                                                     \
     } else {                                                                                \
       uint32_t result_len = 0;                                                              \
       if (OB_FAIL(ObCharset::charset_convert(obj.get_collation_type(),                      \
@@ -1295,7 +1305,7 @@ inline int obj_print_plain_str<ObHexStringType>(const ObObj &obj, char *buffer,
     PRINT_META();                                                       \
     BUF_PRINTO(ob_obj_type_str(obj.get_type()));                        \
     J_COLON();                                                          \
-    if (obj.is_binary() || src_type == CHARSET_UTF16) {                 \
+    if (obj.is_binary() || src_type == CHARSET_UTF16 || src_type == CHARSET_UTF16LE) {      \
       hex_print(obj.get_string_ptr(), obj.get_string_len(), buf, buf_len, pos); \
     } else {                                                            \
       BUF_PRINTO(obj.get_varchar());                                    \
@@ -1594,6 +1604,7 @@ DEF_ENUMSET_INNER_FUNCS(ObSetInnerType, set_inner, ObString);
 //    and lob locators are removed in table apis. Error may occur if used in other scenes.
 // 2. CS_FUNCS: lob with same content and different lobids will have different crc & hash,
 //    but error occur in farm, not used?
+
 #define DEF_TEXT_FUNCS(OBJTYPE, TYPE, VTYPE) \
   DEF_TEXT_PRINT_FUNCS(OBJTYPE);             \
   DEF_STRING_CS_FUNCS(OBJTYPE);                 \
@@ -1645,7 +1656,7 @@ DEF_TEXT_FUNCS(ObLongTextType, string, ObString);
       res = 0;                                                                       \
       common::ObString str = param.get_string();                                     \
       common::ObString wkb;                                                          \
-      ObLobLocatorV2 lob(str, false);                                                \
+      ObLobLocatorV2 lob(str, param.has_lob_header());                               \
       if (!lob.is_valid()) {                                                         \
         COMMON_LOG(WARN, "invalid lob", K(ret), K(str));                             \
       } else if (!lob.has_inrow_data()) {                                            \
@@ -1719,7 +1730,7 @@ DEF_GEO_FUNCS(ObGeometryType, string, ObString);
       res = 0;                                                                       \
       common::ObString str = param.get_string();                                     \
       common::ObString j_bin_str;                                                    \
-      ObLobLocatorV2 lob(str, false);                                                \
+      ObLobLocatorV2 lob(str, param.has_lob_header());                               \
       if (!lob.is_valid()) {                                                         \
         COMMON_LOG(WARN, "invalid lob", K(ret), K(str));                             \
       } else if (!lob.has_inrow_data()) {                                            \
@@ -1728,7 +1739,8 @@ DEF_GEO_FUNCS(ObGeometryType, string, ObString);
       } else if (OB_FAIL(lob.get_inrow_data(j_bin_str))) {                           \
         COMMON_LOG(WARN, "fail to get inrow data", K(ret), K(lob));                  \
       } else {                                                                       \
-        ObJsonBin j_bin(j_bin_str.ptr(), j_bin_str.length());                        \
+        ObJsonBinCtx ctx;                                                            \
+        ObJsonBin j_bin(j_bin_str.ptr(), j_bin_str.length(), &ctx);                  \
         ObIJsonBase *j_base = &j_bin;                                                \
         if (j_bin_str.length() == 0 || param.is_null()) {                            \
           res = hash;                                                                \
@@ -1772,7 +1784,7 @@ inline int obj_print_sql<ObJsonType>(const ObObj &obj, char *buffer, int64_t len
   } else if (str.empty()) { // nothing to print;
   } else if (OB_FAIL(ObJsonBaseFactory::get_json_base(&tmp_allocator, str, in_type, in_type, j_base, parse_flag))) {
     COMMON_LOG(WARN, "fail to get json base", K(ret), K(in_type));
-  } else if (OB_FAIL(j_base->print(jbuf, false))) { // json binary to string
+  } else if (OB_FAIL(j_base->print(jbuf, false, str.length()))) { // json binary to string
     COMMON_LOG(WARN, "fail to convert json to string", K(ret), K(obj));
   } else if (OB_FAIL(databuff_printf(buffer, length, pos, "'"))) {
     COMMON_LOG(WARN, "fail to print \"'\"", K(ret), K(length), K(pos));
@@ -1809,7 +1821,7 @@ inline int obj_print_plain_str<ObJsonType>(const ObObj &obj, char *buffer, int64
   } else if (str.empty()) { // nothing to print;
   } else if (OB_FAIL(ObJsonBaseFactory::get_json_base(&tmp_allocator, str, in_type, in_type, j_base, parse_flag))) {
     COMMON_LOG(WARN, "fail to get json base", K(ret), K(in_type));
-  } else if (OB_FAIL(j_base->print(jbuf, false))) { // json binary to string
+  } else if (OB_FAIL(j_base->print(jbuf, false, str.length()))) { // json binary to string
     COMMON_LOG(WARN, "fail to convert json to string", K(ret), K(obj));
   } else if (params.use_memcpy_) {
     ret = databuff_memcpy(buffer, length, pos, jbuf.length(), jbuf.ptr());
@@ -1837,7 +1849,7 @@ inline int obj_print_json<ObJsonType>(const ObObj &obj, char *buf, int64_t buf_l
   } else if (str.empty()) { // nothing to print;
   } else if (OB_FAIL(ObJsonBaseFactory::get_json_base(&tmp_allocator, str, in_type, in_type, j_base, parse_flag))) {
     COMMON_LOG(WARN, "fail to get json base", K(ret), K(in_type));
-  } else if (OB_FAIL(j_base->print(jbuf, false))) { // json binary to string
+  } else if (OB_FAIL(j_base->print(jbuf, false, str.length()))) { // json binary to string
     COMMON_LOG(WARN, "fail to convert json to string", K(ret), K(obj));
   } else if (OB_FAIL(databuff_printf(buf, buf_len, pos, "%.*s",
                                      static_cast<int>(MIN(jbuf.length(), buf_len - pos)),
@@ -2320,8 +2332,8 @@ template <>
 inline int obj_val_serialize<ObExtendType>(const ObObj &obj, char* buf, const int64_t buf_len, int64_t& pos)
 {
   int ret = OB_SUCCESS;
-  OB_UNIS_ENCODE(obj.get_ext());
   if (obj.is_pl_extend()) {
+    OB_UNIS_ENCODE(obj.get_ext());
     COMMON_LOG(ERROR, "Unexpected serialize", K(OB_NOT_SUPPORTED), K(obj), K(obj.get_meta().get_extend_type()));
     return OB_NOT_SUPPORTED; //TODO:@ryan.ly: close this feature before composite refactor
     if (NULL == serialize_composite_callback) {
@@ -2329,6 +2341,18 @@ inline int obj_val_serialize<ObExtendType>(const ObObj &obj, char* buf, const in
     } else {
       ret = serialize_composite_callback(obj, buf, buf_len, pos);
     }
+  } else if (obj.is_ext_sql_array()) {
+    int64_t v = 0;
+    OB_UNIS_ENCODE(v);
+    const ObSqlArrayObj *array_obj = reinterpret_cast<const ObSqlArrayObj*>(obj.get_ext());
+    if (OB_SUCC(ret) && NULL != array_obj) {
+      int64_t len = array_obj->get_serialize_size();
+      int64_t tmp_pos = pos;
+      OB_UNIS_ENCODE(len);
+      OB_UNIS_ENCODE(*array_obj);
+    }
+  } else {
+    OB_UNIS_ENCODE(obj.get_ext());
   }
   return ret;
 }
@@ -2347,6 +2371,20 @@ inline int obj_val_deserialize<ObExtendType>(ObObj &obj, const char* buf, const 
       } else {
         ret = deserialize_composite_callback(obj, buf, data_len, pos);
       }
+    } else if (obj.is_ext_sql_array()) {
+      if (OB_UNLIKELY(v != 0)) {
+        ret = OB_NOT_SUPPORTED;
+        COMMON_LOG(WARN, "using such type in upgrade period", K(ret));
+      } else {
+        int64_t len = 0;
+        int64_t tmp_pos = pos;
+        OB_UNIS_DECODE(len);
+        /* record the buffer and delay it's deserialize.
+         * should call ObSqlArrayObj::do_real_deserialize which need an allocator
+         */
+        obj.set_extend(reinterpret_cast<int64_t>(buf + pos), T_EXT_SQL_ARRAY, int32_t(len));
+        pos += len;
+      }
     } else {
       obj.set_obj_value(v);
     }
@@ -2357,8 +2395,8 @@ template <>
 inline int64_t obj_val_get_serialize_size<ObExtendType>(const ObObj &obj)
 {
   int64_t len = 0;
-  OB_UNIS_ADD_LEN(obj.get_ext());
   if (obj.is_pl_extend()) {
+    OB_UNIS_ADD_LEN(obj.get_ext());
     COMMON_LOG_RET(ERROR, OB_NOT_SUPPORTED, "Unexpected serialize", K(OB_NOT_SUPPORTED), K(obj), K(obj.get_meta().get_extend_type()));
     return len; //TODO:@ryan.ly: close this feature before composite refactor
     if (NULL == composite_serialize_size_callback) {
@@ -2366,6 +2404,17 @@ inline int64_t obj_val_get_serialize_size<ObExtendType>(const ObObj &obj)
     } else {
       len += composite_serialize_size_callback(obj);
     }
+  } else if (obj.is_ext_sql_array()) {
+    int64_t v = 0;
+    OB_UNIS_ADD_LEN(v);
+    const ObSqlArrayObj *array_obj = reinterpret_cast<const ObSqlArrayObj*>(obj.get_ext());
+    if (NULL != array_obj) {
+      int64_t array_obj_len = array_obj->get_serialize_size();
+      OB_UNIS_ADD_LEN(array_obj_len);
+      OB_UNIS_ADD_LEN(*array_obj);
+    }
+  } else {
+    OB_UNIS_ADD_LEN(obj.get_ext());
   }
   return len;
 }
@@ -2678,7 +2727,10 @@ template <>
     ObCharsetType src_type = ObCharset::charset_type_by_coll(obj.get_collation_type());     \
     ObCharsetType dst_type = ObCharset::charset_type_by_coll(params.cs_type_);              \
     int ret = OB_SUCCESS;                                                            \
-    if (OB_FAIL(databuff_printf(buffer, length, pos, "n'"))) {                              \
+    if (params.character_hex_safe_represent_                                                \
+      && ob_is_character_type(obj.get_type(), obj.get_collation_type())) {                  \
+         ret = ObObjCharacterUtil::print_safe_hex_represent(obj, buffer, length, pos, params.accuracy_); \
+    } else if (OB_FAIL(databuff_printf(buffer, length, pos, "n'"))) {                              \
     } else if (src_type == dst_type) {                                                      \
       ObHexEscapeSqlStr sql_str(obj.get_string(), params.skip_escape_);                     \
       pos += sql_str.to_string(buffer + pos, length - pos);                                 \
@@ -3209,6 +3261,18 @@ inline void obj_batch_checksum<ObDecimalIntType>(const ObObj &obj, ObBatchChecks
   bc.fill(obj.get_decimal_int(), val_len);
 }
 
+template<typename T, typename P>
+struct ObjHashCalculator<ObDecimalIntType, T, P>
+{
+  static int calc_hash_value(const P &params, const uint64_t hash, uint64_t &result)
+  {
+    const ObDecimalInt *decint = params.get_decimal_int();
+    int32_t int_bytes = params.get_int_bytes();
+    result = T::hash(decint, int_bytes, hash);
+    return OB_SUCCESS;
+  }
+};
+
 template <>
 inline int obj_murmurhash<ObDecimalIntType>(const ObObj &obj, const uint64_t hash,
                                                  uint64_t &result)
@@ -3235,17 +3299,6 @@ inline uint64_t obj_crc64_v3<ObDecimalIntType>(const ObObj &obj, const uint64_t 
   return result;
 }
 
-template<typename T, typename P>
-struct ObjHashCalculator<ObDecimalIntType, T, P>
-{
-  static int calc_hash_value(const P &params, const uint64_t hash, uint64_t &result)
-  {
-    const ObDecimalInt *decint = params.get_decimal_int();
-    int32_t int_bytes = params.get_int_bytes();
-    result = T::hash(decint, int_bytes, hash);
-    return OB_SUCCESS;
-  }
-};
 // ObUserDefinedSQLType = 49
 // An UDT is stored as it's leaf type columns, the root type column will not appear in storage now,
 // and will be atmost a few bytes in the feature.
@@ -3393,13 +3446,7 @@ inline int obj_val_serialize<ObUserDefinedSQLType>(const ObObj &obj, char* buf, 
   int ret = OB_SUCCESS;
   OB_UNIS_ENCODE(obj.get_meta().get_subschema_id());
   OB_UNIS_ENCODE(obj.get_meta().get_udt_flags());
-  if (OB_FAIL(ret)) {
-  } else if (obj.get_meta().is_xml_sql_type()) {
-    OB_UNIS_ENCODE(obj.get_string());
-  } else { // need callback for different types?
-    ret = OB_NOT_SUPPORTED;
-    COMMON_LOG(WARN, "unsupported udt type", K(ret), K(obj.get_meta()), K(buf_len), K(pos));
-  }
+  OB_UNIS_ENCODE(obj.get_string());
   return ret;
 }
 
@@ -3412,16 +3459,10 @@ inline int obj_val_deserialize<ObUserDefinedSQLType>(ObObj &obj, const char* buf
 
   OB_UNIS_DECODE(subschema_id);
   OB_UNIS_DECODE(udt_flags);
-  if (OB_FAIL(ret)) {
-  } else if (ob_is_xml_sql_type(ObUserDefinedSQLType, subschema_id)) {
-    ObString blob;
-    OB_UNIS_DECODE(blob);
-    if (OB_SUCC(ret)) {
-      obj.set_sql_udt(blob.ptr(), blob.length(), subschema_id, udt_flags);
-    }
-  } else {
-    ret = OB_NOT_SUPPORTED;
-    COMMON_LOG(WARN, "unsupported udt type", K(ret), K(subschema_id), K(udt_flags));
+  ObString blob;
+  OB_UNIS_DECODE(blob);
+  if (OB_SUCC(ret)) {
+    obj.set_sql_udt(blob.ptr(), blob.length(), subschema_id, udt_flags);
   }
   return ret;
 }
@@ -3435,7 +3476,121 @@ inline int64_t obj_val_get_serialize_size<ObUserDefinedSQLType>(const ObObj &obj
   OB_UNIS_ADD_LEN(obj.get_string());
   return len;
 }
-} // end namespace common
-} // end namespace oceanbase
+
+// DEF_TEXT_PRINT_FUNCS(ObCollectionSQLType);
+template <>
+inline int obj_print_sql<ObCollectionSQLType>(const ObObj &obj, char *buffer, int64_t length,
+                                               int64_t &pos, const ObObjPrintParams &params)
+{
+  UNUSED(params);
+  int ret = OB_SUCCESS;
+  ObString udt_data;
+  if (OB_FAIL(obj.get_udt_print_data(udt_data, buffer, length, pos, true))) {
+  } else if (OB_FAIL(databuff_printf(buffer, length, pos, "'"))) {
+  } else {
+    ObHexEscapeSqlStr sql_str(udt_data);
+    pos += sql_str.to_string(buffer + pos, length - pos);
+    ret = databuff_printf(buffer, length, pos, "'");
+  }
+  return ret;
+}
+
+template <>
+inline int obj_print_str<ObCollectionSQLType>(const ObObj &obj, char *buffer, int64_t length,
+                                               int64_t &pos, const ObObjPrintParams &params)
+{
+  UNUSED(params);
+  int ret = OB_SUCCESS;
+  ObString udt_data;
+  if (OB_FAIL(obj.get_udt_print_data(udt_data, buffer, length, pos, true))) {
+  } else {
+    ret = databuff_printf(buffer, length, pos, "'%.*s'", udt_data.length(), udt_data.ptr());
+  }
+  return ret;
+}
+
+template <>
+inline int obj_print_plain_str<ObCollectionSQLType>(const ObObj &obj, char *buffer, int64_t length,
+                                           int64_t &pos, const ObObjPrintParams &params)
+{
+  int ret = OB_SUCCESS;
+  ObObj tmp_obj = obj;
+  ObString udt_data;
+  if (OB_FAIL(obj.get_udt_print_data(udt_data, buffer, length, pos, true))) {
+  } else {
+    tmp_obj.set_string(obj.get_type(), udt_data);
+    tmp_obj.set_collation_type(CS_TYPE_BINARY);
+    ret = obj_print_plain_str<ObVarcharType>(tmp_obj, buffer, length, pos, params);
+  }
+  return ret;
+}
+template <>
+inline int obj_print_json<ObCollectionSQLType>(const ObObj &obj, char *buf, int64_t buf_len,
+                                                int64_t &pos, const ObObjPrintParams &params)
+{
+  UNUSED(params);
+  int ret = OB_SUCCESS;
+  ObString udt_data;
+  if (OB_FAIL(obj.get_udt_print_data(udt_data, buf, buf_len, pos, true))) {
+  } else {
+    J_OBJ_START();
+    PRINT_META();
+    BUF_PRINTO("ARRAY");
+    J_COLON();
+    BUF_PRINTO(udt_data);
+    J_OBJ_END();
+  }
+  return ret;
+}
+
+// DEF_TEXT_SERIALIZE_FUNCS(ObCollectionSQLType, TYPE, VTYPE)
+template <>
+inline int obj_val_serialize<ObCollectionSQLType>(const ObObj &obj, char* buf, const int64_t buf_len, int64_t& pos)
+{
+  int ret = OB_SUCCESS;
+  OB_UNIS_ENCODE(obj.get_meta().get_subschema_id());
+  OB_UNIS_ENCODE(obj.get_meta().get_udt_flags());
+  OB_UNIS_ENCODE(obj.get_string());
+  return ret;
+}
+
+template <>
+inline int obj_val_deserialize<ObCollectionSQLType>(ObObj &obj, const char* buf, const int64_t data_len, int64_t& pos)
+{
+  int ret = OB_SUCCESS;
+  uint16_t subschema_id = uint16_t();
+  uint8_t udt_flags = uint8_t();
+
+  OB_UNIS_DECODE(subschema_id);
+  OB_UNIS_DECODE(udt_flags);
+  ObString blob;
+  OB_UNIS_DECODE(blob);
+  if (OB_SUCC(ret)) {
+    obj.set_sql_collection(blob.ptr(), blob.length(), subschema_id, udt_flags);
+  }
+  return ret;
+}
+
+template <>
+inline int64_t obj_val_get_serialize_size<ObCollectionSQLType>(const ObObj &obj)
+{
+  int64_t len = 0;
+  OB_UNIS_ADD_LEN(obj.get_meta().get_subschema_id());
+  OB_UNIS_ADD_LEN(obj.get_meta().get_udt_flags());
+  OB_UNIS_ADD_LEN(obj.get_string());
+  return len;
+}
+
+DEF_UDT_CS_FUNCS(ObCollectionSQLType);
+
+#define DEF_ROARINGBITMAP_FUNCS(OBJTYPE, TYPE, VTYPE) \
+  DEF_HEX_STRING_PRINT_FUNCS(OBJTYPE);               \
+  DEF_STRING_CS_FUNCS(OBJTYPE);                      \
+  DEF_TEXT_SERIALIZE_FUNCS(OBJTYPE, TYPE, VTYPE)
+
+DEF_ROARINGBITMAP_FUNCS(ObRoaringBitmapType, string, ObString);
+
+}
+}
 
 #endif //

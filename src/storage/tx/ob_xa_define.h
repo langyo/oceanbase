@@ -34,7 +34,9 @@ extern const int64_t XA_INNER_TABLE_TIMEOUT;
 extern const bool ENABLE_NEW_XA;
 
 static const ObString PL_XA_IMPLICIT_SAVEPOINT = "__PL_XA_IMPLICIT_SAVEPOINT";
-
+static const ObString DBLINK_DEFAULT_SAVEPOINT = "OB_DBLINK_DEFAULT_SAVEPOINT";
+static const ObString PL_DBLINK_DEFAULT_SAVEPOINT = "OB_PL_DBLINK_DEFAULT_SAVEPOINT";
+const int64_t MAX_DBLINK_SAVEPOINT_NAME_LENGTH = 128;
 class ObXATransState
 {
 public:
@@ -61,7 +63,6 @@ public:
   {
     return COMMITTING == state
            || ROLLBACKING == state
-           || PREPARING == state
            || ROLLBACKED == state
            || COMMITTED == state
            || PREPARED == state;
@@ -130,6 +131,7 @@ public:
   static bool contain_tmreadonly(const int64_t flag) { return flag & OBTMREADONLY; }
   static bool contain_tmserializable(const int64_t flag) { return flag & OBTMSERIALIZABLE; }
   static bool is_tmnoflags(const int64_t flag, const int64_t xa_req_type);
+  static bool is_tmnoflags_for_mysql(const int64_t flag) { return OBTMNOFLAGS == flag; }
   static bool contain_loosely(const int64_t flag) { return flag & OBLOOSELY; }
   static bool contain_tmjoin(const int64_t flag) { return flag & OBTMJOIN; }
   static bool is_tmjoin(const int64_t flag) { return flag == OBTMJOIN; }
@@ -182,6 +184,13 @@ public:
   int64_t get_format_id() const { return format_id_; }
   uint64_t get_gtrid_hash() const { return g_hv_; }
   uint64_t get_bqual_hash() const { return b_hv_; }
+  uint64_t get_hash() const {
+    if (0 == g_hv_ || 0 == b_hv_) {
+      g_hv_ = murmurhash(gtrid_str_.ptr(), gtrid_str_.length(), 0) % HASH_SIZE;
+      b_hv_ = murmurhash(bqual_str_.ptr(), bqual_str_.length(), 0) % HASH_SIZE;
+    }
+    return (g_hv_ + b_hv_) / 11;
+  }
   bool empty() const;
   // empty xid is also valid
   bool is_valid() const;
@@ -207,8 +216,8 @@ private:
   char bqual_buf_[MAX_BQUAL_LENGTH];
   common::ObString bqual_str_;
   int64_t format_id_;
-  uint64_t g_hv_;
-  uint64_t b_hv_;
+  mutable uint64_t g_hv_;
+  mutable uint64_t b_hv_;
 };
 
 struct ObXABranchInfo

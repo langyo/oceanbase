@@ -29,7 +29,7 @@ namespace logservice
 class ObLogService;
 class ObLogRestoreDriverBase
 {
-  const int64_t FETCH_LOG_AHEAD_THRESHOLD_NS = 3 * 1000 * 1000 *1000L;  // 3s
+  const int64_t FETCH_LOG_AHEAD_THRESHOLD_NS = 6 * 1000 * 1000 *1000L;  // 6s
 public:
   ObLogRestoreDriverBase();
   virtual ~ObLogRestoreDriverBase();
@@ -42,6 +42,8 @@ protected:
   virtual int do_fetch_log_(ObLS &ls) = 0;
   int check_replica_status_(storage::ObLS &ls, bool &can_fetch_log);
   int get_upper_resotore_scn(share::SCN &scn);
+private:
+  int check_fetch_log_unlimited_(bool &limit);
 protected:
   bool inited_;
   uint64_t tenant_id_;

@@ -487,6 +487,31 @@ private:
   DISALLOW_COPY_AND_ASSIGN(ObCharsetSysVar);
 };
 
+class ObVersionSysVar : public ObBasicSysVar
+{
+public:
+  ObVersionSysVar(OnCheckAndConvertFunc on_check_and_convert = NULL,
+                  OnUpdateFunc on_update = NULL,
+                  ToObjFunc to_select_obj = NULL,
+                  ToStrFunc to_show_str = NULL,
+                  GetMetaTypeFunc get_meta_type = NULL)
+      : ObBasicSysVar(on_check_and_convert,
+                      on_update,
+                      to_select_obj,
+                      to_show_str,
+                      get_meta_type)
+  {
+  }
+  virtual ~ObVersionSysVar() {}
+private:
+  virtual int do_check_and_convert(sql::ObExecContext &ctx,
+                                   const ObSetVar &set_var,
+                                   const common::ObObj &in_val,
+                                   common::ObObj &out_val);
+private:
+  DISALLOW_COPY_AND_ASSIGN(ObVersionSysVar);
+};
+
 /////////////////////////////
 class ObTinyintSysVar : public ObBasicSysVar
 {
@@ -813,6 +838,11 @@ public:
                                                   const ObBasicSysVar &sys_var,
                                                   const common::ObObj &in_val,
                                                   common::ObObj &out_val);
+  static int check_default_value_for_utf8mb4(sql::ObExecContext &ctx,
+                                            const ObSetVar &set_var,
+                                            const ObBasicSysVar &sys_var,
+                                            const ObObj &in_val,
+                                            ObObj &out_val);
   static int check_and_convert_tx_isolation(sql::ObExecContext &ctx,
                                             const ObSetVar &set_var,
                                             const ObBasicSysVar &sys_var,
@@ -893,11 +923,43 @@ public:
                                                   const ObBasicSysVar &sys_var,
                                                   const common::ObObj &in_val,
                                                   common::ObObj &out_val);
+
+  static int check_default_lob_inrow_threshold(sql::ObExecContext &ctx,
+                                                  const ObSetVar &set_var,
+                                                  const ObBasicSysVar &sys_var,
+                                                  const common::ObObj &in_val,
+                                                  common::ObObj &out_val);
+
   static int check_runtime_filter_type_is_valid(sql::ObExecContext &ctx,
                                                 const ObSetVar &set_var,
                                                 const ObBasicSysVar &sys_var,
                                                 const common::ObObj &in_val,
                                                 common::ObObj &out_val);
+  static int check_locale_type_is_valid(sql::ObExecContext &ctx,
+                                        const ObSetVar &set_var,
+                                        const ObBasicSysVar &sys_var,
+                                        const common::ObObj &in_val,
+                                        common::ObObj &out_val);
+  static int check_and_convert_compat_version(sql::ObExecContext &ctx,
+                                              const ObSetVar &set_var,
+                                              const ObBasicSysVar &sys_var,
+                                              const common::ObObj &in_val,
+                                              common::ObObj &out_val);
+  static int check_and_convert_security_version(sql::ObExecContext &ctx,
+                                                const ObSetVar &set_var,
+                                                const ObBasicSysVar &sys_var,
+                                                const common::ObObj &in_val,
+                                                common::ObObj &out_val);
+  static int check_and_convert_version(sql::ObExecContext &ctx,
+                                       const ObBasicSysVar &sys_var,
+                                       const common::ObObj &in_val,
+                                       const uint64_t tenant_id,
+                                       uint64_t &version);
+  static int check_and_convert_block_encryption_mode(sql::ObExecContext &ctx,
+                                                     const ObSetVar &set_var,
+                                                     const ObBasicSysVar &sys_var,
+                                                     const common::ObObj &in_val,
+                                                     common::ObObj &out_val);
 private:
   static int check_session_readonly(sql::ObExecContext &ctx,
                                     const ObSetVar &set_var,
@@ -952,6 +1014,8 @@ public:
                               const ObBasicSysVar &sys_var, common::ObObj &result_obj);
   static int to_obj_sql_mode(common::ObIAllocator &allocator, const sql::ObBasicSessionInfo &session,
                              const ObBasicSysVar &sys_var, common::ObObj &result_obj);
+  static int to_obj_version(common::ObIAllocator &allocator, const sql::ObBasicSessionInfo &session,
+                            const ObBasicSysVar &sys_var, common::ObObj &result_obj);
 private:
   DISALLOW_COPY_AND_ASSIGN(ObSysVarToObjFuncs);
 };
@@ -968,6 +1032,8 @@ public:
                               const ObBasicSysVar &sys_var, common::ObString &result_str);
   static int to_str_sql_mode(common::ObIAllocator &allocator, const sql::ObBasicSessionInfo &session,
                              const ObBasicSysVar &sys_var, common::ObString &result_str);
+  static int to_str_version(common::ObIAllocator &allocator, const sql::ObBasicSessionInfo &session,
+                            const ObBasicSysVar &sys_var, common::ObString &result_str);
 private:
   DISALLOW_COPY_AND_ASSIGN(ObSysVarToStrFuncs);
 };

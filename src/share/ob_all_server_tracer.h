@@ -58,11 +58,14 @@ public:
       common::ObIArray<ObServerInfoInTable> &active_servers_info) const;
   virtual int get_alive_servers(const common::ObZone &zone, common::ObIArray<common::ObAddr> &server_list) const;
   virtual int get_alive_servers_count(const common::ObZone &zone, int64_t &count) const;
+  virtual int get_alive_and_not_stopped_servers(const common::ObZone &zone, common::ObIArray<common::ObAddr> &server_list) const;
   virtual int get_servers_by_status(
       const ObZone &zone,
       common::ObIArray<common::ObAddr> &alive_server_list,
       common::ObIArray<common::ObAddr> &not_alive_server_list) const;
-  virtual int get_min_server_version(char min_server_version[OB_SERVER_VERSION_LENGTH]);
+  virtual int get_min_server_version(
+              char min_server_version_str[OB_SERVER_VERSION_LENGTH],
+              uint64_t &min_observer_version);
   bool has_build() const {return has_build_; };
   int refresh();
   int for_each_server_info(const ObFunction<int(const ObServerInfoInTable &server_info)> &functor);
@@ -79,6 +82,7 @@ private:
   bool has_build_;
   mutable common::SpinRWLock lock_;
   common::ObArray<ObServerInfoInTable> server_info_arr_;
+  common::ObSEArray<common::ObZone, 4> inactive_zone_list_;
 };
 
 class ObServerTraceTask : public common::ObTimerTask
@@ -134,11 +138,14 @@ public:
   virtual int refresh();
   virtual int check_server_can_migrate_in(const common::ObAddr &server, bool &can_migrate_in) const;
   virtual int get_alive_servers_count(const common::ObZone &zone, int64_t &count) const;
+  virtual int get_alive_and_not_stopped_servers(const common::ObZone &zone, common::ObIArray<common::ObAddr> &server_list) const;
   virtual int get_servers_by_status(
       const ObZone &zone,
       common::ObIArray<common::ObAddr> &alive_server_list,
       common::ObIArray<common::ObAddr> &not_alive_server_list) const;
-  virtual int get_min_server_version(char min_server_version[OB_SERVER_VERSION_LENGTH]);
+  virtual int get_min_server_version(
+              char min_server_version_str[OB_SERVER_VERSION_LENGTH],
+              uint64_t &min_observer_version);
   bool has_build() const;
 private:
   ObAllServerTracer();

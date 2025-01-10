@@ -17,6 +17,7 @@
 #include "rpc/ob_request.h"
 #define MULTI_LEVEL_QUEUE_SIZE (10)
 #define MULTI_LEVEL_THRESHOLD (2)
+#define GROUP_MULTI_LEVEL_THRESHOLD (1)
 
 namespace oceanbase
 {
@@ -33,6 +34,7 @@ public:
   int try_pop(common::ObLink *&task, const int32_t level);
   int64_t get_size(const int32_t level) const;
   int64_t get_total_size() const;
+  common::ObPriorityQueue<1>* get_pq_queue(const int32_t level) { return &queue_[level]; }
   int64_t to_string(char *buf, const int64_t buf_len) const
   {
     int64_t pos = 0;

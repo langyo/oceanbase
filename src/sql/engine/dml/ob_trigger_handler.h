@@ -27,11 +27,11 @@ class TriggerHandle
 public:
   static int set_rowid_into_row(const ObTriggerColumnsInfo &cols,
                                 const ObObj &rowid_val,
-                                ObObj* cells);
+                                pl::ObPLRecord *record);
   static int set_rowid_into_row(const ObTriggerColumnsInfo &cols,
                                 ObEvalCtx &eval_ctx,
                                 ObExpr *src_expr,
-                                ObObj* cells);
+                                pl::ObPLRecord *record);
   static int init_param_rows(ObEvalCtx &eval_ctx,
                             const ObTrigDMLCtDef &trig_ctdef,
                             ObTrigDMLRtDef &trig_rtdef);
@@ -67,7 +67,8 @@ public:
                                              pl::ObProcType type)
   {
     bool is_trg_routine = false;
-    if (schema::ObTriggerInfo::is_trigger_body_package_id(package_id) && pl::ObProcType::PACKAGE_PROCEDURE == type) {
+    if (schema::ObTriggerInfo::is_trigger_body_package_id(package_id)
+        && (pl::ObProcType::PACKAGE_PROCEDURE == type || pl::ObProcType::PACKAGE_FUNCTION == type)) {
       if (lib::is_oracle_mode()) {
         is_trg_routine = (routine_id >= ROUTINE_IDX_CALC_WHEN && routine_id <= ROUTINE_IDX_AFTER_STMT);
       } else {
@@ -76,6 +77,7 @@ public:
     }
     return is_trg_routine;
   }
+  static int free_trigger_param_memory(ObTrigDMLRtDef &trig_rtdef, bool keep_composite_attr = true);
 private:
   // trigger
   static int init_trigger_row(ObIAllocator &alloc, int64_t rowtype_col_count, pl::ObPLRecord *&record);

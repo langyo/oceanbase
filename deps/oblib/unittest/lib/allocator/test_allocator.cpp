@@ -91,6 +91,15 @@ TEST_F(TestAllocator, basic)
     sz = ((sz | reinterpret_cast<size_t>(p[0])) & ((1<<13) - 1));
   }
 
+  // test alloc_align/free_align
+  for (int i = 0; i < 10; ++i) {
+    int64_t align = 8<<i;
+    void *ptr = a.alloc_align(100, align);
+    ASSERT_EQ(0, (int64_t)ptr & (align - 1));
+    ASSERT_GT(a.used(), 0);
+    a.free_align(ptr);
+    ASSERT_EQ(a.used(), 0);
+  }
   cout << "done" << endl;
 }
 
@@ -180,13 +189,11 @@ TEST_F(TestAllocator, pm_basic)
 
   // freelist
   int large_size = INTACT_ACHUNK_SIZE - 200;
-  pm.set_max_chunk_cache_size(INTACT_ACHUNK_SIZE);
   ptr = pm.alloc_page(large_size);
   hold = pm.get_hold();
   ASSERT_GT(hold, 0);
   pm.free_page(ptr);
   ASSERT_EQ(pm.get_hold(), hold);
-  pm.set_max_chunk_cache_size(0);
   ptr = pm.alloc_page(large_size);
   ASSERT_EQ(pm.get_hold(), hold);
   pm.free_page(ptr);
@@ -197,7 +204,6 @@ TEST_F(TestAllocator, pm_basic)
   pm.free_page(ptr);
   ASSERT_EQ(pm.get_hold(), hold);
 
-  pm.set_max_chunk_cache_size(INTACT_ACHUNK_SIZE * 2);
   pm.alloc_page(large_size);
   pm.alloc_page(large_size);
   pm.alloc_page(large_size);

@@ -33,6 +33,7 @@ ObPhysicalRestoreOptionParser::ExtraArgsCb::Action ObPhysicalRestoreOptionParser
   {"primary_zone",          ObPhysicalRestoreOptionParser::ExtraArgsCb::set_primary_zone,         false},
   {"kms_encrypt",           ObPhysicalRestoreOptionParser::ExtraArgsCb::set_kms_encrypt,          false},
   {"concurrency",           ObPhysicalRestoreOptionParser::ExtraArgsCb::set_concurrency,          false},
+  {"method",                ObPhysicalRestoreOptionParser::ExtraArgsCb::set_restore_type,         false},
 };
 
 ObPhysicalRestoreOptionParser::ExtraArgsCb::ExtraArgsCb(ObPhysicalRestoreJob &job)
@@ -154,7 +155,7 @@ int ObPhysicalRestoreOptionParser::ExtraArgsCb::set_primary_zone(
   int ret = OB_SUCCESS;
   if (OB_ISNULL(val)) {
     ret = OB_INVALID_ARGUMENT;
-  } else if (STRLEN(val) >= common::MAX_ZONE_LENGTH) {
+  } else if (STRLEN(val) >= common::MAX_ZONE_LIST_LENGTH) {
     ret = OB_SIZE_OVERFLOW;
   } else if (OB_FAIL(job.set_primary_zone(ObString(val)))) {
     LOG_WARN("failed to set primary zone", KR(ret), K(val));
@@ -199,6 +200,32 @@ int ObPhysicalRestoreOptionParser::ExtraArgsCb::set_concurrency(
     LOG_USER_ERROR(OB_INVALID_ARGUMENT, "restore concurrency");
   } else {
     job.set_concurrency(concurrency);
+  }
+  return ret;
+}
+
+int ObPhysicalRestoreOptionParser::ExtraArgsCb::set_restore_type(
+    ObPhysicalRestoreJob &job,
+    const char *val)
+{
+  int ret = OB_SUCCESS;
+  ObRestoreType restore_type(ObRestoreType::Type::RESTORE_TYPE_MAX);
+  if (OB_ISNULL(val)) {
+    ret = OB_INVALID_ARGUMENT;
+  } else if (STRLEN(val) > common::OB_INNER_TABLE_DEFAULT_VALUE_LENTH) {
+    ret = OB_SIZE_OVERFLOW;
+  } else if (0 == STRNCASECMP("full", val, STRLEN(val))) {
+    restore_type = ObRestoreType::Type::FULL;
+  } else if (0 == STRNCASECMP("quick", val, STRLEN(val))){
+    restore_type = ObRestoreType::Type::QUICK;
+  } else {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("restore type is invalid", KR(ret), K(val));
+    LOG_USER_WARN(OB_INVALID_ARGUMENT, "method");
+  }
+
+  if (OB_SUCC(ret)) {
+    job.set_restore_type(restore_type);
   }
   return ret;
 }

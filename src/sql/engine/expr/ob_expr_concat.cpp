@@ -232,10 +232,11 @@ int ObExprConcat::calc_result_typeN(ObExprResType &type,
     OZ (aggregate_charsets_for_string_result(type,
                                              types,
                                              param_num,
-                                             type_ctx.get_coll_type()));
+                                             type_ctx));
     for (int64_t i = 0; i < param_num; ++i) {
       types[i].set_calc_type(type.get_type());
       types[i].set_calc_collation_type(type.get_collation_type());
+      types[i].set_calc_collation_level(type.get_collation_level());
     }
   }
 
@@ -494,6 +495,13 @@ int ObExprConcat::eval_concat(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &expr_
     }
 
   }
+  return ret;
+}
+
+DEF_SET_LOCAL_SESSION_VARS(ObExprConcat, raw_expr) {
+  int ret = OB_SUCCESS;
+  SET_LOCAL_SYSVAR_CAPACITY(1);
+  EXPR_ADD_LOCAL_SYSVAR(share::SYS_VAR_COLLATION_CONNECTION);
   return ret;
 }
 

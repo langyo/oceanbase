@@ -102,7 +102,7 @@ void TestTabletCreateMemtable::SetUp()
   ASSERT_EQ(OB_SUCCESS, ret);
 
   ObStorageLogger *slogger = nullptr;
-  SLOGGERMGR.init(dir_, MAX_FILE_SIZE, log_file_spec_);
+  SLOGGERMGR.init(dir_, dir_, MAX_FILE_SIZE, log_file_spec_);
   SLOGGERMGR.register_tenant(1);
   ret = SLOGGERMGR.get_tenant_storage_logger(1, slogger);
   ASSERT_EQ(OB_SUCCESS, ret);
@@ -156,6 +156,7 @@ int TestTabletCreateMemtable::build_table_handle(
   param.index_type_ = table_schema.get_index_type();
   param.rowkey_column_cnt_ = table_schema.get_rowkey_column_num()
           + ObMultiVersionRowkeyHelpper::get_extra_rowkey_col_cnt();
+  param.table_flag_.reset();
   ObTenantMetaMemMgr &meta_mem_mgr = *(MTL(ObTenantMetaMemMgr*));
   common::ObIAllocator &allocator = meta_mem_mgr.get_tenant_allocator();
   ObTableHandleV2 handle;

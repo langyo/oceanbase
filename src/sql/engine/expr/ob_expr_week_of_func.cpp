@@ -19,6 +19,7 @@
 #include "sql/session/ob_sql_session_info.h"
 #include "sql/engine/ob_exec_context.h"
 #include "sql/engine/expr/ob_datum_cast.h"
+#include "sql/engine/expr/ob_expr_util.h"
 
 using namespace oceanbase::share;
 using namespace oceanbase::sql;
@@ -32,7 +33,7 @@ ObExprWeekOfYear::ObExprWeekOfYear(ObIAllocator& alloc)
     : ObFuncExprOperator(alloc,
                          T_FUN_SYS_WEEK_OF_YEAR,
                          N_WEEK_OF_YEAR,
-                         1, NOT_VALID_FOR_GENERATED_COL, NOT_ROW_DIMENSION)
+                         1, VALID_FOR_GENERATED_COL, NOT_ROW_DIMENSION)
 {
 }
 ObExprWeekOfYear::~ObExprWeekOfYear() {}
@@ -51,6 +52,11 @@ int ObExprWeekOfYear::cg_expr(ObExprCGCtx &op_cg_ctx,
     LOG_WARN("children of weekofyear expr is null", K(ret), K(rt_expr.args_));
   } else {
     rt_expr.eval_func_ = ObExprWeekOfYear::calc_weekofyear;
+    // The vectorization of other types for the expression not completed yet.
+    if ((ObDateTC == ob_obj_type_class(rt_expr.args_[0]->datum_meta_.type_))
+        || (ObDateTimeTC == ob_obj_type_class(rt_expr.args_[0]->datum_meta_.type_))) {
+      rt_expr.eval_vector_func_ = ObExprWeekOfYear::calc_weekofyear_vector;
+    }
   }
   return ret;
 }
@@ -63,6 +69,9 @@ int ObExprWeekOfYear::calc_weekofyear(const ObExpr &expr, ObEvalCtx &ctx, ObDatu
   ObTime ot;
   ObDateSqlMode date_sql_mode;
   const ObSQLSessionInfo *session = NULL;
+  ObSolidifiedVarsGetter helper(expr, ctx, ctx.exec_ctx_.get_my_session());
+  ObSQLMode sql_mode = 0;
+  const common::ObTimeZoneInfo *tz_info = NULL;
   if (OB_ISNULL(session = ctx.exec_ctx_.get_my_session())) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("session is null", K(ret));
@@ -70,16 +79,23 @@ int ObExprWeekOfYear::calc_weekofyear(const ObExpr &expr, ObEvalCtx &ctx, ObDatu
     LOG_WARN("eval param value failed");
   } else if (OB_UNLIKELY(param_datum->is_null())) {
     expr_datum.set_null();
-  } else if (FALSE_IT(date_sql_mode.init(session->get_sql_mode()))) {
+  } else if (OB_FAIL(helper.get_sql_mode(sql_mode))) {
+    LOG_WARN("get sql mode failed", K(ret));
+  } else if (OB_FAIL(helper.get_time_zone_info(tz_info))) {
+    LOG_WARN("get tz info failed", K(ret));
+  } else if (FALSE_IT(date_sql_mode.init(sql_mode))) {
   } else if (OB_FAIL(ob_datum_to_ob_time_with_date(
                  *param_datum, expr.args_[0]->datum_meta_.type_,
                  expr.args_[0]->datum_meta_.scale_,
-                 get_timezone_info(session),
-                 ot, get_cur_time(ctx.exec_ctx_.get_physical_plan_ctx()), false, date_sql_mode,
+                 tz_info,
+                 ot, get_cur_time(ctx.exec_ctx_.get_physical_plan_ctx()), date_sql_mode,
                  expr.args_[0]->obj_meta_.has_lob_header()))) {
     LOG_WARN("cast to ob time failed", K(ret));
     uint64_t cast_mode = 0;
-    ObSQLUtils::get_default_cast_mode(session->get_stmt_type(), session, cast_mode);
+    ObSQLUtils::get_default_cast_mode(session->get_stmt_type(),
+                                      session->is_ignore_stmt(),
+                                      sql_mode,
+                                      cast_mode);
     if (CM_IS_WARN_ON_FAIL(cast_mode)) {
       ret = OB_SUCCESS;
     }
@@ -93,11 +109,11 @@ int ObExprWeekOfYear::calc_weekofyear(const ObExpr &expr, ObEvalCtx &ctx, ObDatu
   return ret;
 }
 
-int ObExprWeekOfYear::is_valid_for_generated_column(const ObRawExpr*expr, const common::ObIArray<ObRawExpr *> &exprs, bool &is_valid) const {
+DEF_SET_LOCAL_SESSION_VARS(ObExprWeekOfYear, raw_expr) {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(check_first_param_not_time(exprs, is_valid))) {
-    LOG_WARN("fail to check if first param is time", K(ret), K(exprs));
-  }
+  SET_LOCAL_SYSVAR_CAPACITY(2);
+  EXPR_ADD_LOCAL_SYSVAR(share::SYS_VAR_SQL_MODE);
+  EXPR_ADD_LOCAL_SYSVAR(share::SYS_VAR_TIME_ZONE);
   return ret;
 }
 
@@ -105,7 +121,7 @@ ObExprWeekDay::ObExprWeekDay(ObIAllocator& alloc)
     : ObFuncExprOperator(alloc,
                          T_FUN_SYS_WEEKDAY_OF_DATE,
                          N_WEEKDAY_OF_DATE,
-                         1, NOT_VALID_FOR_GENERATED_COL, NOT_ROW_DIMENSION)
+                         1, VALID_FOR_GENERATED_COL, NOT_ROW_DIMENSION)
 {
 }
 ObExprWeekDay::~ObExprWeekDay() {}
@@ -136,6 +152,9 @@ int ObExprWeekDay::calc_weekday(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &exp
   ObTime ot;
   ObDateSqlMode date_sql_mode;
   const ObSQLSessionInfo *session = NULL;
+  ObSolidifiedVarsGetter helper(expr, ctx, ctx.exec_ctx_.get_my_session());
+  ObSQLMode sql_mode = 0;
+  const common::ObTimeZoneInfo *tz_info = NULL;
   if (OB_ISNULL(session = ctx.exec_ctx_.get_my_session())) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("session is null", K(ret));
@@ -143,16 +162,23 @@ int ObExprWeekDay::calc_weekday(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &exp
     LOG_WARN("eval param value failed");
   } else if (OB_UNLIKELY(param_datum->is_null())) {
     expr_datum.set_null();
-  } else if (FALSE_IT(date_sql_mode.init(session->get_sql_mode()))) {
+  } else if (OB_FAIL(helper.get_sql_mode(sql_mode))) {
+    LOG_WARN("get sql mode failed", K(ret));
+  } else if (OB_FAIL(helper.get_time_zone_info(tz_info))) {
+    LOG_WARN("get tz info failed", K(ret));
+  } else if (FALSE_IT(date_sql_mode.init(sql_mode))) {
   } else if (OB_FAIL(ob_datum_to_ob_time_with_date(
                  *param_datum, expr.args_[0]->datum_meta_.type_,
                  expr.args_[0]->datum_meta_.scale_,
-                 get_timezone_info(session),
-                 ot, get_cur_time(ctx.exec_ctx_.get_physical_plan_ctx()), false, date_sql_mode,
+                 tz_info,
+                 ot, get_cur_time(ctx.exec_ctx_.get_physical_plan_ctx()), date_sql_mode,
                  expr.args_[0]->obj_meta_.has_lob_header()))) {
     LOG_WARN("cast to ob time failed", K(ret));
     uint64_t cast_mode = 0;
-    ObSQLUtils::get_default_cast_mode(session->get_stmt_type(), session, cast_mode);
+    ObSQLUtils::get_default_cast_mode(session->get_stmt_type(),
+                                      session->is_ignore_stmt(),
+                                      sql_mode,
+                                      cast_mode);
     if (CM_IS_WARN_ON_FAIL(cast_mode)) {
       ret = OB_SUCCESS;
     }
@@ -166,11 +192,11 @@ int ObExprWeekDay::calc_weekday(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &exp
   return ret;
 }
 
-int ObExprWeekDay::is_valid_for_generated_column(const ObRawExpr*expr, const common::ObIArray<ObRawExpr *> &exprs, bool &is_valid) const {
+DEF_SET_LOCAL_SESSION_VARS(ObExprWeekDay, raw_expr) {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(check_first_param_not_time(exprs, is_valid))) {
-    LOG_WARN("fail to check if first param is time", K(ret), K(exprs));
-  }
+  SET_LOCAL_SYSVAR_CAPACITY(2);
+  EXPR_ADD_LOCAL_SYSVAR(share::SYS_VAR_SQL_MODE);
+  EXPR_ADD_LOCAL_SYSVAR(share::SYS_VAR_TIME_ZONE);
   return ret;
 }
 
@@ -179,7 +205,7 @@ ObExprYearWeek::ObExprYearWeek(ObIAllocator& alloc)
                          T_FUN_SYS_YEARWEEK_OF_DATE,
                          N_YEARWEEK_OF_DATE,
                          ONE_OR_TWO,
-                         NOT_VALID_FOR_GENERATED_COL, NOT_ROW_DIMENSION)
+                         VALID_FOR_GENERATED_COL, NOT_ROW_DIMENSION)
 {
 }
 ObExprYearWeek::~ObExprYearWeek() {}
@@ -304,6 +330,9 @@ int ObExprYearWeek::calc_yearweek(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &e
   ObTime ot;
   ObDateSqlMode date_sql_mode;
   const ObSQLSessionInfo *session = NULL;
+  ObSolidifiedVarsGetter helper(expr, ctx, ctx.exec_ctx_.get_my_session());
+  ObSQLMode sql_mode = 0;
+  const common::ObTimeZoneInfo *tz_info = NULL;
   if (OB_ISNULL(session = ctx.exec_ctx_.get_my_session())) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("session is null", K(ret));
@@ -311,16 +340,22 @@ int ObExprYearWeek::calc_yearweek(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &e
     LOG_WARN("eval param value failed");
   } else if (OB_UNLIKELY(param_datum->is_null())) {
     expr_datum.set_null();
-  } else if (FALSE_IT(date_sql_mode.init(session->get_sql_mode()))) {
+  } else if (OB_FAIL(helper.get_sql_mode(sql_mode))) {
+    LOG_WARN("get sql mode failed", K(ret));
+  } else if (OB_FAIL(helper.get_time_zone_info(tz_info))) {
+    LOG_WARN("get tz info failed", K(ret));
+  } else if (FALSE_IT(date_sql_mode.init(sql_mode))) {
   } else if (OB_FAIL(ob_datum_to_ob_time_with_date(
                      *param_datum, expr.args_[0]->datum_meta_.type_,
                      expr.args_[0]->datum_meta_.scale_,
-                     get_timezone_info(session),
-                     ot, get_cur_time(ctx.exec_ctx_.get_physical_plan_ctx()), false,
+                     tz_info,
+                     ot, get_cur_time(ctx.exec_ctx_.get_physical_plan_ctx()),
                      date_sql_mode, expr.args_[0]->obj_meta_.has_lob_header()))) {
     LOG_WARN("cast to ob time failed", K(ret));
     uint64_t cast_mode = 0;
-    ObSQLUtils::get_default_cast_mode(session->get_stmt_type(), session, cast_mode);
+    ObSQLUtils::get_default_cast_mode(session->get_stmt_type(),
+                                      session->is_ignore_stmt(),
+                                      sql_mode, cast_mode);
     if (CM_IS_WARN_ON_FAIL(cast_mode)) {
       ret = OB_SUCCESS;
     }
@@ -344,11 +379,11 @@ int ObExprYearWeek::calc_yearweek(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &e
   return ret;
 }
 
-int ObExprYearWeek::is_valid_for_generated_column(const ObRawExpr*expr, const common::ObIArray<ObRawExpr *> &exprs, bool &is_valid) const {
+DEF_SET_LOCAL_SESSION_VARS(ObExprYearWeek, raw_expr) {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(check_first_param_not_time(exprs, is_valid))) {
-    LOG_WARN("fail to check if first param is time", K(ret), K(exprs));
-  }
+  SET_LOCAL_SYSVAR_CAPACITY(2);
+  EXPR_ADD_LOCAL_SYSVAR(share::SYS_VAR_SQL_MODE);
+  EXPR_ADD_LOCAL_SYSVAR(share::SYS_VAR_TIME_ZONE);
   return ret;
 }
 
@@ -356,7 +391,7 @@ ObExprWeek::ObExprWeek(ObIAllocator& alloc)
     : ObFuncExprOperator(alloc,
                          T_FUN_SYS_WEEK,
                          N_WEEK,
-                         ONE_OR_TWO, NOT_VALID_FOR_GENERATED_COL, NOT_ROW_DIMENSION)
+                         ONE_OR_TWO, VALID_FOR_GENERATED_COL, NOT_ROW_DIMENSION)
 {
 }
 ObExprWeek::~ObExprWeek() {}
@@ -409,6 +444,13 @@ int ObExprWeek::cg_expr(ObExprCGCtx &op_cg_ctx,
     LOG_WARN("second child of week expr is null", K(ret), K(rt_expr.args_));
   } else {
     rt_expr.eval_func_ = ObExprWeek::calc_week;
+    ObObjTypeClass arg_tc = ob_obj_type_class(rt_expr.args_[0]->datum_meta_.type_);
+    // The vectorization of other types for the expression not completed yet.
+    if ((ObDateTC == arg_tc || ObDateTimeTC == arg_tc)
+        && ((2 == rt_expr.arg_cnt_ && ObIntType == rt_expr.args_[1]->datum_meta_.type_)
+            || 1 == rt_expr.arg_cnt_)) {
+      rt_expr.eval_vector_func_ = ObExprWeek::calc_week_vector;
+    }
   }
   return ret;
 }
@@ -422,6 +464,9 @@ int ObExprWeek::calc_week(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &expr_datu
   ObTime ot;
   ObDateSqlMode date_sql_mode;
   const ObSQLSessionInfo *session = NULL;
+  ObSolidifiedVarsGetter helper(expr, ctx, ctx.exec_ctx_.get_my_session());
+  ObSQLMode sql_mode = 0;
+  const common::ObTimeZoneInfo *tz_info = NULL;
   if (OB_ISNULL(session = ctx.exec_ctx_.get_my_session())) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("session is null", K(ret));
@@ -429,16 +474,23 @@ int ObExprWeek::calc_week(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &expr_datu
     LOG_WARN("eval param value failed");
   } else if (OB_UNLIKELY(param_datum->is_null())) {
     expr_datum.set_null();
-  } else if (FALSE_IT(date_sql_mode.init(session->get_sql_mode()))) {
+  } else if (OB_FAIL(helper.get_sql_mode(sql_mode))) {
+    LOG_WARN("get sql mode failed", K(ret));
+  } else if (OB_FAIL(helper.get_time_zone_info(tz_info))) {
+    LOG_WARN("get tz info failed", K(ret));
+  } else if (FALSE_IT(date_sql_mode.init(sql_mode))) {
   } else if (OB_FAIL(ob_datum_to_ob_time_with_date(
                  *param_datum, expr.args_[0]->datum_meta_.type_,
                  expr.args_[0]->datum_meta_.scale_,
-                 get_timezone_info(session),
-                 ot, get_cur_time(ctx.exec_ctx_.get_physical_plan_ctx()), false, date_sql_mode,
+                 tz_info,
+                 ot, get_cur_time(ctx.exec_ctx_.get_physical_plan_ctx()), date_sql_mode,
                  expr.args_[0]->obj_meta_.has_lob_header()))) {
     LOG_WARN("cast to ob time failed", K(ret));
     uint64_t cast_mode = 0;
-    ObSQLUtils::get_default_cast_mode(session->get_stmt_type(), session, cast_mode);
+    ObSQLUtils::get_default_cast_mode(session->get_stmt_type(),
+                                      session->is_ignore_stmt(),
+                                      sql_mode,
+                                      cast_mode);
     if (CM_IS_WARN_ON_FAIL(cast_mode)) {
       LOG_WARN("cast to ob time failed", K(ret));
       LOG_USER_WARN(OB_ERR_CAST_VARCHAR_TO_TIME);
@@ -468,13 +520,379 @@ int ObExprWeek::calc_week(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &expr_datu
   return ret;
 }
 
-int ObExprWeek::is_valid_for_generated_column(const ObRawExpr*expr, const common::ObIArray<ObRawExpr *> &exprs, bool &is_valid) const {
+DEF_SET_LOCAL_SESSION_VARS(ObExprWeek, raw_expr) {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(check_first_param_not_time(exprs, is_valid))) {
-    LOG_WARN("fail to check if first param is time", K(ret), K(exprs));
+  SET_LOCAL_SYSVAR_CAPACITY(2);
+  EXPR_ADD_LOCAL_SYSVAR(share::SYS_VAR_SQL_MODE);
+  EXPR_ADD_LOCAL_SYSVAR(share::SYS_VAR_TIME_ZONE);
+  return ret;
+}
+
+#define EPOCH_WDAY    4       // 1970-1-1 is thursday.
+#define BATCH_CALC_WITH_MODE(BODY) {                        \
+  if (OB_LIKELY(no_skip_no_null)) {                                                      \
+    for (int64_t idx = bound.start(); OB_SUCC(ret) && idx < bound.end(); ++idx) { \
+      BODY;                                                                       \
+    }                                                                             \
+  } else {                                                                        \
+    for (int64_t idx = bound.start(); OB_SUCC(ret) && idx < bound.end(); ++idx) { \
+      if (skip.at(idx) || eval_flags.at(idx)) {                                   \
+        continue;                                                                 \
+      } else if (arg_vec->is_null(idx) || mode_vec->is_null(idx)) {               \
+        res_vec->set_null(idx);                                                   \
+        eval_flags.set(idx);                                                      \
+        continue;                                                                 \
+      }                                                                           \
+      BODY;                                                                       \
+    }                                                                             \
+  }                                                                               \
+}
+
+#define BATCH_CALC_WITHOUT_MODE(BODY) {                \
+  if (OB_LIKELY(no_skip_no_null)) {                                                      \
+    for (int64_t idx = bound.start(); OB_SUCC(ret) && idx < bound.end(); ++idx) { \
+      BODY;                                                                       \
+    }                                                                             \
+  } else {                                                                        \
+    for (int64_t idx = bound.start(); OB_SUCC(ret) && idx < bound.end(); ++idx) { \
+      if (skip.at(idx) || eval_flags.at(idx)) {                                   \
+        continue;                                                                 \
+      } else if (arg_vec->is_null(idx)) {                                         \
+        res_vec->set_null(idx);                                                   \
+        eval_flags.set(idx);                                                      \
+        continue;                                                                 \
+      }                                                                           \
+      BODY;                                                                       \
+    }                                                                             \
+  }                                                                               \
+}
+
+template <typename ArgVec, typename ResVec, typename IN_TYPE>
+int vector_weekofyear(const ObExpr &expr, ObEvalCtx &ctx, const ObBitVector &skip, const EvalBound &bound)
+{
+  int ret = OB_SUCCESS;
+  ArgVec *arg_vec = static_cast<ArgVec *>(expr.args_[0]->get_vector(ctx));
+  ResVec *res_vec = static_cast<ResVec *>(expr.get_vector(ctx));
+  ObBitVector &eval_flags = expr.get_evaluated_flags(ctx);
+  int64_t tz_offset = 0;
+  const common::ObTimeZoneInfo *tz_info = NULL;
+  ObSolidifiedVarsGetter helper(expr, ctx, ctx.exec_ctx_.get_my_session());
+  if (OB_FAIL(helper.get_time_zone_info(tz_info))) {
+    LOG_WARN("get tz info failed", K(ret));
+  } else if (OB_UNLIKELY(eval_flags.is_all_true(bound.start(), bound.end()))) {
+  } else {
+    const ObTimeZoneInfo *local_tz_info = (ObTimestampType == expr.args_[0]->datum_meta_.type_) ? tz_info : NULL;
+    if (OB_FAIL(get_tz_offset(local_tz_info, tz_offset))) {
+      LOG_WARN("get tz_info offset fail", K(ret));
+    } else {
+      DateType date = 0;
+      DateType dt_yday = 0;
+      YearType year = 0;
+      UsecType usec = 0;
+      WeekType week = 0;
+      int8_t delta = 0;
+      bool no_skip_no_null = bound.get_all_rows_active() && !arg_vec->has_null()
+                             && eval_flags.accumulate_bit_cnt(bound) == 0;
+      BATCH_CALC_WITHOUT_MODE({
+        IN_TYPE in_val = *reinterpret_cast<const IN_TYPE*>(arg_vec->get_payload(idx));
+        if (OB_FAIL(ObTimeConverter::parse_date_usec<IN_TYPE>(in_val, tz_offset, oceanbase::lib::is_oracle_mode(), date, usec))) {
+          LOG_WARN("get date and usec from vec failed", K(ret));
+        } else if (OB_UNLIKELY(ObTimeConverter::ZERO_DATE == date)) {
+          res_vec->set_null(idx);
+        } else {
+          DateType wday = WDAY_OFFSET[date % DAYS_PER_WEEK][EPOCH_WDAY];
+          ObTimeConverter::days_to_year_ydays(date, year, dt_yday);
+          if (year <= 0) {
+            res_vec->set_null(idx);
+          } else {
+            ObTimeConverter::to_week(DT_WEEK_GE_4_BEGIN, year, dt_yday, wday, week, delta);
+            res_vec->set_int(idx, week);
+          }
+        }
+        eval_flags.set(idx);
+      });
+    }
   }
   return ret;
 }
+int ObExprWeekOfYear::calc_weekofyear_vector(const ObExpr &expr, ObEvalCtx &ctx, const ObBitVector &skip, const EvalBound &bound)
+{
+  int ret = OB_SUCCESS;
+  const ObSQLSessionInfo *session = NULL;
+  if (OB_ISNULL(session = ctx.exec_ctx_.get_my_session())) {
+    ret = OB_NOT_INIT;
+    LOG_WARN("session is null", K(ret), K(session));
+  } else if (OB_FAIL(expr.args_[0]->eval_vector(ctx, skip, bound))) {
+    LOG_WARN("fail to eval date_format param", K(ret));
+  } else {
+    VectorFormat arg_format = expr.args_[0]->get_format(ctx);
+    VectorFormat res_format = expr.get_format(ctx);
+    ObObjTypeClass arg_tc = ob_obj_type_class(expr.args_[0]->datum_meta_.type_);
+    if (ObDateTC == ob_obj_type_class(expr.args_[0]->datum_meta_.type_)) {
+      if (VEC_FIXED == arg_format && VEC_FIXED == res_format) {
+        ret = vector_weekofyear<DateFixedVec, IntegerFixedVec, DateType>(expr, ctx, skip, bound);
+      } else if (VEC_UNIFORM == arg_format && VEC_FIXED == res_format) {
+        ret = vector_weekofyear<DateUniVec, IntegerFixedVec, DateType>(expr, ctx, skip, bound);
+      } else if (VEC_UNIFORM_CONST == arg_format && VEC_FIXED == res_format) {
+        ret = vector_weekofyear<DateUniCVec, IntegerFixedVec, DateType>(expr, ctx, skip, bound);
+      } else if (VEC_FIXED == arg_format && VEC_UNIFORM == res_format) {
+        ret = vector_weekofyear<DateFixedVec, IntegerUniVec, DateType>(expr, ctx, skip, bound);
+      } else if (VEC_UNIFORM == arg_format && VEC_UNIFORM == res_format) {
+        ret = vector_weekofyear<DateUniVec, IntegerUniVec, DateType>(expr, ctx, skip, bound);
+      } else if (VEC_UNIFORM_CONST == arg_format && VEC_UNIFORM == res_format) {
+        ret = vector_weekofyear<DateUniCVec, IntegerUniVec, DateType>(expr, ctx, skip, bound);
+      } else if (VEC_FIXED == arg_format && VEC_FIXED == res_format) {
+        ret = vector_weekofyear<DateFixedVec, IntegerFixedVec, DateType>(expr, ctx, skip, bound);
+      } else if (VEC_UNIFORM == arg_format && VEC_FIXED == res_format) {
+        ret = vector_weekofyear<DateUniVec, IntegerFixedVec, DateType>(expr, ctx, skip, bound);
+      } else if (VEC_UNIFORM_CONST == arg_format && VEC_FIXED == res_format) {
+        ret = vector_weekofyear<DateUniCVec, IntegerFixedVec, DateType>(expr, ctx, skip, bound);
+      } else {
+        ret = vector_weekofyear<ObVectorBase, ObVectorBase, DateType>(expr, ctx, skip, bound);
+      }
+    } else if (ObDateTimeTC == ob_obj_type_class(expr.args_[0]->datum_meta_.type_)) {
+      if (VEC_FIXED == arg_format && VEC_FIXED == res_format) {
+        ret = vector_weekofyear<DateTimeFixedVec, IntegerFixedVec, DateTimeType>(expr, ctx, skip, bound);
+      } else if (VEC_UNIFORM == arg_format && VEC_FIXED == res_format) {
+        ret = vector_weekofyear<DateTimeUniVec, IntegerFixedVec, DateTimeType>(expr, ctx, skip, bound);
+      } else if (VEC_UNIFORM_CONST == arg_format && VEC_FIXED == res_format) {
+        ret = vector_weekofyear<DateTimeUniCVec, IntegerFixedVec, DateTimeType>(expr, ctx, skip, bound);
+      } else if (VEC_FIXED == arg_format && VEC_UNIFORM == res_format) {
+        ret = vector_weekofyear<DateTimeFixedVec, IntegerUniVec, DateTimeType>(expr, ctx, skip, bound);
+      } else if (VEC_UNIFORM == arg_format && VEC_UNIFORM == res_format) {
+        ret = vector_weekofyear<DateTimeUniVec, IntegerUniVec, DateTimeType>(expr, ctx, skip, bound);
+      } else if (VEC_UNIFORM_CONST == arg_format && VEC_UNIFORM == res_format) {
+        ret = vector_weekofyear<DateTimeUniCVec, IntegerUniVec, DateTimeType>(expr, ctx, skip, bound);
+      } else if (VEC_FIXED == arg_format && VEC_FIXED == res_format) {
+        ret = vector_weekofyear<DateTimeFixedVec, IntegerFixedVec, DateTimeType>(expr, ctx, skip, bound);
+      } else if (VEC_UNIFORM == arg_format && VEC_FIXED == res_format) {
+        ret = vector_weekofyear<DateTimeUniVec, IntegerFixedVec, DateTimeType>(expr, ctx, skip, bound);
+      } else if (VEC_UNIFORM_CONST == arg_format && VEC_FIXED == res_format) {
+        ret = vector_weekofyear<DateTimeUniCVec, IntegerFixedVec, DateTimeType>(expr, ctx, skip, bound);
+      } else {
+        ret = vector_weekofyear<ObVectorBase, ObVectorBase, DateTimeType>(expr, ctx, skip, bound);
+      }
+    }
+
+    if (OB_FAIL(ret)) {
+      LOG_WARN("expr calculation failed", K(ret));
+    }
+  }
+  return ret;
+}
+
+OB_INLINE int ObExprWeek::get_week_mode_value(int64_t mode_value, ObDTMode &mode)
+{
+  int ret = OB_SUCCESS;
+  mode = DT_WEEK_ZERO_BEGIN;
+  int64_t flag = (mode_value % 8 >= 0 ? mode_value % 8 : 8 + (mode_value % 8));
+  switch (flag) {
+    case 0:      //每年的第一周以星期天开始，每周以星期天开始
+      mode += DT_WEEK_SUN_BEGIN;
+      break;
+    case 2:
+      mode = DT_WEEK_SUN_BEGIN;
+      break;
+    case 1:       //每年的第一周需要该周大于三天，每周以星期一开始
+      mode += DT_WEEK_GE_4_BEGIN;
+      break;
+    case 3:
+      mode = DT_WEEK_GE_4_BEGIN;
+      break;
+    case 4:       //每年的第一周需要该周大于三天，每周以星期天开始
+      mode += DT_WEEK_GE_4_BEGIN + DT_WEEK_SUN_BEGIN;
+      break;
+    case 6:
+      mode = DT_WEEK_GE_4_BEGIN + DT_WEEK_SUN_BEGIN;
+      break;
+    case 5:       //每年的第一周需要以星期一开始，每周以星期一开始
+      // mode = mode_value;
+      break;
+    case 7:
+      mode = 0;
+      break;
+    default:
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("unexpected flag value",K(ret),K(flag), K(mode_value));
+      break;
+  }
+  return ret;
+}
+
+template <typename ArgVec, typename ModeVec, typename ResVec, typename IN_TYPE>
+int ObExprWeek::vector_week(const ObExpr &expr, ObEvalCtx &ctx, const ObBitVector &skip, const EvalBound &bound)
+{
+  int ret = OB_SUCCESS;
+  ArgVec *arg_vec = static_cast<ArgVec *>(expr.args_[0]->get_vector(ctx));
+  ResVec *res_vec = static_cast<ResVec *>(expr.get_vector(ctx));
+  ObBitVector &eval_flags = expr.get_evaluated_flags(ctx);
+  const ObSQLSessionInfo *session = NULL;
+  const common::ObTimeZoneInfo *tz_info = NULL;
+  ObSolidifiedVarsGetter helper(expr, ctx, ctx.exec_ctx_.get_my_session());
+  if (OB_ISNULL(session = ctx.exec_ctx_.get_my_session())) {
+    ret = OB_NOT_INIT;
+    LOG_WARN("session is null", K(ret), K(session));
+  } else if (OB_FAIL(helper.get_time_zone_info(tz_info))) {
+    LOG_WARN("get tz info failed", K(ret));
+  } else if (OB_UNLIKELY(eval_flags.is_all_true(bound.start(), bound.end()))) {
+  } else {
+    int64_t tz_offset = 0;
+    const ObTimeZoneInfo *local_tz_info = (ObTimestampType == expr.args_[0]->datum_meta_.type_) ? tz_info : NULL;
+    if (OB_FAIL(get_tz_offset(local_tz_info, tz_offset))) {
+      LOG_WARN("get tz_info offset fail", K(ret));
+    } else {
+      DateType date = 0;
+      DateType dt_yday = 0;
+      YearType year = 0;
+      UsecType usec = 0;
+      WeekType week = 0;
+      int8_t delta = 0;  // no use
+      ObDTMode mode = 0;
+      bool no_skip_no_null = bound.get_all_rows_active() && !arg_vec->has_null()
+                             && eval_flags.accumulate_bit_cnt(bound) == 0;
+      if (2 == expr.arg_cnt_) {
+        ModeVec *mode_vec = static_cast<ModeVec *>(expr.args_[1]->get_vector(ctx));
+        no_skip_no_null = no_skip_no_null && !res_vec->has_null();
+        BATCH_CALC_WITH_MODE({
+          IN_TYPE in_val = *reinterpret_cast<const IN_TYPE*>(arg_vec->get_payload(idx));
+          if (OB_FAIL(ObTimeConverter::parse_date_usec<IN_TYPE>(in_val, tz_offset, oceanbase::lib::is_oracle_mode(), date, usec))) {
+            LOG_WARN("get_date_usec_from_vec failed", K(ret), K(date), K(usec), K(tz_offset));
+          } else if (OB_UNLIKELY(ObTimeConverter::ZERO_DATE == date)) {
+            res_vec->set_null(idx);
+          } else {
+            int64_t mode_value = mode_vec->get_date(idx);
+            if (OB_FAIL(ObExprWeek::get_week_mode_value(mode_value, mode))) {
+              LOG_WARN("invalid mode", K(mode_value), K(mode), K(ret));
+            } else {
+              DateType wday = WDAY_OFFSET[date % DAYS_PER_WEEK][EPOCH_WDAY];
+              ObTimeConverter::days_to_year_ydays(date, year, dt_yday);
+              if (year <= 0) {
+                res_vec->set_null(idx);
+              } else {
+                ObTimeConverter::to_week(mode, year, dt_yday, wday, week, /*unused*/delta);
+                res_vec->set_int(idx, week);
+              }
+            }
+          }
+          eval_flags.set(idx);
+        });
+      } else {  // 1 == expr.arg_cnt_
+        BATCH_CALC_WITHOUT_MODE({
+          IN_TYPE in_val = *reinterpret_cast<const IN_TYPE*>(arg_vec->get_payload(idx));
+          if (OB_FAIL(ObTimeConverter::parse_date_usec<IN_TYPE>(in_val, tz_offset, oceanbase::lib::is_oracle_mode(), date, usec))) {
+            LOG_WARN("get_date_usec_from_vec failed", K(ret), K(date), K(usec), K(tz_offset));
+          } else if (OB_UNLIKELY(ObTimeConverter::ZERO_DATE == date)) {
+            res_vec->set_null(idx);
+          } else {
+            DateType wday = WDAY_OFFSET[date % DAYS_PER_WEEK][EPOCH_WDAY];
+            ObTimeConverter::days_to_year_ydays(date, year, dt_yday);
+            if (year <= 0) {
+              res_vec->set_null(idx);
+            } else {
+              ObTimeConverter::to_week(DT_WEEK_ZERO_BEGIN + DT_WEEK_SUN_BEGIN, year, dt_yday, wday, week, /*unused*/delta);
+              res_vec->set_int(idx, week);
+            }
+          }
+          eval_flags.set(idx);
+        });
+      }
+    }
+  }
+  return ret;
+}
+int ObExprWeek::calc_week_vector(const ObExpr &expr, ObEvalCtx &ctx, const ObBitVector &skip, const EvalBound &bound)
+{
+  int ret = OB_SUCCESS;
+  if (OB_FAIL(expr.args_[0]->eval_vector(ctx, skip, bound))) {
+    LOG_WARN("fail to eval date_format param", K(ret));
+  } else if (2 == expr.arg_cnt_) {
+    if(OB_FAIL(expr.args_[1]->eval_vector(ctx, skip, bound))) {
+      LOG_WARN("fail to eval date_format param", K(ret));
+    }
+  }
+  if (OB_SUCC(ret)) {
+    VectorFormat arg_format = expr.args_[0]->get_format(ctx);
+    VectorFormat res_format = expr.get_format(ctx);
+    ObObjTypeClass arg_tc = ob_obj_type_class(expr.args_[0]->datum_meta_.type_);
+    VectorFormat mode_format;
+    if (2 == expr.arg_cnt_) { // 短路计算
+      mode_format = expr.args_[1]->get_format(ctx);
+    }
+
+#define DEF_WEEk_VECTOR(mode_type)\
+  if (ObDateTC == arg_tc) {\
+    if (VEC_FIXED == arg_format && VEC_FIXED == res_format) {\
+      ret = vector_week<DateFixedVec, mode_type, IntegerFixedVec, DateType>(expr, ctx, skip, bound);\
+    } else if (VEC_FIXED == arg_format && VEC_UNIFORM == res_format) {\
+      ret = vector_week<DateFixedVec, mode_type, IntegerUniVec, DateType>(expr, ctx, skip, bound);\
+    } else if (VEC_FIXED == arg_format && VEC_UNIFORM_CONST == res_format) {\
+      ret = vector_week<DateFixedVec, mode_type, IntegerUniCVec, DateType>(expr, ctx, skip, bound);\
+    } else if (VEC_UNIFORM == arg_format && VEC_FIXED == res_format) {\
+      ret = vector_week<DateUniVec, mode_type, IntegerFixedVec, DateType>(expr, ctx, skip, bound);\
+    } else if (VEC_UNIFORM == arg_format && VEC_UNIFORM == res_format) {\
+      ret = vector_week<DateUniVec, mode_type, IntegerUniVec, DateType>(expr, ctx, skip, bound);\
+    } else if (VEC_UNIFORM == arg_format && VEC_UNIFORM_CONST == res_format) {\
+      ret = vector_week<DateUniVec, mode_type, IntegerUniCVec, DateType>(expr, ctx, skip, bound);\
+    } else if (VEC_UNIFORM_CONST == arg_format && VEC_FIXED == res_format) {\
+      ret = vector_week<DateUniCVec, mode_type, IntegerFixedVec, DateType>(expr, ctx, skip, bound);\
+    } else if (VEC_UNIFORM_CONST == arg_format && VEC_UNIFORM == res_format) {\
+      ret = vector_week<DateUniCVec, mode_type, IntegerUniVec, DateType>(expr, ctx, skip, bound);\
+    } else if (VEC_UNIFORM_CONST == arg_format && VEC_UNIFORM_CONST == res_format) {\
+      ret = vector_week<DateUniCVec, mode_type, IntegerUniCVec, DateType>(expr, ctx, skip, bound);\
+    } else {\
+      ret = vector_week<ObVectorBase, ObVectorBase, ObVectorBase, DateType>(expr, ctx, skip, bound);\
+    }\
+  } else if (ObDateTimeTC == arg_tc) {\
+    if (VEC_FIXED == arg_format && VEC_FIXED == res_format) {\
+      ret = vector_week<DateTimeFixedVec, mode_type, IntegerFixedVec, DateTimeType>(expr, ctx, skip, bound);\
+    } else if (VEC_FIXED == arg_format && VEC_UNIFORM == res_format) {\
+      ret = vector_week<DateTimeFixedVec, mode_type, IntegerUniVec, DateTimeType>(expr, ctx, skip, bound);\
+    } else if (VEC_FIXED == arg_format && VEC_UNIFORM_CONST == res_format) {\
+      ret = vector_week<DateTimeFixedVec, mode_type, IntegerUniCVec, DateTimeType>(expr, ctx, skip, bound);\
+    } else if (VEC_UNIFORM == arg_format && VEC_FIXED == res_format) {\
+      ret = vector_week<DateTimeUniVec, mode_type, IntegerFixedVec, DateTimeType>(expr, ctx, skip, bound);\
+    } else if (VEC_UNIFORM == arg_format && VEC_UNIFORM == res_format) {\
+      ret = vector_week<DateTimeUniVec, mode_type, IntegerUniVec, DateTimeType>(expr, ctx, skip, bound);\
+    } else if (VEC_UNIFORM == arg_format && VEC_UNIFORM_CONST == res_format) {\
+      ret = vector_week<DateTimeUniVec, mode_type, IntegerUniCVec, DateTimeType>(expr, ctx, skip, bound);\
+    } else if (VEC_UNIFORM_CONST == arg_format && VEC_FIXED == res_format) {\
+      ret = vector_week<DateTimeUniCVec, mode_type, IntegerFixedVec, DateTimeType>(expr, ctx, skip, bound);\
+    } else if (VEC_UNIFORM_CONST == arg_format && VEC_UNIFORM == res_format) {\
+      ret = vector_week<DateTimeUniCVec, mode_type, IntegerUniVec, DateTimeType>(expr, ctx, skip, bound);\
+    } else if (VEC_UNIFORM_CONST == arg_format && VEC_UNIFORM_CONST == res_format) {\
+      ret = vector_week<DateTimeUniCVec, mode_type, IntegerUniCVec, DateTimeType>(expr, ctx, skip, bound);\
+    } else {\
+      ret = vector_week<ObVectorBase, ObVectorBase, ObVectorBase, DateTimeType>(expr, ctx, skip, bound);\
+    }\
+  }
+
+    if (1 == expr.arg_cnt_) {
+      DEF_WEEk_VECTOR(ObVectorBase)
+    } else if (2 == expr.arg_cnt_) {
+      if (VEC_UNIFORM == mode_format) {
+        DEF_WEEk_VECTOR(IntegerUniVec)
+      } else if (VEC_FIXED == mode_format) {
+        DEF_WEEk_VECTOR(IntegerFixedVec)
+      } else if (VEC_UNIFORM_CONST == mode_format) {
+        DEF_WEEk_VECTOR(IntegerUniCVec)
+      } else {
+        ret = vector_week<ObVectorBase, ObVectorBase, ObVectorBase, DateTimeType>(expr, ctx, skip, bound);
+      }
+    } else {
+      ret = vector_week<ObVectorBase, ObVectorBase, ObVectorBase, DateTimeType>(expr, ctx, skip, bound);
+    }
+#undef DEF_WEEk_VECTOR
+
+    if (OB_FAIL(ret)) {
+      LOG_WARN("expr calculation failed", K(ret));
+    }
+  }
+  return ret;
+}
+
+#undef EPOCH_WDAY
+#undef BATCH_CALC_WITH_MODE
+#undef BATCH_CALC_WITHOUT_MODE
 
 }
 }

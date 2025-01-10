@@ -50,7 +50,7 @@ protected:
   char test_oss_bucket_[OB_MAX_URI_LENGTH] = "oss://antsys-oceanbasebackup";
 
   // oss config
-  char oss_host_[OB_MAX_URI_LENGTH] = "cn-hangzhou-alipay-b.oss-cdn.aliyun-inc.com";
+  char oss_host_[OB_MAX_URI_LENGTH] = "";
   char oss_id_[MAX_OSS_ID_LENGTH] = "fill_test_id";
   char oss_key_[MAX_OSS_KEY_LENGTH] = "fill_test_key";
 };
@@ -135,7 +135,7 @@ TEST_F(TestStorageOss, test_oss_acl)
   s = oss_get_object_meta(options, &bucket, &object, &resp_headers);
   ASSERT_TRUE(s->code == 200);
   modified_time_before = apr_table_get(resp_headers, "Last-Modified");
-  ossutil.strtotime(modified_time_before, time_before);
+  ossutil.ob_strtotime(modified_time_before, time_before);
 
   const char *modified_time_after = NULL;
   int64_t time_after = 0;
@@ -148,7 +148,7 @@ TEST_F(TestStorageOss, test_oss_acl)
   s = oss_get_object_meta(options, &bucket, &object, &resp_headers);
   ASSERT_TRUE(s->code == 200);
   modified_time_after = apr_table_get(resp_headers, "Last-Modified");
-  ossutil.strtotime(modified_time_after, time_after);
+  ossutil.ob_strtotime(modified_time_after, time_after);
 
   ASSERT_TRUE(time_before < time_after);
 
@@ -170,7 +170,7 @@ TEST_F(TestStorageOss, test_oss_acl)
   s = oss_get_object_meta(options, &bucket, &object, &resp_headers);
   ASSERT_TRUE(s->code == 200);
   modified_after_again = apr_table_get(resp_headers, "Last-Modified");
-  ossutil.strtotime(modified_after_again, time_after_again);
+  ossutil.ob_strtotime(modified_after_again, time_after_again);
   
   ASSERT_TRUE(time_after < time_after_again);
 

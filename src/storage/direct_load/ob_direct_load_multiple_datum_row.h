@@ -33,11 +33,11 @@ public:
   // not deep copy
   int from_datums(const common::ObTabletID &tablet_id, blocksstable::ObStorageDatum *datums,
                   int64_t column_count, int64_t rowkey_column_count,
-                  const table::ObTableLoadSequenceNo &seq_no);
+                  const table::ObTableLoadSequenceNo &seq_no, const bool is_deleted);
   int to_datums(blocksstable::ObStorageDatum *datums, int64_t column_count) const;
   OB_INLINE bool is_valid() const
   {
-    return rowkey_.is_valid() && seq_no_.is_valid() && buf_size_ > 0 && nullptr != buf_;
+    return rowkey_.is_valid() && seq_no_.is_valid() && (buf_size_ == 0 || nullptr != buf_);
   }
   OB_INLINE int64_t get_raw_size() const { return buf_size_; }
   TO_STRING_KV(K_(rowkey), K_(seq_no), K_(buf_size), KP_(buf));
@@ -46,6 +46,7 @@ public:
   common::ObArenaAllocator allocator_;
   ObDirectLoadMultipleDatumRowkey rowkey_;
   table::ObTableLoadSequenceNo seq_no_;
+  bool is_deleted_;
   int64_t buf_size_;
   const char *buf_;
 };

@@ -107,7 +107,7 @@ public:
   // row operation
   // Init operator with operation table name.
   int init(
-    const char *tname, const ObIExecTenantIdProvider &exec_tenant_id_provider);
+    const char *tname, const ObIExecTenantIdProvider &exec_tenant_id_provider, const int32_t group_id = 0);
   // Get operation table name.
   const char *get_table_name() const;
   const ObIExecTenantIdProvider *get_exec_tenant_id_provider() const;
@@ -159,6 +159,12 @@ public:
   // Only column with type of int value can do this.
   int increase_column_by_one(
       common::ObISQLClient &proxy, const ObIInnerTableKey &key, 
+      const char *column_name, int64_t &affected_rows) const;
+
+  // Set column value to old_value - 1.
+  // Only column with type of int value can do this.
+  int decrease_column_by_one(
+      common::ObISQLClient &proxy, const ObIInnerTableKey &key,
       const char *column_name, int64_t &affected_rows) const;
   
   // assignments: "c1=v1, c2=v2"
@@ -270,6 +276,7 @@ private:
   bool is_inited_;
   TableName table_name_; // operation table name.
   const ObIExecTenantIdProvider *exec_tenant_id_provider_; // provide tenant id to exec sql.
+  int32_t group_id_; //remote inner sql rpc queue
 };
 
 

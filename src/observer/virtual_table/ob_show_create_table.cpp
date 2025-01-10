@@ -63,6 +63,10 @@ int ObShowCreateTable::inner_get_next_row(common::ObNewRow *&row)
         && is_restrict_access_virtual_table(table_schema->get_table_id())) {
       ret = OB_TABLE_NOT_EXIST;
       SERVER_LOG(WARN, "fail to get table schema", K(ret), K(show_table_id));
+    } else if (table_schema->is_mlog_table()) {
+      ret = OB_NOT_SUPPORTED;
+      SERVER_LOG(WARN, "show create table on materialized view log is not supported", KR(ret));
+      LOG_USER_ERROR(OB_NOT_SUPPORTED, "show create table on materialized view log is");
     } else {
       if (OB_FAIL(fill_row_cells_with_retry(show_table_id, *table_schema))) {
         SERVER_LOG(WARN, "fail to fill row cells", K(ret),
@@ -212,12 +216,27 @@ int ObShowCreateTable::fill_row_cells_inner(const uint64_t show_table_id,
           // create_table
           ObSchemaPrinter schema_printer(*schema_guard_, strict_mode, sql_quote_show_create, ansi_quotes);
           int64_t pos = 0;
-          if (table_schema.is_view_table()) {
+          if (table_schema.is_materialized_view()) {
+            if (OB_FAIL(schema_printer.print_materialized_view_definition(effective_tenant_id_,
+                                                                         show_table_id,
+                                                                         table_def_buf,
+                                                                         table_def_buf_size,
+                                                                         pos,
+                                                                         TZ_INFO(session_),
+                                                                         false,
+                                                                         session_->get_sql_mode()))) {
+              SERVER_LOG(WARN, "Generate materialized view definition failed",
+                         KR(ret), K(effective_tenant_id_), K(show_table_id));
+            }
+          } else if (table_schema.is_view_table()) {
             if (OB_FAIL(schema_printer.print_view_definiton(effective_tenant_id_,
                                                             show_table_id,
                                                             table_def_buf,
                                                             table_def_buf_size,
-                                                            pos))) {
+                                                            pos,
+                                                            TZ_INFO(session_),
+                                                            false,
+                                                            session_->get_sql_mode()))) {
               SERVER_LOG(WARN, "Generate view definition failed",
                          KR(ret), K(effective_tenant_id_), K(show_table_id));
             }

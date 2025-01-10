@@ -17,6 +17,7 @@
 #include "share/backup/ob_backup_struct.h"
 #include "share/ob_rpc_struct.h"
 #include "share/ob_upgrade_utils.h"
+#include "ob_restore_common_util.h"
 
 namespace oceanbase
 {
@@ -43,25 +44,6 @@ public:
   void do_work();
   void destroy();
 public:
-  enum TenantRestoreStatus
-  {
-    IN_PROGRESS = 0,
-    SUCCESS,
-    FAILED
-  };
-  bool is_tenant_restore_finish(const TenantRestoreStatus tenant_restore_status) const
-  {
-    return SUCCESS == tenant_restore_status || FAILED == tenant_restore_status;
-  }
-  bool is_tenant_restore_success(const TenantRestoreStatus tenant_restore_status) const
-  {
-    return SUCCESS == tenant_restore_status;
-  }
-  bool is_tenant_restore_failed(const TenantRestoreStatus tenant_restore_status) const
-  {
-    return FAILED == tenant_restore_status;
-  }
-
   static int reset_schema_status(const uint64_t tenant_id, common::ObMySQLProxy *sql_proxy);
 
 public:
@@ -90,7 +72,7 @@ private:
   int fill_create_tenant_arg(const share::ObPhysicalRestoreJob &job_info,
                              const ObSqlString &pool_list,
                              obrpc::ObCreateTenantArg &arg);
-  int convert_parameters(const share::ObPhysicalRestoreJob &job_info);
+  int convert_tde_parameters(const share::ObPhysicalRestoreJob &job_info);
   int restore_root_key(const share::ObPhysicalRestoreJob &job_info);
   int restore_keystore(const share::ObPhysicalRestoreJob &job_info);
 
@@ -115,6 +97,7 @@ private:
       const common::ObIArray<share::ObLSAttr> &ls_attr_array);
   int check_all_ls_restore_finish_(const uint64_t tenant_id, TenantRestoreStatus &tenant_restore_status);
   int check_all_ls_restore_to_consistent_scn_finish_(const uint64_t tenant_id, TenantRestoreStatus &tenant_restore_status);
+  int check_all_ls_quick_restore_finish_(const uint64_t tenant_id, TenantRestoreStatus &tenant_restore_status);
   int try_get_tenant_restore_history_(const share::ObPhysicalRestoreJob &job_info,
                                       share::ObHisRestoreJobPersistInfo &history_info,
                                       bool &restore_tenant_exist);
@@ -124,6 +107,23 @@ private:
   int reset_restore_concurrency_(const uint64_t new_tenant_id, const share::ObPhysicalRestoreJob &job_info);
   int update_restore_concurrency_(const common::ObString &tenant_name, const uint64_t tenant_id,
       const int64_t restore_concurrency);
+  int fill_backup_storage_info_(const share::ObPhysicalRestoreJob &job_info);
+  int remove_backup_storage_info_(const share::ObPhysicalRestoreJob &job_info);
+  int stat_restore_progress_(
+      common::ObISQLClient &proxy,
+      const share::ObPhysicalRestoreJob &job_info,
+      const bool is_restore_stat_start,
+      const bool is_restore_finish);
+  int set_restoring_start_ts_(common::ObISQLClient &proxy, const share::ObPhysicalRestoreJob &job_info);
+  int update_tenant_restore_data_mode_to_remote_(const uint64_t tenant_id);
+  int update_tenant_restore_data_mode_to_normal_(const uint64_t tenant_id);
+  int update_tenant_restore_data_mode_(const uint64_t tenant_id, const share::ObRestoreDataMode &new_restore_data_mode);
+  int wait_sys_job_ready_(const ObPhysicalRestoreJob &job, bool &is_ready);
+  int wait_restore_safe_mview_merge_info_();
+  int try_collect_ls_mv_merge_scn_(const share::SCN &tenant_mv_merge_scn);
+  int update_restore_progress_by_bytes_(const ObPhysicalRestoreJob &job, const int64_t total_bytes, const int64_t finish_bytes);
+  int set_tenant_sts_crendential_config_(common::ObISQLClient &proxy,
+      const uint64_t tenant_id, const share::ObPhysicalRestoreJob &job_info);
 private:
   bool inited_;
   share::schema::ObMultiVersionSchemaService *schema_service_;

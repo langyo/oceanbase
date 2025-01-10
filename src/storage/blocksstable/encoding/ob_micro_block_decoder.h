@@ -52,14 +52,18 @@ public:
 
   int batch_decode(
       const ObIRowIndex *row_index,
-      const int64_t *row_ids,
+      const int32_t *row_ids,
       const char **cell_datas,
       const int64_t row_cap,
       common::ObDatum *datums);
 
+  int decode_vector(
+      const ObIRowIndex* row_index,
+      ObVectorDecodeCtx &vector_ctx);
+
   int get_row_count(
       const ObIRowIndex *row_index,
-      const int64_t *row_ids,
+      const int32_t *row_ids,
       const int64_t row_cap,
       const bool contains_null,
       int64_t &count);
@@ -68,12 +72,12 @@ public:
   { return decoder_->get_distinct_count(distinct_cnt); }
   OB_INLINE int read_distinct(
       const char **cell_datas,
-      storage::ObGroupByCell &group_by_cell) const
+      storage::ObGroupByCellBase &group_by_cell) const
   { return decoder_->read_distinct(*ctx_, cell_datas, group_by_cell); }
   OB_INLINE int read_reference(
-      const int64_t *row_ids,
+      const int32_t *row_ids,
       const int64_t row_cap,
-      storage::ObGroupByCell &group_by_cell) const
+      storage::ObGroupByCellBase &group_by_cell) const
   { return decoder_->read_reference(*ctx_, row_ids, row_cap, group_by_cell); }
 public:
   const ObIColumnDecoder *decoder_;
@@ -84,7 +88,13 @@ class ObDecoderCtxArray final
 {
 public:
   typedef ObColumnDecoderCtx ObDecoderCtx;
-  ObDecoderCtxArray(): ctxs_(), ctx_blocks_() {};
+  ObDecoderCtxArray(): ctxs_(), ctx_blocks_()
+  {
+    ObMemAttr attr(ob_thread_tenant_id(), "TLDecoderCtxArr");
+    SET_IGNORE_MEM_VERSION(attr);
+    ctxs_.set_attr(attr);
+    ctx_blocks_.set_attr(attr);
+  };
   ~ObDecoderCtxArray()
   {
     reset();
@@ -107,7 +117,7 @@ static int acquire_local_decoder(ObDecoderPool &local_decoder_pool,
                            const char *meta_data,
                            const ObIColumnDecoder *&decoder);
 template <class Decoder>
-static void release_local_decoder(ObDecoderPool &local_decoder_pool, ObIColumnDecoder *decoder);
+static int release_local_decoder(ObDecoderPool &local_decoder_pool, ObIColumnDecoder *decoder);
 class ObIEncodeBlockReader
 {
 public:
@@ -126,7 +136,7 @@ protected:
   int do_init(const ObMicroBlockData &block_data, const int64_t request_cnt);
   int init_decoders();
   int add_decoder(const int64_t store_idx, const common::ObObjMeta &obj_meta, ObColumnDecoder &dest);
-  void free_decoders();
+  int free_decoders();
   int acquire(const int64_t store_idx, const ObIColumnDecoder *&decoder);
   int setup_row(const uint64_t row_id, int64_t &row_len, const char *&row_data);
 protected:
@@ -235,7 +245,6 @@ public:
   static int update_cached_decoders(char *cache, const int64_t cache_size,
       const char *old_block, const char *cur_block, const int64_t block_size);
 
-  virtual ObReaderType get_type() override { return Decoder; }
   virtual void reset();
   virtual int init(
       const ObMicroBlockData &block_data,
@@ -289,21 +298,24 @@ public:
   virtual int get_rows(
       const common::ObIArray<int32_t> &cols,
       const common::ObIArray<const share::schema::ObColumnParam *> &col_params,
-      const int64_t *row_ids,
+      const int32_t *row_ids,
       const char **cell_datas,
       const int64_t row_cap,
       common::ObIArray<ObSqlDatumInfo> &datum_infos,
       const int64_t datum_offset = 0) override;
   virtual int get_row_count(
       int32_t col_id,
-      const int64_t *row_ids,
+      const int32_t *row_ids,
       const int64_t row_cap,
       const bool contains_null,
+      const share::schema::ObColumnParam *col_param,
       int64_t &count) override final;
   virtual int get_aggregate_result(
+      const ObTableIterParam &iter_param,
+      const ObTableAccessContext &context,
       const int32_t col_offset,
-      const share::schema::ObColumnParam *col_param,
-      const int64_t *row_ids,
+      const share::schema::ObColumnParam &col_param,
+      const int32_t *row_ids,
       const int64_t row_cap,
       storage::ObAggDatumBuf &agg_datum_buf,
       storage::ObAggCell &agg_cell) override;
@@ -313,6 +325,9 @@ public:
     return header_->column_count_;
   }
   virtual int get_column_datum(
+      const ObTableIterParam &iter_param,
+      const ObTableAccessContext &context,
+      const share::schema::ObColumnParam &col_param,
       const int32_t col_offset,
       const int64_t row_index,
       ObStorageDatum &datum) override;
@@ -331,17 +346,38 @@ public:
   virtual int read_distinct(
       const int32_t group_by_col,
       const char **cell_datas,
-      storage::ObGroupByCell &group_by_cell) const override;
+      storage::ObGroupByCellBase &group_by_cell) const override;
   virtual int read_reference(
       const int32_t group_by_col,
-      const int64_t *row_ids,
+      const int32_t *row_ids,
       const int64_t row_cap,
-      storage::ObGroupByCell &group_by_cell) const override;
+      storage::ObGroupByCellBase &group_by_cell) const override;
   virtual int get_group_by_aggregate_result(
-      const int64_t *row_ids,
+      const int32_t *row_ids,
       const char **cell_datas,
       const int64_t row_cap,
       storage::ObGroupByCell &group_by_cell) override;
+  virtual int get_group_by_aggregate_result(
+      const int32_t *row_ids,
+      const char **cell_datas,
+      const int64_t row_cap,
+      const int64_t vec_offset,
+      uint32_t *len_array,
+      sql::ObEvalCtx &eval_ctx,
+      storage::ObGroupByCellVec &group_by_cell) override;
+  virtual int get_rows(
+      const common::ObIArray<int32_t> &cols,
+      const common::ObIArray<const share::schema::ObColumnParam *> &col_params,
+      const int32_t *row_ids,
+      const int64_t row_cap,
+      const char **cell_datas,
+      const int64_t vec_offset,
+      uint32_t *len_array,
+      sql::ObEvalCtx &eval_ctx,
+      sql::ObExprPtrIArray &exprs,
+      const bool need_init_vector) override;
+  virtual bool has_lob_out_row() const override final
+  { return nullptr != header_ && header_->has_lob_out_row(); }
 
 private:
   // use inner_reset to reuse the decoder buffer
@@ -352,7 +388,7 @@ private:
   int add_decoder(const int64_t store_idx,
                   const common::ObObjMeta &obj_meta,
                   ObColumnDecoder &dest);
-  void free_decoders();
+  int free_decoders();
   int decode_cells(const uint64_t row_id,
                    const int64_t row_len,
                    const char *row_data,
@@ -361,7 +397,7 @@ private:
                    ObStorageDatum *datums);
 
   int get_col_datums(int32_t col_id,
-                     const int64_t *row_ids,
+                     const int32_t *row_ids,
                      const char **cell_datas,
                      const int64_t row_cap,
                      common::ObDatum *col_datums);
@@ -393,6 +429,7 @@ private:
       const share::schema::ObColumnParam *col_param,
       ObStorageDatum &decoded_datum,
       common::ObBitmap &result_bitmap);
+  int get_col_data(const int32_t col_id, ObVectorDecodeCtx &vector_ctx);
 
 private:
   const ObMicroBlockHeader *header_;

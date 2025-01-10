@@ -231,7 +231,10 @@ int ObKVGlobalCache::init(
     cache_num_ = 0;
     stopped_ = false;
     mem_limit_getter_ = mem_limit_getter;
-    map_once_clean_num_ = min(MAX_MAP_ONCE_CLEAN_NUM, bucket_num / MAP_ONCE_CLEAN_RATIO);
+    map_once_clean_num_ = bucket_num / MAP_ONCE_CLEAN_RATIO;
+    if (map_once_clean_num_ > MAX_MAP_ONCE_CLEAN_NUM) {
+      map_once_clean_num_ = MAX(MAX_MAP_ONCE_CLEAN_NUM, map_once_clean_num_/EXPAND_MAP_ONCE_CLEAN_RATIO);
+    }
     map_once_replace_num_ = min(MAX_MAP_ONCE_REPLACE_NUM, bucket_num / MAP_ONCE_REPLACE_RATIO);
     inited_ = true;
 #ifdef ENABLE_DEBUG_LOG
@@ -349,14 +352,24 @@ int ObKVGlobalCache::put(
     COMMON_LOG(WARN, "The ObKVGlobalCache has not been inited, ", K(ret));
   } else if (OB_UNLIKELY(!inst_key.is_valid())) {
     ret = OB_INVALID_ARGUMENT;
-    COMMON_LOG(WARN, "The tenant_id is too large, ", K(inst_key), K(ret));
+    COMMON_LOG(WARN, "invalid inst_key", K(inst_key), K(ret));
   } else if (OB_FAIL(insts_.get_cache_inst(inst_key, inst_handle))) {
     COMMON_LOG(WARN, "Fail to get cache inst, ", K(ret));
   } else if (NULL == inst_handle.get_inst()) {
     ret = OB_ERR_UNEXPECTED;
     COMMON_LOG(WARN, "The inst is NULL, ", K(ret));
-  } else if (!overwrite && (OB_SUCC(map_.get(cache_id, key, pvalue, mb_handle)))) {
-    ret = OB_ENTRY_EXIST;
+  } else if (!overwrite) {
+    if (OB_FAIL(map_.get(cache_id, key, pvalue, mb_handle))) {
+      if (OB_ENTRY_NOT_EXIST != ret) {
+        COMMON_LOG(WARN, "KVCacheMap::get failed", K(ret));
+      } else {
+        ret = OB_SUCCESS;
+      }
+	} else {
+	  ret = OB_ENTRY_EXIST;
+	}
+  }
+  if (OB_FAIL(ret)) {
   } else if (OB_FAIL(store.store(*inst_handle.get_inst(), key, value, kvpair, mb_wrapper))) {
     COMMON_LOG(WARN, "Fail to store kvpair to store, ", K(ret));
   } else {
@@ -599,6 +612,7 @@ int ObKVGlobalCache::erase_cache(const char *cache_name)
 int ObKVGlobalCache::register_cache(
   const char *cache_name,
   const int64_t priority,
+  const int64_t mem_limit_pct,
   int64_t &cache_id)
 {
   int ret = OB_SUCCESS;
@@ -629,6 +643,7 @@ int ObKVGlobalCache::register_cache(
         STRNCPY(configs_[cache_id].cache_name_, cache_name, MAX_CACHE_NAME_LENGTH - 1);
         configs_[cache_id].cache_name_[MAX_CACHE_NAME_LENGTH - 1] = '\0';
         configs_[cache_id].priority_ = priority;
+        configs_[cache_id].mem_limit_pct_ = mem_limit_pct;
         configs_[cache_id].is_valid_ = true;
       }
     }
@@ -711,6 +726,24 @@ int ObKVGlobalCache::set_priority(const int64_t cache_id, const int64_t priority
   } else {
     configs_[cache_id].priority_ = priority;
   }
+  return ret;
+}
+
+int ObKVGlobalCache::set_mem_limit_pct(const int64_t cache_id, const int64_t mem_limit_pct)
+{
+  int ret = OB_SUCCESS;
+
+  if (OB_UNLIKELY(!inited_)) {
+    ret = OB_NOT_INIT;
+    COMMON_LOG(WARN, "The ObKVGlobalCache has not been inited, ", K(ret));
+  } else if (OB_UNLIKELY(cache_id < 0) || OB_UNLIKELY(cache_id >= MAX_CACHE_NUM)
+      || OB_UNLIKELY(mem_limit_pct <= 0) || OB_UNLIKELY(mem_limit_pct > 100)) {
+    ret = OB_INVALID_ARGUMENT;
+    COMMON_LOG(WARN, "Invalid argument, ", K(cache_id), K(mem_limit_pct), K(ret));
+  } else {
+    ATOMIC_STORE(&configs_[cache_id].mem_limit_pct_, mem_limit_pct);
+  }
+
   return ret;
 }
 
@@ -894,7 +927,6 @@ int ObKVGlobalCache::get_washable_size(const uint64_t tenant_id, int64_t &washab
 }
 
 int ObKVGlobalCache::sync_wash_mbs(const uint64_t tenant_id, const int64_t wash_size,
-                                   const bool wash_single_mb,
                                    ObICacheWasher::ObCacheMemBlock *&wash_blocks)
 {
   int ret = OB_SUCCESS;
@@ -904,9 +936,9 @@ int ObKVGlobalCache::sync_wash_mbs(const uint64_t tenant_id, const int64_t wash_
   } else if (OB_INVALID_ID == tenant_id || wash_size <= 0) {
     ret = OB_INVALID_ARGUMENT;
     COMMON_LOG(WARN, "invalid arguments", K(ret), K(tenant_id), K(wash_size));
-  } else if (OB_FAIL(store_.sync_wash_mbs(tenant_id, wash_size, wash_single_mb, wash_blocks))) {
+  } else if (OB_FAIL(store_.sync_wash_mbs(tenant_id, wash_size, wash_blocks))) {
     if (ret != OB_CACHE_FREE_BLOCK_NOT_ENOUGH) {
-      COMMON_LOG(WARN, "sync_wash_mbs failed", K(ret), K(tenant_id), K(wash_size), K(wash_single_mb));
+      COMMON_LOG(WARN, "sync_wash_mbs failed", K(ret), K(tenant_id), K(wash_size));
     }
   }
   return ret;

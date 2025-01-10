@@ -10,6 +10,38 @@
  * See the Mulan PubL v2 for more details.
  */
 
+// Define a function type of resource manager
+// Examples:
+//   Defination:
+//     DAG_SCHEDULER_DAG_PRIO_DEF(TEST_FUNCTION)
+//   Use this function type:
+//     ObFunctionType func_type = ObFunctionType::PRIO_TEST_FUNCTION
+//   Get function name:
+//     ObString functiono_name = get_io_function_name(ObFunctionType::PRIO_TEST_FUNCTION)
+//   Check if function name exist:
+//     bool is_exist = false;
+//     check_if_function_exist("TEST_FUNCTION", is_exist)
+#ifdef OB_RESOURCE_FUNCTION_TYPE_DEF
+// DAG_SCHEDULER_DAG_PRIO_DEF(function_type_string)
+OB_RESOURCE_FUNCTION_TYPE_DEF(COMPACTION_HIGH)
+OB_RESOURCE_FUNCTION_TYPE_DEF(HA_HIGH)
+OB_RESOURCE_FUNCTION_TYPE_DEF(COMPACTION_MID)
+OB_RESOURCE_FUNCTION_TYPE_DEF(HA_MID)
+OB_RESOURCE_FUNCTION_TYPE_DEF(COMPACTION_LOW)
+OB_RESOURCE_FUNCTION_TYPE_DEF(HA_LOW)
+OB_RESOURCE_FUNCTION_TYPE_DEF(DDL)
+OB_RESOURCE_FUNCTION_TYPE_DEF(DDL_HIGH)
+OB_RESOURCE_FUNCTION_TYPE_DEF(GC_MACRO_BLOCK)
+OB_RESOURCE_FUNCTION_TYPE_DEF(CLOG_LOW)
+OB_RESOURCE_FUNCTION_TYPE_DEF(CLOG_MID)
+OB_RESOURCE_FUNCTION_TYPE_DEF(CLOG_HIGH)
+OB_RESOURCE_FUNCTION_TYPE_DEF(OPT_STATS)
+OB_RESOURCE_FUNCTION_TYPE_DEF(IMPORT)
+OB_RESOURCE_FUNCTION_TYPE_DEF(EXPORT)
+OB_RESOURCE_FUNCTION_TYPE_DEF(SQL_AUDIT)
+OB_RESOURCE_FUNCTION_TYPE_DEF(MICRO_MINI_MERGE)
+#endif
+
 #ifndef OB_SHARE_RESOURCE_MANAGER_OB_PLAN_INFO_H_
 #define OB_SHARE_RESOURCE_MANAGER_OB_PLAN_INFO_H_
 
@@ -26,20 +58,16 @@ class ObString;
 }
 namespace share
 {
-enum ObFunctionType
+enum ObFunctionType : uint8_t // FARM COMPAT WHITELIST: refine ObFuncType interface
 {
-  PRIO_COMPACTION_HIGH = 0,
-  PRIO_HA_HIGH = 1,
-  PRIO_COMPACTION_MID = 2,
-  PRIO_HA_MID = 3,
-  PRIO_COMPACTION_LOW = 4,
-  PRIO_HA_LOW = 5,
-  PRIO_DDL = 6,
-  PRIO_DDL_HIGH = 7,
+  DEFAULT_FUNCTION = 0,
+#define OB_RESOURCE_FUNCTION_TYPE_DEF(function_type_string) PRIO_##function_type_string,
+#include "ob_resource_plan_info.h"
+#undef OB_RESOURCE_FUNCTION_TYPE_DEF
   MAX_FUNCTION_NUM
 };
-
 ObString get_io_function_name(ObFunctionType function_type);
+int check_if_function_exist(const ObString &function_name, bool &exist);
 
 // 为了便于作为 hash value，所以把 ObString 包一下
 class ObResMgrVarcharValue
@@ -153,18 +181,68 @@ public:
   ObResMgrVarcharValue func_name_;
 };
 
+// ObTenantGroupIdKey
+class ObTenantGroupIdKey {
+public:
+  ObTenantGroupIdKey() : tenant_id_(OB_INVALID_TENANT_ID), group_id_(OB_INVALID_ID)
+  {}
+  ObTenantGroupIdKey(const uint64_t tenant_id, const uint64_t group_id) :
+    tenant_id_(tenant_id), group_id_(group_id)
+  {}
+  int assign(const ObTenantGroupIdKey &other)
+  {
+    tenant_id_ = other.tenant_id_;
+    group_id_ = other.group_id_;
+    return common::OB_SUCCESS;
+  }
+  uint64_t hash() const
+  {
+    uint64_t hash_val = 0;
+    hash_val = common::murmurhash(&tenant_id_, sizeof(tenant_id_), hash_val);
+    hash_val = common::murmurhash(&group_id_, sizeof(group_id_), hash_val);
+    return hash_val;
+  }
+  int hash(uint64_t &hash_val) const
+  {
+    hash_val = hash();
+    return common::OB_SUCCESS;
+  }
+  int compare(const ObTenantGroupIdKey& r) const
+  {
+    int cmp = 0;
+    if (tenant_id_ < r.tenant_id_) {
+      cmp = -1;
+    } else if (tenant_id_ == r.tenant_id_) {
+      cmp = group_id_ < r.group_id_ ? -1 : (group_id_ > r.group_id_ ? 1 : 0);
+    } else {
+      cmp = 1;
+    }
+    return cmp;
+  }
+  bool operator== (const ObTenantGroupIdKey &other) const { return 0 == compare(other); }
+  bool operator!=(const ObTenantGroupIdKey &other) const { return !operator==(other); }
+  bool operator<(const ObTenantGroupIdKey &other) const { return -1 == compare(other); }
+  TO_STRING_KV(K_(tenant_id), K_(group_id));
+
+public:
+  uint64_t tenant_id_;
+  uint64_t group_id_;
+};
+
 class ObPlanDirective
 {
 public:
   ObPlanDirective() :
       tenant_id_(common::OB_INVALID_ID),
-      mgmt_p1_(100),
-      utilization_limit_(100),
+      mgmt_p1_(1),
+      utilization_limit_(1),
       min_iops_(0),
       max_iops_(100),
       weight_iops_(0),
       group_id_(),
       group_name_(),
+      max_net_bandwidth_(100),
+      net_bandwidth_weight_(0),
       level_(1)
   {}
   ~ObPlanDirective() = default;
@@ -173,7 +251,9 @@ public:
   {
     bool bret =  min_iops_ >= 0 && min_iops_ <= 100 && max_iops_ >= 0 &&
                  max_iops_ <= 100 && weight_iops_ >= 0 && weight_iops_ <= 100 &&
-                 min_iops_ <= max_iops_;
+                 min_iops_ <= max_iops_ &&
+                 max_net_bandwidth_ >= 0 && max_net_bandwidth_ <= 100 &&
+                 net_bandwidth_weight_ >= 0 && net_bandwidth_weight_ <= 100;
     return bret;
   }
   int set_tenant_id(const uint64_t tenant_id)
@@ -214,6 +294,14 @@ public:
   {
     return group_name_.set_value(name);
   }
+  void set_max_net_bandwidth(const uint64_t max_net_bandwidth)
+  {
+    max_net_bandwidth_ = max_net_bandwidth;
+  }
+  void set_net_bandwidth_weight(const uint64_t net_bandwidth_weight)
+  {
+    net_bandwidth_weight_ = net_bandwidth_weight;
+  }
   int assign(const ObPlanDirective &other);
   TO_STRING_KV(K_(tenant_id),
                "group_name", group_name_.get_value(),
@@ -223,21 +311,25 @@ public:
                K_(max_iops),
                K_(weight_iops),
                K_(group_id),
+               K_(max_net_bandwidth),
+               K_(net_bandwidth_weight),
                K_(level));
 public:
   uint64_t tenant_id_;
-  int64_t mgmt_p1_;
-  int64_t utilization_limit_;
+  double mgmt_p1_;
+  double utilization_limit_;
   uint64_t min_iops_;
   uint64_t max_iops_;
   uint64_t weight_iops_;
   uint64_t group_id_;
   share::ObGroupName group_name_;
+  uint64_t max_net_bandwidth_;
+  uint64_t net_bandwidth_weight_; // percent of all weight
   int level_;
 private:
   DISALLOW_COPY_AND_ASSIGN(ObPlanDirective);
 };
-
+typedef common::ObSEArray<ObPlanDirective, 8> ObPlanDirectiveSet;
 class ObResourceMappingRule
 {
 public:

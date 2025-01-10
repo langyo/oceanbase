@@ -20,6 +20,7 @@
 #include "observer/table_load/ob_table_load_stat.h"
 #include "share/schema/ob_multi_version_schema_service.h"
 #include "sql/session/ob_sql_session_info.h"
+#include "sql/ob_sql_utils.h"
 
 namespace oceanbase
 {
@@ -32,6 +33,7 @@ using namespace table;
 
 ObTableLoadPartitionCalc::ObTableLoadPartitionCalc()
   : session_info_(nullptr),
+    cast_mode_(CM_NONE),
     is_partition_with_autoinc_(false),
     partition_with_autoinc_idx_(OB_INVALID_INDEX),
     param_(nullptr),
@@ -40,9 +42,12 @@ ObTableLoadPartitionCalc::ObTableLoadPartitionCalc()
     exec_ctx_(allocator_),
     is_inited_(false)
 {
+  allocator_.set_tenant_id(MTL_ID());
 }
 
-int ObTableLoadPartitionCalc::init(const ObTableLoadParam &param, sql::ObSQLSessionInfo *session_info)
+int ObTableLoadPartitionCalc::init(const ObTableLoadParam &param,
+                                   sql::ObSQLSessionInfo *session_info,
+                                   const ObIArray<ObTabletID> &tablet_ids)
 {
   int ret = OB_SUCCESS;
   if (IS_INIT) {
@@ -51,13 +56,14 @@ int ObTableLoadPartitionCalc::init(const ObTableLoadParam &param, sql::ObSQLSess
   } else {
     uint64_t tenant_id = param.tenant_id_;
     uint64_t table_id = param.table_id_;
-    allocator_.set_tenant_id(tenant_id);
     sql_ctx_.schema_guard_ = &schema_guard_;
     exec_ctx_.set_sql_ctx(&sql_ctx_);
     const ObTableSchema *table_schema = nullptr;
     ObDataTypeCastParams cast_params(session_info->get_timezone_info());
     if (OB_FAIL(time_cvrt_.init(cast_params.get_nls_format(ObDateTimeType)))) {
       LOG_WARN("fail to init time converter", KR(ret));
+    } else if (OB_FAIL(ObSQLUtils::get_default_cast_mode(session_info, cast_mode_))) {
+      LOG_WARN("fail to get_default_cast_mode", KR(ret));
     } else if (OB_FAIL(ObTableLoadSchema::get_table_schema(tenant_id, table_id, schema_guard_,
                                                           table_schema))) {
       LOG_WARN("fail to get table schema", KR(ret), K(tenant_id), K(table_id));
@@ -77,6 +83,17 @@ int ObTableLoadPartitionCalc::init(const ObTableLoadParam &param, sql::ObSQLSess
         // 获取part_key_obj_index_
         else if (OB_FAIL(init_part_key_index(table_schema, allocator_))) {
           LOG_WARN("fail to get rowkey index", KR(ret));
+        } else if (ObDirectLoadLevel::PARTITION == param.load_level_) {
+          ObMemAttr attr(MTL_ID(), "TLD_TABLETID");
+          if (OB_FAIL(tablet_ids_set_.create(1024, attr))) {
+            LOG_WARN("fail to init tablet ids set", KR(ret));
+          } else {
+            for (uint64_t i = 0; OB_SUCC(ret) && i < tablet_ids.count(); ++i) {
+              if (OB_FAIL(tablet_ids_set_.set_refactored(tablet_ids.at(i)))) {
+                LOG_WARN("fail to set tablet id", KR(ret));
+              }
+            }
+          }
         }
       }
       if (OB_SUCC(ret)) {
@@ -94,7 +111,8 @@ int ObTableLoadPartitionCalc::init_part_key_index(const ObTableSchema *table_sch
                                                 ObIAllocator &allocator)
 {
   int ret = OB_SUCCESS;
-  ObSEArray<ObColDesc, 64> column_descs;
+  ObArray<ObColDesc> column_descs;
+  column_descs.set_tenant_id(MTL_ID());
   if (OB_FAIL(table_schema->get_column_ids(column_descs, false))) {
     LOG_WARN("fail to get column ids", KR(ret));
   } else if (OB_UNLIKELY(column_descs.empty())) {
@@ -171,16 +189,20 @@ int ObTableLoadPartitionCalc::cast_part_key(common::ObNewRow &part_key, common::
     LOG_WARN("invalid part key count", KR(ret), K(part_key.count_), K(part_key_obj_index_.count()));
   } else {
     ObDataTypeCastParams cast_params(session_info_->get_timezone_info());
-    ObCastCtx cast_ctx(&allocator, &cast_params, CM_NONE, ObCharset::get_system_collation());
+    ObCastCtx cast_ctx(&allocator, &cast_params, cast_mode_, ObCharset::get_system_collation());
     ObTableLoadCastObjCtx cast_obj_ctx(*param_, &time_cvrt_, &cast_ctx, true);
     ObObj obj;
     for (int64_t i = 0; OB_SUCC(ret) && i < part_key_obj_index_.count(); ++i) {
       const IndexAndType &index_and_type = part_key_obj_index_.at(i);
-      if (OB_FAIL(ObTableLoadObjCaster::cast_obj(cast_obj_ctx, index_and_type.column_schema_,
-                                                    part_key.cells_[i], obj))) {
+      const ObColumnSchemaV2 *column_schema = index_and_type.column_schema_;
+      ObObj &part_obj = part_key.cells_[i];
+      if (OB_FAIL(ObTableLoadObjCaster::cast_obj(cast_obj_ctx,
+                                                 column_schema,
+                                                 part_obj,
+                                                 obj))) {
         LOG_WARN("fail to cast obj", KR(ret));
       } else {
-        part_key.cells_[i] = obj;
+        part_obj = obj;
       }
     }
   }
@@ -193,6 +215,8 @@ int ObTableLoadPartitionCalc::get_partition_by_row(
   int ret = OB_SUCCESS;
   ObArray<ObTabletID> tablet_ids;
   ObArray<ObObjectID> part_ids;
+  tablet_ids.set_tenant_id(MTL_ID());
+  part_ids.set_tenant_id(MTL_ID());
   if (OB_FAIL(table_location_.calculate_partition_ids_by_rows2(
                *session_info_, schema_guard_, param_->table_id_, part_rows, tablet_ids, part_ids))) {
     LOG_WARN("fail to calc partition id", KR(ret));
@@ -202,9 +226,24 @@ int ObTableLoadPartitionCalc::get_partition_by_row(
     LOG_WARN("invalid args", K(part_ids.count()), K(tablet_ids.count()));
   }
   for (int i = 0; OB_SUCC(ret) && i < part_rows.count(); i++) {
-    if (OB_FAIL(
-          partition_ids.push_back(ObTableLoadPartitionId(part_ids.at(i), tablet_ids.at(i))))) {
-      LOG_WARN("fail to push partition id", KR(ret));
+    if (ObDirectLoadLevel::PARTITION == param_->load_level_) {
+      ret = tablet_ids_set_.exist_refactored(tablet_ids.at(i));
+      if (OB_LIKELY(OB_HASH_EXIST == ret)) {
+        if (OB_FAIL(partition_ids.push_back(ObTableLoadPartitionId(part_ids.at(i), tablet_ids.at(i))))) {
+          LOG_WARN("fail to push partition id", KR(ret), K(part_ids.at(i)), K(tablet_ids.at(i)));
+        }
+      } else if (OB_HASH_NOT_EXIST == ret) {
+        if (OB_FAIL(partition_ids.push_back(ObTableLoadPartitionId()))) {
+          LOG_WARN("fail to push empty partition id", KR(ret));
+        }
+      } else {
+        LOG_WARN("fail to search tablet ids set", KR(ret));
+      }
+    } else {
+      if (OB_FAIL(
+            partition_ids.push_back(ObTableLoadPartitionId(part_ids.at(i), tablet_ids.at(i))))) {
+        LOG_WARN("fail to push partition id", KR(ret));
+      }
     }
   }
   return ret;

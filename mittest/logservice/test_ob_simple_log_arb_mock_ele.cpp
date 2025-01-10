@@ -1,3 +1,6 @@
+// owner: yunlong.cb
+// owner group: log
+
 // Copyright (c) 2021 OceanBase
 // OceanBase is licensed under Mulan PubL v2.
 // You can use this software according to the terms and conditions of the Mulan PubL v2.
@@ -48,6 +51,7 @@ public:
 int64_t ObSimpleLogClusterTestBase::member_cnt_ = 3;
 int64_t ObSimpleLogClusterTestBase::node_cnt_ = 5;
 bool ObSimpleLogClusterTestBase::need_add_arb_server_ = true;
+bool ObSimpleLogClusterTestBase::need_shared_storage_ = false;
 std::string ObSimpleLogClusterTestBase::test_name_ = TEST_NAME;
 
 TEST_F(TestObSimpleLogClusterArbMockEleService, switch_leader_during_degrading)

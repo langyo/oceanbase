@@ -18,6 +18,7 @@
 #include "lib/oblog/ob_log_module.h"
 #include "lib/net/ob_addr.h"
 #include "lib/stat/ob_diagnose_info.h"
+#include "share/transfer/ob_transfer_info.h"
 
 namespace oceanbase
 {
@@ -53,11 +54,6 @@ OB_SERIALIZE_MEMBER(ObTabletLSKey,
     tenant_id_,
     tablet_id_);
 
-OB_SERIALIZE_MEMBER(ObTabletLSCache,
-    cache_key_,
-    ls_id_,
-    renew_time_);
-
 ObLSReplicaLocation::ObLSReplicaLocation()
     : server_(),
       role_(FOLLOWER),
@@ -76,7 +72,7 @@ void ObLSReplicaLocation::reset()
   sql_port_ = OB_INVALID_INDEX;
   replica_type_ = REPLICA_TYPE_FULL;
   property_.reset();
-  restore_status_ = ObLSRestoreStatus::Status::RESTORE_NONE;
+  restore_status_ = ObLSRestoreStatus::Status::NONE;
   proposal_id_ = OB_INVALID_ID;
 }
 
@@ -370,17 +366,17 @@ bool ObLSLocation::operator!=(const ObLSLocation &other) const
   return !(*this == other);
 }
 
-int ObLSLocation::get_replica_count(int64_t &full_replica_cnt, int64_t &readonly_replica_cnt)
+int ObLSLocation::get_replica_count(int64_t &full_replica_cnt, int64_t &non_paxos_replica_cnt)
 {
   int ret = OB_SUCCESS;
   full_replica_cnt = 0;
-  readonly_replica_cnt = 0;
+  non_paxos_replica_cnt = 0;
   for (int64_t i = 0; OB_SUCC(ret) && i < replica_locations_.count(); ++i) {
     const ObLSReplicaLocation &replica = replica_locations_.at(i);
     if (REPLICA_TYPE_FULL == replica.get_replica_type()) {
       full_replica_cnt++;
-    } else if (REPLICA_TYPE_READONLY == replica.get_replica_type()) {
-      readonly_replica_cnt++;
+    } else if (ObReplicaTypeCheck::is_non_paxos_replica(replica.get_replica_type())) {
+      non_paxos_replica_cnt++;
     }
   }
   return ret;
@@ -702,7 +698,8 @@ int ObTabletLocation::deep_copy(
 ObTabletLSCache::ObTabletLSCache()
     : cache_key_(),
       ls_id_(),
-      renew_time_(0)
+      renew_time_(0),
+      transfer_seq_(OB_INVALID_TRANSFER_SEQ)
 {
 }
 
@@ -716,6 +713,7 @@ void ObTabletLSCache::reset()
   cache_key_.reset();
   ls_id_.reset();
   renew_time_ = 0;
+  transfer_seq_ = OB_INVALID_TRANSFER_SEQ;
 }
 
 int ObTabletLSCache::assign(const ObTabletLSCache &other)
@@ -725,6 +723,7 @@ int ObTabletLSCache::assign(const ObTabletLSCache &other)
     cache_key_ = other.cache_key_;
     ls_id_ = other.ls_id_;
     renew_time_ = other.renew_time_;
+    transfer_seq_ = other.transfer_seq_;
   }
   return ret;
 }
@@ -733,19 +732,16 @@ bool ObTabletLSCache::is_valid() const
 {
   return cache_key_.is_valid()
       && ls_id_.is_valid()
-      && renew_time_ > 0;
-}
-
-bool ObTabletLSCache::mapping_is_same_with(const ObTabletLSCache &other) const
-{
-  return cache_key_ == other.cache_key_
-      && ls_id_ == other.ls_id_;
+      && renew_time_ > 0
+      && transfer_seq_ > OB_INVALID_TRANSFER_SEQ;
 }
 
 bool ObTabletLSCache::operator==(const ObTabletLSCache &other) const
 {
-  return mapping_is_same_with(other)
-      && renew_time_ == other.renew_time_;
+  return cache_key_ == other.cache_key_
+         && ls_id_ == other.ls_id_
+         && renew_time_ == other.renew_time_
+         && transfer_seq_ == other.transfer_seq_;
 }
 
 bool ObTabletLSCache::operator!=(const ObTabletLSCache &other) const
@@ -758,7 +754,7 @@ int ObTabletLSCache::init(
     const ObTabletID &tablet_id,
     const ObLSID &ls_id,
     const int64_t renew_time,
-    const int64_t row_scn)
+    const int64_t transfer_seq)
 {
   int ret = OB_SUCCESS;
   if (OB_FAIL(cache_key_.init(tenant_id, tablet_id))) {
@@ -766,6 +762,7 @@ int ObTabletLSCache::init(
   } else {
     ls_id_ = ls_id;
     renew_time_ = renew_time;
+    transfer_seq_ = transfer_seq;
     ObLink::reset();
   }
   return ret;

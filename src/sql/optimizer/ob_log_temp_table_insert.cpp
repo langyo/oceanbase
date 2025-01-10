@@ -109,8 +109,9 @@ int ObLogTempTableInsert::do_re_est_cost(EstimateCostInfo &param, double &card, 
     ObOptimizerContext &opt_ctx = get_plan()->get_optimizer_context();
     op_cost = ObOptEstCost::cost_material(card / param.need_parallel_,
                                           child->get_width(),
-                                          opt_ctx.get_cost_model_type());
+                                          opt_ctx);
     cost += op_cost;
+    card = 0;
   }
   return ret;
 }

@@ -553,8 +553,10 @@ int ObDataDictStorage::submit_to_palf_()
   ObDataDictPersistCallback *callback = NULL;
   const SCN &ref_scn = snapshot_scn_; // ns
   const bool need_nonblock = false; // TODO 是否需要non-block?
+  const bool allow_compression = true;
   palf::LSN lsn;
   SCN submit_scn;
+  int64_t proposal_id = 0;
 
   if (OB_ISNULL(palf_buf_)
       || OB_ISNULL(log_handler_)
@@ -567,11 +569,11 @@ int ObDataDictStorage::submit_to_palf_()
     DDLOG(WARN, "log_handler_ is not valid", KR(ret));
   } else if (OB_UNLIKELY(palf_pos_ == 0)) {
     DDLOG(INFO, "empty palf_buf, do nothing", K_(palf_buf_len), K_(palf_pos));
-  } else if (OB_FAIL(check_ls_leader(log_handler_, is_leader))) {
-    DDLOG(WARN, "check_ls_leader failed", KR(ret), K(is_leader));
+  } else if (OB_FAIL(check_ls_leader(log_handler_, is_leader, proposal_id))) {
+    DDLOG(WARN, "check_ls_leader failed", KR(ret), K(is_leader), K(proposal_id));
   } else if (OB_UNLIKELY(! is_leader)) {
     ret = OB_STATE_NOT_MATCH;
-    DDLOG(INFO, "do-nothing on non-leader logstream.", KR(ret), K(is_leader));
+    DDLOG(INFO, "do-nothing on non-leader logstream.", KR(ret), K(is_leader), K(proposal_id));
   } else if (OB_FAIL(alloc_palf_cb_(callback))) {
     DDLOG(WARN, "alloc_palf_cb_ failed", KR(ret));
   } else if (OB_FAIL(log_handler_->append(
@@ -579,6 +581,7 @@ int ObDataDictStorage::submit_to_palf_()
       palf_pos_,
       ref_scn,
       need_nonblock,
+      allow_compression,
       callback,
       lsn,
       submit_scn
@@ -719,6 +722,7 @@ void ObDataDictStorage::reset_cb_queue_()
   while (! cb_queue_.empty()) {
     QLink *item = NULL;
     if (OB_ISNULL(item = cb_queue_.pop())) {
+      ret = OB_ERR_UNEXPECTED;
       DDLOG(WARN, "pop item from data_dict_meta persist_callback_queue failed", KR(ret));
     } else {
       allocator_.free(item);

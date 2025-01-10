@@ -9,6 +9,7 @@
  * MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
  * See the Mulan PubL v2 for more details.
  */
+#define USING_LOG_PREFIX SHARE
 
 #include "share/detect/ob_detect_rpc_processor.h"
 #include "share/detect/ob_detect_manager.h"
@@ -26,6 +27,7 @@ int ObDetectRpcP::process()
     MTL_SWITCH(detectable_id.tenant_id_) {
       ObDetectManager* dm = MTL(ObDetectManager*);
       if (OB_ISNULL(dm)) {
+        // ignore ret
         LIB_LOG(WARN, "[DM] dm is null", K(detectable_id.tenant_id_));
         continue;
       }

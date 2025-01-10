@@ -36,6 +36,7 @@
 #include "sql/engine/expr/ob_expr_bit_neg.h"
 #include "sql/engine/expr/ob_expr_bit_left_shift.h"
 #include "sql/engine/expr/ob_expr_bit_right_shift.h"
+#include "sql/engine/expr/ob_expr_bm25.h"
 #include "sql/engine/expr/ob_expr_case.h"
 #include "sql/engine/expr/ob_expr_oracle_decode.h"
 #include "sql/engine/expr/ob_expr_oracle_trunc.h"
@@ -63,6 +64,7 @@
 #include "sql/engine/expr/ob_expr_agg_param_list.h"
 #include "sql/engine/expr/ob_expr_is_serving_tenant.h"
 #include "sql/engine/expr/ob_expr_hex.h"
+#include "sql/engine/expr/ob_expr_password.h"
 #include "sql/engine/expr/ob_expr_in.h"
 #include "sql/engine/expr/ob_expr_not_in.h"
 #include "sql/engine/expr/ob_expr_int2ip.h"
@@ -194,6 +196,10 @@
 #include "sql/engine/expr/ob_expr_part_id.h"
 #include "sql/engine/expr/ob_expr_timestamp_add.h"
 #include "sql/engine/expr/ob_expr_des_hex_str.h"
+#include "sql/engine/expr/ob_expr_doc_id.h"
+#include "sql/engine/expr/ob_expr_doc_length.h"
+#include "sql/engine/expr/ob_expr_word_segment.h"
+#include "sql/engine/expr/ob_expr_word_count.h"
 #include "sql/engine/expr/ob_expr_ascii.h"
 #include "sql/engine/expr/ob_expr_truncate.h"
 #include "sql/engine/expr/ob_expr_bit_count.h"
@@ -246,7 +252,7 @@
 #include "sql/engine/expr/ob_expr_plsql_variable.h"
 #include "sql/engine/expr/ob_expr_pl_associative_index.h"
 #include "sql/engine/expr/ob_expr_chr.h"
-#include "sql/engine/expr/ob_expr_aes_encrypt.h"
+#include "sql/engine/expr/ob_expr_symmetric_encrypt.h"
 #include "sql/engine/expr/ob_expr_timezone.h"
 #include "sql/engine/expr/ob_expr_sys_extract_utc.h"
 #include "sql/engine/expr/ob_expr_tz_offset.h"
@@ -313,6 +319,8 @@
 #include "sql/engine/expr/ob_expr_nlssort.h"
 #include "sql/engine/expr/ob_expr_json_object.h"
 #include "sql/engine/expr/ob_expr_json_extract.h"
+#include "sql/engine/expr/ob_expr_json_schema_valid.h"
+#include "sql/engine/expr/ob_expr_json_schema_validation_report.h"
 #include "sql/engine/expr/ob_expr_json_contains.h"
 #include "sql/engine/expr/ob_expr_json_contains_path.h"
 #include "sql/engine/expr/ob_expr_json_depth.h"
@@ -325,6 +333,7 @@
 #include "sql/engine/expr/ob_expr_json_valid.h"
 #include "sql/engine/expr/ob_expr_json_remove.h"
 #include "sql/engine/expr/ob_expr_json_array_append.h"
+#include "sql/engine/expr/ob_expr_json_append.h"
 #include "sql/engine/expr/ob_expr_json_array_insert.h"
 #include "sql/engine/expr/ob_expr_json_value.h"
 #include "sql/engine/expr/ob_expr_json_replace.h"
@@ -364,6 +373,7 @@
 #include "sql/engine/expr/ob_expr_st_buffer.h"
 #include "sql/engine/expr/ob_expr_spatial_cellid.h"
 #include "sql/engine/expr/ob_expr_spatial_mbr.h"
+#include "sql/engine/expr/ob_expr_sdo_relate.h"
 #include "sql/engine/expr/ob_expr_st_geomfromewkb.h"
 #include "sql/engine/expr/ob_expr_st_geomfromwkb.h"
 #include "sql/engine/expr/ob_expr_st_geomfromewkt.h"
@@ -395,14 +405,95 @@
 #include "sql/engine/expr/ob_expr_priv_xml_binary.h"
 #include "sql/engine/expr/ob_expr_xmlparse.h"
 #include "sql/engine/expr/ob_expr_xml_element.h"
+#include "sql/engine/expr/ob_expr_xml_forest.h"
+#include "sql/engine/expr/ob_expr_xml_concat.h"
 #include "sql/engine/expr/ob_expr_xml_attributes.h"
 #include "sql/engine/expr/ob_expr_extract_value.h"
 #include "sql/engine/expr/ob_expr_extract_xml.h"
+#include "sql/engine/expr/ob_expr_existsnode_xml.h"
 #include "sql/engine/expr/ob_expr_xml_serialize.h"
 #include "sql/engine/expr/ob_expr_xmlcast.h"
 #include "sql/engine/expr/ob_expr_update_xml.h"
+#include "sql/engine/expr/ob_expr_insert_child_xml.h"
+#include "sql/engine/expr/ob_expr_xml_delete_xml.h"
+#include "sql/engine/expr/ob_expr_xml_sequence.h"
+#include "sql/engine/expr/ob_expr_sql_udt_construct.h"
+#include "sql/engine/expr/ob_expr_priv_attribute_access.h"
 #include "sql/engine/expr/ob_expr_temp_table_ssid.h"
+#include "sql/engine/expr/ob_expr_priv_st_numinteriorrings.h"
+#include "sql/engine/expr/ob_expr_priv_st_iscollection.h"
+#include "sql/engine/expr/ob_expr_priv_st_equals.h"
+#include "sql/engine/expr/ob_expr_priv_st_touches.h"
 #include "sql/engine/expr/ob_expr_align_date4cmp.h"
+#include "sql/engine/expr/ob_expr_extract_cert_expired_time.h"
+#include "sql/engine/expr/ob_expr_transaction_id.h"
+#include "sql/engine/expr/ob_expr_inner_row_cmp_val.h"
+#include "sql/engine/expr/ob_expr_last_refresh_scn.h"
+#include "sql/engine/expr/ob_expr_priv_st_makeenvelope.h"
+#include "sql/engine/expr/ob_expr_priv_st_clipbybox2d.h"
+#include "sql/engine/expr/ob_expr_priv_st_pointonsurface.h"
+#include "sql/engine/expr/ob_expr_priv_st_geometrytype.h"
+#include "sql/engine/expr/ob_expr_st_crosses.h"
+#include "sql/engine/expr/ob_expr_st_overlaps.h"
+#include "sql/engine/expr/ob_expr_st_union.h"
+#include "sql/engine/expr/ob_expr_st_length.h"
+#include "sql/engine/expr/ob_expr_st_difference.h"
+#include "sql/engine/expr/ob_expr_st_asgeojson.h"
+#include "sql/engine/expr/ob_expr_st_centroid.h"
+#include "sql/engine/expr/ob_expr_st_symdifference.h"
+#include "sql/engine/expr/ob_expr_priv_st_asmvtgeom.h"
+#include "sql/engine/expr/ob_expr_priv_st_makevalid.h"
+#include "sql/engine/expr/ob_expr_gtid.h"
+#include "sql/engine/expr/ob_expr_array.h"
+#include "sql/engine/expr/ob_expr_vec_vid.h"
+#include "sql/engine/expr/ob_expr_vec_type.h"
+#include "sql/engine/expr/ob_expr_vec_vector.h"
+#include "sql/engine/expr/ob_expr_vec_scn.h"
+#include "sql/engine/expr/ob_expr_vec_key.h"
+#include "sql/engine/expr/ob_expr_vec_data.h"
+#include "sql/engine/expr/ob_expr_vector.h"
+#include "sql/engine/expr/ob_expr_inner_table_option_printer.h"
+#include "sql/engine/expr/ob_expr_rb_build_empty.h"
+#include "sql/engine/expr/ob_expr_rb_is_empty.h"
+#include "sql/engine/expr/ob_expr_rb_build_varbinary.h"
+#include "sql/engine/expr/ob_expr_rb_to_varbinary.h"
+#include "sql/engine/expr/ob_expr_rb_cardinality.h"
+#include "sql/engine/expr/ob_expr_rb_calc_cardinality.h"
+#include "sql/engine/expr/ob_expr_rb_calc.h"
+#include "sql/engine/expr/ob_expr_rb_to_string.h"
+#include "sql/engine/expr/ob_expr_rb_from_string.h"
+#include "sql/engine/expr/ob_expr_rb_select.h"
+#include "sql/engine/expr/ob_expr_rb_build.h"
+#include "sql/engine/expr/ob_expr_array_contains.h"
+#include "sql/engine/expr/ob_expr_array_to_string.h"
+#include "sql/engine/expr/ob_expr_string_to_array.h"
+#include "sql/engine/expr/ob_expr_array_append.h"
+#include "sql/engine/expr/ob_expr_element_at.h"
+#include "sql/engine/expr/ob_expr_array_cardinality.h"
+#include "sql/engine/expr/ob_expr_tokenize.h"
+#include "sql/engine/expr/ob_expr_lock_func.h"
+#include "sql/engine/expr/ob_expr_decode_trace_id.h"
+#include "sql/engine/expr/ob_expr_topn_filter.h"
+#include "sql/engine/expr/ob_expr_get_path.h"
+#include "sql/engine/expr/ob_expr_transaction_id.h"
+#include "sql/engine/expr/ob_expr_audit_log_func.h"
+#include "sql/engine/expr/ob_expr_can_access_trigger.h"
+#include "sql/engine/expr/ob_expr_split_part.h"
+#include "sql/engine/expr/ob_expr_inner_decode_like.h"
+#include "sql/engine/expr/ob_expr_inner_double_to_int.h"
+#include "sql/engine/expr/ob_expr_inner_decimal_to_year.h"
+#include "sql/engine/expr/ob_expr_array_overlaps.h"
+#include "sql/engine/expr/ob_expr_array_contains_all.h"
+#include "sql/engine/expr/ob_expr_array_distinct.h"
+#include "sql/engine/expr/ob_expr_array_remove.h"
+#include "sql/engine/expr/ob_expr_array_map.h"
+#include "sql/engine/expr/ob_expr_calc_odps_size.h"
+#include "sql/engine/expr/ob_expr_get_mysql_routine_parameter_type_str.h"
+#include "sql/engine/expr/ob_expr_priv_st_geohash.h"
+#include "sql/engine/expr/ob_expr_priv_st_makepoint.h"
+#include "sql/engine/expr/ob_expr_to_pinyin.h"
+
+
 
 using namespace oceanbase::common;
 namespace oceanbase
@@ -638,6 +729,7 @@ void ObExprOperatorFactory::register_expr_operators()
     REG_OP(ObExprGreaterThan);
     REG_OP(ObExprGreatest);
     REG_OP(ObExprHex);
+    REG_OP(ObExprPassword);
     REG_OP(ObExprIn);
     REG_OP(ObExprNotIn);
     REG_OP(ObExprInt2ip);
@@ -834,6 +926,10 @@ void ObExprOperatorFactory::register_expr_operators()
     REG_OP(ObExprPartId);
     REG_OP(ObExprLastTraceId);
     REG_OP(ObExprLastExecId);
+    REG_OP(ObExprDocID);
+    REG_OP(ObExprDocLength);
+    REG_OP(ObExprWordSegment);
+    REG_OP(ObExprWordCount);
     REG_OP(ObExprObjAccess);
     REG_OP(ObExprEnumToStr);
     REG_OP(ObExprSetToStr);
@@ -890,6 +986,8 @@ void ObExprOperatorFactory::register_expr_operators()
     REG_OP(ObExprHash);
     REG_OP(ObExprJsonObject);
     REG_OP(ObExprJsonExtract);
+    REG_OP(ObExprJsonSchemaValid);
+    REG_OP(ObExprJsonSchemaValidationReport);
     REG_OP(ObExprJsonContains);
     REG_OP(ObExprJsonContainsPath);
     REG_OP(ObExprJsonDepth);
@@ -902,6 +1000,7 @@ void ObExprOperatorFactory::register_expr_operators()
     REG_OP(ObExprJsonSearch);
     REG_OP(ObExprJsonValid);
     REG_OP(ObExprJsonArrayAppend);
+    REG_OP(ObExprJsonAppend);
     REG_OP(ObExprJsonArrayInsert);
     REG_OP(ObExprJsonValue);
     REG_OP(ObExprJsonReplace);
@@ -916,6 +1015,8 @@ void ObExprOperatorFactory::register_expr_operators()
     REG_OP(ObExprJsonMergePatch);
     REG_OP(ObExprJsonPretty);
     REG_OP(ObExprJsonMemberOf);
+    REG_OP(ObExprExtractValue);
+    REG_OP(ObExprUpdateXml);
     REG_OP(ObExprSha);
     REG_SAME_OP(T_FUN_SYS_SHA ,T_FUN_SYS_SHA, N_SHA1, i);
     REG_OP(ObExprSha2);
@@ -927,6 +1028,7 @@ void ObExprOperatorFactory::register_expr_operators()
     REG_OP(ObExprTimestampToScn);
     REG_OP(ObExprScnToTimestamp);
     REG_OP(ObExprSqlModeConvert);
+    REG_OP(ObExprCanAccessTrigger);
 #if  defined(ENABLE_DEBUG_LOG) || !defined(NDEBUG)
     // convert input value into an OceanBase error number and throw out as exception
     REG_OP(ObExprErrno);
@@ -998,7 +1100,116 @@ void ObExprOperatorFactory::register_expr_operators()
     REG_OP(ObExprRandom);
     REG_OP(ObExprRandstr);
     REG_OP(ObExprPrefixPattern);
+    REG_OP(ObExprPrivSTNumInteriorRings);
+    REG_OP(ObExprPrivSTIsCollection);
+    REG_OP(ObExprPrivSTEquals);
+    REG_OP(ObExprPrivSTTouches);
     REG_OP(ObExprAlignDate4Cmp);
+    REG_OP(ObExprJsonQuery);
+    REG_OP(ObExprBM25);
+
+    REG_OP(ObExprGetLock);
+    REG_OP(ObExprIsFreeLock);
+    REG_OP(ObExprIsUsedLock);
+    REG_OP(ObExprReleaseLock);
+    REG_OP(ObExprReleaseAllLocks);
+    REG_OP(ObExprExtractExpiredTime);
+    REG_OP(ObExprTransactionId);
+    REG_OP(ObExprInnerRowCmpVal);
+    REG_OP(ObExprLastRefreshScn);
+    REG_OP(ObExprTopNFilter);
+    REG_OP(ObExprPrivSTMakeEnvelope);
+    REG_OP(ObExprPrivSTClipByBox2D);
+    REG_OP(ObExprPrivSTPointOnSurface);
+    REG_OP(ObExprPrivSTGeometryType);
+    REG_OP(ObExprSTCrosses);
+    REG_OP(ObExprSTOverlaps);
+    REG_OP(ObExprSTUnion);
+    REG_OP(ObExprSTLength);
+    REG_OP(ObExprSTDifference);
+    REG_OP(ObExprSTAsGeoJson);
+    REG_OP(ObExprSTCentroid);
+    REG_OP(ObExprSTSymDifference);
+    REG_OP(ObExprPrivSTAsMVTGeom);
+    REG_OP(ObExprPrivSTMakeValid);
+    REG_OP(ObExprPrivSTGeoHash);
+    REG_OP(ObExprPrivSTMakePoint);
+    REG_OP(ObExprCurrentRole);
+    REG_OP(ObExprArray);
+    /* vector index */
+    REG_OP(ObExprVecVid);
+    REG_OP(ObExprVecType);
+    REG_OP(ObExprVecVector);
+    REG_OP(ObExprVecScn);
+    REG_OP(ObExprVecKey);
+    REG_OP(ObExprVecData);
+    REG_OP(ObExprVectorL2Distance);
+    REG_OP(ObExprVectorCosineDistance);
+    REG_OP(ObExprVectorIPDistance);
+    REG_OP(ObExprVectorNegativeIPDistance);
+    REG_OP(ObExprVectorL1Distance);
+    REG_OP(ObExprVectorDims);
+    REG_OP(ObExprVectorNorm);
+    REG_OP(ObExprVectorDistance);
+    REG_OP(ObExprInnerTableOptionPrinter);
+    REG_OP(ObExprInnerTableSequenceGetter);
+    REG_OP(ObExprRbBuildEmpty);
+    REG_OP(ObExprRbIsEmpty);
+    REG_OP(ObExprRbBuildVarbinary);
+    REG_OP(ObExprRbToVarbinary);
+    REG_OP(ObExprRbCardinality);
+    REG_OP(ObExprRbAndCardinality);
+    REG_OP(ObExprRbOrCardinality);
+    REG_OP(ObExprRbXorCardinality);
+    REG_OP(ObExprRbAndnotCardinality);
+    REG_OP(ObExprRbAndNull2emptyCardinality);
+    REG_OP(ObExprRbOrNull2emptyCardinality);
+    REG_OP(ObExprRbAndnotNull2emptyCardinality);
+    REG_OP(ObExprRbAnd);
+    REG_OP(ObExprRbOr);
+    REG_OP(ObExprRbXor);
+    REG_OP(ObExprRbAndnot);
+    REG_OP(ObExprRbAndNull2empty);
+    REG_OP(ObExprRbOrNull2empty);
+    REG_OP(ObExprRbAndnotNull2empty);
+    REG_OP(ObExprRbToString);
+    REG_OP(ObExprRbFromString);
+    REG_OP(ObExprRbSelect);
+    REG_OP(ObExprRbBuild);
+    REG_OP(ObExprGetPath);
+    REG_OP(ObExprGTIDSubset);
+    REG_OP(ObExprGTIDSubtract);
+    REG_OP(ObExprWaitForExecutedGTIDSet);
+    REG_OP(ObExprWaitUntilSQLThreadAfterGTIDs);
+    REG_OP(ObExprArrayContains);
+    REG_OP(ObExprArrayToString);
+    REG_OP(ObExprStringToArray);
+    REG_OP(ObExprArrayAppend);
+    REG_OP(ObExprElementAt);
+    REG_OP(ObExprArrayCardinality);
+    REG_OP(ObExprDecodeTraceId);
+    REG_OP(ObExprAuditLogSetFilter);
+    REG_OP(ObExprAuditLogRemoveFilter);
+    REG_OP(ObExprAuditLogSetUser);
+    REG_OP(ObExprAuditLogRemoveUser);
+    REG_OP(ObExprIsEnabledRole);
+    REG_OP(ObExprSm3);
+    REG_OP(ObExprSm4Encrypt);
+    REG_OP(ObExprSm4Decrypt);
+    REG_OP(ObExprSplitPart);
+    REG_OP(ObExprInnerIsTrue);
+    REG_OP(ObExprInnerDecodeLike);
+    REG_OP(ObExprInnerDoubleToInt);
+    REG_OP(ObExprInnerDecimalToYear);
+    REG_OP(ObExprTokenize);
+    REG_OP(ObExprArrayOverlaps);
+    REG_OP(ObExprArrayContainsAll);
+    REG_OP(ObExprArrayDistinct);
+    REG_OP(ObExprArrayRemove);
+    REG_OP(ObExprArrayMap);
+    REG_OP(ObExprGetMySQLRoutineParameterTypeStr);
+    REG_OP(ObExprCalcOdpsSize);
+    REG_OP(ObExprToPinyin);
   }();
 // 注册oracle系统函数
   REG_OP_ORCL(ObExprSysConnectByPath);
@@ -1184,6 +1395,9 @@ void ObExprOperatorFactory::register_expr_operators()
   REG_OP_ORCL(ObExprSysExtractUtc);
   REG_OP_ORCL(ObExprTzOffset);
   REG_OP_ORCL(ObExprFromTz);
+  REG_OP_ORCL(ObExprSpatialCellid);
+  REG_OP_ORCL(ObExprSpatialMbr);
+  REG_OP_ORCL(ObExprToPinyin);
   //label security
   REG_OP_ORCL(ObExprOLSPolicyCreate);
   REG_OP_ORCL(ObExprOLSPolicyAlter);
@@ -1302,13 +1516,37 @@ void ObExprOperatorFactory::register_expr_operators()
   REG_OP_ORCL(ObExprPrivXmlBinary);
   REG_OP_ORCL(ObExprXmlparse);
   REG_OP_ORCL(ObExprXmlElement);
+  REG_OP_ORCL(ObExprXmlConcat);
+  REG_OP_ORCL(ObExprXmlForest);
   REG_OP_ORCL(ObExprXmlAttributes);
   REG_OP_ORCL(ObExprExtractValue);
   REG_OP_ORCL(ObExprExtractXml);
+  REG_OP_ORCL(ObExprExistsNodeXml);
   REG_OP_ORCL(ObExprXmlSerialize);
   REG_OP_ORCL(ObExprXmlcast);
   REG_OP_ORCL(ObExprUpdateXml);
+  REG_OP_ORCL(ObExprInsertChildXml);
+  REG_OP_ORCL(ObExprDeleteXml);
+  REG_OP_ORCL(ObExprXmlSequence);
+  REG_OP_ORCL(ObExprUdtConstruct);
+  REG_OP_ORCL(ObExprUDTAttributeAccess);
   REG_OP_ORCL(ObExprTempTableSSID);
+  REG_OP_ORCL(ObExprJsonObjectStar);
+  REG_OP_ORCL(ObExprTransactionId);
+  REG_OP_ORCL(ObExprInnerRowCmpVal);
+  REG_OP_ORCL(ObExprLastRefreshScn);
+  REG_OP_ORCL(ObExprTopNFilter);
+  REG_OP_ORCL(ObExprInnerTableOptionPrinter);
+  REG_OP_ORCL(ObExprInnerTableSequenceGetter);
+  // REG_OP_ORCL(ObExprTopNFilter);
+  REG_OP_ORCL(ObExprSdoRelate);
+  REG_OP_ORCL(ObExprGetPath);
+  REG_OP_ORCL(ObExprDecodeTraceId);
+  REG_OP_ORCL(ObExprSplitPart);
+  REG_OP_ORCL(ObExprInnerIsTrue);
+  REG_OP_ORCL(ObExprInnerDecodeLike);
+  REG_OP_ORCL(ObExprInnerDoubleToInt);
+  REG_OP_ORCL(ObExprCalcOdpsSize);
 }
 
 bool ObExprOperatorFactory::is_expr_op_type_valid(ObExprOperatorType type)
@@ -1424,9 +1662,27 @@ void ObExprOperatorFactory::get_function_alias_name(const ObString &origin_name,
       // don't alias "power" to "pow" in oracle mode, because oracle has no
       // "pow" function.
       alias_name = ObString::make_string(N_POW);
+    } else if (0 == origin_name.case_compare("VEC_VID")) {
+      alias_name = ObString::make_string(N_VEC_VID);
+    } else if (0 == origin_name.case_compare("VEC_TYPE")) {
+      alias_name = ObString::make_string(N_VEC_TYPE);
+    } else if (0 == origin_name.case_compare("VEC_VECTOR")) {
+      alias_name = ObString::make_string(N_VEC_VECTOR);
+    } else if (0 == origin_name.case_compare("VEC_SCN")) {
+      alias_name = ObString::make_string(N_VEC_SCN);
+    } else if (0 == origin_name.case_compare("VEC_KEY")) {
+      alias_name = ObString::make_string(N_VEC_KEY);
+    } else if (0 == origin_name.case_compare("VEC_DATA")) {
+      alias_name = ObString::make_string(N_VEC_DATA);
+    } else if (0 == origin_name.case_compare("DOC_ID")) {
+      alias_name = ObString::make_string(N_DOC_ID);
     } else if (0 == origin_name.case_compare("ws")) {
       // ws is synonym for word_segment
       alias_name = ObString::make_string(N_WORD_SEGMENT);
+    } else if (0 == origin_name.case_compare("WORD_COUNT")) {
+      alias_name = ObString::make_string(N_WORD_COUNT);
+    } else if (0 == origin_name.case_compare("DOC_LENGTH")) {
+      alias_name = ObString::make_string(N_DOC_LENGTH);
     } else if (0 == origin_name.case_compare("inet_ntoa")) {
       // inet_ntoa is synonym for int2ip
       alias_name = ObString::make_string(N_INT2IP);
@@ -1439,6 +1695,9 @@ void ObExprOperatorFactory::get_function_alias_name(const ObString &origin_name,
     } else if (0 == origin_name.case_compare("area")) {
       // area is synonym for st_area
       alias_name = ObString::make_string(N_ST_AREA);
+    } else if (0 == origin_name.case_compare("centroid")) {
+      // centroid is synonym for st_centroid
+      alias_name = ObString::make_string(N_ST_CENTROID);
     } else {
       //do nothing
     }

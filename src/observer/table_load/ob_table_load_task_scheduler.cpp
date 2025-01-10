@@ -20,7 +20,7 @@
 #include "observer/table_load/ob_table_load_task.h"
 #include "share/ob_share_util.h"
 #include "share/rc/ob_tenant_base.h"
-#include "storage/direct_load/ob_direct_load_table_builder_allocator.h"
+#include "share/resource_manager/ob_resource_manager.h"
 
 namespace oceanbase
 {
@@ -33,7 +33,6 @@ using namespace storage;
 void ObTableLoadTaskThreadPoolScheduler::MyThreadPool::run1()
 {
   OB_ASSERT(OB_NOT_NULL(scheduler_));
-  ObTenantStatEstGuard stat_est_guard(MTL_ID());
   const int64_t thread_count = get_thread_count();
   // LOG_INFO("table load task thread start", KP(this), "pid", get_tid_cache(), "thread_idx", get_thread_idx());
   // 启动成功的线程数+1
@@ -68,6 +67,7 @@ ObTableLoadTaskThreadPoolScheduler::ObTableLoadTaskThreadPoolScheduler(int64_t t
     state_(STATE_ZERO),
     is_inited_(false)
 {
+  allocator_.set_tenant_id(MTL_ID());
   snprintf(name_, OB_THREAD_NAME_BUF_LEN, "TLD_%03ld_%s", table_id % 1000, label);
 }
 
@@ -112,7 +112,6 @@ int ObTableLoadTaskThreadPoolScheduler::init()
     ret = OB_INIT_TWICE;
     LOG_WARN("ObTableLoadTaskThreadPoolScheduler init twice", KR(ret), KP(this));
   } else {
-    allocator_.set_tenant_id(MTL_ID());
     thread_pool_.set_thread_count(thread_count_);
     thread_pool_.set_run_wrapper(MTL_CTX());
     ObCurTraceId::TraceId *cur_trace_id = ObCurTraceId::get_trace_id();
@@ -242,6 +241,7 @@ void ObTableLoadTaskThreadPoolScheduler::run(uint64_t thread_idx)
   share::ObTenantBase *tenant_base = MTL_CTX();
   lib::Worker::CompatMode mode = ((omt::ObTenant *)tenant_base)->get_compat_mode();
   lib::Worker::set_compatibility_mode(mode);
+  CONSUMER_GROUP_FUNC_GUARD(ObFunctionType::PRIO_IMPORT);
 
   LOG_INFO("table load task thread run", KP(this), "pid", get_tid_cache(), K(thread_idx));
 
@@ -268,9 +268,6 @@ void ObTableLoadTaskThreadPoolScheduler::run(uint64_t thread_idx)
   if (STATE_RUNNING == state_) {
     state_ = STATE_STOPPING;
   }
-
-  // clear thread local variables
-  get_table_builder_allocator()->reset();
 
   LOG_INFO("table load task thread stopped", KP(this), "pid", get_tid_cache(), K(thread_idx));
 }

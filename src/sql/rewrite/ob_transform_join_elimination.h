@@ -243,7 +243,7 @@ private:
    * @brief trans_table_item
    * 将关联target_table的结构改写为关联source_table
    * 从from item中删除target table
-   * 从partiton信息中删除target table
+   * 从partition信息中删除target table
    * 重构 rel_idx
    * @param stmt
    * @param source_table
@@ -262,15 +262,11 @@ private:
   int eliminate_outer_join_in_joined_table(ObDMLStmt *stmt,
                                            TableItem *&table_item,
                                            const bool is_non_sens_dul_vals,
+                                           const bool is_root_table,
                                            ObIArray<uint64_t> &removed_ids,
                                            ObIArray<ObRawExprPointer> &relation_exprs,
                                            bool &trans_happen,
                                            ObIArray<ObSEArray<TableItem *, 4>> &trans_tables);
-
-  int check_vaild_non_sens_dul_vals(ObIArray<ObParentDMLStmt> &parent_stmts,
-                                    ObDMLStmt *stmt,
-                                    bool &is_valid,
-                                    bool &need_add_limit_constraint);
 
   int get_eliminable_tables(const ObDMLStmt *stmt,
                             const ObIArray<ObRawExpr *> &conds,
@@ -593,7 +589,7 @@ private:
    * @brief trans_semi_table_item
    * 将关联target_table的结构改写为关联source_table
    * 从table items中删除target table
-   * 从partiton信息中删除target table
+   * 从partition信息中删除target table
    * 重构 rel_idx
    * @param stmt
    * @param source_table

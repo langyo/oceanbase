@@ -75,7 +75,7 @@ public:
   int switch_to_follower_gracefully();
   int resume_leader() { return switch_to_leader(); }
 
-  int launch_major_freeze();
+  int launch_major_freeze(const ObMajorFreezeReason freeze_reason);
   int suspend_merge();
   int resume_merge();
   int clear_merge_error();
@@ -88,7 +88,9 @@ public:
   void destroy();
 
   bool is_paused() const;
-  int get_uncompacted_tablets(common::ObArray<share::ObTabletReplica> &uncompacted_tablets) const;
+  int get_uncompacted_tablets(
+    common::ObArray<share::ObTabletReplica> &uncompacted_tablets,
+    common::ObArray<uint64_t> &uncompacted_table_ids) const;
 
 protected:
   virtual ObMajorFreezeServiceType get_service_type() const

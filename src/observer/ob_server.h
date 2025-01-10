@@ -20,6 +20,8 @@
 #include "lib/container/ob_iarray.h"
 
 
+#include "share/object_storage/ob_device_config_mgr.h"
+#include "share/object_storage/ob_device_manifest_task.h"
 #include "share/stat/ob_opt_stat_service.h"
 #include "share/ratelimit/ob_rl_mgr.h"
 #include "share/ls/ob_ls_table_operator.h"
@@ -38,7 +40,6 @@
 
 #include "storage/tx/wrs/ob_weak_read_service.h"         // ObWeakReadService
 #include "storage/tx/wrs/ob_black_list.h"
-#include "storage/ob_partition_component_factory.h"
 
 #include "rootserver/ob_root_service.h"
 
@@ -61,9 +62,9 @@
 #include "observer/table/ob_table_service.h"
 #include "observer/dbms_job/ob_dbms_job_rpc_proxy.h"
 #include "observer/ob_inner_sql_rpc_proxy.h"
+#include "observer/ob_startup_accel_task_handler.h"
 #include "share/ls/ob_ls_table_operator.h" // for ObLSTableOperator
 #include "storage/ob_locality_manager.h"
-#include "storage/ob_partition_component_factory.h"
 #include "storage/ddl/ob_ddl_heart_beat_task.h"
 
 #include "storage/ob_disk_usage_reporter.h"
@@ -79,6 +80,10 @@
 
 #include "sql/engine/table/ob_external_table_access_service.h"
 #include "share/external_table/ob_external_table_file_rpc_proxy.h"
+#ifdef OB_BUILD_SHARED_STORAGE
+#include "close_modules/shared_storage/storage/shared_storage/ob_tenant_gc_task.h"
+#endif
+#include "share/ob_device_credential_task.h"
 
 namespace oceanbase
 {
@@ -106,8 +111,8 @@ namespace observer
 class ObServer
 {
 public:
-  static const int64_t DEFAULT_ETHERNET_SPEED = 1000 / 8 * 1024 * 1024; // default 125m/s  1000Mbit
-  static const int64_t DISK_USAGE_REPORT_INTERVAL = 1000L * 1000L * 300L; // 5min
+  static const int64_t DEFAULT_ETHERNET_SPEED = 10000 / 8 * 1024 * 1024; // change from default 1250m/s  10000Mbit to 1250MBps 10000Mbit
+  static const int64_t DISK_USAGE_REPORT_INTERVAL = 1000L * 1000L * 60L; // 1min
   static const uint64_t DEFAULT_CPU_FREQUENCY = 2500 * 1000; // 2500 * 1000 khz
   static ObServer &get_instance();
 
@@ -182,6 +187,21 @@ public:
     bool is_inited_;
   };
 
+  class ObRefreshIOCalibrationTimeTask: public common::ObTimerTask
+  {
+  public:
+    ObRefreshIOCalibrationTimeTask();
+    virtual ~ObRefreshIOCalibrationTimeTask() {}
+    int init(ObServer *observer, int tg_id);
+    void destroy();
+    virtual void runTimerTask() override;
+  private:
+    const static int64_t REFRESH_INTERVAL = 10 * 1000L * 1000L;//10s
+    ObServer *obs_;
+    int tg_id_;
+    bool is_inited_;
+  };
+
   class ObRefreshTime {
   public:
     explicit ObRefreshTime(ObServer *obs): obs_(obs){}
@@ -224,6 +244,7 @@ public:
   share::schema::ObMultiVersionSchemaService &get_schema_service() { return schema_service_; }
   ObInOutBandwidthThrottle &get_bandwidth_throttle() { return bandwidth_throttle_; }
   uint64_t get_cpu_frequency_khz() { return cpu_frequency_; }
+  int64_t get_network_speed() const { return ethernet_speed_; }
   const common::ObAddr &get_self() const { return self_addr_; }
   const ObGlobalContext &get_gctx() const { return gctx_; }
   ObGlobalContext &get_gctx() { return gctx_; }
@@ -248,10 +269,15 @@ private:
   ~ObServer();
 
   int init_config();
+  int init_opts_config(bool has_config_file); // init configs from command line
+  int init_local_ip_and_devname();
+  int init_self_addr();
+  int init_config_module();
   int init_tz_info_mgr();
   int init_pre_setting();
   int init_network();
   int init_interrupt();
+  int init_zlib_lite_compressor();
   int init_multi_tenant();
   int init_sql_proxy();
   int init_io();
@@ -274,6 +300,7 @@ private:
   int init_px_target_mgr();
   int init_storage();
   int init_tx_data_cache();
+  int init_log_kv_cache();
   int init_gc_partition_adapter();
   int init_loaddata_global_stat();
   int init_bandwidth_throttle();
@@ -282,23 +309,33 @@ private:
   int stop_log_mgr();
   int reload_bandwidth_throttle_limit(int64_t network_speed);
   int get_network_speed_from_sysfs(int64_t &network_speed);
-  int get_network_speed_from_config_file(int64_t &network_speed);
   int refresh_network_speed();
   int refresh_cpu_frequency();
+  int refresh_io_calibration();
   int clean_up_invalid_tables();
   int clean_up_invalid_tables_by_tenant(const uint64_t tenant_id);
   int init_ctas_clean_up_task(); //Regularly clean up the residuals related to querying and building tables and temporary tables
   int init_redef_heart_beat_task();
+#ifdef OB_BUILD_SHARED_STORAGE
+  int init_tenant_dir_gc_task();
+#endif
   int init_ddl_heart_beat_task_container();
   int refresh_temp_table_sess_active_time();
   int init_refresh_active_time_task(); //Regularly update the sess_active_time of the temporary table created by the proxy connection sess
   int init_refresh_network_speed_task();
   int init_refresh_cpu_frequency();
+  int init_device_manifest_task();
+  int check_all_device_connectivity();
+  int init_refresh_io_calibration();
   int set_running_mode();
   void check_user_tenant_schema_refreshed(const common::ObIArray<uint64_t> &tenant_ids, const int64_t expire_time);
   void check_log_replay_over(const common::ObIArray<uint64_t> &tenant_ids, const int64_t expire_time);
   int try_update_hidden_sys();
+  int check_if_multi_tenant_synced();
+  int check_if_schema_ready();
+  int check_if_timezone_usable();
   int parse_mode();
+  void deinit_zlib_lite_compressor();
 
   // ------------------------------- arb server start ------------------------------------
   int start_sig_worker_and_handle();
@@ -310,12 +347,21 @@ private:
   // ------------------------------- arb server end --------------------------------------
 
 public:
+  static int get_network_speed_from_config_file(int64_t &network_speed);
+public:
   volatile bool need_ctas_cleanup_; //true: ObCTASCleanUpTask should traverse all table schemas to find the one need be dropped
 private:
   //thread to deal signals
   char sig_buf_[sizeof(ObSignalWorker) + sizeof(ObSignalHandle)] __attribute__((__aligned__(16)));
   ObSignalWorker *sig_worker_;
   ObSignalHandle *signal_handle_;
+
+  // gctx, aka global context, stores pointers to objects or services
+  // which should share with all, or in part, of classes using in
+  // observer. The whole pointers stored in gctx wouldn't be changed
+  // once they're assigned. So other class can only get a reference of
+  // constant gctx.
+  ObGlobalContext &gctx_;
 
   // self addr
   common::ObAddr self_addr_;
@@ -338,6 +384,7 @@ private:
   // The two proxies by which local OceanBase server has ability to
   // communicate with other server.
   obrpc::ObSrvRpcProxy srv_rpc_proxy_;
+  obrpc::ObStorageRpcProxy storage_rpc_proxy_;
   obrpc::ObCommonRpcProxy rs_rpc_proxy_;
   common::ObMySQLProxy sql_proxy_;
   common::ObMySQLProxy ddl_sql_proxy_;
@@ -359,6 +406,7 @@ private:
   common::ObConfigManager config_mgr_;
   omt::ObTenantConfigMgr &tenant_config_mgr_;
   omt::ObTenantTimezoneMgr &tenant_timezone_mgr_;
+  share::ObDeviceConfigMgr &device_config_mgr_;
 
   // The Oceanbase schema relating to.
   share::schema::ObMultiVersionSchemaService &schema_service_;
@@ -379,7 +427,6 @@ private:
   share::ObLocationService location_service_;
 
   // storage related
-  storage::ObPartitionComponentFactory partition_cfy_;
   common::ObInOutBandwidthThrottle bandwidth_throttle_;
   int64_t sys_bkgd_net_percentage_;
   int64_t ethernet_speed_;
@@ -416,13 +463,6 @@ private:
   // Tenant isolation resource management
   share::ObCgroupCtrl cgroup_ctrl_;
 
-  // gctx, aka global context, stores pointers to objects or services
-  // which should share with all, or in part, of classes using in
-  // observer. The whole pointers stored in gctx wouldn't be changed
-  // once they're assigned. So other class can only get a reference of
-  // constant gctx.
-  ObGlobalContext gctx_;
-
   //observer start time
   int64_t start_time_;
   int64_t warm_up_start_time_;
@@ -435,8 +475,10 @@ private:
   ObRefreshTimeTask refresh_active_time_task_; // repeat & no retry
   ObRefreshNetworkSpeedTask refresh_network_speed_task_; // repeat & no retry
   ObRefreshCpuFreqTimeTask refresh_cpu_frequency_task_;
+  ObRefreshIOCalibrationTimeTask refresh_io_calibration_task_; // retry to success & no repeat
   blocksstable::ObStorageEnv storage_env_;
   share::ObSchemaStatusProxy schema_status_proxy_;
+  ObDeviceCredentialTask device_credential_task_;
 
   // for locality
   ObLocalityManager locality_manager_;
@@ -452,6 +494,14 @@ private:
   arbserver::ObArbServerTimer arb_timer_;
 #endif
   share::ObWorkloadRepositoryService wr_service_;
+
+  // This handler is used to process tasks during startup. it can speed up the startup process.
+  // If you have tasks that need to be processed in parallel, you can use this handler,
+  // but please note that this handler will be destroyed after observer startup.
+  ObStartupAccelTaskHandler startup_accel_handler_;
+#ifdef OB_BUILD_SHARED_STORAGE
+  ObTenantGCTask tenant_dir_gc_task_;
+#endif
 }; // end of class ObServer
 
 inline ObServer &ObServer::get_instance()

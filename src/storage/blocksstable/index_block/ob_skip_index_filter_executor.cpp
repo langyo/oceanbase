@@ -1,12 +1,14 @@
-// Copyright (c) 2022 Ant Group CO., Ltd.
-// OceanBase is licensed under Mulan PubL v1.
-// You can use this software according to the terms and conditions of the Mulan
-// PubL v1. You may obtain a copy of Mulan PubL v1 at:
-//             http://license.coscl.org.cn/MulanPubL-1.0
-// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY
-// KIND, EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO
-// NON-INFRINGEMENT, MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE. See the
-// Mulan PubL v1 for more details.
+/**
+ * Copyright (c) 2022 OceanBase
+ * OceanBase is licensed under Mulan PubL v2.
+ * You can use this software according to the terms and conditions of the Mulan PubL v2.
+ * You may obtain a copy of Mulan PubL v2 at:
+ *          http://license.coscl.org.cn/MulanPubL-2.0
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND,
+ * EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
+ * MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
+ * See the Mulan PubL v2 for more details.
+ */
 
 #define USING_LOG_PREFIX STORAGE
 #include "storage/blocksstable/index_block/ob_skip_index_filter_executor.h"
@@ -14,6 +16,26 @@ namespace oceanbase
 {
 namespace blocksstable
 {
+
+int ObSkipIndexFilterExecutor::init(const int64_t batch_size, common::ObIAllocator *allocator)
+{
+  int ret = OB_SUCCESS;
+  if (IS_INIT) {
+    ret = OB_INIT_TWICE;
+    LOG_WARN("ObSkipIndexFilterExecutor has been inited", K(ret));
+  } else if (OB_UNLIKELY(batch_size <= 0 || nullptr == allocator)) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("Invalid batch_size or allocator", K(ret), K(batch_size), KP(allocator));
+  } else if (OB_ISNULL(skip_bit_ = sql::to_bit_vector(allocator->alloc(sql::ObBitVector::memory_size(batch_size))))) {
+    ret = OB_ALLOCATE_MEMORY_FAILED;
+    LOG_WARN("Failed to alloc memory for skip bit", K(ret), K(batch_size));
+  } else {
+    skip_bit_->init(batch_size);
+    allocator_ = allocator;
+    is_inited_ = true;
+  }
+  return ret;
+}
 
 int ObSkipIndexFilterExecutor::read_aggregate_data(const uint32_t col_idx,
                   common::ObIAllocator &allocator,
@@ -47,23 +69,53 @@ int ObSkipIndexFilterExecutor::read_aggregate_data(const uint32_t col_idx,
 
 int ObSkipIndexFilterExecutor::falsifiable_pushdown_filter(
     const uint32_t col_idx,
+    const ObObjMeta &obj_meta,
     const ObSkipIndexType index_type,
     const ObMicroIndexInfo &index_info,
-    sql::ObWhiteFilterExecutor &filter,
-    common::ObIAllocator &allocator)
+    sql::ObPhysicalFilterExecutor &filter,
+    common::ObIAllocator &allocator,
+    const bool use_vectorize)
 {
   int ret = OB_SUCCESS;
-  reset();
-  if (OB_UNLIKELY(!index_info.has_agg_data())) {
+  if (IS_NOT_INIT) {
+    ret = OB_NOT_INIT;
+    LOG_WARN("ObSkipIndexFilterExecutor has not been inited", K(ret));
+  } else if (OB_UNLIKELY(!index_info.has_agg_data())) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("Invalid argument", K(ret), K(index_info));
+  } else if (FALSE_IT(agg_row_reader_.reset())) {
   } else if (OB_FAIL(agg_row_reader_.init(index_info.agg_row_buf_, index_info.agg_buf_size_))) {
     LOG_WARN("failed to init agg row reader", K(ret));
   } else {
     switch (index_type) {
       case ObSkipIndexType::MIN_MAX: {
-        if (OB_FAIL(filter_on_min_max(col_idx, index_info.get_row_count(), filter, allocator))) {
-          LOG_WARN("Fail to filter on min_max", K(ret), K(col_idx));
+        if (filter.is_filter_dynamic_node()) {
+          sql::ObDynamicFilterExecutor &dynamic_filter =
+            static_cast<sql::ObDynamicFilterExecutor &>(filter);
+          if (!dynamic_filter.is_data_prepared()) {
+            filter.get_filter_bool_mask().set_uncertain();
+          } else if (dynamic_filter.is_filter_all_data()) {
+            filter.get_filter_bool_mask().set_always_false();
+          } else if (dynamic_filter.is_pass_all_data()) {
+            filter.get_filter_bool_mask().set_always_true();
+          } else if (OB_FAIL(filter_on_min_max(col_idx, index_info.get_row_count(),
+              obj_meta, dynamic_filter, allocator))) {
+            LOG_WARN("Failed to filter on min_max for dynamic filter", K(ret), K(col_idx));
+          }
+        } else if (filter.is_filter_white_node()) {
+          sql::ObWhiteFilterExecutor &white_filter =
+            static_cast<sql::ObWhiteFilterExecutor &>(filter);
+          if (OB_FAIL(filter_on_min_max(col_idx, index_info.get_row_count(),
+              obj_meta, white_filter, allocator))) {
+            LOG_WARN("Failed to filter on min_max for white filter", K(ret), K(col_idx));
+          }
+        } else if (filter.is_filter_black_node()) {
+          sql::ObBlackFilterExecutor &black_filter =
+            static_cast<sql::ObBlackFilterExecutor &>(filter);
+          if (OB_FAIL(black_filter_on_min_max(col_idx, index_info.get_row_count(),
+              obj_meta, black_filter, allocator, use_vectorize))) {
+            LOG_WARN("Failed to filter on min_max for black filter", K(ret), K(col_idx));
+          }
         }
         break;
       }
@@ -79,12 +131,12 @@ int ObSkipIndexFilterExecutor::falsifiable_pushdown_filter(
 int ObSkipIndexFilterExecutor::filter_on_min_max(
     const uint32_t col_idx,
     const uint64_t row_count,
+    const ObObjMeta &obj_meta,
     sql::ObWhiteFilterExecutor &filter,
     common::ObIAllocator &allocator)
 {
   int ret = OB_SUCCESS;
   sql::ObBoolMask &fal_desc = filter.get_filter_bool_mask();
-  const ObObjMeta &obj_meta = filter.get_filter_node().expr_->args_[0]->obj_meta_;
   const share::schema::ObColumnParam *col_param = filter.get_col_params().at(0);
   ObStorageDatum null_count;
   ObStorageDatum min_datum;
@@ -97,8 +149,8 @@ int ObSkipIndexFilterExecutor::filter_on_min_max(
   } else if (null_count.is_null() && min_datum.is_null() && max_datum.is_null()) {
     // min max null_count all null, expect uncertain cause by progressive merge
     fal_desc.set_uncertain();
-  } else if (null_count.is_null() || null_count.get_int() < 0 || null_count.get_int() > row_count ||
-             min_datum.is_null() != max_datum.is_null()) {
+  } else if (OB_UNLIKELY(null_count.is_null() || null_count.get_int() < 0 || null_count.get_int() > row_count ||
+             min_datum.is_null() != max_datum.is_null())) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("not correct min_max agg info", K(ret), K(col_idx), K(row_count),
              K(null_count), K(min_datum), K(max_datum));
@@ -250,10 +302,7 @@ int ObSkipIndexFilterExecutor::eq_operator(const sql::ObWhiteFilterExecutor &fil
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("Invalid argument for falsifiable EQ operator", K(ret), K(filter));
   } else {
-    // falsifable calculation, if prefix, do not verify equal
     const ObDatum &ref_datum = datums.at(0);
-    bool min_prefix = min_datum.len_ == ObSkipIndexColMeta::MAX_SKIP_INDEX_COL_LENGTH;
-    bool max_prefix = max_datum.len_ == ObSkipIndexColMeta::MAX_SKIP_INDEX_COL_LENGTH;
     ObDatumCmpFuncType cmp_func = filter.cmp_func_;
     int min_cmp_res = 0;
     int max_cmp_res = 0;
@@ -263,8 +312,7 @@ int ObSkipIndexFilterExecutor::eq_operator(const sql::ObWhiteFilterExecutor &fil
       LOG_WARN("Failed to compare datum", K(ret), K(max_datum), K(ref_datum));
     } else if (min_cmp_res > 0 || max_cmp_res < 0) {
       fal_desc.set_always_false();
-    } else if (!max_prefix && !min_prefix &&
-        min_cmp_res == 0 && max_cmp_res ==0) {
+    } else if (min_cmp_res == 0 && max_cmp_res == 0) {
       fal_desc.set_always_true();
     } else {
       fal_desc.set_uncertain();
@@ -284,10 +332,7 @@ int ObSkipIndexFilterExecutor::ne_operator(const sql::ObWhiteFilterExecutor &fil
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("Invalid argument for falsifiable NE operator", K(ret), K(filter));
   } else {
-    // falsifable calculation, if prefix, do not verify equal
     const ObDatum &ref_datum = datums.at(0);
-    bool min_prefix = min_datum.len_ == ObSkipIndexColMeta::MAX_SKIP_INDEX_COL_LENGTH;
-    bool max_prefix = max_datum.len_ == ObSkipIndexColMeta::MAX_SKIP_INDEX_COL_LENGTH;
     ObDatumCmpFuncType cmp_func = filter.cmp_func_;
     int min_cmp_res = 0;
     int max_cmp_res = 0;
@@ -295,8 +340,7 @@ int ObSkipIndexFilterExecutor::ne_operator(const sql::ObWhiteFilterExecutor &fil
       LOG_WARN("Failed to compare datum", K(ret), K(min_datum), K(ref_datum));
     } else if (OB_FAIL(cmp_func(max_datum, ref_datum, max_cmp_res))) {
       LOG_WARN("Failed to compare datum", K(ret), K(max_datum), K(ref_datum));
-    } else if (!max_prefix && !min_prefix &&
-        min_cmp_res == 0 && max_cmp_res ==0) {
+    } else if (min_cmp_res == 0 && max_cmp_res == 0) {
       fal_desc.set_always_false();
     } else if (min_cmp_res > 0 || max_cmp_res < 0) {
       fal_desc.set_always_true();
@@ -318,9 +362,7 @@ int ObSkipIndexFilterExecutor::gt_operator(const sql::ObWhiteFilterExecutor &fil
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("Invalid argument for falsifiable GT operator", K(ret), K(filter));
   } else {
-    // falsifable calculation, if prefix, do not verify equal
     const ObDatum &ref_datum = datums.at(0);
-    bool max_prefix = max_datum.len_ == ObSkipIndexColMeta::MAX_SKIP_INDEX_COL_LENGTH;
     ObDatumCmpFuncType cmp_func = filter.cmp_func_;
     int min_cmp_res = 0;
     int max_cmp_res = 0;
@@ -328,8 +370,7 @@ int ObSkipIndexFilterExecutor::gt_operator(const sql::ObWhiteFilterExecutor &fil
       LOG_WARN("Failed to compare datum", K(ret), K(min_datum), K(ref_datum));
     } else if (OB_FAIL(cmp_func(max_datum, ref_datum, max_cmp_res))) {
       LOG_WARN("Failed to compare datum", K(ret), K(max_datum), K(ref_datum));
-    } else if (max_cmp_res < 0 ||
-      (!max_prefix && max_cmp_res == 0)) {
+    } else if (max_cmp_res < 0 || max_cmp_res == 0) {
       fal_desc.set_always_false();
     } else if (min_cmp_res > 0) {
       fal_desc.set_always_true();
@@ -351,9 +392,7 @@ int ObSkipIndexFilterExecutor::ge_operator(const sql::ObWhiteFilterExecutor &fil
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("Invalid argument for falsifiable GE operator", K(ret), K(filter));
   } else {
-    // falsifable calculation, if prefix, do not verify equal
     const ObDatum &ref_datum = datums.at(0);
-    bool min_prefix = min_datum.len_ == ObSkipIndexColMeta::MAX_SKIP_INDEX_COL_LENGTH;
     ObDatumCmpFuncType cmp_func = filter.cmp_func_;
     int min_cmp_res = 0;
     int max_cmp_res = 0;
@@ -363,8 +402,7 @@ int ObSkipIndexFilterExecutor::ge_operator(const sql::ObWhiteFilterExecutor &fil
       LOG_WARN("Failed to compare datum", K(ret), K(max_datum), K(ref_datum));
     } else if (max_cmp_res < 0) {
       fal_desc.set_always_false();
-    } else if (min_cmp_res > 0 ||
-        (!min_prefix && min_cmp_res == 0)) {
+    } else if (min_cmp_res > 0 || min_cmp_res == 0) {
       fal_desc.set_always_true();
     } else {
       fal_desc.set_uncertain();
@@ -384,9 +422,7 @@ int ObSkipIndexFilterExecutor::lt_operator(const sql::ObWhiteFilterExecutor &fil
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("Invalid argument for falsifiable LT operator", K(ret), K(filter));
   } else {
-    // falsifable calculation, if prefix, do not verify equal
     const ObDatum &ref_datum = datums.at(0);
-    bool min_prefix = min_datum.len_ == ObSkipIndexColMeta::MAX_SKIP_INDEX_COL_LENGTH;
     ObDatumCmpFuncType cmp_func = filter.cmp_func_;
     int min_cmp_res = 0;
     int max_cmp_res = 0;
@@ -394,8 +430,7 @@ int ObSkipIndexFilterExecutor::lt_operator(const sql::ObWhiteFilterExecutor &fil
       LOG_WARN("Failed to compare datum", K(ret), K(min_datum), K(ref_datum));
     } else if (OB_FAIL(cmp_func(max_datum, ref_datum, max_cmp_res))) {
       LOG_WARN("Failed to compare datum", K(ret), K(max_datum), K(ref_datum));
-    } else if (min_cmp_res > 0 ||
-        (!min_prefix && min_cmp_res == 0)) {
+    } else if (min_cmp_res > 0 || min_cmp_res == 0) {
       fal_desc.set_always_false();
     } else if (max_cmp_res < 0) {
       fal_desc.set_always_true();
@@ -417,7 +452,6 @@ int ObSkipIndexFilterExecutor::le_operator(const sql::ObWhiteFilterExecutor &fil
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("Invalid argument for falsifiable LE operator", K(ret), K(filter));
   } else {
-    // falsifable calculation, if prefix, do not verify equal
     const ObDatum &ref_datum = datums.at(0);
     bool max_prefix = max_datum.len_ == ObSkipIndexColMeta::MAX_SKIP_INDEX_COL_LENGTH;
     ObDatumCmpFuncType cmp_func = filter.cmp_func_;
@@ -429,8 +463,7 @@ int ObSkipIndexFilterExecutor::le_operator(const sql::ObWhiteFilterExecutor &fil
       LOG_WARN("Failed to compare datum", K(ret), K(max_datum), K(ref_datum));
     } else if (min_cmp_res > 0) {
       fal_desc.set_always_false();
-    } else if (max_cmp_res < 0 ||
-        (!max_prefix && max_cmp_res == 0)) {
+    } else if (max_cmp_res < 0 || max_cmp_res == 0) {
       fal_desc.set_always_true();
     } else {
       fal_desc.set_uncertain();
@@ -446,43 +479,39 @@ int ObSkipIndexFilterExecutor::in_operator(const sql::ObWhiteFilterExecutor &fil
 {
   int ret = OB_SUCCESS;
   const common::ObIArray<common::ObDatum> &datums = filter.get_datums();
-  if (OB_UNLIKELY(datums.count() == 0 || filter.null_param_contained())){
+  const sql::ObExpr *col_expr = filter.get_filter_node().expr_;
+  if (OB_UNLIKELY(nullptr == col_expr)) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("Invalid argument for falsifiable IN operator", K(ret), K(filter));
+  } else if (filter.null_param_contained()) {
+    fal_desc.set_always_false();
   } else {
-    // falsifable calculation, if prefix, do not verify equal
-    const int ref_count = datums.count();
-    bool min_prefix = min_datum.len_ == ObSkipIndexColMeta::MAX_SKIP_INDEX_COL_LENGTH;
-    bool max_prefix = max_datum.len_ == ObSkipIndexColMeta::MAX_SKIP_INDEX_COL_LENGTH;
     ObDatumCmpFuncType cmp_func = filter.cmp_func_;
-    int min_cmp_res;
-    int max_cmp_res;
-    bool falsifable_true = true;
-    bool falsifable_false = false;
-    for (int i = 0; OB_SUCC(ret) && i < ref_count; ++i) {
-      if (OB_FAIL(cmp_func(min_datum, datums.at(i), min_cmp_res))) {
-        LOG_WARN("Failed to compare datum", K(ret), K(min_datum), K(i), K(datums.at(i)));
-      } else if (OB_FAIL(cmp_func(max_datum, datums.at(i), max_cmp_res))) {
-        LOG_WARN("Failed to compare datum", K(ret), K(max_datum), K(i), K(datums.at(i)));
+    int cmp_res = 0;
+    bool equal = false;
+    ObDatumComparator cmp_rev(cmp_func, ret, equal, true);
+    int64_t pos = std::lower_bound(datums.get_data(), datums.get_data() + datums.count(), min_datum, cmp_rev) - datums.get_data();
+    if (OB_FAIL(ret)) {
+    } else if (pos < 0 || pos > datums.count()) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("Unexpected binary search result", K(ret), K(pos), K(datums.count()));
+    } else if (pos == datums.count()) { // datums[datums.count()-1] < min_datum <= max_datum
+      fal_desc.set_always_false();
+    } else {
+      const ObDatum &ref_datum = datums.at(pos);
+      if (OB_FAIL(cmp_func(max_datum, ref_datum, cmp_res))) {
+        LOG_WARN("Failed to compare datum", K(ret), K(max_datum), K(ref_datum));
+      } else if (cmp_res > 0) { // min_datum <= datums[pos] < max_datum
+        fal_desc.set_uncertain();
+      } else if (cmp_res < 0) { // min_datum <= max_datum < datums[0] or datums[pos-1] < min_datum <= max_datum < datums[pos]
+        fal_desc.set_always_false();
+      } else if (equal) { // min_datum == max_datum == datums[pos]
+        fal_desc.set_always_true();
       } else {
-          if (falsifable_true && ((min_cmp_res < 0 && max_cmp_res > 0) ||
-              (!min_prefix && min_cmp_res == 0) ||
-              (!max_prefix && max_cmp_res == 0))) {
-            falsifable_true = false;
-          }
-          if (!falsifable_false && !min_prefix && !max_prefix && min_cmp_res == 0 && max_cmp_res == 0) {
-            falsifable_false = true;
-          }
+        fal_desc.set_uncertain(); // min_datum != max_datum and max_datum == datums[pos]
       }
     }
-    if (OB_FAIL(ret)) {
-    } else if (falsifable_true) {
-      fal_desc.set_always_false();
-    } else if (falsifable_false) {
-      fal_desc.set_always_true();
-    } else {
-      fal_desc.set_uncertain();
-    }
+    LOG_DEBUG("check filter in in skip index", K(ret), K(cmp_res), K(equal), K(pos), K(fal_desc));
   }
   return ret;
 }
@@ -501,9 +530,6 @@ int ObSkipIndexFilterExecutor::bt_operator(const sql::ObWhiteFilterExecutor &fil
     const ObDatum &ref_left_datum = datums.at(0);
     const ObDatum &ref_right_datum = datums.at(1);
 
-    // falsifable calculation, if prefix, do not verify equal
-    bool min_prefix = min_datum.len_ == ObSkipIndexColMeta::MAX_SKIP_INDEX_COL_LENGTH;
-    bool max_prefix = max_datum.len_ == ObSkipIndexColMeta::MAX_SKIP_INDEX_COL_LENGTH;
     ObDatumCmpFuncType cmp_func = filter.cmp_func_;
     int min_left_cmp_res = 0;
     int min_right_cmp_res = 0;
@@ -520,10 +546,8 @@ int ObSkipIndexFilterExecutor::bt_operator(const sql::ObWhiteFilterExecutor &fil
       LOG_WARN("Failed to compare datum", K(ret), K(max_datum), K(ref_right_datum));
     } else if (min_right_cmp_res > 0 || max_left_cmp_res < 0) {
       fal_desc.set_always_false();
-    } else if ((min_left_cmp_res > 0 ||
-        (!min_prefix && min_left_cmp_res == 0)) &&
-        (max_right_cmp_res < 0 ||
-        (!max_prefix && max_right_cmp_res == 0))) {
+    } else if ((min_left_cmp_res > 0 || min_left_cmp_res == 0) &&
+        (max_right_cmp_res < 0 || max_right_cmp_res == 0)) {
       fal_desc.set_always_true();
     } else {
       fal_desc.set_uncertain();
@@ -531,5 +555,60 @@ int ObSkipIndexFilterExecutor::bt_operator(const sql::ObWhiteFilterExecutor &fil
   }
   return ret;
 }
+
+int ObSkipIndexFilterExecutor::black_filter_on_min_max(
+  const uint32_t col_idx,
+  const uint64_t row_count,
+  const ObObjMeta &obj_meta,
+  sql::ObBlackFilterExecutor &filter,
+  common::ObIAllocator &allocator,
+  const bool use_vectorize)
+{
+  int ret = OB_SUCCESS;
+  sql::ObBoolMask &fal_desc = filter.get_filter_bool_mask();
+  const share::schema::ObColumnParam *col_param = filter.get_col_params().at(0);
+  ObStorageDatum null_count;
+  ObStorageDatum min_datum;
+  ObStorageDatum max_datum;
+  if (OB_UNLIKELY(!filter.is_monotonic())) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("Invalid black filter, filter is not monotonic", K(ret), K(filter));
+  } else if (OB_FAIL(read_aggregate_data(col_idx, allocator, col_param,
+                            obj_meta, null_count, min_datum, max_datum))) {
+    LOG_WARN("Failed to read min and max", K(ret), K(col_idx));
+  } else if (null_count.is_null() && min_datum.is_null() && max_datum.is_null()) {
+    // min max null_count all null, expect uncertain cause by progressive merge
+    fal_desc.set_uncertain();
+  } else if (OB_UNLIKELY(null_count.is_null() || null_count.get_int() < 0 || null_count.get_int() > row_count ||
+             min_datum.is_null() != max_datum.is_null())) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("Not correct min_max agg info", K(ret), K(col_idx), K(row_count),
+             K(null_count), K(min_datum), K(max_datum));
+  } else if (use_vectorize &&
+             filter.get_op().enable_rich_format_ &&
+             OB_FAIL(init_exprs_uniform_header(filter.get_cg_col_exprs(),
+                                               filter.get_op().get_eval_ctx(),
+                                               filter.get_op().get_eval_ctx().max_batch_size_))) {
+    LOG_WARN("Failed to init exprs vector header", K(ret));
+  } else {
+    const bool is_all_null = null_count.get_int() == row_count;
+    const bool has_null = null_count.get_int() > 0 && null_count.get_int() < row_count;
+    if (is_all_null) {
+      fal_desc.set_always_false();
+    } else if (OB_FAIL(check_skip_by_monotonicity(filter,
+                                                  min_datum,
+                                                  max_datum,
+                                                  *skip_bit_,
+                                                  has_null,
+                                                  nullptr, /*result_bitmap*/
+                                                  fal_desc))) {
+      LOG_WARN("Failed to check can skip by monotonicity", K(ret), K(min_datum), K(max_datum), K(has_null), K(filter));
+    }
+  }
+  LOG_DEBUG("Utilize skip index judge black filter", K(ret), K(fal_desc), K(min_datum), K(max_datum),
+                                                     K(null_count), K(row_count), K(filter));
+  return ret;
+}
+
 } // end namespace blocksstable
 } // end namespace oceanbase

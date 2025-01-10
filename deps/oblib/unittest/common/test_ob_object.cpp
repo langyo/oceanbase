@@ -267,7 +267,8 @@ TEST_F(TestObObj, test_int)
   char buffer[64];
   ASSERT_TRUE(0 < obj1.to_string(buffer, 64));
   ASSERT_STREQ("{\"BIGINT\":-1}", buffer);
-  _OB_LOG(DEBUG, "%s", S(obj1));
+  ObCStringHelper helper;
+  _OB_LOG(DEBUG, "%s", helper.convert(obj1));
   int64_t pos = 0;
   OK(obj1.print_sql_literal(buffer, 64, pos));
   _OB_LOG(DEBUG, "%s", buffer);
@@ -322,7 +323,8 @@ TEST_F(TestObObj, test_varchar)
   ASSERT_TRUE(0 < obj1.to_string(buffer, 64));
   const char* expected_str = "{\"VARCHAR\":\"abc\", collation:\"invalid_type\"}";
   ASSERT_STREQ(expected_str, buffer);
-  _OB_LOG(DEBUG, "%s", S(obj1));
+  ObCStringHelper helper;
+  _OB_LOG(DEBUG, "%s", helper.convert(obj1));
   int64_t pos = 0;
   OK(obj1.print_sql_literal(buffer, 64, pos));
   _OB_LOG(DEBUG, "%s", buffer);
@@ -791,7 +793,7 @@ TEST_F(TestObObj, test_serialize)
   const char * cases[] =
       {
         "",
-        "10.244.4.30:55412;10.244.4.31:55412"
+        "127.0.0.1:55412;127.0.0.2:55412"
       };
   for (int64_t i = 0; i < ARRAYSIZEOF(cases); ++i) {
     obj1.set_varchar(cases[i]);

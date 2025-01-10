@@ -51,6 +51,7 @@ class IObLogLSFetchMgr;
 
 struct TransStatInfo;
 
+class IObLogFetcher;
 class LSFetchCtx;
 typedef ObLogDListNode<LSFetchCtx> FetchTaskListNode;
 
@@ -208,6 +209,8 @@ public:
   /// @retval Other error codes   Failed
   int next_server(common::ObAddr &request_svr);
 
+  int get_server_count(int64_t &server_count);
+
   void mark_svr_list_update_flag(const bool need_update);
 
   uint64_t hash() const;
@@ -271,6 +274,7 @@ public:
 
   bool is_in_fetching_log() const { return FETCHING_LOG == ATOMIC_LOAD(&state_); }
   void set_not_in_fetching_log() { ATOMIC_SET(&state_, NOT_FETCHING_LOG); }
+  bool is_loading_data_dict_baseline_data() const { return is_loading_data_dict_baseline_data_; }
 
   void dispatch_out(const char *reason)
   {
@@ -482,7 +486,7 @@ private:
   }
 
 public:
-  TO_STRING_KV("type", "FETCH_TASK",
+  TO_STRING_KV_WITH_HELPER("type", "FETCH_TASK",
       "stype", print_fetch_stream_type(stype_),
       K_(state),
       "state_str", print_state(state_),
@@ -499,7 +503,7 @@ public:
       K_(fetch_info),
       K_(svr_list_need_update),
       "start_log_id_locate_req",
-      start_lsn_locate_req_.is_state_idle() ? "IDLE" : to_cstring(start_lsn_locate_req_),
+      start_lsn_locate_req_.is_state_idle() ? "IDLE" : helper.convert(start_lsn_locate_req_),
       KP_(next),
       KP_(prev));
 
@@ -512,6 +516,11 @@ private:
   int set_end_lsn_and_init_dict_iter_(const palf::LSN &start_lsn);
   int get_log_route_service_(logservice::ObLogRouteService *&log_route_service);
   int get_large_buffer_pool_(archive::LargeBufferPool *&large_buffer_pool);
+#ifdef OB_BUILD_LOG_STORAGE_COMPRESS
+  int decompress_log_(const char *buf, const int64_t buf_len, int64_t pos,
+                      char *&decompression_buf, int64_t &decompressed_len,
+                      IObLogFetcher *fetcher);
+#endif
 
 private:
   FetchStreamType         stype_;

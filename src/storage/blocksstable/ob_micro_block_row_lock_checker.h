@@ -40,6 +40,7 @@ public:
   {
     check_exist_ = check_eixst;
   }
+  void inc_empty_read(int64_t empty_read_prefix);
 protected:
   virtual int inner_get_next_row(
       bool &row_lock_checked,
@@ -85,6 +86,7 @@ protected:
   virtual void check_row_in_major_sstable(bool &need_stop);
   int seek_forward();
 private:
+  bool reach_end_;
   int64_t rowkey_current_idx_;
   int64_t rowkey_begin_idx_;
   int64_t rowkey_end_idx_;

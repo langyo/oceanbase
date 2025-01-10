@@ -259,6 +259,28 @@ int ObRawExprReplacer::visit(ObAggFunRawExpr &expr)
   return ret;
 }
 
+int ObRawExprReplacer::visit(ObMatchFunRawExpr &expr)
+{
+  int ret = OB_SUCCESS;
+  bool skip_expr = false;
+  if (OB_FAIL(check_skip_expr(expr, skip_expr))) {
+    LOG_WARN("failed to check skip expr");
+  } else if (!skip_expr) {
+    ObRawExpr *new_expr = NULL;
+    bool need_replace = false;
+    int64_t count = expr.get_param_count();
+    for (int64_t i = 0; OB_SUCC(ret) && i < count; ++i) {
+      if (OB_FAIL(check_need_replace(expr.get_param_expr(i), new_expr, need_replace))) {
+        LOG_WARN("failed to check need replace", K(ret));
+      } else if (need_replace) {
+        expr.get_param_expr(i) = new_expr;
+        replace_happened_ = true;
+      }
+    }
+  }
+  return ret;
+}
+
 int ObRawExprReplacer::visit(ObSysFunRawExpr &expr)
 {
   int ret = OB_SUCCESS;
@@ -405,6 +427,19 @@ int ObRawExprReplacer::try_init_expr_map(int64_t bucket_size)
     }
   }
   return ret;
+}
+
+bool ObRawExprReplacer::is_existed(const ObRawExpr *target) const
+{
+  bool bret = false;
+  if (OB_LIKELY(expr_replace_map_.created())) {
+    uint64_t key = reinterpret_cast<uint64_t>(target);
+    uint64_t val = 0;
+    if (OB_SUCCESS == expr_replace_map_.get_refactored(key, val)) {
+      bret = true;
+    }
+  }
+  return bret;
 }
 
 int ObRawExprReplacer::check_from_expr_existed(const ObRawExpr *from_expr,

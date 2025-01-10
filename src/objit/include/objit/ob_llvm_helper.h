@@ -18,6 +18,7 @@
 #include "lib/container/ob_fast_array.h"
 #include "lib/string/ob_string.h"
 #include "common/object/ob_object.h"
+#include "share/rc/ob_tenant_base.h"
 
 namespace llvm
 {
@@ -42,6 +43,7 @@ namespace oceanbase
 {
 namespace jit
 {
+enum class ObPLOptLevel : int;
 
 namespace core {
 class JitContext;
@@ -351,22 +353,26 @@ public:
 
 public:
   ObLLVMHelper(common::ObIAllocator &allocator)
-    : allocator_(allocator),
+    : is_inited_(false),
+      allocator_(allocator),
       jc_(NULL),
-      jit_(NULL){}
+      jit_(NULL) {}
   virtual ~ObLLVMHelper();
   int init();
   void final();
   static int initialize();
-  void compile_module(bool optimization = true);
+  int compile_module(jit::ObPLOptLevel optimization);
   void dump_module();
   void dump_debuginfo();
-  int verify_function(ObLLVMFunction &function);
   int verify_module();
-  uint64_t get_function_address(const common::ObString &name);
+  int get_function_address(const common::ObString &name, uint64_t &addr);
   static void add_symbol(const common::ObString &name, void *value);
 
   ObDIRawData get_debug_info() const;
+
+  const ObString &get_compiled_object();
+
+  int add_compiled_object(size_t length, const char *ptr);
 
 public:
   //指令
@@ -444,6 +450,12 @@ public:
   int get_int_value(const ObLLVMType &value, int64_t i, ObLLVMValue &i_value);
   int get_insert_block(ObLLVMBasicBlock &block);
 
+#ifdef CPP_STANDARD_20
+  static int64 get_integer_type_id();
+  static int64 get_pointer_type_id();
+  static int64 get_struct_type_id();
+#endif
+
 public:
   core::JitContext *get_jc() { return jc_; }
 
@@ -452,6 +464,7 @@ private:
   static int init_llvm();
 
 private:
+  bool is_inited_;
   common::ObIAllocator &allocator_;
   core::JitContext *jc_;
   core::ObOrcJit *jit_;
@@ -544,7 +557,7 @@ class ObDWARFHelper
 public:
   ObDWARFHelper(ObIAllocator &allocator, char* debug_buf, int64_t debug_len)
     : Allocator(allocator), DebugBuf(debug_buf), DebugLen(debug_len), Context(nullptr) {}
-  ~ObDWARFHelper() {}
+  ~ObDWARFHelper();
 
   int init();
 

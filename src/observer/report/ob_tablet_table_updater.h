@@ -30,6 +30,7 @@ class ObLSID;
 class ObTabletReplica;
 class ObTabletTableOperator;
 struct ObTabletReplicaChecksumItem;
+class ObCompactionLocalityCache;
 }
 namespace observer
 {
@@ -111,12 +112,6 @@ public:
   int hash(uint64_t &hash_val) const { hash_val = hash(); return OB_SUCCESS; };
   bool compare_without_version(
       const ObTabletTableUpdateTask &other) const;
-  inline bool need_assign_when_equal() const { return false; }
-  inline int assign_when_equal(const ObTabletTableUpdateTask &other)
-  {
-    UNUSED(other);
-    return common::OB_NOT_SUPPORTED;
-  }
   // TODO: need to realize barrier related functions
   bool is_barrier() const;
 
@@ -244,6 +239,30 @@ private:
   int reput_to_queue_(
     const common::ObIArray<ObTabletTableUpdateTask> &tasks);
 
+  int check_tenant_status_(
+      const uint64_t tenant_id,
+      bool &tenant_dropped,
+      bool &schema_not_ready);
+
+  // prepare_locality_cache - init ls locality cache for share storage
+  void prepare_locality_cache_(
+      share::ObCompactionLocalityCache &locality_cache,
+      bool &locality_is_valid);
+
+  // check_remove_task_ - check whether the replica in inner table should be removed
+  void check_remove_task_(
+      const share::ObLSID &ls_id,
+      const bool is_ls_not_exist,
+      const bool locality_is_valid,
+      share::ObCompactionLocalityCache &locality_cache,
+      bool &is_remove_task);
+
+  // push_task_info_ - add update / remove task to array
+  int push_task_info_(
+      const ObTabletTableUpdateTask &task,
+      const share::ObTabletReplica &replica,
+      ObArray<share::ObTabletReplica> &replicas,
+      ObArray<ObTabletTableUpdateTask> &task_list);
 private:
   const int64_t MINI_MODE_UPDATE_TASK_THREAD_CNT = 1;
   const int64_t MIN_UPDATE_TASK_THREAD_CNT = 2;

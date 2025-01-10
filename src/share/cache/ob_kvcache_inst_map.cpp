@@ -295,7 +295,7 @@ int ObKVCacheInstMap::get_cache_inst(
       } else if (OB_HASH_NOT_EXIST == ret) {
         lib::ObMemAttr attr(inst_key.tenant_id_, "CACHE_MAP_NODE");
         SET_USE_500(attr);
-        inst = OB_NEW(ObKVCacheInst, ObMemAttr(inst_key.tenant_id_, "CACHE_INST"));
+        inst = OB_NEW(ObKVCacheInst, SET_IGNORE_MEM_VERSION(ObMemAttr(inst_key.tenant_id_, "CACHE_INST")));
         if (OB_ISNULL(inst)) {
           ret = OB_ALLOCATE_MEMORY_FAILED;
           COMMON_LOG(WARN, "Fail to alloc cache inst, ", K(ret));
@@ -309,6 +309,11 @@ int ObKVCacheInstMap::get_cache_inst(
           inst->cache_id_ = inst_key.cache_id_;
           inst->tenant_id_ = inst_key.tenant_id_;
           inst->status_.config_ = &configs_[inst_key.cache_id_];
+          if (0 == STRNCMP(inst->status_.config_->cache_name_, "index_block_cache", MAX_CACHE_NAME_LENGTH)
+            || 0 == STRNCMP(inst->status_.config_->cache_name_, "user_block_cache", MAX_CACHE_NAME_LENGTH)) {
+            inst->is_block_cache_ = true;
+          }
+
           //the first ref is kept by inst_map_
           add_inst_ref(inst);
           //the second ref is return outside

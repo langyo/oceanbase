@@ -33,6 +33,38 @@ public:
 private:
   DISALLOW_COPY_AND_ASSIGN(ObExprCurrentUserPriv);
 };
+
+class ObExprCurrentRole : public ObFuncExprOperator
+{
+public:
+  explicit  ObExprCurrentRole(common::ObIAllocator &alloc);
+  virtual ~ObExprCurrentRole();
+  virtual int calc_result_type0(ObExprResType &type,
+                                common::ObExprTypeCtx &type_ctx) const;
+  static int eval_current_role(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &expr_datum);
+  virtual int cg_expr(ObExprCGCtx &op_cg_ctx,
+                      const ObRawExpr &raw_expr,
+                      ObExpr &rt_expr) const override;
+private:
+  DISALLOW_COPY_AND_ASSIGN(ObExprCurrentRole);
+};
+
+class ObExprIsEnabledRole : public ObFuncExprOperator
+{
+public:
+  explicit  ObExprIsEnabledRole(common::ObIAllocator &alloc);
+  virtual ~ObExprIsEnabledRole();
+  virtual int calc_result_type2(ObExprResType &type,
+                                ObExprResType &type1,
+                                ObExprResType &type2,
+                                common::ObExprTypeCtx &type_ctx) const;
+  static int eval_is_enabled_role(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &expr_datum);
+  virtual int cg_expr(ObExprCGCtx &op_cg_ctx,
+                      const ObRawExpr &raw_expr,
+                      ObExpr &rt_expr) const override;
+private:
+  DISALLOW_COPY_AND_ASSIGN(ObExprIsEnabledRole);
+};
 }
 }
 #endif /* OCEANBASE_SQL_ENGINE_EXPR_OB_EXPR_CURRENT_USER_PRIV_ */

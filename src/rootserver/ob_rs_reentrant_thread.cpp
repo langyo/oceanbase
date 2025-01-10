@@ -37,7 +37,7 @@ ObRsReentrantThread::~ObRsReentrantThread()
 
 void ObRsReentrantThread::update_last_run_timestamp() 
 {
-  auto time = ObTimeUtility::current_time();
+  int64_t time = ObTimeUtility::current_time();
   IGNORE_RETURN lib::Thread::update_loop_ts(time);
   if (ATOMIC_LOAD(&last_run_timestamp_) != -1) {
     ATOMIC_STORE(&last_run_timestamp_, time);
@@ -73,7 +73,7 @@ void ObRsReentrantThread::wait()
   }
 }
 
-int ObRsReentrantThread::create(const int64_t thread_cnt, const char* thread_name)
+int ObRsReentrantThread::create(const int64_t thread_cnt, const char* thread_name, const int64_t wait_event_id)
 {
   int ret = OB_SUCCESS;
   bool added = false;
@@ -85,7 +85,7 @@ int ObRsReentrantThread::create(const int64_t thread_cnt, const char* thread_nam
     }
   }
 
-  if (FAILEDx(share::ObReentrantThread::create(thread_cnt, thread_name))) {
+  if (FAILEDx(share::ObReentrantThread::create(thread_cnt, thread_name, wait_event_id))) {
     LOG_WARN("fail to create reentraint thread", KR(ret), K(thread_name));
   } else if (last_run_timestamp_ != -1) {
     LOG_INFO("rs_monitor_check : reentrant thread check register success", K(thread_name));
@@ -139,6 +139,7 @@ void ObRsReentrantThread::check_alert(const ObRsReentrantThread &thread)
                  K(last_run_interval), K(check_interval), K(schedule_interval));
   }
 }
+
 
 CheckThreadSet::CheckThreadSet() 
   : arr_(), rwlock_(ObLatchIds::THREAD_HANG_CHECKER_LOCK)

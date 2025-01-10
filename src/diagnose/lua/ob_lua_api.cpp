@@ -41,6 +41,8 @@
 #include "sql/engine/ob_tenant_sql_memory_manager.h"
 
 #include <lua.hpp>
+#include "share/ash/ob_di_util.h"
+
 
 using namespace oceanbase;
 using namespace common;
@@ -866,9 +868,9 @@ int select_sysstat(lua_State* L)
     for (int64_t i = 0; i < ids.size() && !gen.is_end(); ++i) {
       ObArenaAllocator diag_allocator;
       HEAP_VAR(ObDiagnoseTenantInfo, diag_info, &diag_allocator) {
-        if (OB_FAIL(ObDIGlobalTenantCache::get_instance().get_the_diag_info(ids.at(i), diag_info))) {
+        if (OB_FAIL(share::ObDiagnosticInfoUtil::get_the_diag_info(ids.at(i), diag_info))) {
           OB_LOG(ERROR, "failed to get_the_diag_info", K(ids.at(i)), K(ret));
-        } else if (OB_FAIL(observer::ObAllVirtualSysStat::update_all_stats(ids.at(i), diag_info.get_set_stat_stats()))) {
+        } else if (OB_FAIL(observer::ObAllVirtualSysStat::update_all_stats(ids.at(i), diag_info))) {
           OB_LOG(ERROR, "failed to update_all_stats", K(ids.at(i)), K(ret));
         } else {
           for (int64_t stat_idx = 0;
@@ -1217,7 +1219,7 @@ int select_sql_workarea_active(lua_State *L)
     lua_pushnil(L);
   } else {
     ObArray<uint64_t> ids;
-    common::ObSEArray<sql::ObSqlWorkareaProfileInfo, 32> wa_actives;
+    common::ObSEArray<sql::ObSqlWorkareaProfileInfo, 20> wa_actives;
     std::vector<const char*> columns = {
       "plan_id",
       "sql_id",
@@ -1274,7 +1276,7 @@ int select_sql_workarea_active(lua_State *L)
         // number_passes
         gen.next_column(wa_active.profile_.get_number_pass());
         // tempseg_size
-        gen.next_column(wa_active.profile_.get_dumped_size());
+        gen.next_column(wa_active.profile_.get_max_dumped_size());
         // tenant_id
         gen.next_column(tenant_id);
         // policy
@@ -1492,11 +1494,11 @@ int select_disk_stat(lua_State *L)
     gen.next_row();
 
     // total_size
-    gen.next_column(OB_SERVER_BLOCK_MGR.get_total_macro_block_count() * OB_SERVER_BLOCK_MGR.get_macro_block_size());
+    gen.next_column(OB_STORAGE_OBJECT_MGR.get_total_macro_block_count() * OB_STORAGE_OBJECT_MGR.get_macro_block_size());
     // used_size
-    gen.next_column(OB_SERVER_BLOCK_MGR.get_used_macro_block_count() * OB_SERVER_BLOCK_MGR.get_macro_block_size());
+    gen.next_column(OB_STORAGE_OBJECT_MGR.get_used_macro_block_count() * OB_STORAGE_OBJECT_MGR.get_macro_block_size());
     // free_size
-    gen.next_column(OB_SERVER_BLOCK_MGR.get_free_macro_block_count() * OB_SERVER_BLOCK_MGR.get_macro_block_size());
+    gen.next_column(OB_STORAGE_OBJECT_MGR.get_free_macro_block_count() * OB_STORAGE_OBJECT_MGR.get_macro_block_size());
     // is_disk_valid
     gen.next_column(DEVICE_HEALTH_NORMAL != dhs ? 0 : 1);
     // disk_error_begin_ts
@@ -2031,9 +2033,9 @@ int get_tenant_sysstat(int64_t tenant_id, int64_t statistic, int64_t &value)
         || statistic >= ObStatEventIds::STAT_EVENT_SET_END
         || ObStatEventIds::STAT_EVENT_ADD_END == statistic) {
       ret = OB_INVALID_ARGUMENT;
-    } else if (OB_FAIL(ObDIGlobalTenantCache::get_instance().get_the_diag_info(tenant_id, diag_info))) {
+    } else if (OB_FAIL(share::ObDiagnosticInfoUtil::get_the_diag_info(tenant_id, diag_info))) {
       // do nothing
-    } else if (OB_FAIL(observer::ObAllVirtualSysStat::update_all_stats(tenant_id, diag_info.get_set_stat_stats()))) {
+    } else if (OB_FAIL(observer::ObAllVirtualSysStat::update_all_stats(tenant_id, diag_info))) {
       // do nothing
     } else if (statistic < ObStatEventIds::STAT_EVENT_ADD_END) {
       ObStatEventAddStat* stat = diag_info.get_add_stat_stats().get(statistic);

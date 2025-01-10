@@ -26,6 +26,7 @@
 #include "rpc/obrpc/ob_rpc_stat.h"
 #include "rpc/obrpc/ob_net_keepalive.h"
 #include "rpc/frame/ob_net_easy.h"
+#include "lib/stat/ob_diagnostic_info_guard.h"
 
 namespace easy
 {
@@ -97,6 +98,7 @@ int async_cb(easy_request_t *r)
 
       ret = OB_LIBEASY_ERROR;
     } else if (OB_FAIL(cb->decode(r->ipacket))) {
+      cb->set_error(ret);
       cb->on_invalid();
       LOG_WARN("decode failed", K(ret), K(pcode));
     } else if (OB_PACKET_CLUSTER_ID_NOT_MATCH == cb->get_rcode()) {
@@ -144,6 +146,7 @@ int async_cb(easy_request_t *r)
   if (!OB_SUCC(ret)) {
     LOG_WARN("process async request fail", K(r), K(ret), K(pcode));
   }
+  THIS_WORKER.get_sql_arena_allocator().reset();
 
   const int64_t cur_time = ObTimeUtility::current_time();
   const int64_t total_time = cur_time  - start_time;

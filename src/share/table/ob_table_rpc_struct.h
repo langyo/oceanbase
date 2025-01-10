@@ -28,6 +28,24 @@ class ObTableLoginRequest final
 {
   OB_UNIS_VERSION(1);
 public:
+  ObTableLoginRequest()
+    : auth_method_(1),
+      client_type_(0),
+      client_version_(1),
+      reserved1_(0),
+      client_capabilities_(0),
+      max_packet_size_(0),
+      reserved2_(0),
+      reserved3_(0),
+      tenant_name_(),
+      user_name_(),
+      pass_secret_(),
+      pass_scramble_(),
+      database_name_(),
+      ttl_us_(0),
+      client_info_()
+  {}
+public:
   uint8_t auth_method_;  // always 1 for now
   uint8_t client_type_;  // 1: libobtable; 2: java client
   uint8_t client_version_;  // always 1 for now
@@ -42,6 +60,7 @@ public:
   ObString pass_scramble_;  // 20 bytes random string
   ObString database_name_;
   int64_t ttl_us_;  // 0 means no TTL
+  ObString client_info_; // json format string, record client parameters
 public:
   TO_STRING_KV(K_(auth_method),
                K_(client_type),
@@ -54,7 +73,8 @@ public:
                K_(tenant_name),
                K_(user_name),
                K_(database_name),
-               K_(ttl_us));
+               K_(ttl_us),
+               K_(client_info));
 };
 
 class ObTableLoginResult final
@@ -88,7 +108,7 @@ class ObTableOperationRequest final
 public:
   ObTableOperationRequest() : credential_(), table_name_(), table_id_(common::OB_INVALID_ID),
       tablet_id_(), entity_type_(), table_operation_(),
-      consistency_level_(), returning_rowkey_(false), returning_affected_entity_(false),
+      consistency_level_(), option_flag_(OB_TABLE_OPTION_DEFAULT), returning_affected_entity_(false),
       returning_affected_rows_(false),
       binlog_row_image_type_(ObBinlogRowImageType::FULL)
       {}
@@ -101,9 +121,14 @@ public:
                K_(entity_type),
                K_(table_operation),
                K_(consistency_level),
-               K_(returning_rowkey),
+               K_(option_flag),
                K_(returning_affected_entity),
                K_(returning_affected_rows));
+public:
+  OB_INLINE bool use_put() const { return option_flag_ & OB_TABLE_OPTION_USE_PUT; }
+  OB_INLINE bool returning_rowkey() const { return option_flag_ & OB_TABLE_OPTION_RETURNING_ROWKEY; }
+  OB_INLINE uint8_t get_option_flag() const { return option_flag_; }
+  OB_INLINE bool returning_affected_entity() const { return returning_affected_entity_; }
 public:
   /// the credential returned when login.
   ObString credential_;
@@ -119,8 +144,8 @@ public:
   ObTableOperation table_operation_;
   /// read consistency level. currently only support STRONG.
   ObTableConsistencyLevel consistency_level_;
-  /// Whether return the rowkey, currently the value MUST be false (In the case of Append/Increment the value could be true).
-  bool returning_rowkey_;
+  /// option flag, specific option switch.
+  uint8_t option_flag_;
   /// Whether return the row which has been modified, currently the value MUST be false (In the case of Append/Increment, the value could be true)
   bool returning_affected_entity_;
   /// Whether return affected_rows
@@ -144,7 +169,7 @@ public:
         entity_type_(),
         batch_operation_(),
         consistency_level_(),
-        returning_rowkey_(false),
+        option_flag_(OB_TABLE_OPTION_DEFAULT),
         returning_affected_entity_(false),
         returning_affected_rows_(false),
         batch_operation_as_atomic_(false),
@@ -159,10 +184,15 @@ public:
                K_(entity_type),
                K_(batch_operation),
                K_(consistency_level),
-               K_(returning_rowkey),
+               K_(option_flag),
                K_(returning_affected_entity),
                K_(returning_affected_rows),
                K_(batch_operation_as_atomic));
+public:
+  OB_INLINE bool use_put() const { return option_flag_ & OB_TABLE_OPTION_USE_PUT; }
+  OB_INLINE bool returning_rowkey() const { return option_flag_ & OB_TABLE_OPTION_RETURNING_ROWKEY; }
+  OB_INLINE bool return_one_result() const { return option_flag_ & OB_TABLE_OPTION_RETURN_ONE_RES; }
+  OB_INLINE bool returning_affected_entity() const { return returning_affected_entity_; }
 public:
   ObString credential_;
   ObString table_name_;
@@ -173,8 +203,8 @@ public:
   ObTableBatchOperation batch_operation_;
   // Only support STRONG
   ObTableConsistencyLevel consistency_level_;
-  // Only support false (Support true for only Append/Increment)
-  bool returning_rowkey_;
+  // option flag, specific option switch.
+  uint8_t option_flag_;
   // Only support false (Support true for only Append/Increment)
   bool returning_affected_entity_;
   /// whether return affected_rows
@@ -243,15 +273,15 @@ public:
   ObBinlogRowImageType binlog_row_image_type_;
 };
 
-class ObTableQuerySyncRequest : public ObTableQueryRequest
+class ObTableQueryAsyncRequest : public ObTableQueryRequest
 {
   OB_UNIS_VERSION(1);
 public:
-  ObTableQuerySyncRequest()
+  ObTableQueryAsyncRequest()
       :query_session_id_(0),
        query_type_(ObQueryOperationType::QUERY_MAX)
   {}
-  virtual ~ObTableQuerySyncRequest(){}
+  virtual ~ObTableQueryAsyncRequest(){}
   INHERIT_TO_STRING_KV("ObTableQueryRequest", ObTableQueryRequest,
                K_(query_session_id),
                K_(query_type));
@@ -368,6 +398,98 @@ public:
   common::ObIAllocator *allocator_; // for deserialize
   ObTableDirectLoadResultHeader header_;
   ObString res_content_;
+};
+
+class ObTableLSOpRequest final
+{
+  OB_UNIS_VERSION(1);
+public:
+  ObTableLSOpRequest()
+    : credential_(),
+      entity_type_(),
+      consistency_level_(),
+      ls_op_()
+  {
+  }
+  ~ObTableLSOpRequest() {}
+
+  TO_STRING_KV("credential", common::ObHexStringWrap(credential_),
+               K_(entity_type),
+               K_(consistency_level),
+               K_(ls_op));
+public:
+  ObString credential_;
+  ObTableEntityType entity_type_;  // for optimize purpose
+  ObTableConsistencyLevel consistency_level_;
+  ObTableLSOp ls_op_;
+};
+
+using ObTableSingleOpResult = ObTableOperationResult;
+class ObTableTabletOpResult: public common::ObSEArrayImpl<ObTableSingleOpResult, ObTableTabletOp::COMMON_OPS_SIZE>
+{
+  OB_UNIS_VERSION(1);
+public:
+  ObTableTabletOpResult()
+      : BaseType("TblTabletOpRes", common::OB_MALLOC_NORMAL_BLOCK_SIZE),
+        entity_factory_(NULL),
+        alloc_(NULL)
+  {}
+  virtual ~ObTableTabletOpResult() = default;
+  ObTableTabletOpResult(const ObTableTabletOpResult& other);
+  void set_entity_factory(ObITableEntityFactory *entity_factory) { entity_factory_ = entity_factory; }
+  ObITableEntityFactory *get_entity_factory() { return entity_factory_; }
+  void set_allocator(common::ObIAllocator *alloc) { alloc_ = alloc; }
+  common::ObIAllocator *get_allocator() { return alloc_; }
+  OB_INLINE void assign_properties_names(const ObIArray<ObString> *all_properties_names) {
+    all_properties_names_ = all_properties_names;
+  }
+
+  OB_INLINE void set_all_rowkey_names(const ObIArray<ObString> *all_rowkey_names) {
+    all_rowkey_names_ = all_rowkey_names;
+  }
+private:
+  using BaseType = common::ObSEArrayImpl<ObTableSingleOpResult, ObTableTabletOp::COMMON_OPS_SIZE>;
+  uint64_t reserved_;
+  ObITableEntityFactory *entity_factory_;
+  common::ObIAllocator *alloc_;
+  const ObIArray<ObString>* all_properties_names_;
+  const ObIArray<ObString>* all_rowkey_names_;
+};
+
+class ObTableLSOpResult: public common::ObSEArrayImpl<ObTableTabletOpResult, ObTableLSOp::COMMON_BATCH_SIZE>
+{
+  OB_UNIS_VERSION(1);
+public:
+  ObTableLSOpResult()
+    : BaseType("TblLSOpRes", common::OB_MALLOC_NORMAL_BLOCK_SIZE),
+      entity_factory_(NULL),
+      alloc_(NULL)
+  {}
+  virtual ~ObTableLSOpResult() = default;
+  OB_INLINE void set_allocator(common::ObIAllocator *alloc) { alloc_ = alloc; }
+  OB_INLINE common::ObIAllocator *get_allocator() { return alloc_; }
+  OB_INLINE int assign_rowkey_names(const ObIArray<ObString>& all_rowkey_names)
+  {
+    return rowkey_names_.assign(all_rowkey_names);
+  }
+  OB_INLINE int assign_properties_names(const ObIArray<ObString>& all_properties_names)
+  {
+    return properties_names_.assign(all_properties_names);
+  }
+  OB_INLINE const ObIArray<ObString>& get_rowkey_names() const { return rowkey_names_; }
+  OB_INLINE const ObIArray<ObString>& get_properties_names() const { return properties_names_; }
+
+private:
+  DISALLOW_COPY_AND_ASSIGN(ObTableLSOpResult);
+  using BaseType = common::ObSEArrayImpl<ObTableTabletOpResult, ObTableLSOp::COMMON_BATCH_SIZE>;
+  // allways empty
+  ObSEArray<ObString, 1> rowkey_names_;
+  // Only when this batch of operations is read-only is it not empty.
+  ObSEArray<ObString, 4> properties_names_;
+  // do not serialize
+  // ObITableEntityFactory *entity_factory_;
+  ObTableEntityFactory<ObTableSingleOpEntity> *entity_factory_;
+  common::ObIAllocator *alloc_;
 };
 
 } // end namespace table

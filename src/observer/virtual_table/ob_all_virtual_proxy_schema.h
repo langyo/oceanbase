@@ -129,7 +129,8 @@ private:
       const common::ObString &tenant_name,
       const common::ObString &view_definition,
       const bool is_oracle_mode,
-      const share::schema::ObTableSchema *&new_table_schema);
+      const share::schema::ObTableSchema *&new_table_schema,
+      const common::ObString &database_name);
   int inner_get_next_row_();
   int fill_row_(
       share::schema::ObSchemaGetterGuard &schema_guard,
@@ -143,6 +144,10 @@ private:
   int get_next_tenant_server_(const common::ObString &table_name,
                               const share::schema::ObTableSchema *table_schema);
   int get_tenant_servers_(const uint64_t tenant_id);
+  int get_replica_type_from_locality_(
+    const share::schema::ZoneLocalityIArray &zone_locality_array,
+    const ObZone &zone,
+    ObReplicaType &replica_type);
   int fill_tenant_servers_(
       const uint64_t tenant_id,
       common::sqlclient::ObMySQLResult &result,

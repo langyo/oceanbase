@@ -46,6 +46,9 @@ int ObTriggerResolver::resolve(const ParseNode &parse_tree)
     ObDropTriggerStmt *stmt = create_stmt<ObDropTriggerStmt>();
     OV (OB_NOT_NULL(stmt), OB_ALLOCATE_MEMORY_FAILED);
     OZ (resolve_drop_trigger_stmt(parse_tree, stmt->get_trigger_arg()));
+    if (lib::is_mysql_mode()) {
+      OZ (get_drop_trigger_stmt_table_name(stmt));
+    }
     break;
   }
   case T_TG_ALTER: {
@@ -57,6 +60,75 @@ int ObTriggerResolver::resolve(const ParseNode &parse_tree)
   default:
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid stmt type", K(ret), K(stmt_type));
+  }
+  return ret;
+}
+
+int ObTriggerResolver::get_drop_trigger_stmt_table_name(ObDropTriggerStmt *stmt)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(stmt)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("drop trigger stmt is NULL", K(ret));
+  } else {
+    const obrpc::ObDropTriggerArg &arg = stmt->get_trigger_arg();
+    uint64_t tenant_id = arg.tenant_id_;
+    const ObString &trigger_database = arg.trigger_database_;
+    const ObString &trigger_name = arg.trigger_name_;
+    ObSchemaGetterGuard *schema_guard = NULL;
+    const ObDatabaseSchema *db_schema = NULL;
+    uint64_t trigger_database_id = OB_INVALID_ID;
+    const ObTriggerInfo *trigger_info = NULL;
+    const ObTableSchema *table = NULL;
+
+    CK (OB_NOT_NULL(schema_checker_));
+    CK (OB_NOT_NULL(schema_checker_->get_schema_guard()));
+    OX (schema_guard = schema_checker_->get_schema_guard());
+    if (OB_SUCC(ret)) {
+      if(OB_FAIL(schema_guard->get_database_schema(tenant_id, trigger_database, db_schema))) {
+        LOG_WARN("get database schema failed", K(ret));
+      } else if (NULL == db_schema) {
+        ret = OB_ERR_BAD_DATABASE;
+        LOG_USER_ERROR(OB_ERR_BAD_DATABASE, trigger_database.length(), trigger_database.ptr());
+      } else if (db_schema->is_or_in_recyclebin()) {
+        ret = OB_ERR_OPERATION_ON_RECYCLE_OBJECT;
+        LOG_WARN("Can't not operate db in recyclebin",
+                 K(tenant_id), K(trigger_database), K(trigger_database_id), K(*db_schema), K(ret));
+      } else if (OB_INVALID_ID == (trigger_database_id = db_schema->get_database_id())) {
+        ret = OB_ERR_BAD_DATABASE;
+        LOG_WARN("database id is invalid",
+                 K(tenant_id), K(trigger_database), K(trigger_database_id), K(*db_schema), K(ret));
+      } else if (OB_FAIL(schema_guard->get_trigger_info(tenant_id, trigger_database_id,
+                                                       trigger_name, trigger_info))) {
+        LOG_WARN("get trigger info failed", K(ret), K(trigger_database), K(trigger_name));
+      } else if (OB_ISNULL(trigger_info)) {
+        ret = OB_ERR_TRIGGER_NOT_EXIST;
+      } else if (trigger_info->is_in_recyclebin()) {
+        ret = OB_ERR_OPERATION_ON_RECYCLE_OBJECT;
+        LOG_WARN("trigger is in recyclebin", K(ret),
+                 K(trigger_info->get_trigger_id()), K(trigger_info->get_trigger_name()));
+      } else if (OB_FAIL(schema_guard->get_table_schema(tenant_id,
+                                                  trigger_info->get_base_object_id(),
+                                                  table))) {
+       LOG_WARN("Failed to get table schema", K(tenant_id),
+                   K(trigger_info->get_base_object_id()), K(ret));
+      } else if (OB_ISNULL(table)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("Table schema should not be NULL", K(ret));
+      } else {
+        stmt->trigger_table_name_ = table->get_table_name_str();
+      }
+      if (OB_ERR_TRIGGER_NOT_EXIST == ret || OB_ERR_BAD_DATABASE == ret) {
+        ret = OB_ERR_TRIGGER_NOT_EXIST;
+        stmt->is_exist = false;
+        if (arg.if_exist_) {
+          ret = OB_SUCCESS;
+        } else {
+          LOG_MYSQL_USER_ERROR(OB_ERR_TRIGGER_NOT_EXIST);
+        }
+        LOG_WARN("trigger not exist", K(arg.trigger_database_), K(arg.trigger_name_), K(ret));
+      }
+    }
   }
   return ret;
 }
@@ -109,7 +181,7 @@ int ObTriggerResolver::resolve_sp_definer(const ParseNode *parse_node,
             ret = OB_ERR_UNEXPECTED;
             LOG_WARN("fail to get_user_info", K(ret));
           } else if (OB_ISNULL(user_info)) {
-            LOG_USER_WARN(OB_ERR_USER_NOT_EXIST);
+            LOG_USER_WARN(OB_ERR_USER_NOT_EXIST, user_name.length(), user_name.ptr());
             pl::ObPL::insert_error_msg(OB_ERR_USER_NOT_EXIST);
             ret = OB_SUCCESS;
           }
@@ -158,6 +230,18 @@ int ObTriggerResolver::resolve_create_trigger_stmt(const ParseNode &parse_node,
   OX (trigger_arg.trigger_info_.set_owner_id(session_info_->get_user_id()));
   OZ (resolve_sp_definer(is_ora ? nullptr : parse_node.children_[0], trigger_arg));
   OZ (resolve_trigger_source(*parse_node.children_[is_ora ? 0 : 1], trigger_arg));
+  if (OB_SUCC(ret)) {
+    const ObTableSchema *table_schema = NULL;
+    CK (OB_NOT_NULL(schema_checker_));
+    CK (OB_NOT_NULL(schema_checker_->get_schema_guard()));
+    OZ (schema_checker_->get_schema_guard()->get_table_schema(trigger_arg.trigger_info_.get_tenant_id(),
+                                                              trigger_arg.trigger_info_.get_base_object_id(),
+                                                              table_schema));
+    CK (OB_NOT_NULL(table_schema));
+    OZ (trigger_arg.based_schema_object_infos_.push_back(ObBasedSchemaObjectInfo(table_schema->get_table_id(),
+                                                                                 TABLE_SCHEMA,
+                                                                                 table_schema->get_schema_version())));
+  }
   if (OB_SUCC(ret)) {
     ObErrorInfo &error_info = trigger_arg.error_info_;
     error_info.collect_error_info(&(trigger_arg.trigger_info_));
@@ -265,6 +349,9 @@ int ObTriggerResolver::resolve_trigger_source(const ParseNode &parse_node,
   if (OB_SUCC(ret) && parse_node.value_ != 0 && is_oracle_mode()) {
     ret = OB_NOT_SUPPORTED;
     LOG_USER_ERROR(OB_NOT_SUPPORTED, "default collation in create trigger");
+  }
+  if (OB_SUCC(ret) && parse_node.value_ != 0 && is_mysql_mode()) {
+    OX (trigger_arg.with_if_not_exist_ = parse_node.value_);
   }
   return ret;
 }
@@ -477,10 +564,11 @@ int ObTriggerResolver::resolve_timing_point(int16_t before_or_after, int16_t stm
   ParseResult parse_result;
   const ObStmtNodeTree *parse_tree = NULL;
   bool is_include_old_new_in_trigger = false;
-  const ObString &trigger_body = trigger_arg.trigger_info_.get_trigger_body();
+  ObString trigger_body = trigger_arg.trigger_info_.get_trigger_body();
   parse_result.is_for_trigger_ = 1;
   parse_result.mysql_compatible_comment_ = 0;
   parse_result.is_dynamic_sql_ = 0;
+  OZ (ObSQLUtils::convert_sql_text_from_schema_for_resolve(*allocator_, session_info_->get_dtc_params(), trigger_body));
   OZ (pl_parser.parse(trigger_body, trigger_body, parse_result, true));
   CK (OB_NOT_NULL(parse_tree = parse_result.result_tree_));
   CK (T_STMT_LIST == parse_tree->type_);
@@ -1029,7 +1117,7 @@ int ObTriggerResolver::resolve_order_clause(const ParseNode *parse_node, ObCreat
           if (OB_SUCC(ret) && (trg_info.get_database_id() == ref_db_id)
               && (trg_info.get_trigger_name() == ref_trg_name)) {
             ret = OB_ERR_REF_CYCLIC_IN_TRG;
-            LOG_WARN("ORA-25023: cyclic trigger dependency is not allowed", K(ret));
+            LOG_WARN("OBE-25023: cyclic trigger dependency is not allowed", K(ret));
           }
         }
         OZ (schema_checker_->get_trigger_info(trg_info.get_tenant_id(), ref_trg_db_name, ref_trg_name, ref_trg_info));
@@ -1056,7 +1144,7 @@ int ObTriggerResolver::resolve_order_clause(const ParseNode *parse_node, ObCreat
           if (is_oracle_mode) {
             if (trg_info.get_base_object_id() != ref_trg_info->get_base_object_id()) {
               ret = OB_ERR_REF_ANOTHER_TABLE_IN_TRG;
-              LOG_WARN("ORA-25021: cannot reference a trigger defined on another table", K(ret));
+              LOG_WARN("OBE-25021: cannot reference a trigger defined on another table", K(ret));
             } else if (trg_info.is_simple_dml_type() && !ref_trg_info->is_compound_dml_type()) {
               if (!(trg_info.is_row_level_before_trigger() && ref_trg_info->is_row_level_before_trigger())
                   && !(trg_info.is_row_level_after_trigger() && ref_trg_info->is_row_level_after_trigger())
@@ -1106,7 +1194,10 @@ int ObTriggerResolver::analyze_trigger(ObSchemaGetterGuard &schema_guard,
         ObPLParser parser(allocator, session_info->get_charsets4parser(), session_info->get_sql_mode());
         ObStmtNodeTree *column_list = NULL;
         ParseResult parse_result;
-        OZ (parser.parse(trigger_info.get_update_columns(), trigger_info.get_update_columns(), parse_result, true));
+        ObString update_columns = trigger_info.get_update_columns();
+        OZ (ObSQLUtils::convert_sql_text_from_schema_for_resolve(
+                  allocator, session_info->get_dtc_params(), update_columns));
+        OZ (parser.parse(update_columns, update_columns, parse_result, true));
         CK (OB_NOT_NULL(parse_result.result_tree_) && 1 == parse_result.result_tree_->num_child_);
         CK (OB_NOT_NULL(column_list = parse_result.result_tree_->children_[0]));
         CK (column_list->type_ == T_TG_COLUMN_LIST);
@@ -1125,7 +1216,7 @@ int ObTriggerResolver::analyze_trigger(ObSchemaGetterGuard &schema_guard,
             OX (column_schema = table_schema->get_column_schema(column_node->str_value_));
             if (OB_SUCC(ret) && OB_ISNULL(column_schema)) {
               ret = OB_ERR_KEY_COLUMN_DOES_NOT_EXITS;
-              LOG_WARN("column not exist", K(ret), K(trigger_info.get_update_columns()), K(i));
+              LOG_WARN("column not exist", K(ret), K(update_columns), K(i));
               LOG_USER_ERROR(OB_ERR_KEY_COLUMN_DOES_NOT_EXITS, (int32_t)column_node->str_len_, column_node->str_value_);
             }
           }

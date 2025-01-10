@@ -80,6 +80,7 @@ int ObDBMSJobTask::stop()
     timer_.cancel(*this);
     timer_.stop();
     timer_.wait();
+    ObSpinLockGuard guard(lock_);
     wait_vector_.clear();
     job_key_ = NULL;
     ready_queue_ = NULL;

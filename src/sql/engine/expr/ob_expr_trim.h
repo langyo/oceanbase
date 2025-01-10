@@ -36,10 +36,8 @@ public:
                        int32_t param_num);
 
   virtual ~ObExprTrim();
-  static int trim(common::ObString &result,
-                  const int64_t trim_type,
-                  const common::ObString &trim_pattern,
-                  const common::ObString &text);
+  static int trim(common::ObString &result, const int64_t trim_type,
+      const common::ObString &trim_pattern, const common::ObString &text);
 
   static  int trim2(common::ObString &result,
                   const int64_t trim_type,
@@ -68,10 +66,12 @@ public:
                       ObExpr &rt_expr) const override;
 
   static int eval_trim(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &expr_datum);
+  static int eval_trim_vector(VECTOR_EVAL_FUNC_ARG_DECL);
 
   // fill ' ' to %buf with specified charset.
   static int fill_default_pattern(char *buf, const int64_t in_len,
                                   common::ObCollationType cs_type, int64_t &out_len);
+  DECLARE_SET_LOCAL_SESSION_VARS;
 private:
   // helper func
   static int lrtrim(const common::ObString src,

@@ -62,7 +62,10 @@ int ObExprMod::calc_result_type2(ObExprResType &type,
         // In mysql mode, precision of int(255) is 255, more than OB_MAX_DECIMAL_POSSIBLE_PRECISION
         // So precision deduced just now may be larger than 81 while res type is decimal_int
         // TODO:@xiaofeng.lby, use a more generic method to solve this problem
-        type.set_precision(MIN(type.get_precision(), OB_MAX_DECIMAL_POSSIBLE_PRECISION));
+        const int64_t int_part1 = type1.get_precision() - type1.get_scale();
+        const int64_t int_part2 = type2.get_precision() - type2.get_scale();
+        const int64_t precision = MAX(int_part1, int_part2) + type.get_scale();
+        type.set_precision(MIN(precision, OB_MAX_DECIMAL_POSSIBLE_PRECISION));
         type1.set_calc_accuracy(type.get_accuracy());
         type2.set_calc_accuracy(type.get_accuracy());
       }
@@ -491,7 +494,16 @@ int ObExprMod::mod_decimalint(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &datum
       ObDecimalIntBuilder res_val;
       switch (int_bytes) {
         CALC_DECIMAL_INT_MOD(int32)
-        CALC_DECIMAL_INT_MOD(int64)
+        case sizeof(int64_t): {
+          const int64_t l = *(l_decint->int64_v_);
+          const int64_t r = *(r_decint->int64_v_);
+          if (INT64_MIN == l && -1 == r) {
+            res_val.from(0); //INT64_MIN % -1 --> FPE
+          } else {
+            res_val.from(l % r);
+          }
+          break;
+        }
         CALC_DECIMAL_INT_MOD(int128)
         CALC_DECIMAL_INT_MOD(int256)
         CALC_DECIMAL_INT_MOD(int512)

@@ -35,7 +35,7 @@ int ObLogSelectInto::est_cost()
   } else {
     ObOptimizerContext &opt_ctx = get_plan()->get_optimizer_context();
     set_op_cost(ObOptEstCost::cost_get_rows(child->get_card() / parallel, 
-                                            opt_ctx.get_cost_model_type()));
+                                            opt_ctx));
     set_cost(op_cost_ + child->get_cost());
     set_card(child->get_card());
   }
@@ -62,6 +62,8 @@ int ObLogSelectInto::get_op_exprs(ObIArray<ObRawExpr*> &all_exprs)
   int ret = OB_SUCCESS;
   if (OB_FAIL(append(all_exprs, select_exprs_))) {
     LOG_WARN("failed to push back select exprs", K(ret));
+  } else if (file_partition_expr_ != NULL && OB_FAIL(all_exprs.push_back(file_partition_expr_))) {
+    LOG_WARN("failed to push back file partition expr", K(ret));
   } else if (OB_FAIL(ObLogicalOperator::get_op_exprs(all_exprs))) {
     LOG_WARN("failed to get op exprs", K(ret));
   } else { /*do nothing*/ }

@@ -18,7 +18,6 @@
 #include "lib/container/ob_array_array.h"
 #include "storage/compaction/ob_partition_merger.h"
 #include "storage/memtable/ob_memtable_interface.h"
-#include "storage/ob_partition_component_factory.h"
 #include "blocksstable/ob_data_file_prepare.h"
 #include "blocksstable/ob_row_generate.h"
 #include "observer/ob_service.h"
@@ -235,7 +234,7 @@ void TestRangeSpliter::prepare_sstable_handle(ObTableHandleV2 &handle,
   macro_data[0] =
       "bigint   var   bigint bigint  flag    multi_version_row_flag\n"
       "0        var1    -9    0     EXIST   CLF\n"
-      "1        var1   -9    MIN      EXIST   SCF\n"
+      "1        var1    -9    MIN   EXIST   SCF\n"
       "1        var1    -9    0     EXIST   C\n";
 
   macro_data[1] =
@@ -302,7 +301,7 @@ void TestRangeSpliter::prepare_sstable_handle(ObTableHandleV2 &handle,
       "bigint   var   bigint bigint  flag    multi_version_row_flag\n"
       "18       var1     -9    0     EXIST   CLF\n"
       "19       var1   -9    MIN      EXIST   SCF\n"
-      "19       var1     -9    0     EXIST   CF\n";
+      "19       var1     -9    0     EXIST   C\n";
 
   macro_data[13] =
       "bigint   var   bigint bigint  flag    multi_version_row_flag\n"
@@ -324,7 +323,7 @@ void TestRangeSpliter::prepare_sstable_handle(ObTableHandleV2 &handle,
       "bigint   var   bigint bigint  flag    multi_version_row_flag\n"
       "24       var1    -9    0     EXIST   CLF\n"
       "25       var1    -9    MIN      EXIST  SCF\n"
-      "25       var1    -9    0     EXIST   CF\n";
+      "25       var1    -9    0     EXIST   CL\n";
 
   macro_data[17] =
       "bigint   var   bigint bigint  flag    multi_version_row_flag\n"

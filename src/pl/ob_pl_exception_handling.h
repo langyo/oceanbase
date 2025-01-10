@@ -15,7 +15,11 @@
 
 #include "ob_pl_stmt.h"
 
+#ifdef CPP_STANDARD_20
+#include "lib/clang/17/include/unwind.h"
+#else
 #include "lib/clang/11.0.1/include/unwind.h"
+#endif
 
 namespace oceanbase
 {
@@ -64,6 +68,8 @@ public:
                                                     struct _Unwind_Context *context);
   static int eh_convert_exception(bool oracle_mode, int oberr, ObPLConditionType *type, int64_t *error_code, const char **sql_state, int64_t *str_len);
   static ObPLConditionType eh_classify_exception(const char *sql_state);
+
+  static int eh_adjust_call_stack(ObPLContext &pl_ctx, uint64_t location, int err_code);
 
 #ifdef OB_BUILD_ORACLE_PL
   static int eh_adjust_call_stack(

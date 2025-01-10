@@ -221,17 +221,18 @@ private:
     HashMapMemMgrCore();
     ~HashMapMemMgrCore();
     static HashMapMemMgrCore& get_instance();
+    int init(const int64_t tenant_id);
     ObExternalRef* get_external_ref();
     ObSmallAllocator& get_node_alloc();
-    ObConcurrentFIFOAllocator& get_dir_alloc();
-    ObConcurrentFIFOAllocator& get_cnter_alloc();
+    ObIAllocator& get_dir_alloc();
+    ObIAllocator& get_cnter_alloc();
     void add_map(void *ptr);
     void rm_map(void *ptr);
   private:
     ObExternalRef hash_ref_;
     ObSmallAllocator node_alloc_;
-    ObConcurrentFIFOAllocator dir_alloc_;
-    ObConcurrentFIFOAllocator cnter_alloc_;
+    ObMalloc dir_alloc_;
+    ObMalloc cnter_alloc_;
     typedef common::ObArray<void*> MapArray;
     MapArray map_array_;
     ObSpinLock map_array_lock_;
@@ -245,10 +246,11 @@ private:
     typedef HashMapMemMgrCore Core;
     HashMapMemMgr() {}
     virtual ~HashMapMemMgr() {}
+    int init(const int64_t tenant_id) { UNUSED(tenant_id); return OB_SUCCESS; }
     ObExternalRef* get_external_ref();
     ObSmallAllocator& get_node_alloc();
-    ObConcurrentFIFOAllocator& get_dir_alloc();
-    ObConcurrentFIFOAllocator& get_cnter_alloc();
+    ObIAllocator& get_dir_alloc();
+    ObIAllocator& get_cnter_alloc();
     void add_map(void *ptr) { Core::get_instance().add_map(ptr); }
     void rm_map(void *ptr) { Core::get_instance().rm_map(ptr); }
   private:
@@ -262,11 +264,12 @@ private:
   public:
     HashMapMemMgr() : core_() {}
     virtual ~HashMapMemMgr() {}
+    int init(const int64_t tenant_id);
     typedef HashMapMemMgrCore Core;
     ObExternalRef* get_external_ref();
     ObSmallAllocator& get_node_alloc();
-    ObConcurrentFIFOAllocator& get_dir_alloc();
-    ObConcurrentFIFOAllocator& get_cnter_alloc();
+    ObIAllocator& get_dir_alloc();
+    ObIAllocator& get_cnter_alloc();
     void add_map(void *ptr) { Core::get_instance().add_map(ptr); }
     void rm_map(void *ptr) { Core::get_instance().rm_map(ptr); }
   private:
@@ -313,6 +316,7 @@ public:
     virtual ~BlurredIterator() {}
     int next(Key &key, Value &value);
     void rewind();
+    void rewind_randomly();
   private:
     ObLinearHashMap *map_;
     uint64_t bkt_idx_;
@@ -391,9 +395,9 @@ public:
   // m_seg_sz and s_seg_sz are the sizes of micro-segment and standard-segment.
   // Set m_seg_sz = 0 to disable micro-segment.
   // dir_init_sz is the initial size of directory, it doubles when overflows.
+  int init(const ObMemAttr &mem_attr);
   int init(const lib::ObLabel &label = LABEL, uint64_t tenant_id = TENANT_ID);
-  int init(uint64_t m_seg_sz, uint64_t s_seg_sz, uint64_t dir_init_sz,
-      const lib::ObLabel &label = LABEL, uint64_t tenant_id = TENANT_ID);
+  int init(uint64_t m_seg_sz, uint64_t s_seg_sz, uint64_t dir_init_sz, const ObMemAttr &mem_attr);
   int destroy();
   // Load factor control.
   int set_load_factor_lmt(double lower_lmt, double upper_lmt);
@@ -437,7 +441,13 @@ public:
   // fn: bool operator()(const Key &key, Value &value);
   // If operator() returns false, operate() return OB_EAGAIN.
   template <typename Function> int operate(const Key &key, Function &fn);
-
+  // insert_or_operate.
+  // If the specialized value exists, Call fn on the specified Value
+  // Otherwise insert the specialized value to hashmap
+  // All this operation is under lock protection.
+  // fn: bool operator()(const Key &key, Value &value);
+  // If operator() returns false, insert_or_operate() return OB_EAGAIN.
+  template <typename Function> int insert_or_operate(const Key &key, const Value &value, Function &fn);
   bool is_inited() const { return init_; }
 
 private:
@@ -517,6 +527,7 @@ private:
       uint64_t bkt_L, Function &fn, DoOp &op);
   template <typename Function> int do_erase_if_(const Key &key, Function &fn);
   template <typename Function> int do_operate_(const Key &key, Function &fn);
+  template <typename Function> int do_insert_or_operate_(const Key &key, const Value &value, Function &fn);
 
 private:
   bool init_;
@@ -565,6 +576,13 @@ constexpr const char *ObLinearHashMap<Key, Value, MemMgrTag>::LABEL;
 
 template <typename Key, typename Value, typename MemMgrTag>
 template <typename Dummy>
+int ObLinearHashMap<Key, Value, MemMgrTag>::HashMapMemMgr<UniqueMemMgrTag, Dummy>::init(const int64_t tenant_id)
+{
+  return core_.init(tenant_id);
+}
+
+template <typename Key, typename Value, typename MemMgrTag>
+template <typename Dummy>
 ObExternalRef* ObLinearHashMap<Key, Value, MemMgrTag>::HashMapMemMgr<UniqueMemMgrTag, Dummy>::get_external_ref()
 {
   return core_.get_external_ref();
@@ -579,14 +597,14 @@ ObSmallAllocator& ObLinearHashMap<Key, Value, MemMgrTag>::HashMapMemMgr<UniqueMe
 
 template <typename Key, typename Value, typename MemMgrTag>
 template <typename Dummy>
-ObConcurrentFIFOAllocator& ObLinearHashMap<Key, Value, MemMgrTag>::HashMapMemMgr<UniqueMemMgrTag, Dummy>::get_dir_alloc()
+ObIAllocator& ObLinearHashMap<Key, Value, MemMgrTag>::HashMapMemMgr<UniqueMemMgrTag, Dummy>::get_dir_alloc()
 {
   return core_.get_dir_alloc();
 }
 
 template <typename Key, typename Value, typename MemMgrTag>
 template <typename Dummy>
-ObConcurrentFIFOAllocator& ObLinearHashMap<Key, Value, MemMgrTag>::HashMapMemMgr<UniqueMemMgrTag, Dummy>::get_cnter_alloc()
+ObIAllocator& ObLinearHashMap<Key, Value, MemMgrTag>::HashMapMemMgr<UniqueMemMgrTag, Dummy>::get_cnter_alloc()
 {
   return core_.get_cnter_alloc();
 }
@@ -607,46 +625,39 @@ ObSmallAllocator& ObLinearHashMap<Key, Value, MemMgrTag>::HashMapMemMgr<Tag, Dum
 
 template <typename Key, typename Value, typename MemMgrTag>
 template <typename Tag, typename Dummy>
-ObConcurrentFIFOAllocator& ObLinearHashMap<Key, Value, MemMgrTag>::HashMapMemMgr<Tag, Dummy>::get_dir_alloc()
+ObIAllocator& ObLinearHashMap<Key, Value, MemMgrTag>::HashMapMemMgr<Tag, Dummy>::get_dir_alloc()
 {
   return Core::get_instance().get_dir_alloc();
 }
 
 template <typename Key, typename Value, typename MemMgrTag>
 template <typename Tag, typename Dummy>
-ObConcurrentFIFOAllocator& ObLinearHashMap<Key, Value, MemMgrTag>::HashMapMemMgr<Tag, Dummy>::get_cnter_alloc()
+ObIAllocator& ObLinearHashMap<Key, Value, MemMgrTag>::HashMapMemMgr<Tag, Dummy>::get_cnter_alloc()
 {
   return Core::get_instance().get_cnter_alloc();
 }
-
 /* Hash Map memory manager. */
 template <typename Key, typename Value, typename MemMgrTag>
 ObLinearHashMap<Key, Value, MemMgrTag>::HashMapMemMgrCore::HashMapMemMgrCore()
   : map_array_lock_(common::ObLatchIds::HASH_MAP_LOCK)
 {
+}
+
+/* Hash Map memory manager. */
+template <typename Key, typename Value, typename MemMgrTag>
+int ObLinearHashMap<Key, Value, MemMgrTag>::HashMapMemMgrCore::init(const int64_t tenant_id)
+{
+  int ret = OB_SUCCESS;
+  dir_alloc_.set_attr(ObMemAttr(tenant_id, "LinearHashMapDi"));
+  cnter_alloc_.set_attr(ObMemAttr(tenant_id, "LinearHashMapCn"));
+  map_array_.set_attr(SET_USE_500("HashMapArray"));
   // Init node alloc.
-  int ret = node_alloc_.init(static_cast<int64_t>(sizeof(Node)), SET_USE_500("LinearHashMapNo"));
+  ret = node_alloc_.init(static_cast<int64_t>(sizeof(Node)),
+                         SET_USE_500(ObMemAttr(tenant_id, "LinearHashMapNo")));
   if (OB_FAIL(ret)) {
     LIB_LOG(WARN, "failed to init node alloc", K(ret));
   }
-  int64_t total_limit = 128 * (1L << 30); // 128GB
-  int64_t page_size = 0;
-  if (lib::is_mini_mode()) {
-    total_limit *= lib::mini_mode_resource_ratio();
-  }
-  page_size = OB_MALLOC_MIDDLE_BLOCK_SIZE;
-  // Init dir alloc.
-  ret = dir_alloc_.init(total_limit, 2 * page_size, page_size);
-  dir_alloc_.set_attr(SET_USE_500("LinearHashMapDi"));
-  if (OB_FAIL(ret)) {
-    LIB_LOG(WARN, "failed to init dir alloc", K(ret));
-  }
-  // Init counter alloc.
-  ret = cnter_alloc_.init(total_limit, 2 * page_size, page_size);
-  cnter_alloc_.set_attr(SET_USE_500("LinearHashMapCn"));
-  if (OB_FAIL(ret)) {
-    LIB_LOG(WARN, "failed to init cnter alloc", K(ret));
-  }
+  return ret;
 }
 
 template <typename Key, typename Value, typename MemMgrTag>
@@ -658,8 +669,6 @@ ObLinearHashMap<Key, Value, MemMgrTag>::HashMapMemMgrCore::~HashMapMemMgrCore()
       LIB_LOG(WARN, "hash map not destroy", "map_ptr", map_array_.at(i));
     }
   }
-  cnter_alloc_.destroy();
-  dir_alloc_.destroy();
   if (OB_SUCCESS != (ret = node_alloc_.destroy())) {
     LIB_LOG(ERROR, "failed to destroy node alloc", K(ret));
   }
@@ -669,7 +678,18 @@ template <typename Key, typename Value, typename MemMgrTag>
 typename ObLinearHashMap<Key, Value, MemMgrTag>::HashMapMemMgrCore&
 ObLinearHashMap<Key, Value, MemMgrTag>::HashMapMemMgrCore::get_instance()
 {
+  class InitCore {
+  public:
+    InitCore(HashMapMemMgrCore &core)
+    {
+      int ret = OB_SUCCESS;
+      if (OB_FAIL(core.init(OB_SERVER_TENANT_ID))) {
+        LIB_LOG(ERROR, "failed to init MemMgrCore", K(ret));
+      }
+    }
+  };
   static HashMapMemMgrCore core;
+  static InitCore init(core);
   return core;
 }
 
@@ -687,13 +707,13 @@ ObSmallAllocator& ObLinearHashMap<Key, Value, MemMgrTag>::HashMapMemMgrCore::get
 }
 
 template <typename Key, typename Value, typename MemMgrTag>
-ObConcurrentFIFOAllocator& ObLinearHashMap<Key, Value, MemMgrTag>::HashMapMemMgrCore::get_dir_alloc()
+ObIAllocator& ObLinearHashMap<Key, Value, MemMgrTag>::HashMapMemMgrCore::get_dir_alloc()
 {
   return dir_alloc_;
 }
 
 template <typename Key, typename Value, typename MemMgrTag>
-ObConcurrentFIFOAllocator& ObLinearHashMap<Key, Value, MemMgrTag>::HashMapMemMgrCore::get_cnter_alloc()
+ObIAllocator& ObLinearHashMap<Key, Value, MemMgrTag>::HashMapMemMgrCore::get_cnter_alloc()
 {
   return cnter_alloc_;
 }
@@ -770,6 +790,7 @@ int ObLinearHashMap<Key, Value, MemMgrTag>::Cnter::init(HashMapMemMgr<MemMgrTag>
 template <typename Key, typename Value, typename MemMgrTag>
 int ObLinearHashMap<Key, Value, MemMgrTag>::Cnter::destroy()
 {
+  // Double destroy. Support it.
   if (NULL != mem_mgr_ && NULL != cnter_) {
     mem_mgr_->get_cnter_alloc().free(cnter_);
   }
@@ -784,7 +805,7 @@ void ObLinearHashMap<Key, Value, MemMgrTag>::Cnter::add(const int64_t cnt,
                                                const int64_t th_id)
 {
   if (NULL == cnter_) {
-    LIB_LOG_RET(ERROR, common::OB_ERR_UNEXPECTED, "invalid cnter, not init", K(cnter_));
+    //LIB_LOG_RET(ERROR, common::OB_ERR_UNEXPECTED, "invalid cnter, not init", K(cnter_));
   } else {
     // Use thread id mod counter cnt to assign counter.
     // get cpu id may be used in the future.
@@ -854,42 +875,71 @@ void ObLinearHashMap<Key, Value, MemMgrTag>::BlurredIterator::rewind()
   key_idx_ = 0;
 }
 
+template <typename Key, typename Value, typename MemMgrTag>
+void ObLinearHashMap<Key, Value, MemMgrTag>::BlurredIterator::rewind_randomly()
+{
+  bkt_idx_ = 0;
+  key_idx_ = 0;
+  int64_t seed = (ObTimeUtility::current_time() & 0xFFFFFFFF);
+  if (NULL != map_) {
+    const uint64_t bkt_cnt = map_->get_bkt_cnt();
+    if (bkt_cnt > 1) {
+      bkt_idx_ = seed % bkt_cnt;
+    }
+  }
+}
+
 // Public functions.
 template <typename Key, typename Value, typename MemMgrTag>
-int ObLinearHashMap<Key, Value, MemMgrTag>::init(const lib::ObLabel &label /*= LABEL*/,
-                                                 uint64_t tenant_id /*=TENANT_ID*/)
+int ObLinearHashMap<Key, Value, MemMgrTag>::init(const ObMemAttr &mem_attr)
 {
   return init(OB_MALLOC_NORMAL_BLOCK_SIZE, /* Small segment. */
               OB_MALLOC_BIG_BLOCK_SIZE, /* Large segment. */
               DIR_SZ_L_LMT, /* Dir size, small when init, expand * 2. */
-              label,
-              tenant_id);
+              mem_attr);
+}
+
+template <typename Key, typename Value, typename MemMgrTag>
+int ObLinearHashMap<Key, Value, MemMgrTag>::init(const lib::ObLabel &label /*= LABEL*/,
+                                                 uint64_t tenant_id /*=TENANT_ID*/)
+{
+  return init(ObMemAttr(tenant_id, label));
 }
 
 template <typename Key, typename Value, typename MemMgrTag>
 int ObLinearHashMap<Key, Value, MemMgrTag>::init(uint64_t m_seg_sz, uint64_t s_seg_sz, uint64_t dir_init_sz,
-    const lib::ObLabel &label /*= LABEL*/, uint64_t tenant_id /*=TENANT_ID*/)
+    const ObMemAttr &mem_attr)
 {
   const double LOAD_FCT_DEF_U_LMT = 1;
   const double LOAD_FCT_DEF_L_LMT = 0.01;
 
   int ret = OB_SUCCESS;
   /* Memory alloc from MemMgr, and its static, so label and tenant_id no longer used. */
-  memattr_.tenant_id_ = tenant_id;
-  memattr_.label_ = label;
+  memattr_ = mem_attr;
   load_factor_u_limit_ = LOAD_FCT_DEF_U_LMT;
   load_factor_l_limit_ = LOAD_FCT_DEF_L_LMT;
   load_factor_ = 0.0;
   set_Lp_(0, 0);
   init_haz_();
   init_foreach_();
-  if (OB_SUCCESS != (ret = init_d_arr_(m_seg_sz, s_seg_sz, dir_init_sz)))
+  if (OB_SUCCESS != (ret = mem_mgr_.init(mem_attr.tenant_id_)))
+  { }
+  else if (OB_SUCCESS != (ret = init_d_arr_(m_seg_sz, s_seg_sz, dir_init_sz)))
   { }
   else if (OB_SUCCESS != (ret = cnter_.init(mem_mgr_)))
   { }
   else {
     init_ = true;
     mem_mgr_.add_map(this);
+  }
+  // destory when init failed
+  if (!init_) {
+    int tmp_ret = OB_SUCCESS;
+    if (OB_SUCCESS != (tmp_ret = destroy())) {
+      LIB_LOG(ERROR, "clear init fail memory failed", K(tmp_ret), K(ret));
+    } else {
+      LIB_LOG(ERROR, "init counter failed", K(ret));
+    }
   }
   return ret;
 }
@@ -898,9 +948,8 @@ template <typename Key, typename Value, typename MemMgrTag>
 int ObLinearHashMap<Key, Value, MemMgrTag>::destroy()
 {
   int ret = OB_SUCCESS;
-  if (!init_) {
-    // Double destroy. Support it.
-  } else if (OB_SUCCESS == (ret = do_clear_())) {
+  // Double destroy. Support it.
+  if (OB_SUCCESS == (ret = do_clear_())) {
     mem_mgr_.rm_map(this);
     cnter_.destroy();
     des_d_arr_();
@@ -1160,7 +1209,8 @@ void ObLinearHashMap<Key, Value, MemMgrTag>::des_d_arr_()
       Bucket *seg = dir_[idx];
       if (seg != NULL) { des_seg_(seg);  }
     }
-    des_dir_(dir_);
+    mem_mgr_.get_dir_alloc().free(dir_);
+    dir_ = NULL;
   }
 }
 
@@ -1765,20 +1815,16 @@ template <typename Key, typename Value, typename MemMgrTag>
 int ObLinearHashMap<Key, Value, MemMgrTag>::do_clear_()
 {
   int ret = OB_SUCCESS;
-  if (!init_) {
-    ret = OB_NOT_INIT;
-  } else {
-    if (dir_ != NULL) {
-      uint64_t seg_idx = 0;
-      while (seg_idx < dir_seg_n_lmt_ && dir_[seg_idx] != NULL) {
-        uint64_t bkt_n = (seg_idx < m_seg_n_lmt_) ? m_seg_bkt_n_ : s_seg_bkt_n_;
-        uint64_t clear_cnt = do_clear_seg_(dir_[seg_idx], bkt_n);
-        add_cnt_(-1 * (int64_t)clear_cnt);
-        seg_idx += 1;
-      }
-    } else { /*Fatal err.*/}
-    while (ES_SUCCESS == shrink_()) { }
-  }
+  if (dir_ != NULL) {
+    uint64_t seg_idx = 0;
+    while (seg_idx < dir_seg_n_lmt_ && dir_[seg_idx] != NULL) {
+      uint64_t bkt_n = (seg_idx < m_seg_n_lmt_) ? m_seg_bkt_n_ : s_seg_bkt_n_;
+      uint64_t clear_cnt = do_clear_seg_(dir_[seg_idx], bkt_n);
+      add_cnt_(-1 * (int64_t)clear_cnt);
+      seg_idx += 1;
+    }
+  } else { /*Fatal err.*/}
+  while (ES_SUCCESS == shrink_()) { }
   return ret;
 }
 
@@ -1858,6 +1904,71 @@ int ObLinearHashMap<Key, Value, MemMgrTag>::do_insert_(const Key &key, const Val
   }
   if (OB_SUCC(ret)) {
     add_cnt_(1);
+    load_factor_ctrl_(hash_v);
+  }
+  return ret;
+}
+
+
+template <typename Key, typename Value, typename MemMgrTag>
+template <typename Function>
+int ObLinearHashMap<Key, Value, MemMgrTag>::do_insert_or_operate_(const Key &key, const Value &value, Function &fn)
+{
+  int ret = OB_SUCCESS;
+  uint64_t hash_v = 0;
+  bool operate = false;
+  if (!init_) {
+    ret = OB_NOT_INIT;
+  } else {
+    Bucket* bkt_seg = NULL;
+    Bucket *bkt = load_access_bkt_(key, hash_v, bkt_seg);
+    if (!is_bkt_nonempty_(bkt)) {
+      new (&bkt->key_) Key(key);
+      new (&bkt->value_) Value(value);
+      set_bkt_nonempty_(bkt, true);
+    } else {
+      if (equal_func_(bkt->key_, key)) {
+        operate = true;
+        if (fn(bkt->key_, bkt->value_)) {
+          ret = OB_SUCCESS;
+        } else {
+          ret = OB_EAGAIN;
+        }
+      } else {
+        Node *iter = bkt->next_;
+        while ((iter != NULL) && !operate) {
+          if (equal_func_(iter->key_, key)) {
+            operate = true;
+            if (fn(iter->key_, iter->value_)) {
+              ret = OB_SUCCESS;
+            } else {
+              ret = OB_EAGAIN;
+            }
+            break;
+          }
+          iter = iter->next_;
+        }
+      }
+
+      if (!operate && OB_SUCC(ret)) {
+        Node *node = static_cast<Node*>(mem_mgr_.get_node_alloc().alloc());
+        if (node == NULL) {
+          ret = OB_ALLOCATE_MEMORY_FAILED;
+        } else {
+          new (&node->key_) Key(key);
+          new (&node->value_) Value(value);
+          node->next_ = bkt->next_;
+          bkt->next_ = node;
+        }
+      }
+    }
+    unload_access_bkt_(bkt, bkt_seg);
+  }
+
+  if (OB_SUCC(ret)) {
+    if (!operate) {
+      add_cnt_(1);
+    }
     load_factor_ctrl_(hash_v);
   }
   return ret;
@@ -2384,6 +2495,13 @@ template <typename Key, typename Value, typename MemMgrTag>
 ConstructGuard<Key, Value, MemMgrTag>::ConstructGuard()
 {
   auto& t = ObLinearHashMap<Key, Value, MemMgrTag>::HashMapMemMgrCore::get_instance();
+}
+
+template <typename Key, typename Value, typename MemMgrTag>
+template <typename Function>
+int ObLinearHashMap<Key, Value, MemMgrTag>::insert_or_operate(const Key& key, const Value &value, Function& fn)
+{
+  return do_insert_or_operate_(key, value, fn);
 }
 
 }

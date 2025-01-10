@@ -17,6 +17,7 @@
 #include "observer/mysql/obmp_base.h"
 #include "observer/mysql/ob_query_retry_ctrl.h"
 #include "lib/rc/context.h"
+#include "observer/mysql/obmp_stmt_execute.h"
 
 namespace oceanbase
 {
@@ -27,7 +28,6 @@ class ObMultiStmtItem;
 namespace observer
 {
 
-struct ObGlobalContext;
 
 class ObMPStmtSendLongData : public ObMPBase
 {
@@ -74,10 +74,11 @@ private:
   int64_t exec_start_timestamp_;
   int64_t exec_end_timestamp_;
   int32_t stmt_id_;
-  int16_t param_id_;
+  uint16_t param_id_;
   uint64_t buffer_len_;
   common::ObString buffer_;
   bool need_disconnect_;
+  ObPSAnalysisChecker defender_;
 
 private:
   DISALLOW_COPY_AND_ASSIGN(ObMPStmtSendLongData);
