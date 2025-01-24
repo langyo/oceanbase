@@ -39,7 +39,7 @@ const int64_t OB_MIN_PARALLEL_TASK_COUNT = 13; //期望每一个并行度最低�
 const int64_t OB_MAX_PARALLEL_TASK_COUNT = 100; //期望每一个并行度最大持有task数量
 const int64_t OB_MIN_MARCO_COUNT_IN_TASK = 1; //每个task最少负责的宏块个数
 const int64_t OB_INVAILD_PARALLEL_TASK_COUNT = -1;
-const int64_t OB_EXPECTED_TASK_LOAD = 100; //MB, one task will get 100MB data from disk
+const int64_t OB_EXPECTED_TASK_LOAD = 102400; //KB, one task will get 100MB data from disk
 const int64_t OB_GET_MACROS_COUNT_BY_QUERY_RANGE = 1;
 const int64_t OB_GET_BLOCK_RANGE = 2;
 const int64_t OB_BROADCAST_THRESHOLD = 100;
@@ -120,7 +120,12 @@ enum JtColType {
   COL_TYPE_QUERY, // 3
   COL_TYPE_VALUE, // 4
   NESTED_COL_TYPE, // 5
-  COL_TYPE_QUERY_JSON_COL = 6,
+  COL_TYPE_QUERY_JSON_COL, // 6
+  COL_TYPE_VAL_EXTRACT_XML, // 7
+  COL_TYPE_XMLTYPE_XML, // 8
+  COL_TYPE_ORDINALITY_XML = 9,
+  COL_TYPE_RB_ITERATE = 10,
+  COL_TYPE_UNNEST = 11,
 };
 
 enum ObNameTypeClass
@@ -132,7 +137,10 @@ enum ObNameTypeClass
 
 enum ObMatchAgainstMode {
   NATURAL_LANGUAGE_MODE = 0,
-  BOOLEAN_MODE = 1
+  NATURAL_LANGUAGE_MODE_WITH_QUERY_EXPANSION = 1,
+  BOOLEAN_MODE = 2,
+  WITH_QUERY_EXPANSION = 3,
+  MAX_MATCH_AGAINST_MODE = 4,
 };
 
 #define IS_JOIN(type) \
@@ -169,8 +177,6 @@ enum ObMatchAgainstMode {
    (join_type) == RIGHT_ANTI_JOIN)
 
 #define IS_OUTER_OR_CONNECT_BY_JOIN(join_type) (IS_OUTER_JOIN(join_type) || CONNECT_BY_JOIN == join_type)
-
-#define IS_DUMMY_PHY_OPERATOR(op_type) ((op_type == PHY_MONITORING_DUMP))
 
 #define IS_LEFT_STYLE_JOIN(join_type) \
   ((join_type) == LEFT_SEMI_JOIN || \
@@ -280,6 +286,8 @@ enum ObRepartitionScope
   OB_REPARTITION_BOTH_SIDE,
 };
 
+// enum ObPLCacheObjectType start wich OB_PHY_PLAN_UNCERTAIN value.
+// if it need add enum value to ObPhyPlanType, need skip ObPLCacheObjectType max value.
 enum ObPhyPlanType
 {
   OB_PHY_PLAN_UNINITIALIZED = 0,
@@ -320,6 +328,7 @@ enum ExplainType
   EXPLAIN_EXTENDED_NOADDR,
   EXPLAIN_DBLINK_STMT,
   EXPLAIN_HINT_FORMAT,
+  EXPLAIN_PLAN_TABLE
 };
 
 enum DiagnosticsType
@@ -419,6 +428,13 @@ enum DistinctType
 };
 
 enum class ObPDMLOption {
+  NOT_SPECIFIED = -1,
+  ENABLE,
+  DISABLE,
+  MAX_VALUE
+};
+
+enum class ObParallelDASOption {
   NOT_SPECIFIED = -1,
   ENABLE,
   DISABLE,
@@ -648,6 +664,118 @@ ObTMSegmentArray<T, max_block_size, BlockAllocatorT, auto_free,
 {
   this->set_tenant_id(MTL_ID());
 }
+
+inline const ObString &ob_match_against_mode_str(const ObMatchAgainstMode mode)
+{
+  static const ObString ma_mode_str[] =
+  {
+    "NATURAL LANGUAGE MODE",
+    "NATURAL LANGUAGE MODE WITH QUERY EXPANSION",
+    "BOOLEAN MODE",
+    "WITH QUERY EXPANSION",
+    "UNKNOWN MATCH MODE"
+  };
+
+  if (OB_LIKELY(mode >= ObMatchAgainstMode::NATURAL_LANGUAGE_MODE)
+      && OB_LIKELY(mode < ObMatchAgainstMode::MAX_MATCH_AGAINST_MODE)) {
+    return ma_mode_str[mode];
+  } else {
+    return ma_mode_str[ObMatchAgainstMode::MAX_MATCH_AGAINST_MODE];
+  }
+}
+
+static bool is_fixed_length_storage(ObObjType type) {
+  bool is_fixed = true;
+  ObObjTypeClass tc = ob_obj_type_class(type);
+  OB_ASSERT(tc >= ObNullTC && tc < ObMaxTC);
+  if (ObNumberTC == tc
+      || ObExtendTC == tc
+      || ObTextTC == tc
+      || ObEnumSetInnerTC == tc
+      || ObRawTC == tc
+      || ObRowIDTC == tc
+      || ObLobTC == tc
+      || ObJsonTC == tc
+      || ObGeometryTC == tc
+      || ObUserDefinedSQLTC == tc
+      || ObDecimalIntTC == tc
+      || ObRoaringBitmapTC == tc) {
+    is_fixed = false;
+  }
+  return is_fixed;
+}
+
+static bool is_fixed_length(ObObjType type) {
+  bool is_fixed = true;
+  ObObjTypeClass tc = ob_obj_type_class(type);
+  OB_ASSERT(tc >= ObNullTC && tc < ObMaxTC);
+  if (ObNumberTC == tc
+      || ObExtendTC == tc
+      || ObTextTC == tc
+      || ObStringTC == tc
+      || ObEnumSetInnerTC == tc
+      || ObRawTC == tc
+      || ObRowIDTC == tc
+      || ObLobTC == tc
+      || ObJsonTC == tc
+      || ObGeometryTC == tc
+      || ObUserDefinedSQLTC == tc
+      || ObDecimalIntTC == tc
+      || ObRoaringBitmapTC == tc
+      || ObCollectionSQLTC == tc) {
+    is_fixed = false;
+  }
+  return is_fixed;
+}
+
+static int16_t get_type_fixed_length(ObObjType type) {
+  int16_t len = 0;
+  ObObjTypeClass tc = ob_obj_type_class(type);
+  OB_ASSERT(tc >= ObNullTC && tc < ObMaxTC);
+  switch (tc)
+  {
+    case ObUIntTC:
+    case ObIntTC:
+    case ObDoubleTC:
+    case ObDateTimeTC:
+    case ObMySQLDateTimeTC:
+    case ObTimeTC:
+    case ObBitTC:
+    case ObEnumSetTC:
+    {
+      len = 8;
+      break;
+    }
+    case ObDateTC:
+    case ObMySQLDateTC:
+    case ObFloatTC:
+    {
+      len = 4;
+      break;
+    }
+    case ObYearTC:
+    {
+      len = 1;
+      break;
+    }
+    case ObOTimestampTC: {
+      len = (type == ObTimestampTZType) ? 12 : 10;
+      break;
+    }
+    case ObIntervalTC:
+    {
+      len = (type == ObIntervalYMType) ? 8 : 12;
+      break;
+    }
+    default:
+      break;
+  }
+  return len;
+}
+
+#define SPM_MODE_DISABLE 0
+#define SPM_MODE_ONLINE_EVOLVE 1
+#define SPM_MODE_BASELINE_FIRST 2
 
 }  // namespace sql
 }  // namespace oceanbase

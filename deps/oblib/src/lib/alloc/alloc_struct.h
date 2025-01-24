@@ -23,6 +23,8 @@
 #include "lib/alloc/alloc_assist.h"
 #include "lib/alloc/abit_set.h"
 #include "lib/allocator/ob_mod_define.h"
+#include "lib/list/ob_dlink_node.h"
+#include "lib/atomic/ob_atomic.h"
 
 #ifndef NDEBUG
 #define MEMCHK_LEVEL 1
@@ -119,15 +121,24 @@ struct ObLabel
   const char *str_;
 };
 
+struct ObMemVersionNode : public ObDLinkBase<ObMemVersionNode>
+{
+  static uint32_t global_version;
+  static __thread bool tl_ignore_node;
+  static __thread ObMemVersionNode* tl_node;
+  uint32_t version_ = UINT32_MAX;
+};
+
 struct ObMemAttr
 {
-  friend ObMemAttr DoNotUseMe(ObMemAttr &attr, bool expect_500);
+  friend ObMemAttr DoNotUseMe(ObMemAttr &attr);
+  friend ObMemAttr UseUnexpected500(ObMemAttr &attr);
+  friend ObMemAttr IgnoreVersion(ObMemAttr &attr);
   uint64_t tenant_id_;
   ObLabel label_;
   uint64_t ctx_id_;
   uint64_t sub_ctx_id_;
   ObAllocPrio prio_;
-
   explicit ObMemAttr(
     uint64_t tenant_id = common::OB_SERVER_TENANT_ID,
     ObLabel label = ObLabel(),
@@ -137,42 +148,75 @@ struct ObMemAttr
         label_(label),
         ctx_id_(ctx_id),
         sub_ctx_id_(ObSubCtxIds::MAX_SUB_CTX_ID),
-        prio_(prio) {}
+        prio_(prio),
+        use_500_(false),
+        expect_500_(true),
+        ignore_version_(ObMemVersionNode::tl_ignore_node),
+        alloc_extra_info_(false)
+  {}
   int64_t to_string(char* buf, const int64_t buf_len) const;
   bool use_500() const { return use_500_; }
   bool expect_500() const { return expect_500_; }
-private:
-  bool use_500_ = false;
-  bool expect_500_ = true;
+  bool ignore_version() const { return ignore_version_; }
+public:
+  union {
+    char padding__[4];
+    struct {
+      struct {
+        uint8_t use_500_ : 1;
+        uint8_t expect_500_ : 1;
+        uint8_t ignore_version_ : 1;
+        uint8_t alloc_extra_info_ : 1;
+      };
+    };
+  };
 };
 
-inline ObMemAttr DoNotUseMe(ObMemAttr &attr, bool expect_500)
+inline ObMemAttr DoNotUseMe(ObMemAttr &attr)
 {
   attr.use_500_ = true;
-  attr.expect_500_ = expect_500;
+  attr.ignore_version_ = true;
   return attr;
 }
 
-inline ObMemAttr DoNotUseMe(const ObMemAttr &&attr, const bool expect_500)
+inline ObMemAttr UseUnexpected500(ObMemAttr &attr)
 {
-  ObMemAttr attr_cpy = attr;
-  return DoNotUseMe(attr_cpy, expect_500);
+  attr.use_500_ = true;
+  attr.expect_500_ = false;
+  attr.ignore_version_ = true;
+  return attr;
 }
 
-inline ObMemAttr DoNotUseMe(const ObLabel &label, const bool expect_500)
+inline ObMemAttr IgnoreVersion(ObMemAttr &attr)
 {
-  ObMemAttr attr(OB_SERVER_TENANT_ID, label);
-  return DoNotUseMe(attr, expect_500);
+  attr.ignore_version_ = true;
+  return attr;
 }
 
-inline ObMemAttr DoNotUseMe(const ObLabel &label, const uint64_t ctx_id, const bool expect_500)
-{
-  ObMemAttr attr(OB_SERVER_TENANT_ID, label, ctx_id);
-  return DoNotUseMe(attr, expect_500);
-}
+#define ObMemAttrFriendFunc(func_name)                                    \
+  inline ObMemAttr func_name(const ObMemAttr &&attr)                      \
+  {                                                                       \
+    ObMemAttr attr_cpy = attr;                                            \
+    return func_name(attr_cpy);                                           \
+  }                                                                       \
+  inline ObMemAttr func_name(const ObLabel &label)                        \
+  {                                                                       \
+    ObMemAttr attr(OB_SERVER_TENANT_ID, label);                           \
+    return func_name(attr);                                               \
+  }                                                                       \
+  inline ObMemAttr func_name(const ObLabel &label, const uint64_t ctx_id) \
+  {                                                                       \
+    ObMemAttr attr(OB_SERVER_TENANT_ID, label, ctx_id);                   \
+    return func_name(attr);                                               \
+  }
 
-#define SET_USE_500(args...) ::oceanbase::lib::DoNotUseMe(args, true)
-#define SET_USE_UNEXPECTED_500(args...) ::oceanbase::lib::DoNotUseMe(args, false)
+ObMemAttrFriendFunc(DoNotUseMe);
+ObMemAttrFriendFunc(UseUnexpected500);
+ObMemAttrFriendFunc(IgnoreVersion);
+
+#define SET_USE_500(args...) ::oceanbase::lib::DoNotUseMe(args)
+#define SET_USE_UNEXPECTED_500(args...) ::oceanbase::lib::UseUnexpected500(args)
+#define SET_IGNORE_MEM_VERSION(args...) ::oceanbase::lib::IgnoreVersion(args)
 
 struct AllocHelper
 {
@@ -201,9 +245,6 @@ struct AChunk {
   OB_INLINE int blk_offset(const ABlock *block) const;
   OB_INLINE int blk_nblocks(const ABlock *block) const;
   OB_INLINE char *blk_data(const ABlock *block) const;
-  OB_INLINE void mark_unused_blk_offset_bit(int offset);
-  OB_INLINE void unmark_unused_blk_offset_bit(int offset);
-  OB_INLINE bool is_all_blks_unused();
   union {
     uint32_t MAGIC_CODE_;
     struct {
@@ -212,19 +253,54 @@ struct AChunk {
       };
     };
   };
+#ifdef ENABLE_SANITY
+  void *ref_;
+#endif
   BlockSet *block_set_;
+  uint64_t using_cnt_;
   uint64_t washed_blks_;
   uint64_t washed_size_;
   uint64_t alloc_bytes_;
   AChunk *prev_, *next_; // ObTenantCtxAllocator's free_list or BlockSet's using_list
   AChunk *prev2_, *next2_; // ObTenantCtxAllocator's using_list
   ASimpleBitSet<MAX_BLOCKS_CNT> blk_bs_;
-  ASimpleBitSet<MAX_BLOCKS_CNT> unused_blk_bs_;
   char data_[0];
 } __attribute__ ((aligned (16)));
 
-
+class AObject;
+struct AObjectList
+{
+  struct Head {
+    int64_t cnt_      : 10;
+    int64_t addr_     : 54;
+  };
+  AObjectList()
+    : v_(0)
+  {}
+  void reset(AObject *obj, int64_t cnt)
+  {
+    Head h;
+    h.cnt_ = cnt;
+    h.addr_ = (int64_t)obj;
+    ATOMIC_BCAS(&v_, 0, *(int64_t*)&h);
+  }
+  void reset() { v_ = 0; }
+  int64_t push(AObject *obj);
+  AObject *popall(int64_t *cnt = NULL)
+  {
+    int64_t v = ATOMIC_TAS(&v_, 0);
+    Head *h = (Head*)&v;
+    if (NULL != cnt) *cnt = h->cnt_;
+    return (AObject*)h->addr_;
+  }
+  int64_t v_;
+};
 struct ABlock {
+  enum {
+    FULL,
+    PARTITIAL,
+    EMPTY,
+  };
   OB_INLINE ABlock();
   OB_INLINE AChunk *chunk() const;
   OB_INLINE void clear_magic_code();
@@ -239,14 +315,22 @@ struct ABlock {
         uint8_t in_use_ : 1;
         uint8_t is_large_ : 1;
         uint8_t is_washed_ : 1;
+        uint8_t status_ : 2;
+        uint8_t is_malloc_v2_ : 1;
       };
     };
   };
 
   uint64_t alloc_bytes_;
   uint32_t ablock_size_;
-  ObjectSet *obj_set_;
-  int64_t mem_context_;
+  void *obj_set_;
+  union {
+    struct {
+      int32_t sc_idx_;
+      int32_t max_cnt_;
+      AObjectList freelist_;
+    };
+  };
   ABlock *prev_, *next_;
 };
 
@@ -259,6 +343,16 @@ struct AObject {
   OB_INLINE ABlock *block() const;
   OB_INLINE uint64_t hold(uint32_t cells_per_block) const;
   OB_INLINE ObLabel label() const;
+  OB_INLINE char *bt();
+  OB_INLINE void set_label(const char* label)
+  {
+    if (nullptr != label) {
+      STRNCPY(label_, label, AOBJECT_LABEL_SIZE);
+      label_[AOBJECT_LABEL_SIZE] = '\0';
+    } else {
+      MEMSET(label_, '\0', AOBJECT_LABEL_SIZE + 1);
+    }
+  }
 
   // members
   union {
@@ -274,16 +368,18 @@ struct AObject {
   uint16_t obj_offset_;
 
   uint32_t alloc_bytes_;
-  uint64_t tenant_id_;
+  uint32_t version_;
   char label_[AOBJECT_LABEL_SIZE + 1];
 
   // padding to ensure data_ is 16x offset
   union {
-    char padding__[4];
+    char padding__[16];
     struct {
       struct {
         uint8_t on_leak_check_ : 1;
         uint8_t on_malloc_sample_ : 1;
+        uint8_t ignore_version_ : 1;
+
       };
     };
   };
@@ -312,6 +408,12 @@ static const uint32_t AOBJECT_META_SIZE = AOBJECT_HEADER_SIZE + AOBJECT_TAIL_SIZ
 static const uint32_t INTACT_NORMAL_AOBJECT_SIZE = 8L << 10;
 static const uint32_t INTACT_MIDDLE_AOBJECT_SIZE = 64L << 10;
 
+static const int32_t AOBJECT_BACKTRACE_COUNT = 16;
+static const int32_t AOBJECT_BACKTRACE_SIZE = sizeof(void*) * AOBJECT_BACKTRACE_COUNT;
+static const int32_t AOBJECT_EXTRA_INFO_SIZE = AOBJECT_BACKTRACE_SIZE;
+
+static const int32_t MAX_BACKTRACE_LENGTH = 512;
+
 static const uint32_t ABLOCK_HEADER_SIZE = sizeof(ABlock);
 static const uint32_t ABLOCK_SIZE = INTACT_NORMAL_AOBJECT_SIZE;
 
@@ -324,7 +426,7 @@ STATIC_ASSERT(ACHUNK_HEADER_SIZE < ACHUNK_PRESERVE_SIZE &&
               0 == (ACHUNK_HEADER_SIZE & (ABLOCK_ALIGN - 1)) &&
               0 == (ABLOCK_SIZE & (ABLOCK_ALIGN - 1)) &&
               AChunk::MAX_BLOCKS_CNT > BLOCKS_PER_CHUNK &&
-              ACHUNK_HEADER_SIZE >= BLOCKS_PER_CHUNK * ABLOCK_HEADER_SIZE &&
+              ACHUNK_HEADER_SIZE >= ACHUNK_PURE_HEADER_SIZE + BLOCKS_PER_CHUNK * ABLOCK_HEADER_SIZE &&
               0 == (ACHUNK_SIZE & (ABLOCK_SIZE - 1)), "meta check");
 
 inline uint64_t align_up(uint64_t x, uint64_t align)
@@ -339,7 +441,11 @@ inline uint64_t align_up2(uint64_t x, uint64_t align)
 
 AChunk::AChunk() :
     MAGIC_CODE_(ACHUNK_MAGIC_CODE),
+#ifdef ENABLE_SANITY
+    ref_(nullptr),
+#endif
     block_set_(nullptr),
+    using_cnt_(0),
     washed_blks_(0), washed_size_(0), alloc_bytes_(0),
     prev_(this), next_(this),
     prev2_(this), next2_(this)
@@ -393,33 +499,9 @@ void AChunk::mark_blk_offset_bit(int offset)
   blk_bs_.set(offset);
 }
 
-void AChunk::mark_unused_blk_offset_bit(int offset)
-{
-  unused_blk_bs_.set(offset);
-}
-
 void AChunk::unmark_blk_offset_bit(int offset)
 {
   blk_bs_.unset(offset);
-}
-
-void AChunk::unmark_unused_blk_offset_bit(int offset)
-{
-  unused_blk_bs_.unset(offset);
-}
-
-bool AChunk::is_all_blks_unused()
-{
-  bool ret = false;
-  if (0 != washed_size_) {
-    auto blk_bs = blk_bs_;
-    blk_bs.combine(unused_blk_bs_,
-          [](int64_t left, int64_t right) { return (left ^ right); });
-    ret = -1 == blk_bs.min_bit_ge(0);
-  } else {
-    ret = -1 == blk_bs_.min_bit_ge(1);
-  }
-  return ret;
 }
 
 ABlock *AChunk::offset2blk(int offset) const
@@ -475,11 +557,24 @@ char *AChunk::blk_data(const ABlock *block) const
   return (char*)this + ACHUNK_HEADER_SIZE + b_offset * ABLOCK_SIZE;
 }
 
+inline int64_t AObjectList::push(AObject *obj)
+{
+  int64_t ov = ATOMIC_LOAD(&v_);
+  Head nh;
+  nh.addr_ = (int64_t)obj;
+  do {
+    Head oh = *(Head*)&ov;
+    obj->next_ = (AObject*)oh.addr_;
+    nh.cnt_ = oh.cnt_ + 1;
+  } while (!ATOMIC_CMP_AND_EXCHANGE(&v_, &ov, *(int64_t*)&nh));
+  return nh.cnt_;
+}
+
 ABlock::ABlock() :
     MAGIC_CODE_(ABLOCK_MAGIC_CODE),
     alloc_bytes_(0),
     ablock_size_(0),
-    obj_set_(NULL), mem_context_(0),
+    obj_set_(NULL),
     prev_(this), next_(this)
 {}
 
@@ -522,8 +617,7 @@ char *ABlock::data() const
 AObject::AObject()
     : MAGIC_CODE_(FREE_AOBJECT_MAGIC_CODE),
       nobjs_(0), nobjs_prev_(0), obj_offset_(0),
-      alloc_bytes_(0), tenant_id_(0),
-      on_leak_check_(false), on_malloc_sample_(false)
+      alloc_bytes_(0), on_leak_check_(false), on_malloc_sample_(false)
 {
 }
 
@@ -551,7 +645,7 @@ bool AObject::is_last(uint32_t cells_per_block) const
 ABlock *AObject::block() const
 {
   AChunk *chunk = AChunk::ptr2chunk(this);
-  abort_unless(chunk->is_valid());
+  DEBUG_ASSERT(chunk->is_valid());
   ABlock *block = chunk->ptr2blk(this);
   return block;
 }
@@ -566,6 +660,10 @@ uint64_t AObject::hold(uint32_t cells_per_block) const
 ObLabel AObject::label() const
 {
   return ObLabel(label_);
+}
+char *AObject::bt()
+{
+  return &data_[alloc_bytes_ + AOBJECT_TAIL_SIZE];
 }
 
 class Label
@@ -608,13 +706,80 @@ private:
   ObMemAttr old_attr_;
 };
 
-extern void inc_divisive_mem_size(const int64_t size);
-extern void dec_divisive_mem_size(const int64_t size);
-extern int64_t get_divisive_mem_size();
+class ObLightBacktraceGuard
+{
+public:
+  ObLightBacktraceGuard(const bool enable)
+    : last_(tl_enable())
+  {
+    tl_enable() = enable;
+  }
+  ~ObLightBacktraceGuard()
+  {
+    tl_enable() = last_;
+  }
+public:
+  static bool is_enabled()
+  {
+    return tl_enable();
+  }
+private:
+  static bool &tl_enable()
+  {
+    static __thread bool enable = false;
+    return enable;
+  }
+private:
+  const bool last_;
+};
 
-extern void set_ob_mem_mgr_path();
-extern void unset_ob_mem_mgr_path();
-extern bool is_ob_mem_mgr_path();
+class ObUnmanagedMemoryStat
+{
+public:
+  class DisableGuard
+  {
+  public:
+    DisableGuard()
+      : last_(tl_disabled())
+    {
+      tl_disabled() = true;
+    }
+    ~DisableGuard()
+    {
+      tl_disabled() = last_;
+    }
+    static bool &tl_disabled()
+    {
+      static __thread bool disabled = false;
+      return disabled;
+    }
+  private:
+    bool last_;
+  };
+  static ObUnmanagedMemoryStat &get_instance()
+  {
+    static ObUnmanagedMemoryStat instance;
+    return instance;
+  }
+  static bool is_disabled()
+  {
+    return DisableGuard::tl_disabled();
+  }
+  void inc(const int64_t size);
+  void dec(const int64_t size);
+  int64_t get_total_hold();
+private:
+  ObUnmanagedMemoryStat()
+  {}
+  int64_t hold_[OB_MAX_CPU_NUM];
+};
+
+#define UNMAMAGED_MEMORY_STAT ObUnmanagedMemoryStat::get_instance()
+
+extern int64_t get_unmanaged_memory_size();
+
+extern void enable_memleak_light_backtrace(const bool);
+extern bool is_memleak_light_backtrace_enabled();
 
 #define FORCE_EXPLICT_500_MALLOC() \
   OB_UNLIKELY(oceanbase::lib::ObMallocAllocator::get_instance()->force_explict_500_malloc_)

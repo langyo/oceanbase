@@ -28,6 +28,8 @@
 #include "sql/engine/px/datahub/components/ob_dh_sample.h"
 #include "sql/engine/px/datahub/components/ob_dh_init_channel.h"
 #include "sql/engine/px/datahub/components/ob_dh_second_stage_reporting_wf.h"
+#include "sql/engine/px/datahub/components/ob_dh_join_filter_count_row.h"
+
 namespace oceanbase
 {
 namespace sql
@@ -105,6 +107,7 @@ public:
 public:
   virtual int inner_open() override;
   virtual void destroy() override;
+  virtual int inner_rescan() override;
   virtual int inner_close() override;
   virtual int inner_get_next_row() override;
 
@@ -122,12 +125,11 @@ public:
                                        dtl::ObDtlChTotalInfo &ch_info) override;
 private:
 
-  // fetch next rows for inner_get_next_row() or inner_get_next_batch()
-  int fetch_rows(const int64_t row_cnt);
   int setup_loop_proc() override;
   int setup_readers();
   void destroy_readers();
   int next_row(ObReceiveRowReader &reader, bool &wait_next_msg);
+  int next_rows(ObReceiveRowReader &reader, int64_t max_row_cnt, int64_t &read_rows);
   virtual void clean_dfos_dtl_interm_result() override
   {
     msg_proc_.clean_dtl_interm_result(ctx_);
@@ -148,12 +150,19 @@ private:
   ObInitChannelPieceMsgP init_channel_piece_msg_proc_;
   ObReportingWFPieceMsgP reporting_wf_piece_msg_proc_;
   ObOptStatsGatherPieceMsgP opt_stats_gather_piece_msg_proc_;
+  ObSPWinFuncPXPieceMsgP sp_winfunc_px_piece_msg_proc_;
+  ObRDWinFuncPXPieceMsgP rd_winfunc_px_piece_msg_proc_;
+  ObJoinFilterCountRowPieceMsgP join_filter_count_row_piece_msg_proc_;
   ObReceiveRowReader *readers_;
   ObOrderedReceiveFilter receive_order_;
   int64_t reader_cnt_;
   int64_t channel_idx_;
   int64_t finish_ch_cnt_;
   bool all_rows_finish_;
+  // stored rows used for get batch rows from DTL reader.
+  const ObChunkDatumStore::StoredRow **stored_rows_;
+  const ObCompactRow **vector_rows_;
+
 };
 
 } // end namespace sql

@@ -21,7 +21,7 @@ using namespace storage;
 using namespace common;
 namespace blocksstable
 {
-#define FPRINTF(args...) fprintf(stderr, ##args)
+#define FPRINTF(args...) fprintf(fd_, ##args)
 #define P_BAR() FPRINTF("|")
 #define P_DASH() FPRINTF("------------------------------")
 #define P_END_DASH() FPRINTF("--------------------------------------------------------------------------------")
@@ -96,7 +96,8 @@ static const char * OB_OBJ_TYPE_NAMES[ObMaxType] = {
     "ObTimestampTZType", "ObTimestampLTZType", "ObTimestampNanoType",
     "ObRawType", "ObIntervalYMType", "ObIntervalDSType", "ObNumberFloatType",
     "ObNVarchar2Type", "ObNCharType", "ObURowIDType", "ObLobType",
-    "ObJsonType", "ObGeometryType", "ObUserDefinedSQLType","ObDecimalIntType"
+    "ObJsonType", "ObGeometryType", "ObUserDefinedSQLType", "ObDecimalIntType",
+    "ObCollectionSQLType", "ObMySQLDateType", "ObMySQLDateTimeType",
 };
 
 void ObSSTablePrinter::print_title(const char *title, const int64_t level)
@@ -223,7 +224,8 @@ void ObSSTablePrinter::print_row_title(const ObDatumRow *row, const int64_t row_
     P_VALUE_BINT_B(row_index);
     P_COLON();
     P_NAME("trans_id=");
-    P_VALUE_STR_B(to_cstring(row->trans_id_));
+    ObCStringHelper helper;
+    P_VALUE_STR_B(helper.convert(row->trans_id_));
     P_COMMA();
     P_NAME("dml_flag=");
     P_VALUE_STR_B(dml_flag);
@@ -238,7 +240,8 @@ void ObSSTablePrinter::print_row_title(const ObDatumRow *row, const int64_t row_
     P_VALUE_BINT_B(row_index);
     P_COLON();
     P_NAME("trans_id=");
-    P_VALUE_STR_B(to_cstring(row->trans_id_));
+    ObCStringHelper helper;
+    P_VALUE_STR_B(helper.convert(row->trans_id_));
     P_COMMA();
     P_NAME("dml_flag=");
     P_VALUE_STR_B(dml_flag);
@@ -251,12 +254,15 @@ void ObSSTablePrinter::print_row_title(const ObDatumRow *row, const int64_t row_
 
 void ObSSTablePrinter::print_cell(const ObObj &cell)
 {
-  P_VALUE_STR_B(to_cstring(cell));
+  ObCStringHelper helper;
+  P_VALUE_STR_B(helper.convert(cell));
 }
 
 void ObSSTablePrinter::print_cell(const ObStorageDatum &datum)
 {
-  P_VALUE_STR_B(to_cstring(datum));
+  ObCStringHelper helper;
+  ObStorageDatumWrapper wrapper(datum, true);
+  P_VALUE_STR_B(helper.convert(wrapper));
 }
 
 void ObSSTablePrinter::print_common_header(const ObMacroBlockCommonHeader *common_header)
@@ -335,13 +341,15 @@ void ObSSTablePrinter::print_index_row_header(const ObIndexBlockRowHeader *idx_r
     P_NAME("Index Block Row Header");
     P_BAR();
     P_COLOR(NONE_COLOR);
-    P_VALUE_STR_B(to_cstring(*idx_row_header));
+    ObCStringHelper helper;
+    P_VALUE_STR_B(helper.convert(*idx_row_header));
     P_END();
   } else {
     P_BAR();
     P_NAME("Index Block Row Header");
     P_BAR();
-    P_VALUE_STR_B(to_cstring(*idx_row_header));
+    ObCStringHelper helper;
+    P_VALUE_STR_B(helper.convert(*idx_row_header));
     P_END();
   }
 }
@@ -355,13 +363,15 @@ void ObSSTablePrinter::print_index_minor_meta(const ObIndexBlockRowMinorMetaInfo
     P_NAME("Index Block Minor Meta Info");
     P_BAR();
     P_COLOR(NONE_COLOR);
-    P_VALUE_STR_B(to_cstring(*minor_meta));
+    ObCStringHelper helper;
+    P_VALUE_STR_B(helper.convert(*minor_meta));
     P_END();
   } else {
     P_BAR();
     P_NAME("Index Block Minor Meta Info");
     P_BAR();
-    P_VALUE_STR_B(to_cstring(*minor_meta));
+    ObCStringHelper helper;
+    P_VALUE_STR_B(helper.convert(*minor_meta));
     P_END();
   }
 }
@@ -535,16 +545,20 @@ void ObSSTablePrinter::print_store_row(
     if (OB_LIKELY(tx_id.get_id() != INT64_MAX)) {
       ObMemAttr mem_attr;
       mem_attr.label_ = "TX_DATA_TABLE";
-      void *p = op_alloc(ObSliceAlloc);
-      auto slice_allocator = new (p) ObSliceAlloc(storage::TX_DATA_SLICE_SIZE, mem_attr);
+      void *p = op_alloc(ObTenantTxDataAllocator);
+      if (OB_NOT_NULL(p)) {
+        ObTenantTxDataAllocator *tx_data_allocator = new (p) ObTenantTxDataAllocator();
 
-      ObTxData tx_data;
-      tx_data.tx_id_ = tx_id;
-      if (OB_FAIL(tx_data.deserialize(str.ptr(), str.length(), pos, *slice_allocator))) {
-        STORAGE_LOG(WARN, "deserialize tx data failed", KR(ret), K(str));
-        hex_dump(str.ptr(), str.length(), true, OB_LOG_LEVEL_WARN);
-      } else {
-        ObTxData::print_to_stderr(tx_data);
+        ObTxData tx_data;
+        tx_data.tx_id_ = tx_id;
+        if (OB_FAIL(tx_data_allocator->init("PRINT_TX_DATA_SST"))) {
+          STORAGE_LOG(WARN, "init tx data allocator failed", KR(ret), K(str));
+        } else if (OB_FAIL(tx_data.deserialize(str.ptr(), str.length(), pos, *tx_data_allocator))) {
+          STORAGE_LOG(WARN, "deserialize tx data failed", KR(ret), K(str));
+          hex_dump(str.ptr(), str.length(), true, OB_LOG_LEVEL_WARN);
+        } else {
+          ObTxData::print_to_stderr(tx_data);
+        }
       }
     } else {
       // pre-process data for upper trans version calculation

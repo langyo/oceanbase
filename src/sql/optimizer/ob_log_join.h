@@ -15,6 +15,8 @@
 #include "ob_log_operator_factory.h"
 #include "ob_logical_operator.h"
 #include "ob_join_order.h"
+#include "sql/engine/join/ob_join_filter_material_control_info.h"
+
 namespace oceanbase
 {
 namespace sql
@@ -119,6 +121,7 @@ namespace sql
                                           const int64_t buf_len,
                                           int64_t &pos);
     virtual int do_re_est_cost(EstimateCostInfo &param, double &card, double &op_cost, double &cost) override;
+    virtual int est_ambient_card() override;
     /*
      * IN         right_child_sharding_info   the join's right child sharding info
      * IN         right_keys                  the right join equal condition
@@ -155,8 +158,6 @@ namespace sql
 
     inline bool can_use_batch_nlj() const { return can_use_batch_nlj_; }
     void set_can_use_batch_nlj(bool can_use) { can_use_batch_nlj_ = can_use; }
-    int check_and_set_use_batch();
-    int check_if_disable_batch(ObLogicalOperator* root, bool &can_use_batch_nlj);
     void set_join_path(JoinPath *path) { join_path_ = path; }
     JoinPath *get_join_path() { return join_path_; }
     bool is_my_exec_expr(const ObRawExpr *expr);
@@ -164,9 +165,24 @@ namespace sql
                                 ObSqlPlanItem &plan_item) override;
     common::ObIArray<ObExecParamRawExpr *> &get_above_pushdown_left_params() { return above_pushdown_left_params_; }
     common::ObIArray<ObExecParamRawExpr *> &get_above_pushdown_right_params() { return above_pushdown_right_params_; }
+    virtual int get_card_without_filter(double &card) override;
+
+    inline bool use_realistic_runtime_bloom_filter_size()
+    {
+      return jf_material_control_info_.enable_material_;
+    }
+
+    inline const ObJoinFilterMaterialControlInfo &get_jf_material_control_info() const
+    {
+      return jf_material_control_info_;
+    }
+
+    inline ObJoinFilterMaterialControlInfo &get_jf_material_control_info()
+    {
+      return jf_material_control_info_;
+    }
 
   private:
-    int set_use_batch(ObLogicalOperator* root);
     inline bool can_enable_gi_partition_pruning()
     {
       return (NESTED_LOOP_JOIN == join_algo_)
@@ -178,6 +194,7 @@ namespace sql
     // 左侧的 GI 看到这个 partition id 后会以 producer 的身份生成列
     int generate_join_partition_id_expr();
     virtual int get_op_exprs(ObIArray<ObRawExpr*> &all_exprs) override;
+    virtual int is_my_fixed_expr(const ObRawExpr *expr, bool &is_fixed) override;
     int get_connect_by_exprs(ObIArray<ObRawExpr*> &all_exprs);
     virtual int allocate_granule_post(AllocGIContext &ctx) override;
     virtual int allocate_granule_pre(AllocGIContext &ctx) override;
@@ -221,7 +238,7 @@ namespace sql
     int print_join_tables_in_hint(const ObDMLStmt &stmt,
                                   PlanText &plan_text,
                                   const ObRelIds &table_set);
-
+    virtual int check_use_child_ordering(bool &used, int64_t &inherit_child_ordering_index)override;
   private:
     // all join predicates
     common::ObSEArray<ObRawExpr *, 8, common::ModulePageAllocator, true> join_conditions_; //equal join condition, for merge-join
@@ -250,7 +267,7 @@ namespace sql
     JoinPath *join_path_;
     common::ObSEArray<ObExecParamRawExpr *, 4, common::ModulePageAllocator, true> above_pushdown_left_params_;
     common::ObSEArray<ObExecParamRawExpr *, 4, common::ModulePageAllocator, true> above_pushdown_right_params_;
-
+    ObJoinFilterMaterialControlInfo jf_material_control_info_;
     DISALLOW_COPY_AND_ASSIGN(ObLogJoin);
   };
 

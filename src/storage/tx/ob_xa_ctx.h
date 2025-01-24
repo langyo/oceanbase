@@ -147,6 +147,27 @@ public:
     return xa_ref_count_;
   }
 public:
+  // for mysql xa
+  int xa_start_for_mysql(const ObXATransID &xid, ObTxDesc *tx_desc);
+  int xa_end_for_mysql(const ObXATransID &xid, ObTxDesc *tx_desc);
+  int pre_xa_prepare_for_mysql(const ObXATransID &xid,
+                               ObTxDesc *tx_desc,
+                               bool &need_exit,
+                               bool &is_read_only,
+                               share::ObLSID &coord_id);
+  int xa_prepare_for_mysql(const ObXATransID &xid, const int64_t timeout_us);
+  int wait_xa_prepare_for_mysql(const ObXATransID &xid, const int64_t timeout_us);
+  int one_phase_end_trans_for_mysql(const ObXATransID &xid,
+                                    const bool is_rollback,
+                                    const int64_t timeout_us,
+                                    ObTxDesc *tx_desc,
+                                    bool &need_exit);
+  int wait_one_phase_end_trans_for_mysql(const bool is_rollback,
+                                         const int64_t timeout_us);
+  bool is_mysql_mode() const { return is_mysql_mode_; }
+  int handle_abort_for_mysql(int cause);
+  int32_t get_state() const { return xa_trans_state_; }
+public:
   // for 4.0 dblink
   int xa_start_for_dblink(const ObXATransID &xid,
                           const int64_t flags,
@@ -155,6 +176,7 @@ public:
                           ObTxDesc *tx_desc);
   int get_dblink_client(const common::sqlclient::DblinkDriverProto dblink_type,
                         common::sqlclient::ObISQLConnection *dblink_conn,
+                        ObDBLinkTransStatistics *dblink_statistics,
                         ObDBLinkClient *&client);
   int remove_dblink_client(ObDBLinkClient *client);
   ObDBLinkClientArray &get_dblink_client_array() { return dblink_client_array_; }
@@ -171,13 +193,15 @@ public:
                K_(xa_branch_count), K_(xa_ref_count), K_(lock_grant),
                K_(is_tightly_coupled), K_(lock_xid), K_(xa_stmt_info),
                K_(is_terminated), K_(executing_xid), "uref", get_uref(),
-               K_(has_tx_level_temp_table), K_(local_lock_level), K_(need_stmt_lock));
+               K_(has_tx_level_temp_table), K_(local_lock_level), K_(need_stmt_lock),
+               K_(is_mysql_mode));
 private:
   int register_timeout_task_(const int64_t interval_us);
   int unregister_timeout_task_();
   int register_xa_timeout_task_();
   void notify_xa_start_complete_(int ret_code);
   int wait_xa_sync_status_(const int64_t expired_time);
+  int wait_sync_stmt_info_(const int64_t expired_time);
   int update_xa_branch_info_(const ObXATransID &xid,
                              const int64_t to_state,
                              const common::ObAddr &addr,
@@ -256,7 +280,10 @@ private:
   // for 4.0 dblink
   int get_dblink_client_(const common::sqlclient::DblinkDriverProto dblink_type,
                          common::sqlclient::ObISQLConnection *dblink_conn,
+                         ObDBLinkTransStatistics *dblink_statistics,
                          ObDBLinkClient *&dblink_client);
+private:
+  static const int MIN_TX_REF_COUNT = 3;
 private:
   bool is_inited_;
   ObXACtxMgr *xa_ctx_mgr_;
@@ -306,6 +333,7 @@ private:
   // can be removed when xid is from session
   ObXATransID executing_xid_;
   ObTransCond start_stmt_cond_;
+  ObTransCond sync_stmt_info_cond_;
   SyncXACb end_trans_cb_;
   // if dblink trans, record dblink client
   ObDBLinkClientArray dblink_client_array_;
@@ -331,6 +359,7 @@ private:
   //    4.2 if local_lock_level == 0, execute the normal global lock release processing
   int64_t local_lock_level_;
   bool need_stmt_lock_;
+  bool is_mysql_mode_;
 };
 
 }//transaction

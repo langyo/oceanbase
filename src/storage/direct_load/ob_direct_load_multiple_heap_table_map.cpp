@@ -27,12 +27,12 @@ ObDirectLoadMultipleHeapTableMap::ObDirectLoadMultipleHeapTableMap(int64_t mem_l
   allocator_("TLD_HT_map"),
   mem_limit_(mem_limit)
 {
+  allocator_.set_tenant_id(MTL_ID());
 }
 
 int ObDirectLoadMultipleHeapTableMap::init()
 {
   int ret = OB_SUCCESS;
-  allocator_.set_tenant_id(MTL_ID());
   ret = tablet_map_.init();
   return ret;
 }
@@ -77,7 +77,7 @@ int ObDirectLoadMultipleHeapTableMap::get_all_key_sorted(ObArray<KeyType> &key_a
     LOG_WARN("fail to get all keys", KR(ret));
   }
   if (OB_SUCC(ret)) {
-    std::sort(key_array.begin(), key_array.end());
+    lib::ob_sort(key_array.begin(), key_array.end());
   }
   return ret;
 }

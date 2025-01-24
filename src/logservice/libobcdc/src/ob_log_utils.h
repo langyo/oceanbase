@@ -236,8 +236,8 @@ private:
 
 int get_local_ip(common::ObString &local_ip);
 
-RecordType get_record_type(const blocksstable::ObDmlFlag &dml_flag);
-const char *print_dml_flag(const blocksstable::ObDmlFlag &dml_flag);
+RecordType get_record_type(const blocksstable::ObDmlRowFlag &dml_flag);
+const char *print_dml_flag(const blocksstable::ObDmlRowFlag &dml_flag);
 const char *print_record_type(int type);
 const char *print_src_category(int src_category);
 const char *print_record_src_type(int type);
@@ -246,9 +246,12 @@ const char *print_table_status(int status);
 const char *print_compat_mode(const lib::Worker::CompatMode &compat_mode);
 const char *get_ctype_string(int ctype);
 bool is_lob_type(const int ctype);
+bool is_string_type(const int ctype);
 bool is_json_type(const int ctype);
 bool is_geometry_type(const int ctype);
 bool is_xml_type(const int ctype);
+bool is_roaringbitmap_type(const int ctype);
+bool is_collection_type(const int ctype);
 int64_t get_non_hidden_column_count(const oceanbase::share::schema::ObTableSchema &table_schema);
 
 double get_delay_sec(const int64_t tstamp);
@@ -521,8 +524,6 @@ int get_tenant_compat_mode(const uint64_t tenant_id,
     lib::Worker::CompatMode &compat_mode,
     const int64_t timeout);
 
-char *lbt_oblog();
-
 bool is_backup_mode();
 
 struct BRColElem
@@ -586,6 +587,14 @@ struct CDCLSNComparator
     return a < b;
   }
 };
+
+struct LSNComparator
+{
+  static int compare(const palf::LSN& lsn1, const palf::LSN& lsn2) {
+    return lsn1.val_ > lsn2.val_ ? 1 : (lsn1.val_ == lsn2.val_ ? 0 : -1);
+  }
+};
+
 // sort and unique lsn arr.
 // NOT THREAD_SAFE
 int sort_and_unique_lsn_arr(ObLogLSNArray &lsn_arr);
@@ -601,7 +610,7 @@ int sort_and_unique_array(ARRAY &arr, Comparator &comparator)
 
   if (arr.count() > 1) {
     // sort lsn_arr
-    std::sort(arr.begin(), arr.end(), comparator);
+    lib::ob_sort(arr.begin(), arr.end(), comparator);
     auto prev = arr.at(0);
     // get duplicate misslog lsn idx
     for(int64_t idx = 1; OB_SUCC(ret) && idx < arr.count(); idx++) {
@@ -673,6 +682,10 @@ int read_from_file(const char *file_path, char *buf, const int64_t buf_len);
       } \
     } \
   } while (0)
+
+// convert to compat mode
+int convert_to_compat_mode(const common::ObCompatibilityMode &compatible_mode,
+    lib::Worker::CompatMode &compat_mode);
 
 } // namespace libobcdc
 } // namespace oceanbase

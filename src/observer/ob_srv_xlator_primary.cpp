@@ -9,6 +9,7 @@
  * MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
  * See the Mulan PubL v2 for more details.
  */
+#define USING_LOG_PREFIX SERVER
 
 #include "share/interrupt/ob_interrupt_rpc_proxy.h"
 #include "observer/ob_srv_xlator.h"
@@ -45,6 +46,7 @@
 #include "observer/table/ob_table_batch_execute_processor.h"
 #include "observer/table/ob_table_query_processor.h"
 #include "observer/table/ob_table_query_and_mutate_processor.h"
+#include "observer/net/ob_rpc_reverse_keepalive.h"
 
 #include "observer/dbms_job/ob_dbms_job_rpc_processor.h"
 #include "storage/tx_storage/ob_tenant_freezer_rpc.h"
@@ -116,8 +118,11 @@ void oceanbase::observer::init_srv_xlator_for_sys(ObSrvRpcXlator *xlator) {
 
   //dbms_scheduler
   RPC_PROCESSOR(ObRpcRunDBMSSchedJobP, gctx_);
+  RPC_PROCESSOR(ObRpcStopDBMSSchedJobP, gctx_);
+  RPC_PROCESSOR(ObRpcDBMSSchedPurgeP, gctx_);
 
   RPC_PROCESSOR(ObRpcGetServerResourceInfoP, gctx_);
+  RPC_PROCESSOR(ObRpcReverseKeepaliveP, gctx_);
 }
 
 void oceanbase::observer::init_srv_xlator_for_schema_test(ObSrvRpcXlator *xlator) {
@@ -165,6 +170,11 @@ void oceanbase::observer::init_srv_xlator_for_transaction(ObSrvRpcXlator *xlator
   RPC_PROCESSOR(ObTxFreeRoutePushStateP);
   // for tx state check of 4377
   RPC_PROCESSOR(ObAskTxStateFor4377P);
+  // for lock wait mgr
+  // RPC_PROCESSOR(ObLockWaitMgrDstEnqueueP);
+  // RPC_PROCESSOR(ObLockWaitMgrDstEnqueueRespP);
+  // RPC_PROCESSOR(ObLockWaitMgrLockReleaseP);
+  // RPC_PROCESSOR(ObLockWaitMgrWakeUpP);
 }
 
 void oceanbase::observer::init_srv_xlator_for_clog(ObSrvRpcXlator *xlator) {
@@ -195,6 +205,14 @@ void oceanbase::observer::init_srv_xlator_for_logservice(ObSrvRpcXlator *xlator)
 #endif
   RPC_PROCESSOR(logservice::LogChangeAccessModeP);
   RPC_PROCESSOR(logservice::LogFlashbackMsgP);
+#ifdef OB_BUILD_ARBITRATION
+  RPC_PROCESSOR(logservice::LogProbeRsP);
+#endif
+  RPC_PROCESSOR(logservice::LogGetCkptReqP);
+#ifdef OB_BUILD_SHARED_STORAGE
+  RPC_PROCESSOR(logservice::LogSyncBaseLSNReqP);
+  RPC_PROCESSOR(logservice::LogAcquireRebuildInfoP);
+#endif
 }
 
 void oceanbase::observer::init_srv_xlator_for_palfenv(ObSrvRpcXlator *xlator)
@@ -229,6 +247,7 @@ void oceanbase::observer::init_srv_xlator_for_cdc(ObSrvRpcXlator *xlator)
   RPC_PROCESSOR(ObCdcLSReqStartLSNByTsP);
   RPC_PROCESSOR(ObCdcLSFetchLogP);
   RPC_PROCESSOR(ObCdcLSFetchMissingLogP);
+  RPC_PROCESSOR(ObCdcFetchRawLogP);
 }
 
 void oceanbase::observer::init_srv_xlator_for_executor(ObSrvRpcXlator *xlator) {

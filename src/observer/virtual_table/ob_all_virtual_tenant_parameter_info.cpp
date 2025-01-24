@@ -37,7 +37,7 @@ int ObAllVirtualTenantParameterInfo::inner_open()
 {
   int ret = OB_SUCCESS;
   const ObAddr &addr = GCTX.self_addr();
-  if (OB_FAIL(OTC_MGR.get_all_tenant_config_info(all_config_))) {
+  if (OB_FAIL(OTC_MGR.get_all_tenant_config_info(all_config_, allocator_))) {
     SERVER_LOG(WARN, "fail to get all tenant config info", K(ret));
   } else if (!addr.ip_to_string(ip_buf_, sizeof(ip_buf_))) {
     ret = OB_ERR_UNEXPECTED;
@@ -50,6 +50,7 @@ int ObAllVirtualTenantParameterInfo::inner_open()
 
 void ObAllVirtualTenantParameterInfo::reset()
 {
+  ObVirtualTableIterator::reset();
   config_iter_ = all_config_.begin();
 }
 
@@ -102,7 +103,9 @@ int ObAllVirtualTenantParameterInfo::inner_get_next_row(ObNewRow *&row)
             break;
           }
         case DATA_TYPE: {
-            cells[i].set_null();
+            cells[i].set_varchar(config_iter_->data_type_.ptr());
+            cells[i].set_collation_type(
+                ObCharset::get_default_collation(ObCharset::get_default_charset()));
             break;
           }
         case VALUE: {

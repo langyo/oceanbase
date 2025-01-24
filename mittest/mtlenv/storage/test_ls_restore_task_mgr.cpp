@@ -1,3 +1,6 @@
+// owner: wangxiaohui.wxh
+// owner group: physical_backup
+
 /**
  * Copyright (c) 2021 OceanBase
  * OceanBase CE is licensed under Mulan PubL v2.
@@ -56,7 +59,7 @@ int ObLSRestoreHandler::fill_restore_arg_()
   info.backup_set_desc_.backup_set_id_ = 1;
   info.backup_set_desc_.backup_type_.type_ = share::ObBackupType::FULL_BACKUP;
   ls_restore_arg_.job_id_ = 1;
-  ls_restore_arg_.restore_type_ = share::ObRestoreType::NORMAL_RESTORE;
+  ls_restore_arg_.restore_type_ = share::ObRestoreType::FULL;
   ls_restore_arg_.tenant_id_ = MTL_ID();
   ls_restore_arg_.restore_scn_.convert_for_logservice(10000000000);
   ls_restore_arg_.backup_cluster_version_ = 10;
@@ -207,7 +210,7 @@ public:
   virtual ~TestLSRestoreHandler() = default;
   static void SetUpTestCase()
   {
-    ObServerCheckpointSlogHandler::get_instance().is_started_ = true;
+    SERVER_STORAGE_META_SERVICE.is_started_ = true;
   }
   static void TearDownTestCase()
   {
@@ -356,7 +359,7 @@ TEST_F(TestLSRestoreHandler, restore_start_1)
   EXPECT_EQ(ObLSRestoreStatus::Status::RESTORE_START, handler->state_handler_->ls_restore_status_);
   EXPECT_EQ(OB_SUCCESS, handler->state_handler_->do_restore());
   EXPECT_EQ(OB_SUCCESS, ls->get_restore_status(status));
-  EXPECT_EQ(ObLSRestoreStatus::Status::RESTORE_NONE, status);
+  EXPECT_EQ(ObLSRestoreStatus::Status::NONE, status);
   ls->set_restore_status(ObLSRestoreStatus(ObLSRestoreStatus::Status::RESTORE_START), rebuild_seq);
   ls->disable_replay();
   LOG_INFO("TestLSRestoreHandler::restore_start_1 finish");
@@ -517,11 +520,6 @@ int ObLSTabletIterator::get_next_tablet(ObTabletHandle &handle)
   return OB_ITER_END;
 }
 
-int ObLS::load_ls_inner_tablet()
-{
-  return OB_SUCCESS;
-}
-
 }
 
 namespace unittest
@@ -585,7 +583,7 @@ TEST_F(TestLSRestoreHandler, wait_state)
   EXPECT_EQ(OB_SUCCESS, ls->get_ls_restore_handler()->update_state_handle_());
   EXPECT_EQ(ObLSRestoreStatus::Status::WAIT_RESTORE_MAJOR_DATA, ls->get_ls_restore_handler()->state_handler_->ls_restore_status_);
   EXPECT_EQ(OB_SUCCESS, ls->get_ls_restore_handler()->state_handler_->do_restore());
-  EXPECT_EQ(ObLSRestoreStatus::Status::RESTORE_NONE, ls->ls_meta_.restore_status_);
+  EXPECT_EQ(ObLSRestoreStatus::Status::NONE, ls->ls_meta_.restore_status_);
 
   ob_role = ObRole::FOLLOWER;
   // follower in wait restore sys tablets
@@ -655,13 +653,13 @@ TEST_F(TestLSRestoreHandler, wait_state)
   EXPECT_EQ(ObLSRestoreStatus::Status::QUICK_RESTORE_FINISH, ls->ls_meta_.restore_status_);
 
   // follower in wait restore major data
-  leader_status = ObLSRestoreStatus::Status::RESTORE_NONE;
+  leader_status = ObLSRestoreStatus::Status::NONE;
   ls->get_ls_restore_handler()->state_handler_ = nullptr;
   ls->ls_meta_.restore_status_ = ObLSRestoreStatus::Status::WAIT_RESTORE_MAJOR_DATA;
   EXPECT_EQ(OB_SUCCESS, ls->get_ls_restore_handler()->update_state_handle_());
   EXPECT_EQ(ObLSRestoreStatus::Status::WAIT_RESTORE_MAJOR_DATA, ls->get_ls_restore_handler()->state_handler_->ls_restore_status_);
   EXPECT_EQ(OB_SUCCESS, ls->get_ls_restore_handler()->state_handler_->do_restore());
-  EXPECT_EQ(ObLSRestoreStatus::Status::RESTORE_NONE, ls->ls_meta_.restore_status_);
+  EXPECT_EQ(ObLSRestoreStatus::Status::NONE, ls->ls_meta_.restore_status_);
 
   leader_status = ObLSRestoreStatus::Status::RESTORE_MAJOR_DATA;
   ls->ls_meta_.restore_status_ = ObLSRestoreStatus::Status::WAIT_RESTORE_MAJOR_DATA;
@@ -669,7 +667,7 @@ TEST_F(TestLSRestoreHandler, wait_state)
   EXPECT_EQ(ObLSRestoreStatus::Status::WAIT_RESTORE_MAJOR_DATA, ls->ls_meta_.restore_status_);
 
   ObLSService *ls_svr = MTL(ObLSService*);
-  EXPECT_EQ(OB_SUCCESS, ls_svr->remove_ls(ObLSID(100), true));
+  EXPECT_EQ(OB_SUCCESS, ls_svr->remove_ls(ObLSID(100)));
   LOG_INFO("TestLSRestoreHandler::wait_state finish");
 }
 

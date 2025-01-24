@@ -6,10 +6,10 @@ CREATE OR REPLACE PACKAGE BODY dbms_stats
       ownname            VARCHAR(65535),
       tabname            VARCHAR(65535),
       partname           VARCHAR(65535) DEFAULT NULL,
-      estimate_percent   DECIMAL DEFAULT AUTO_SAMPLE_SIZE,
-      block_sample       BOOLEAN DEFAULT FALSE,
+      estimate_percent   DECIMAL(20, 10) DEFAULT AUTO_SAMPLE_SIZE,
+      block_sample       BOOLEAN DEFAULT NULL,
       method_opt         VARCHAR(65535) DEFAULT DEFAULT_METHOD_OPT,
-      degree             DECIMAL DEFAULT NULL,
+      degree             DECIMAL(20, 10) DEFAULT NULL,
       granularity        VARCHAR(65535) DEFAULT DEFAULT_GRANULARITY,
       cascade            BOOLEAN DEFAULT NULL,
       stattab            VARCHAR(65535) DEFAULT NULL,
@@ -17,16 +17,18 @@ CREATE OR REPLACE PACKAGE BODY dbms_stats
       statown            VARCHAR(65535) DEFAULT NULL,
       no_invalidate      BOOLEAN DEFAULT FALSE,
       stattype           VARCHAR(65535) DEFAULT 'DATA',
-      force              BOOLEAN DEFAULT FALSE
+      force              BOOLEAN DEFAULT FALSE,
+      hist_est_percent   DECIMAL DEFAULT AUTO_SAMPLE_SIZE,
+      hist_block_sample  BOOLEAN DEFAULT NULL
     );
     PRAGMA INTERFACE(C, GATHER_TABLE_STATS);
 
     PROCEDURE gather_schema_stats (
       ownname            VARCHAR(65535),
-      estimate_percent   DECIMAL DEFAULT AUTO_SAMPLE_SIZE,
-      block_sample       BOOLEAN DEFAULT FALSE,
+      estimate_percent   DECIMAL(20, 10) DEFAULT AUTO_SAMPLE_SIZE,
+      block_sample       BOOLEAN DEFAULT NULL,
       method_opt         VARCHAR(65535) DEFAULT DEFAULT_METHOD_OPT,
-      degree             DECIMAL DEFAULT NULL,
+      degree             DECIMAL(20, 10) DEFAULT NULL,
       granularity        VARCHAR(65535) DEFAULT DEFAULT_GRANULARITY,
       cascade            BOOLEAN DEFAULT NULL,
       stattab            VARCHAR(65535) DEFAULT NULL,
@@ -42,11 +44,11 @@ CREATE OR REPLACE PACKAGE BODY dbms_stats
       ownname            VARCHAR(65535),
       indname            VARCHAR(65535),
       partname           VARCHAR(65535) DEFAULT NULL,
-      estimate_percent   DECIMAL DEFAULT AUTO_SAMPLE_SIZE,
+      estimate_percent   DECIMAL(20, 10) DEFAULT AUTO_SAMPLE_SIZE,
       stattab            VARCHAR(65535) DEFAULT NULL,
       statid             VARCHAR(65535) DEFAULT NULL,
       statown            VARCHAR(65535) DEFAULT NULL,
-      degree             DECIMAL DEFAULT NULL,
+      degree             DECIMAL(20, 10) DEFAULT NULL,
       granularity        VARCHAR(65535) DEFAULT DEFAULT_GRANULARITY,
       no_invalidate      BOOLEAN DEFAULT FALSE,
       force              BOOLEAN DEFAULT FALSE,
@@ -60,17 +62,17 @@ CREATE OR REPLACE PACKAGE BODY dbms_stats
       partname           VARCHAR(65535) DEFAULT NULL,
       stattab            VARCHAR(65535) DEFAULT NULL,
       statid             VARCHAR(65535) DEFAULT NULL,
-      numrows            DECIMAL DEFAULT NULL,
-      numblks            DECIMAL DEFAULT NULL,
-      avgrlen            DECIMAL DEFAULT NULL,
-      flags              DECIMAL DEFAULT NULL,
+      numrows            DECIMAL(20, 10) DEFAULT NULL,
+      numblks            DECIMAL(20, 10) DEFAULT NULL,
+      avgrlen            DECIMAL(20, 10) DEFAULT NULL,
+      flags              DECIMAL(20, 10) DEFAULT NULL,
       statown            VARCHAR(65535) DEFAULT NULL,
       no_invalidate      BOOLEAN DEFAULT FALSE,
-      cachedblk          DECIMAL DEFAULT NULL,
-      cachehit           DECIMAL DEFAULT NULL,
+      cachedblk          DECIMAL(20, 10) DEFAULT NULL,
+      cachehit           DECIMAL(20, 10) DEFAULT NULL,
       force              BOOLEAN DEFAULT FALSE,
-      nummacroblks       DECIMAL DEFAULT NULL,
-      nummicroblks       DECIMAL DEFAULT NULL
+      nummacroblks       DECIMAL(20, 10) DEFAULT NULL,
+      nummicroblks       DECIMAL(20, 10) DEFAULT NULL
     );
     PRAGMA INTERFACE(C, SET_TABLE_STATS);
 
@@ -81,10 +83,10 @@ CREATE OR REPLACE PACKAGE BODY dbms_stats
       partname           VARCHAR(65535) DEFAULT NULL,
       stattab            VARCHAR(65535) DEFAULT NULL,
       statid             VARCHAR(65535) DEFAULT NULL,
-      distcnt            DECIMAL DEFAULT NULL,
-      density            DECIMAL DEFAULT NULL,
-      nullcnt            DECIMAL DEFAULT NULL,
-      epc                DECIMAL DEFAULT NULL,
+      distcnt            DECIMAL(20, 10) DEFAULT NULL,
+      density            DECIMAL(20, 10) DEFAULT NULL,
+      nullcnt            DECIMAL(20, 10) DEFAULT NULL,
+      epc                DECIMAL(20, 10) DEFAULT NULL,
       minval             TEXT DEFAULT NULL,
       maxval             TEXT DEFAULT NULL,
       bkvals             TEXT DEFAULT NULL,
@@ -92,9 +94,9 @@ CREATE OR REPLACE PACKAGE BODY dbms_stats
       chvals             TEXT DEFAULT NULL,
       eavals             TEXT DEFAULT NULL,
       rpcnts             TEXT DEFAULT NULL,
-      eavs               DECIMAL DEFAULT NULL,
-      avgclen            DECIMAL DEFAULT NULL,
-      flags              DECIMAL DEFAULT NULL,
+      eavs               DECIMAL(20, 10) DEFAULT NULL,
+      avgclen            DECIMAL(20, 10) DEFAULT NULL,
+      flags              DECIMAL(20, 10) DEFAULT NULL,
       statown            VARCHAR(65535) DEFAULT NULL,
       no_invalidate      BOOLEAN DEFAULT FALSE,
       force              BOOLEAN DEFAULT FALSE
@@ -107,23 +109,23 @@ CREATE OR REPLACE PACKAGE BODY dbms_stats
       partname           VARCHAR(65535) DEFAULT NULL,
       stattab            VARCHAR(65535) DEFAULT NULL,
       statid             VARCHAR(65535) DEFAULT NULL,
-      numrows            DECIMAL    DEFAULT NULL,
-      numlblks           DECIMAL    DEFAULT NULL,
-      numdist            DECIMAL    DEFAULT NULL,
-      avglblk            DECIMAL    DEFAULT NULL,
-      avgdblk            DECIMAL    DEFAULT NULL,
-      clstfct            DECIMAL    DEFAULT NULL,
-      indlevel           DECIMAL    DEFAULT NULL,
-      flags              DECIMAL    DEFAULT NULL,
+      numrows            DECIMAL(20, 10)    DEFAULT NULL,
+      numlblks           DECIMAL(20, 10)    DEFAULT NULL,
+      numdist            DECIMAL(20, 10)    DEFAULT NULL,
+      avglblk            DECIMAL(20, 10)    DEFAULT NULL,
+      avgdblk            DECIMAL(20, 10)    DEFAULT NULL,
+      clstfct            DECIMAL(20, 10)    DEFAULT NULL,
+      indlevel           DECIMAL(20, 10)    DEFAULT NULL,
+      flags              DECIMAL(20, 10)    DEFAULT NULL,
       statown            VARCHAR(65535) DEFAULT NULL,
       no_invalidate      BOOLEAN    DEFAULT FALSE,
-      guessq             DECIMAL    DEFAULT NULL,
-      cachedblk          DECIMAL    DEFAULT NULL,
-      cachehit           DECIMAL    DEFAULT NULL,
+      guessq             DECIMAL(20, 10)    DEFAULT NULL,
+      cachedblk          DECIMAL(20, 10)    DEFAULT NULL,
+      cachehit           DECIMAL(20, 10)    DEFAULT NULL,
       force              BOOLEAN    DEFAULT FALSE,
-      avgrlen            DECIMAL    DEFAULT NULL,
-      nummacroblks       DECIMAL    DEFAULT NULL,
-      nummicroblks       DECIMAL    DEFAULT NULL,
+      avgrlen            DECIMAL(20, 10)    DEFAULT NULL,
+      nummacroblks       DECIMAL(20, 10)    DEFAULT NULL,
+      nummicroblks       DECIMAL(20, 10)    DEFAULT NULL,
       tabname            VARCHAR(65535) DEFAULT NULL
     );
     PRAGMA INTERFACE(C, SET_INDEX_STATS);
@@ -139,7 +141,8 @@ CREATE OR REPLACE PACKAGE BODY dbms_stats
       cascade_indexes   BOOLEAN DEFAULT TRUE,
       statown           VARCHAR(65535) DEFAULT NULL,
       no_invalidate     BOOLEAN DEFAULT FALSE,
-      force             BOOLEAN DEFAULT FALSE
+      force             BOOLEAN DEFAULT FALSE,
+      degree            DECIMAL(20, 10) DEFAULT 1
     );
     PRAGMA INTERFACE(C, DELETE_TABLE_STATS);
 
@@ -154,7 +157,8 @@ CREATE OR REPLACE PACKAGE BODY dbms_stats
       statown          VARCHAR(65535) DEFAULT NULL,
       no_invalidate    BOOLEAN DEFAULT FALSE,
       force            BOOLEAN DEFAULT FALSE,
-      col_stat_type    VARCHAR(65535) DEFAULT 'ALL'
+      col_stat_type    VARCHAR(65535) DEFAULT 'ALL',
+      degree           DECIMAL(20, 10) DEFAULT 1
     );
     PRAGMA INTERFACE(C, DELETE_COLUMN_STATS);
 
@@ -169,7 +173,8 @@ CREATE OR REPLACE PACKAGE BODY dbms_stats
       no_invalidate    BOOLEAN        DEFAULT FALSE,
       stattype         VARCHAR(65535) DEFAULT 'ALL',
       force            BOOLEAN        DEFAULT FALSE,
-      tabname          VARCHAR(65535) DEFAULT NULL
+      tabname          VARCHAR(65535) DEFAULT NULL,
+      degree           DECIMAL(20, 10) DEFAULT 1
     );
     PRAGMA INTERFACE(C, DELETE_INDEX_STATS);
 
@@ -179,7 +184,8 @@ CREATE OR REPLACE PACKAGE BODY dbms_stats
       statid            VARCHAR(65535) DEFAULT NULL,
       statown           VARCHAR(65535) DEFAULT NULL,
       no_invalidate     BOOLEAN DEFAULT FALSE,
-      force             BOOLEAN DEFAULT FALSE
+      force             BOOLEAN DEFAULT FALSE,
+      degree            DECIMAL(20, 10) DEFAULT 1
     );
     PRAGMA INTERFACE(C, DELETE_SCHEMA_STATS);
 
@@ -360,7 +366,7 @@ CREATE OR REPLACE PACKAGE BODY dbms_stats
     PRAGMA INTERFACE(C, PURGE_STATS);
 
     PROCEDURE alter_stats_history_retention(
-      retention             DECIMAL
+      retention             DECIMAL(20, 10)
     );
     PRAGMA INTERFACE(C, ALTER_STATS_HISTORY_RETENTION);
 
@@ -431,4 +437,34 @@ CREATE OR REPLACE PACKAGE BODY dbms_stats
     );
     PRAGMA INTERFACE(C, DELETE_TABLE_PREFS);
 
+    PROCEDURE copy_table_stats (
+      ownname        VARCHAR(65535),
+      tabname        VARCHAR(65535),
+      srcpartname    VARCHAR(65535),
+      dstpartname		 VARCHAR(65535),
+      scale_factor	 DECIMAL(20, 10) DEFAULT 1,
+      flags					 DECIMAL(20, 10) DEFAULT NULL,
+      force          BOOLEAN DEFAULT FALSE
+    );
+    PRAGMA INTERFACE(C, COPY_TABLE_STATS);
+
+    PROCEDURE cancel_gather_stats (
+      taskid          VARCHAR(65535)
+    );
+    PRAGMA INTERFACE(C, CANCEL_GATHER_STATS);
+
+    PROCEDURE GATHER_SYSTEM_STATS();
+    PRAGMA INTERFACE(C, GATHER_SYSTEM_STATS);
+
+    PROCEDURE DELETE_SYSTEM_STATS();
+    PRAGMA INTERFACE(C, DELETE_SYSTEM_STATS);
+
+    PROCEDURE SET_SYSTEM_STATS (
+      pname          VARCHAR(65535),
+      pvalue         DECIMAL(20, 10)
+    );
+    PRAGMA INTERFACE(C, SET_SYSTEM_STATS);
+
+    PROCEDURE async_gather_stats_job_proc (duration BIGINT DEFAULT NULL);
+    PRAGMA INTERFACE(C, ASYNC_GATHER_STATS_JOB_PROC);
 END dbms_stats;

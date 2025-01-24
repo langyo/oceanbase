@@ -51,15 +51,18 @@ public:
   static int mtl_init(ObDecodeResourcePool *&ctx_array_pool);
   void destroy();
   int init();
+  int reload_config();
   template <typename T>
   int alloc(T *&item);
   template <typename T>
   int free(T *item);
-
 private:
+  uint64_t get_adaptive_factor(const uint64_t tenant_id) const;
   template<typename T>
   ObSmallObjPool<T> &get_pool();
 private:
+  static const uint64_t MIN_FACTOR = 1; // 5.5M
+  static const uint64_t MAX_FACTOR = 50; // 275.5M
   static const int64_t MAX_DECODER_CNT = 4096;
   static const int64_t MID_DECODER_CNT = MAX_DECODER_CNT / 2;
   static const int64_t MIN_DECODER_CNT = MAX_DECODER_CNT / 4;
@@ -100,7 +103,7 @@ public:
   template <typename T>
   inline int alloc(T *&item);
   template <typename T>
-  inline void free(T *item);
+  inline int free(T *item);
   void reset();
 private:
   constexpr static int16_t MAX_CNTS[] = {MAX_FREE_CNT, MAX_FREE_CNT,
@@ -114,7 +117,7 @@ private:
   inline void pop_decoder(const ObColumnHeader::Type &type, T *&item);
   inline void push_decoder(const ObColumnHeader::Type &type, ObIColumnDecoder *item);
   template <typename T>
-  inline void free_decoders(ObDecodeResourcePool &decode_res_pool,
+  inline int free_decoders(ObDecodeResourcePool &decode_res_pool,
                             const ObColumnHeader::Type &type);
   ObIColumnDecoder* raw_pool_[MAX_CNTS[ObColumnHeader::RAW]];
   ObIColumnDecoder* dict_pool_[MAX_CNTS[ObColumnHeader::DICT]];
@@ -140,7 +143,7 @@ public:
   template <typename T>
   inline int alloc(T *&item);
   template <typename T>
-  inline void free(T *item);
+  inline int free(T *item);
   void reset();
 private:
   constexpr static int16_t MAX_CS_CNTS[ObCSColumnHeader::MAX_TYPE] =
@@ -153,7 +156,7 @@ private:
   inline void pop_decoder(const ObCSColumnHeader::Type &type, T *&item);
   inline void push_decoder(const ObCSColumnHeader::Type &type, ObIColumnCSDecoder *item);
   template <typename T>
-  inline void free_decoders(ObDecodeResourcePool &decode_res_pool,
+  inline int free_decoders(ObDecodeResourcePool &decode_res_pool,
                             const ObCSColumnHeader::Type &type);
   ObIColumnCSDecoder* cs_integer_pool_[MAX_CS_CNTS[ObCSColumnHeader::INTEGER]];
   ObIColumnCSDecoder* cs_string_pool_[MAX_CS_CNTS[ObCSColumnHeader::STRING]];

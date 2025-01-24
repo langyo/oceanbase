@@ -83,10 +83,14 @@ void TestBloomFilterDataReaderWriter::SetUp()
   ret = row_generate_.init(table_schema_);
   ASSERT_EQ(OB_SUCCESS, ret);
   ASSERT_EQ(OB_SUCCESS, row_.init(allocator_, TEST_COLUMN_CNT));
-  static ObTenantBase tenant_ctx(1);
+  static ObTenantBase tenant_ctx(OB_SYS_TENANT_ID);
   ObTenantEnv::set_tenant(&tenant_ctx);
   ObTenantIOManager *io_service = nullptr;
+  EXPECT_EQ(OB_SUCCESS, ObTenantIOManager::mtl_new(io_service));
   EXPECT_EQ(OB_SUCCESS, ObTenantIOManager::mtl_init(io_service));
+  EXPECT_EQ(OB_SUCCESS, io_service->start());
+  tenant_ctx.set(io_service);
+  ObTenantEnv::set_tenant(&tenant_ctx);
 }
 
 void TestBloomFilterDataReaderWriter::TearDown()
@@ -275,7 +279,7 @@ int TestBloomFilterDataReaderWriter::check_bloom_filter_cache(const ObBloomFilte
 TEST_F(TestBloomFilterDataReaderWriter, test_cache_value_serial)
 {
   int ret = OB_SUCCESS;
-  int64_t macro_block_size = OB_SERVER_BLOCK_MGR.get_macro_block_size();
+  int64_t macro_block_size = OB_STORAGE_OBJECT_MGR.get_macro_block_size();
   int64_t pos = 0;
 
   ObBloomFilterCacheValue bf_cache_value;

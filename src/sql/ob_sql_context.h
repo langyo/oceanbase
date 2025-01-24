@@ -17,6 +17,7 @@
 #include "lib/net/ob_addr.h"
 #include "lib/hash/ob_placement_hashset.h"
 #include "lib/container/ob_2d_array.h"
+#include "lib/random/ob_random.h"
 #include "sql/optimizer/ob_table_partition_info.h"
 #include "sql/monitor/ob_exec_stat.h"
 #include "lib/hash_func/murmur_hash.h"
@@ -25,6 +26,7 @@
 #include "observer/omt/ob_tenant_config_mgr.h"
 #include "share/client_feedback/ob_feedback_partition_struct.h"
 #include "sql/dblink/ob_dblink_utils.h"
+#include "sql/monitor/ob_sql_stat_record.h"
 #ifdef OB_BUILD_SPM
 #include "sql/spm/ob_spm_define.h"
 #endif
@@ -60,6 +62,77 @@ typedef common::ObFixedArray<LocationConstraint, common::ObIAllocator> ObPlanLoc
 typedef common::ObSEArray<int64_t, 4, common::ModulePageAllocator, true> ObPwjConstraint;
 typedef common::ObFixedArray<int64_t, common::ObIAllocator> ObPlanPwjConstraint;
 class ObShardingInfo;
+
+struct ObPCResourceMapRule
+{
+public:
+  ObPCResourceMapRule() :
+    resource_group_(),
+    res_map_rule_id_(common::OB_INVALID_ID),
+    res_map_rule_param_idx_(common::OB_INVALID_INDEX)
+  {}
+
+  void reset()
+  {
+    resource_group_.reset();
+    res_map_rule_id_ = common::OB_INVALID_ID;
+    res_map_rule_param_idx_ = common::OB_INVALID_INDEX;
+  }
+
+  void shadow_copy(const ObPCResourceMapRule &resource_map_rule)
+  {
+    resource_group_ = resource_map_rule.resource_group_;
+    res_map_rule_id_ = resource_map_rule.res_map_rule_id_;
+    res_map_rule_param_idx_ = resource_map_rule.res_map_rule_param_idx_;
+  }
+  int deep_copy(const ObPCResourceMapRule &resource_map_rule, ObIAllocator &allocator)
+  {
+    int ret = OB_SUCCESS;
+    common::ob_write_string(allocator, resource_map_rule.get_resource_group(), resource_group_);
+    res_map_rule_id_ = resource_map_rule.res_map_rule_id_;
+    res_map_rule_param_idx_ = resource_map_rule.res_map_rule_param_idx_;
+    return ret;
+  }
+
+  void set_resource_group(const common::ObString &resource_group)
+  {
+    resource_group_ = resource_group;
+  }
+
+  void set_column_map_rule(uint64_t res_map_rule_id, int64_t res_map_rule_param_idx)
+  {
+    res_map_rule_id_ = res_map_rule_id;
+    res_map_rule_param_idx_ = res_map_rule_param_idx;
+  }
+
+  inline bool use_hint_control_resource()
+  {
+    return !resource_group_.empty();
+  }
+
+  inline const ObString &get_resource_group() const
+  {
+    return resource_group_;
+  }
+  inline uint64_t get_res_map_rule_id() const
+  {
+    return res_map_rule_id_;
+  }
+  inline int64_t get_res_map_rule_param_idx() const
+  {
+    return res_map_rule_param_idx_;
+  }
+
+  TO_STRING_KV(K_(resource_group), K_(res_map_rule_id), K_(res_map_rule_param_idx));
+
+private:
+  DISALLOW_COPY_AND_ASSIGN(ObPCResourceMapRule);
+  // currently only PlanSet in plan cache module will have a deep copy version string to classify
+  // plan
+  common::ObString resource_group_;
+  uint64_t res_map_rule_id_;
+  int64_t res_map_rule_param_idx_;
+};
 
 struct LocationConstraint
 {
@@ -277,6 +350,47 @@ struct ObInsertRewriteOptCtx
   int64_t row_count_;
 };
 
+struct ObQueryRetryASHDiagInfo {
+public:
+  ObQueryRetryASHDiagInfo()
+    :ls_id_(0),
+    holder_tx_id_(0),
+    holder_data_seq_num_(0),
+    holder_lock_timestamp_(0),
+    table_id_(0),
+    table_schema_version_(0),
+    sys_ls_leader_addr_(0),
+    dop_(0),
+    required_px_workers_number_(0),
+    admitted_px_workers_number_(0)
+  {}
+
+  ~ObQueryRetryASHDiagInfo() = default;
+  void reset() {
+    ls_id_ = 0;
+    holder_tx_id_ = 0;
+    holder_data_seq_num_ = 0;
+    holder_lock_timestamp_ = 0;
+    table_id_ = 0;
+    table_schema_version_ = 0;
+    sys_ls_leader_addr_ = 0;
+    dop_ = 0;
+    required_px_workers_number_ = 0;
+    admitted_px_workers_number_ = 0;
+  }
+
+public:
+  int64_t ls_id_;
+  int64_t holder_tx_id_;
+  int64_t holder_data_seq_num_;
+  int64_t holder_lock_timestamp_;
+  int64_t table_id_;
+  int64_t table_schema_version_;
+  int64_t sys_ls_leader_addr_;
+  int64_t dop_;
+  int64_t required_px_workers_number_;
+  int64_t admitted_px_workers_number_;
+};
 
 class ObQueryRetryInfo
 {
@@ -286,7 +400,8 @@ public:
       is_rpc_timeout_(false),
       last_query_retry_err_(common::OB_SUCCESS),
       retry_cnt_(0),
-      query_switch_leader_retry_timeout_ts_(0)
+      query_switch_leader_retry_timeout_ts_(0),
+      query_retry_ash_diag_info_()
   {
   }
   virtual ~ObQueryRetryInfo() {}
@@ -332,6 +447,8 @@ public:
   void inc_retry_cnt() { retry_cnt_++; }
   int64_t get_retry_cnt() const { return retry_cnt_; }
 
+  ObQueryRetryASHDiagInfo* get_query_retry_ash_diag_info_ptr() { return &query_retry_ash_diag_info_; }
+  const ObQueryRetryASHDiagInfo& get_retry_ash_diag_info() const { return query_retry_ash_diag_info_; }
 
   TO_STRING_KV(K_(inited), K_(is_rpc_timeout), K_(last_query_retry_err));
 
@@ -349,6 +466,7 @@ private:
   int64_t retry_cnt_;
   // for fast fail,
   int64_t query_switch_leader_retry_timeout_ts_;
+  ObQueryRetryASHDiagInfo query_retry_ash_diag_info_;
 private:
   DISALLOW_COPY_AND_ASSIGN(ObQueryRetryInfo);
 };
@@ -388,6 +506,8 @@ public:
   int get_table_schema(uint64_t table_id,
                        const share::schema::ObTableSchema *&table_schema,
                        bool is_link = false) const;
+  int get_database_schema(const uint64_t database_id,
+                          const ObDatabaseSchema *&database_schema);
   int get_column_schema(uint64_t table_id, const common::ObString &column_name,
                         const share::schema::ObColumnSchemaV2 *&column_schema,
                         bool is_link = false) const;
@@ -401,7 +521,9 @@ public:
                                bool with_mv,
                                bool with_global_index = true,
                                bool with_domain_index = true,
-                               bool with_spatial_index = true);
+                               bool with_spatial_index = true,
+                               bool with_vector_index = true);
+  int get_table_mlog_schema(const uint64_t table_id, const ObTableSchema *&mlog_schema);
   int get_link_table_schema(uint64_t table_id,
                             const share::schema::ObTableSchema *&table_schema) const;
   int get_link_column_schema(uint64_t table_id, const common::ObString &column_name,
@@ -431,26 +553,38 @@ struct ObBaselineKey
   ObBaselineKey()
   : db_id_(common::OB_INVALID_ID),
     constructed_sql_(),
-    sql_id_() {}
-  ObBaselineKey(uint64_t db_id, const ObString &constructed_sql, const ObString &sql_id)
+    sql_id_(),
+    format_sql_id_(),
+    format_sql_() {}
+  ObBaselineKey(uint64_t db_id, const ObString &constructed_sql,
+                const ObString &sql_id, const ObString &format_sql_id,
+                const ObString &format_sql)
   : db_id_(db_id),
     constructed_sql_(constructed_sql),
-    sql_id_(sql_id) {}
+    sql_id_(sql_id),
+    format_sql_id_(format_sql_id),
+    format_sql_(format_sql) {}
 
   inline void reset()
   {
     db_id_ = common::OB_INVALID_ID;
     constructed_sql_.reset();
     sql_id_.reset();
+    format_sql_id_.reset();
+    format_sql_.reset();
   }
 
   TO_STRING_KV(K_(db_id),
                K_(constructed_sql),
-               K_(sql_id));
+               K_(sql_id),
+               K_(format_sql_id),
+               K_(format_sql));
 
   uint64_t  db_id_;
   common::ObString constructed_sql_;
   common::ObString sql_id_;
+  common::ObString format_sql_id_;
+  common::ObString format_sql_;
 };
 
 struct ObSpmCacheCtx
@@ -491,8 +625,12 @@ public:
     }
     return reroute_info_;
   }
-  share::ObFeedbackRerouteInfo *get_reroute_info() {
+  share::ObFeedbackRerouteInfo *get_reroute_info() const {
     return reroute_info_;
+  }
+  void set_reroute_info(share::ObFeedbackRerouteInfo &reroute_info)
+  {
+    reroute_info_->assign(reroute_info);
   }
 
   bool is_batch_params_execute() const
@@ -551,6 +689,7 @@ public:
   // release dynamic allocated memory
   //
   void clear();
+
 public:
   ObMultiStmtItem multi_stmt_item_;
   ObSQLSessionInfo *session_info_;
@@ -563,6 +702,7 @@ public:
   bool is_show_trace_stmt_;  // [OUT]
   int64_t retry_times_;
   char sql_id_[common::OB_MAX_SQL_ID_LENGTH + 1];
+  char format_sql_id_[common::OB_MAX_SQL_ID_LENGTH + 1];
   ExecType exec_type_;
   bool is_prepare_protocol_;
   bool is_pre_execute_;
@@ -608,6 +748,7 @@ public:
   common::ObIArray<ObExprConstraint> *all_expr_constraints_;
   common::ObIArray<ObPCPrivInfo> *all_priv_constraints_;
   bool need_match_all_params_; //only used for matching plans
+  common::ObIArray<ObLocalSessionVar> *all_local_session_vars_; //store the old values of session vars which have changed after creating generated columns
   bool is_ddl_from_primary_;//备集群从主库同步过来需要处理的ddl sql语句
   const sql::ObStmt *cur_stmt_;
   const ObPhysicalPlan *cur_plan_;
@@ -620,8 +761,7 @@ public:
   ObSpmCacheCtx spm_ctx_;
   bool is_execute_call_stmt_;
   bool enable_sql_resource_manage_;
-  uint64_t res_map_rule_id_;
-  int64_t res_map_rule_param_idx_;
+  ObPCResourceMapRule resource_map_rule_;
   uint64_t res_map_rule_version_;
   bool is_text_ps_mode_;
   uint64_t first_plan_hash_;
@@ -634,11 +774,15 @@ public:
     struct {
       uint32_t enable_strict_defensive_check_: 1; //TRUE if the _enable_defensive_check is '2'
       uint32_t enable_user_defined_rewrite_ : 1;//TRUE if enable_user_defined_rewrite_rules is open
-      uint32_t reserved_ : 30;
+      uint32_t is_from_pl_ : 1;
+      uint32_t reserved_ : 29;
     };
   };
+  common::ObString raw_sql_;
+  TO_STRING_KV(K(stmt_type_));
 private:
   share::ObFeedbackRerouteInfo *reroute_info_;
+
 };
 
 struct ObQueryCtx
@@ -677,10 +821,12 @@ public:
       is_prepare_stmt_(false),
       has_nested_sql_(false),
       tz_info_(NULL),
-      res_map_rule_id_(common::OB_INVALID_ID),
-      res_map_rule_param_idx_(common::OB_INVALID_INDEX),
       root_stmt_(NULL),
-      udf_has_select_stmt_(false)
+      optimizer_features_enable_version_(0),
+      udf_flag_(0),
+      has_dblink_(false),
+      injected_random_status_(false),
+      ori_question_marks_count_(0)
   {
   }
   TO_STRING_KV(N_PARAM_NUM, question_marks_count_,
@@ -721,10 +867,10 @@ public:
     is_prepare_stmt_ = false;
     has_nested_sql_ = false;
     tz_info_ = NULL;
-    res_map_rule_id_ = common::OB_INVALID_ID;
-    res_map_rule_param_idx_ = common::OB_INVALID_INDEX;
     root_stmt_ = NULL;
-    udf_has_select_stmt_ = false;
+    udf_flag_ = 0;
+    optimizer_features_enable_version_ = 0;
+    ori_question_marks_count_ = 0;
   }
 
   int64_t get_new_stmt_id() { return stmt_count_++; }
@@ -750,8 +896,26 @@ public:
   void set_is_prepare_stmt(bool is_prepare) { is_prepare_stmt_ = is_prepare; }
   bool has_nested_sql() const { return has_nested_sql_; }
   void set_has_nested_sql(bool has_nested_sql) { has_nested_sql_ = has_nested_sql; }
+  bool has_dblink() const { return has_dblink_; }
+  void set_has_dblink(bool v) { has_dblink_ = v; }
   void set_timezone_info(const common::ObTimeZoneInfo *tz_info) { tz_info_ = tz_info; }
   const common::ObTimeZoneInfo *get_timezone_info() const { return tz_info_; }
+  int add_local_session_vars(ObIAllocator *alloc, const ObLocalSessionVar &local_session_var, int64_t &idx);
+  bool get_injected_random_status() const { return injected_random_status_; }
+  void set_injected_random_status(bool injected_random_status) { injected_random_status_ = injected_random_status; }
+  void set_random_plan_seed(uint64_t seed) {rand_gen_.seed(seed);}
+  // check whether optimizer_features_enable_version_ in [v1, v2) or [v3, v4) or ... or [vn, +inf)
+  template<typename... Args>
+  bool check_opt_compat_version(uint64_t v1, uint64_t v2, Args... args) const;
+  bool check_opt_compat_version(uint64_t v1) const { return optimizer_features_enable_version_ >= v1; }
+  bool check_opt_compat_version(uint64_t v1, uint64_t v2) const {
+    return optimizer_features_enable_version_ >= v1 && optimizer_features_enable_version_ < v2;
+  }
+  void set_questionmark_count(int64_t count) {
+    ori_question_marks_count_ = count;
+    question_marks_count_ = count;
+  };
+
 
 public:
   static const int64_t CALCULABLE_EXPR_NUM = 1;
@@ -782,6 +946,7 @@ public:
   common::ObDList<ObPreCalcExprConstraint> all_pre_calc_constraints_;
   common::ObSArray<ObExprConstraint, common::ModulePageAllocator, true> all_expr_constraints_;
   common::ObSArray<ObPCPrivInfo, common::ModulePageAllocator, true> all_priv_constraints_;
+  common::ObSArray<ObLocalSessionVar, common::ModulePageAllocator, true> all_local_session_vars_;
   common::ObSArray<ObUserVarIdentRawExpr *, common::ModulePageAllocator, true> all_user_variable_;
   common::hash::ObHashMap<uint64_t, ObObj, common::hash::NoPthreadDefendMode> calculable_expr_results_;
   bool need_match_all_params_; //only used for matching plans
@@ -802,11 +967,30 @@ public:
   bool is_prepare_stmt_;
   bool has_nested_sql_;
   const common::ObTimeZoneInfo *tz_info_;
-  uint64_t res_map_rule_id_;
-  int64_t res_map_rule_param_idx_;
   ObDMLStmt *root_stmt_;
-  bool udf_has_select_stmt_; // udf has select stmt, not contain other dml stmt
+  uint64_t optimizer_features_enable_version_;
+  union {
+    int8_t udf_flag_;
+    struct {
+      int8_t has_pl_udf_ : 1; // used to mark sql contain pl udf
+      int8_t udf_has_select_stmt_ : 1; // udf has select stmt, not contain other dml stmt
+      int8_t udf_has_dml_stmt_ : 1; // udf has dml stmt
+      int8_t has_dblink_udf_ : 1; // udf is dblink udf
+      int8_t reserved_:4;
+    };
+  };
+  bool has_dblink_;
+  bool injected_random_status_;
+  ObRandom rand_gen_;
+  int64_t ori_question_marks_count_;
 };
+
+template<typename... Args>
+bool ObQueryCtx::check_opt_compat_version(uint64_t v1, uint64_t v2, Args... args) const
+{
+  return check_opt_compat_version(v1, v2) || check_opt_compat_version(args...);
+}
+
 } /* ns sql*/
 } /* ns oceanbase */
 #endif //OCEANBASE_SQL_CONTEXT_

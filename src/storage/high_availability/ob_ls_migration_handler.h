@@ -27,7 +27,7 @@ namespace oceanbase
 {
 namespace storage
 {
-
+class ObLSCompleteMigrationParam;
 enum class ObLSMigrationHandlerStatus : int8_t
 {
   INIT = 0,
@@ -84,6 +84,9 @@ public:
   void destroy();
   void stop();
   void wait(bool &wait_finished);
+  int set_ha_src_info(const ObStorageHASrcInfo &src_info);
+  int cancel_task(const share::ObTaskId &task_id, bool &is_exist);
+  bool is_cancel() const;
 
 private:
   void reuse_();
@@ -98,6 +101,11 @@ private:
   int check_task_exist_(
       const ObLSMigrationHandlerStatus &status,
       bool &is_exist);
+  int handle_failed_task_(
+      const ObLSMigrationHandlerStatus &status,
+      bool &need_generate_dag_net);
+  // only use this function when task exist
+  int cancel_current_task_();
 
   int do_init_status_();
   int do_prepare_ls_status_();
@@ -125,11 +133,10 @@ private:
       int64_t &required_size);
   int inner_report_result_(const ObLSMigrationTask &task);
   int report_to_rebuild_service_();
-  int get_ls_info_(
-      const int64_t cluster_id,
-      const uint64_t tenant_id,
-      const share::ObLSID &ls_id,
-      share::ObLSInfo &ls_info);
+  int get_ha_src_info_(ObStorageHASrcInfo &src_info) const;
+  int get_ls_migration_task_with_nolock_(ObLSMigrationTask &task) const;
+  int check_task_exist_with_nolock_(const share::ObTaskId &task_id, bool &is_exist) const;
+  int switch_next_stage_with_nolock_(const int32_t result);
 
 private:
   bool is_inited_;
@@ -146,6 +153,8 @@ private:
   ObLSMigrationHandlerStatus status_;
   int32_t result_;
   bool is_stop_;
+  bool is_cancel_;
+  ObStorageHASrcInfo chosen_src_;
   DISALLOW_COPY_AND_ASSIGN(ObLSMigrationHandler);
 };
 

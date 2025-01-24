@@ -25,7 +25,7 @@ using namespace oceanbase;
 using namespace oceanbase::common;
 using namespace oceanbase::storage;
 using namespace oceanbase::blocksstable;
-
+using namespace oceanbase::share;
 
 ObCompactionBufferBlock::ObCompactionBufferBlock()
   : header_(nullptr),
@@ -201,7 +201,7 @@ int ObTenantCompactionMemPool::mtl_init(ObTenantCompactionMemPool* &mem_pool)
   } else if (OB_ISNULL(malloc_allocator = ObMallocAllocator::get_instance())) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("get null malloc allocator, cannnot reserve memory for mini compaction", K(ret), K(tenant_id));
-  } else if (OB_FAIL(malloc_allocator->set_tenant_ctx_idle(tenant_id, ObCtxIds::MERGE_RESERVE_CTX_ID, RESERVE_MEM_SIZE, true/*reserve*/))) {
+  } else if (OB_FAIL(malloc_allocator->set_tenant_ctx_idle(tenant_id, ObCtxIds::MERGE_RESERVE_CTX_ID, RESERVE_MEM_SIZE, !MTL_IS_MINI_MODE()/*reserve*/))) {
     LOG_WARN("failed to reserve memory for mini compaction", K(ret));
   } else {
     mem_pool->reserve_mode_signal_ = 1;
@@ -300,7 +300,9 @@ int ObTenantCompactionMemPool::init()
   } else {
     chunk_allocator_.set_tenant_id(MTL_ID());
     piece_allocator_.set_tenant_id(MTL_ID());
-    max_block_num_ = MAX_MEMORY_LIMIT / ObCompactionBufferChunk::DEFAULT_BLOCK_SIZE;
+    max_block_num_ = MTL_IS_MINI_MODE()
+                   ? MINI_MODE_CHUNK_MEMORY_LIMIT / ObCompactionBufferChunk::DEFAULT_BLOCK_SIZE
+                   : CHUNK_MEMORY_LIMIT / ObCompactionBufferChunk::DEFAULT_BLOCK_SIZE;
     total_block_num_ = 0;
     is_inited_ = true;
   }
@@ -491,8 +493,8 @@ int ObTenantCompactionMemPool::try_shrink()
 {
   int ret = OB_SUCCESS;
   ObSpinLockGuard guard(chunk_lock_);
-
-  if (max_block_num_ > total_block_num_) {
+  // not reserve mem in mini mode
+  if (!MTL_IS_MINI_MODE() && max_block_num_ > total_block_num_) {
     // do nothing
   } else if (used_block_num_ <= total_block_num_ / 2) {
     // Less than half of blocks were used, need shrink
@@ -542,7 +544,9 @@ void ObTenantCompactionMemPool::MemPoolShrinkTask::runTimerTask()
 bool ObTenantCompactionMemPool::acquire_reserve_mem()
 {
   bool bret = false;
-  bret = ATOMIC_BCAS(&reserve_mode_signal_, 1, 0);
+  if (!MTL_IS_MINI_MODE()) {
+    bret = ATOMIC_BCAS(&reserve_mode_signal_, 1, 0);
+  }
   return bret;
 }
 
@@ -612,7 +616,7 @@ int ObCompactionBufferWriter::ensure_space(int64_t size)
     if (OB_FAIL(resize(size))) {
       LOG_WARN("failed to resize buffer writer", K(ret), K(size));
     } else {
-      LOG_INFO("success to resize buffer writer", K(ret), K(size));
+      LOG_TRACE("success to resize buffer writer", K(ret), K(size));
     }
   }
 
@@ -624,7 +628,7 @@ int ObCompactionBufferWriter::ensure_space(int64_t size)
     if (NULL != ref_mem_ctx_) {
       ref_mem_ctx_->inc_buffer_hold_mem(capacity_ - old_capacity);
     } else {
-      LOG_INFO("no mem ctx has setted to thread", K(ret), K(label_), K(size), K(capacity_), K(old_capacity));
+      LOG_TRACE("no mem ctx has setted to thread", K(ret), K(label_), K(size), K(capacity_), K(old_capacity));
     }
   }
   return ret;

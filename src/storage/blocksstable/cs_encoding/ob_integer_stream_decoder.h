@@ -36,7 +36,7 @@ typedef void (*ConvertUnitToDatumFunc)(
       const char *data,
       const ObIntegerStreamDecoderCtx &ctx,
       const char *ref_data,
-      const int64_t *row_ids,
+      const int32_t *row_ids,
       const int64_t row_cap,
       common::ObDatum *datums);
 
@@ -55,6 +55,51 @@ public:
 
   static int transform_to_raw_array(
       const ObStreamData &data, ObIntegerStreamDecoderCtx &ctx, char *raw_arr_buf, ObIAllocator &alloc);
+
+  OB_INLINE static int decimal_datum_assign(
+      common::ObDatum &datum,
+      uint8_t precision_width,
+      uint64_t value,
+      const bool safe)
+  {
+    int ret = OB_SUCCESS;
+    switch(precision_width) {
+      case ObIntegerStream::UintWidth::UW_4_BYTE : {
+        *(int32_t*)datum.ptr_ = (int64_t)(value);
+        datum.pack_ = sizeof(int32_t);
+        break;
+      }
+      case ObIntegerStream::UintWidth::UW_8_BYTE : {
+        *(int64_t*)datum.ptr_ = (int64_t)(value);
+        datum.pack_ = sizeof(int64_t);
+        break;
+      }
+      case ObIntegerStream::UintWidth::UW_16_BYTE : {
+        *(int128_t*)datum.ptr_ = (int64_t)(value);
+        datum.pack_ = sizeof(int128_t);
+        break;
+      }
+      case ObIntegerStream::UintWidth::UW_32_BYTE : {
+        *(int256_t*)datum.ptr_ = (int64_t)(value);
+        datum.pack_ = sizeof(int256_t);
+        break;
+      }
+      case ObIntegerStream::UintWidth::UW_64_BYTE : {
+        *(int512_t*)datum.ptr_ = (int64_t)(value);
+        datum.pack_ = sizeof(int512_t);
+        break;
+      }
+      default : {
+        ret = OB_ERR_UNEXPECTED;
+        STORAGE_LOG(WARN, "Unexpected precison width", K(ret), K(precision_width));
+        if (!safe) {
+          ob_abort();
+        }
+        break;
+      }
+    }
+    return ret;
+  }
 
 private:
   // decode all, but do not add base, maybe modify ObIntegerStreamDecoderCtx.
@@ -94,6 +139,7 @@ private:
     uint64_t in_pos = 0;
 
     codec.set_uint_bytes(sizeof(T));
+    codec.set_pfor_packing_type(ctx.meta_.get_pfor_packing_type());
     if (OB_FAIL(codec.decode(in, in_len, in_pos, uint_count, out, out_len, out_pos))) {
       STORAGE_LOG(WARN, "fail to deocde array", K(in_len), K(uint_count), K(out_len), KR(ret));
     }

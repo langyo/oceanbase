@@ -31,8 +31,6 @@ static const int8_t DAYS_OF_MON[2][12 + 1] = {
   {0, 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31}
 };
 
-#define IS_LEAP_YEAR(y) ((((y) % 4) == 0 && (((y) % 100) != 0 || ((y) % 400) == 0)) ? 1 : 0)
-
 ObExprAlignDate4Cmp::ObExprAlignDate4Cmp(common::ObIAllocator &alloc)
   : ObFuncExprOperator(alloc, T_FUN_SYS_ALIGN_DATE4CMP, N_ALIGN_DATE4CMP, 3, VALID_FOR_GENERATED_COL, NOT_ROW_DIMENSION)
 {
@@ -295,7 +293,8 @@ int ObExprAlignDate4Cmp::integer_to_ob_time(const int64_t &date,
     // If it fails, it means the value is not convertible to time.
     date_sql_mode.allow_invalid_dates_ = true;
     date_sql_mode.no_zero_date_ = false;
-    if (OB_FAIL(ObTimeConverter::int_to_ob_time_with_date(date, ob_time, true, date_sql_mode))) {
+    date_sql_mode.allow_incomplete_dates_ = true;
+    if (OB_FAIL(ObTimeConverter::int_to_ob_time_with_date(date, ob_time, date_sql_mode))) {
       date_arg_type = NON_DATE;
       ret = OB_SUCCESS;
     } else {
@@ -364,7 +363,8 @@ int ObExprAlignDate4Cmp::str_to_ob_time(const ObString &date, DateArgType &date_
   ObDateSqlMode date_sql_mode;
   date_sql_mode.allow_invalid_dates_ = true;
   date_sql_mode.no_zero_date_ = false;
-  if (OB_FAIL(ObTimeConverter::str_to_ob_time_with_date(date, ob_time, NULL, true, date_sql_mode))) {
+  date_sql_mode.allow_incomplete_dates_ = true;
+  if (OB_FAIL(ObTimeConverter::str_to_ob_time_with_date(date, ob_time, NULL, date_sql_mode))) {
     date_arg_type = NON_DATE;
     ret = OB_SUCCESS;
   } else {
@@ -533,7 +533,7 @@ int ObExprAlignDate4Cmp::set_zero_res(ObDatum &res, ObTime &ob_time,
       if (is_no_zero_date) {
         res.set_null();
       } else {
-        res.set_datetime(ObTimeConverter::ZERO_DATETIME + ob_time.parts_[DT_USEC]);
+        res.set_datetime(ObTimeConverter::ZERO_DATETIME);
       }
       break;
     }

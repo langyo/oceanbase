@@ -80,7 +80,7 @@ public:                                                                         
     } else if (OB_FAIL(handler.handle_request(req))) {                                                            \
       CLOG_LOG(WARN, "Processor handle_request failed", K(ret), K(req));                                          \
     } else {                                                                                                      \
-      CLOG_LOG(INFO, "Processor handle_request success", K(ret), K(req));                                         \
+      CLOG_LOG(TRACE, "Processor handle_request success", K(ret), K(req));                                         \
     }                                                                                                             \
     return ret;                                                                                                   \
   }                                                                                                               \
@@ -120,6 +120,30 @@ DEFINE_LOGSERVICE_RPC_PROCESSOR(LogFlashbackMsgP,
                                 obrpc::ObLogServiceRpcProxy,
                                 LogFlashbackMsg,
                                 obrpc::OB_LOG_FLASHBACK_CMD);
+
+#ifdef OB_BUILD_ARBITRATION
+DEFINE_LOGSERVICE_SYNC_RPC_PROCESSOR(LogProbeRsP,
+                                     obrpc::ObLogServiceRpcProxy,
+                                     LogProbeRsReq,
+                                     LogProbeRsResp,
+                                     obrpc::OB_LOG_PROBE_RS);
+#endif
+DEFINE_LOGSERVICE_SYNC_RPC_PROCESSOR(LogGetCkptReqP,
+                                     obrpc::ObLogServiceRpcProxy,
+                                     LogGetCkptReq,
+                                     LogGetCkptResp,
+                                     obrpc::OB_LOG_GET_LS_CKPT);
+
+#ifdef OB_BUILD_SHARED_STORAGE
+DEFINE_LOGSERVICE_RPC_PROCESSOR(LogSyncBaseLSNReqP,
+                                obrpc::ObLogServiceRpcProxy,
+                                LogSyncBaseLSNReq,
+                                obrpc::OB_LOG_SYNC_BASE_LSN_REQ);
+DEFINE_LOGSERVICE_RPC_PROCESSOR(LogAcquireRebuildInfoP,
+                                obrpc::ObLogServiceRpcProxy,
+                                LogAcquireRebuildInfoMsg,
+                                obrpc::OB_LOG_ACQUIRE_REBUILD_INFO);
+#endif
 } // end namespace logservice
 } // end namespace oceanbase
 

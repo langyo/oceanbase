@@ -41,6 +41,7 @@
 #include "share/ob_ls_id.h"
 #include "share/ob_tenant_info_proxy.h"       // ObAllTenantInfo
 #include "share/scn.h"
+#include "lib/ash/ob_active_session_guard.h"
 
 namespace oceanbase
 {
@@ -289,6 +290,7 @@ void ObArchiveFetcher::run1()
       int64_t end_tstamp = ObTimeUtility::current_time();
       int64_t wait_interval = THREAD_RUN_INTERVAL - (end_tstamp - begin_tstamp);
       if (wait_interval > 0) {
+        common::ObBKGDSessInActiveGuard inactive_guard;
         fetch_cond_.timedwait(wait_interval);
       }
     }
@@ -336,7 +338,7 @@ int ObArchiveFetcher::handle_single_task_()
     if (OB_FAIL(handle_log_fetch_task_(*task))) {
       ARCHIVE_LOG(WARN, "handle failed", K(ret), K(id));
     } else {
-      ARCHIVE_LOG(INFO, "handle task succ", K(id));
+      ARCHIVE_LOG(TRACE, "handle task succ", K(id));
     }
 
     if (OB_SUCC(ret)) {
@@ -344,7 +346,7 @@ int ObArchiveFetcher::handle_single_task_()
         ARCHIVE_LOG(WARN, "try consume task status failed", K(ret), K(id));
       } else {
         archive_sequencer_->signal();
-        ARCHIVE_LOG(INFO, "try consume task status succ", K(id));
+        ARCHIVE_LOG(TRACE, "try consume task status succ", K(id));
       }
     }
 
@@ -361,11 +363,10 @@ int ObArchiveFetcher::handle_log_fetch_task_(ObArchiveLogFetchTask &task)
   int ret = OB_SUCCESS;
   bool need_delay = false;
   bool submit_log = false;
+  const ObLSID id = task.get_ls_id();
   PalfGroupBufferIterator iter;
-  PalfHandleGuard palf_handle_guard;
   TmpMemoryHelper helper(unit_size_, allocator_);
   ObArchiveSendTask *send_task = NULL;
-  const ObLSID id = task.get_ls_id();
   const ArchiveWorkStation &station = task.get_station();
   ArchiveKey key = station.get_round();
   SCN commit_scn;
@@ -389,7 +390,7 @@ int ObArchiveFetcher::handle_log_fetch_task_(ObArchiveLogFetchTask &task)
       ARCHIVE_LOG(TRACE, "need delay", K(task), K(need_delay));
   } else if (OB_FAIL(init_helper_(task, commit_lsn, helper))) {
     ARCHIVE_LOG(WARN, "init helper failed", K(ret), K(task));
-  } else if (OB_FAIL(init_iterator_(task.get_ls_id(), helper, palf_handle_guard, iter))) {
+  } else if (OB_FAIL(init_iterator_(task.get_ls_id(), helper, iter))) {
     ARCHIVE_LOG(WARN, "init iterator failed", K(ret), K(task));
   } else if (OB_FAIL(generate_send_buffer_(iter, helper))) {
     ARCHIVE_LOG(WARN, "generate send buffer failed", K(ret), K(task));
@@ -595,19 +596,19 @@ int ObArchiveFetcher::init_helper_(ObArchiveLogFetchTask &task, const LSN &commi
 
 int ObArchiveFetcher::init_iterator_(const ObLSID &id,
     const TmpMemoryHelper &helper,
-    PalfHandleGuard &palf_handle_guard,
     PalfGroupBufferIterator &iter)
 {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(log_service_->open_palf(id, palf_handle_guard))) {
+  bool exists = false;
+  if (OB_FAIL(seek_log_iterator(id, helper.get_start_offset(), iter))) {
     if (OB_LS_NOT_EXIST == ret) {
       ARCHIVE_LOG(WARN, "ls not exist", K(ret), K(id), "tenant_id", MTL_ID());
       ret = OB_LOG_ARCHIVE_LEADER_CHANGED;
     } else {
-      ARCHIVE_LOG(WARN, "open ls failed", K(ret), K(id), K(helper));
+      ARCHIVE_LOG(WARN, "iterator seek failed", K(ret), K(id), K(helper));
     }
-  } else if (OB_FAIL(palf_handle_guard.seek(helper.get_start_offset(), iter))) {
-    ARCHIVE_LOG(WARN, "iterator seek failed", K(ret), K(id), K(helper));
+  } else if (OB_FAIL(iter.set_io_context(palf::LogIOContext(MTL_ID(), id.id(), palf::LogIOUser::ARCHIVE)))) {
+    ARCHIVE_LOG(WARN, "iterator set_io_context failed", K(ret), K(id), K(helper));
   } else {
     ARCHIVE_LOG(TRACE, "init iterator succ", K(id), K(helper));
   }
@@ -891,7 +892,7 @@ int ObArchiveFetcher::try_consume_fetch_log_(const ObLSID &id)
         ARCHIVE_LOG(WARN, "get sorted fetch log failed", K(ret), K(id));
       } else if (! task_exist) {
         need_break = true;
-        ARCHIVE_LOG(INFO, "no log fetch task exist, just skip", K(ret), K(id), K(task_exist));
+        ARCHIVE_LOG(TRACE, "no log fetch task exist, just skip", K(ret), K(id), K(task_exist));
       } else if (OB_ISNULL(send_task = task->get_send_task())) {
         ret = OB_ERR_UNEXPECTED;
         ARCHIVE_LOG(ERROR, "send task is NULL", K(ret), K(send_task), KPC(task));
@@ -983,7 +984,7 @@ int ObArchiveFetcher::submit_residual_log_fetch_task_(ObArchiveLogFetchTask &tas
   } else if (OB_FAIL(task_queue_.push(&task))) {
     ARCHIVE_LOG(WARN, "push task failed", K(ret), K(task));
   } else {
-    ARCHIVE_LOG(INFO, "submit residual log fetch task succ", KP(&task));
+    ARCHIVE_LOG(TRACE, "submit residual log fetch task succ", KP(&task));
   }
   return ret;
 }
@@ -1040,10 +1041,9 @@ void ObArchiveFetcher::handle_log_fetch_ret_(
     if (OB_ERR_OUT_OF_LOWER_BOUND == ret_code) {
       int tmp_ret = OB_CLOG_RECYCLE_BEFORE_ARCHIVE;
       reason.set(ObArchiveInterruptReason::Factor::LOG_RECYCLE, lbt(), tmp_ret);
-      LOG_DBA_ERROR(OB_CLOG_RECYCLE_BEFORE_ARCHIVE, "msg", "observer clog is recycled "
-          "before archive, check if archive speed is less than clog writing speed "
-          "or archive device is full or archive device is not healthy",
-          "ret", tmp_ret);
+      LOG_DBA_ERROR_V2(OB_LOG_RECYCLE_BEFORE_ARCHIVE, OB_CLOG_RECYCLE_BEFORE_ARCHIVE, "msg", "observer clog is recycled "
+          "before archive.", "[suggesstion] check if archive speed is less than clog writing speed "
+          "or archive device is full or archive device is not healthy");
     } else {
       reason.set(ObArchiveInterruptReason::Factor::UNKONWN, lbt(), ret_code);
     }

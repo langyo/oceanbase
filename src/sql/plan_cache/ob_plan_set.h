@@ -164,8 +164,7 @@ public:
         pre_cal_expr_handler_(NULL),
         can_skip_params_match_(false),
         can_delay_init_datum_store_(false),
-        res_map_rule_id_(common::OB_INVALID_ID),
-        res_map_rule_param_idx_(common::OB_INVALID_INDEX),
+        resource_map_rule_(),
         is_cli_return_rowid_(false)
   {}
   virtual ~ObPlanSet();
@@ -299,9 +298,8 @@ protected:
   bool can_delay_init_datum_store_;
 
 public:
-  //variables for resource map rule
-  uint64_t res_map_rule_id_;
-  int64_t res_map_rule_param_idx_;
+  //variable for resource map rule
+  ObPCResourceMapRule resource_map_rule_;
   bool is_cli_return_rowid_;
 };
 
@@ -321,12 +319,9 @@ public:
       has_duplicate_table_(false),
       //has_array_binding_(false),
       is_contain_virtual_table_(false),
-#ifdef OB_BUILD_SPM
       enable_inner_part_parallel_exec_(false),
-      is_spm_closed_(false)
-#else
-      enable_inner_part_parallel_exec_(false)
-#endif
+      is_single_table_(false),
+      is_contain_inner_table_(false)
       {
       }
 
@@ -349,9 +344,9 @@ public:
   // calculate phy_plan type:
   // @param [in]  phy_locations
   // @param [out] plan_type
-  static int calc_phy_plan_type_v2(const common::ObIArray<ObCandiTableLoc> &phy_locations,
-                                   ObPhyPlanType &plan_type,
-                                   bool need_check_on_same_server);
+  static int calc_phy_plan_type_v2(const common::ObIArray<ObCandiTableLoc> &candi_table_locs,
+                                   const ObPlanCacheCtx &pc_ctx,
+                                   ObPhyPlanType &plan_type);
   static int calc_phy_plan_type(const common::ObIArray<ObCandiTableLoc> &phy_locations,
                                 ObPhyPlanType &plan_type);
   inline bool has_duplicate_table() const { return has_duplicate_table_; }
@@ -411,8 +406,7 @@ private:
                         ObPhysicalPlan *&plan);
   int get_phy_locations(const ObIArray<ObTableLocation> &table_locations,
                         ObPlanCacheCtx &pc_ctx,
-                        ObIArray<ObCandiTableLoc> &candi_table_locs,
-                        bool &need_check_on_same_server);
+                        ObIArray<ObCandiTableLoc> &candi_table_locs);
 
   int get_phy_locations(const ObTablePartitionInfoArray &partition_infos,
                         ObIArray<ObCandiTableLoc> &candi_table_locs);
@@ -461,9 +455,8 @@ private:
   bool is_contain_virtual_table_;
   // px并行度是否大于1
   bool enable_inner_part_parallel_exec_;
-#ifdef OB_BUILD_SPM
-  bool is_spm_closed_;
-#endif
+  bool is_single_table_;
+  bool is_contain_inner_table_;
 };
 
 inline ObPlanSetType ObPlanSet::get_plan_set_type_by_cache_obj_type(ObLibCacheNameSpace ns)

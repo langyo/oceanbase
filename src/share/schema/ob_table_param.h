@@ -19,11 +19,16 @@
 #include "lib/utility/ob_print_utils.h"
 #include "lib/utility/ob_unify_serialize.h"
 #include "share/ob_define.h"
-#include "storage/access/ob_table_read_info.h"
 #include "sql/engine/basic/ob_pushdown_filter.h"
+#include "src/storage/meta_mem/ob_fixed_meta_obj_array.h"
+#include "src/storage/access/ob_table_read_info.h"
 
 namespace oceanbase
 {
+namespace storage
+{
+class ObTableReadInfo;
+}
 namespace share
 {
 namespace schema
@@ -148,7 +153,7 @@ class ColumnMap
       SHADOW_COLUMN_ID_OFFSET + MAX_ARRAY_SIZE - 1;
 
   typedef common::ObFixedArray<int32_t, common::ObIAllocator> ColumnArray;
-  #define IS_SHADOW_COLUMN(column_id) (column_id >= OB_MIN_SHADOW_COLUMN_ID)
+  #define IS_SHADOW_COLUMN(column_id) ((column_id >= OB_MIN_SHADOW_COLUMN_ID) && !common::is_mlog_special_column(column_id))
 
 public:
   ColumnMap(common::ObIAllocator &allocator)
@@ -234,6 +239,9 @@ public:
   inline bool is_hidden() const { return is_hidden_; }
   int assign(const ObColumnParam &other);
 
+  inline void set_lob_chunk_size(int64_t chunk_size) { lob_chunk_size_ = chunk_size; }
+  inline int64_t get_lob_chunk_size() const { return lob_chunk_size_; }
+
   TO_STRING_KV(K_(column_id),
                K_(meta_type),
                K_(order),
@@ -245,7 +253,8 @@ public:
                K_(is_gen_col),
                K_(is_virtual_gen_col),
                K_(is_gen_col_udf_expr),
-               K_(is_hidden));
+               K_(is_hidden),
+               K_(lob_chunk_size));
 private:
   int deep_copy_obj(const common::ObObj &src, common::ObObj &dest);
 private:
@@ -262,6 +271,7 @@ private:
   bool is_virtual_gen_col_;
   bool is_gen_col_udf_expr_;
   bool is_hidden_;
+  int64_t lob_chunk_size_;
 };
 
 typedef common::ObFixedArray<ObColumnParam *, common::ObIAllocator> Columns;
@@ -287,7 +297,8 @@ public:
               const common::ObIArray<uint64_t> &output_column_ids,
               const sql::ObStoragePushdownFlag &pd_pushdown_flag,
               const common::ObIArray<uint64_t> *tsc_out_cols = NULL,
-              const bool force_mysql_mode = false);
+              const bool force_mysql_mode = false,
+              const bool query_cs_replica = false);
 
   // convert aggregate column projector from 'aggregate_column_ids' and 'output_projector_'
   // convert group by column projector from 'group_by_column_ids' and 'output_projector_'
@@ -302,11 +313,21 @@ public:
   inline uint64_t get_table_id() const { return table_id_; }
   inline int64_t is_spatial_index() const { return is_spatial_index_; }
   inline void set_is_spatial_index(bool is_spatial_index) { is_spatial_index_ = is_spatial_index; }
+  inline bool is_fts_index() const { return is_fts_index_; }
+  inline void set_is_fts_index(const bool is_fts_index) { is_fts_index_ = is_fts_index; }
+  inline int64_t is_multivalue_index() const { return is_multivalue_index_; }
+  inline void set_is_multivalue_index(bool is_multivalue_index) { is_multivalue_index_ = is_multivalue_index; }
+  inline bool is_vec_index() const { return is_vec_index_; }
+  inline void set_is_vec_index(const bool is_vec_index) { is_vec_index_ = is_vec_index; }
+  inline int64_t is_partition_table() const { return is_partition_table_; }
+  inline void set_is_partition_table(bool is_partition_table) { is_partition_table_ = is_partition_table; }
   inline bool use_lob_locator() const { return use_lob_locator_; }
   inline bool enable_lob_locator_v2() const { return enable_lob_locator_v2_; }
   inline bool &get_enable_lob_locator_v2() { return enable_lob_locator_v2_; }
   inline bool has_virtual_column() const { return has_virtual_column_; }
   inline int64_t get_rowid_version() const { return rowid_version_; }
+  inline bool is_column_replica_table() const { return is_column_replica_table_; }
+  inline bool is_normal_cgs_at_the_end() const { return is_normal_cgs_at_the_end_; }
   inline const common::ObIArray<int32_t> &get_rowid_projector() const { return rowid_projector_; }
   inline const common::ObIArray<int32_t> &get_output_projector() const { return output_projector_; }
   inline const common::ObIArray<int32_t> &get_aggregate_projector() const { return aggregate_projector_; }
@@ -315,6 +336,9 @@ public:
   inline const common::ObIArray<int32_t> &get_pad_col_projector() const { return pad_col_projector_; }
   inline void disable_padding() { pad_col_projector_.reset(); }
   inline const storage::ObTableReadInfo &get_read_info() const { return main_read_info_; }
+  inline const ObString &get_parser_name() const { return parser_name_; }
+  inline const common::ObIArray<storage::ObTableReadInfo *> *get_cg_read_infos() const
+  { return cg_read_infos_.empty() ? nullptr : &cg_read_infos_; }
 
   DECLARE_TO_STRING;
 
@@ -331,7 +355,8 @@ private:
                                       const common::ObIArray<uint64_t> &output_column_ids,
                                       const common::ObIArray<uint64_t> *tsc_out_cols,
                                       const bool force_mysql_mode,
-                                      const sql::ObStoragePushdownFlag &pd_pushdown_flag);
+                                      const sql::ObStoragePushdownFlag &pd_pushdown_flag,
+                                      const bool query_cs_replica = false);
 
   int filter_common_columns(const common::ObIArray<const ObColumnSchemaV2 *> &columns,
                             common::ObIArray<const ObColumnSchemaV2 *> &new_columns);
@@ -355,6 +380,7 @@ private:
                                   int64_t &rowid_version,
                                   Projector &rowid_projector,
                                   bool is_use_lob_locator_v2);
+  int convert_fulltext_index_info(const ObTableSchema &table_schema);
 
 private:
   const static int64_t DEFAULT_COLUMN_MAP_BUCKET_NUM = 4;
@@ -374,17 +400,28 @@ private:
   Projector pad_col_projector_;
 
   // need to serialize
+  // version of the mixture read info
+  int16_t read_param_version_;
   storage::ObTableReadInfo main_read_info_;
+  storage::ObFixedMetaObjArray<storage::ObTableReadInfo *> cg_read_infos_;
 
   bool has_virtual_column_;
   // specified to use lob locator or not
   bool use_lob_locator_;
   int64_t rowid_version_;
   Projector rowid_projector_;
+  ObString parser_name_;
   // if min cluster version < 4.1 use lob locator v1, else use lob locator v2.
   // use enable_lob_locator_v2_ to avoid locator type sudden change while table scan is running
   bool enable_lob_locator_v2_;
   bool is_spatial_index_;
+  bool is_fts_index_;
+  bool is_multivalue_index_;
+  bool is_column_replica_table_;
+  bool is_vec_index_;
+  bool is_partition_table_;
+  // column storage tables created after v435 will place the rowkey/all cg at the start of the table schema column group array
+  bool is_normal_cgs_at_the_end_;
 };
 } //namespace schema
 } //namespace share

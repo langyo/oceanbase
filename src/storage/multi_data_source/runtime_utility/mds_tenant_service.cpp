@@ -19,6 +19,7 @@
 #include "lib/utility/utility.h"
 #include "ob_clock_generator.h"
 #include "share/rc/ob_tenant_base.h"
+#include "share/allocator/ob_shared_memory_allocator_mgr.h"
 #include "storage/meta_mem/ob_tablet_map_key.h"
 #include "storage/meta_mem/ob_tenant_meta_mem_mgr.h"
 #include "storage/tablet/ob_tablet.h"
@@ -38,7 +39,6 @@ namespace storage
 {
 namespace mds
 {
-
 /********************FOR MEMORY LEAK DEBUG***************************/
 thread_local char __thread_mds_tag__[TAG_SIZE] = {0};
 TLOCAL(const char *, __thread_mds_alloc_type__) = nullptr;
@@ -46,14 +46,14 @@ TLOCAL(const char *, __thread_mds_alloc_file__) = nullptr;
 TLOCAL(const char *, __thread_mds_alloc_func__) = nullptr;
 TLOCAL(uint32_t, __thread_mds_alloc_line__) = 0;
 
-void set_mds_mem_check_thread_local_info(const MdsWriter &writer,
+void set_mds_mem_check_thread_local_info(const storage::mds::MdsWriter &writer,
                                          const char *alloc_ctx_type,
                                          const char *alloc_file,
                                          const char *alloc_func,
                                          const uint32_t alloc_line)
 {
   int64_t pos = 0;
-  databuff_printf(__thread_mds_tag__, TAG_SIZE, pos, "%s", to_cstring(writer));
+  databuff_printf(__thread_mds_tag__, TAG_SIZE, pos, writer);
   __thread_mds_alloc_type__ = alloc_ctx_type;
   __thread_mds_alloc_file__ = alloc_file;
   __thread_mds_alloc_func__ = alloc_func;
@@ -68,7 +68,9 @@ void set_mds_mem_check_thread_local_info(const share::ObLSID &ls_id,
                                          const uint32_t alloc_line)
 {
   int64_t pos = 0;
-  databuff_printf(__thread_mds_tag__, TAG_SIZE, pos, "%s, %s", to_cstring(ls_id), to_cstring(tablet_id));
+  databuff_printf(__thread_mds_tag__, TAG_SIZE, pos, ls_id);
+  databuff_printf(__thread_mds_tag__, TAG_SIZE, pos, ", ");
+  databuff_printf(__thread_mds_tag__, TAG_SIZE, pos, tablet_id);
   __thread_mds_alloc_type__ = data_type;
   __thread_mds_alloc_file__ = alloc_file;
   __thread_mds_alloc_func__ = alloc_func;
@@ -85,92 +87,6 @@ void reset_mds_mem_check_thread_local_info()
 }
 /********************************************************************/
 
-int ObTenantMdsAllocator::init()
-{
-  int ret = OB_SUCCESS;
-  ObMemAttr mem_attr;
-  // TODO : @gengli new ctx id?
-  mem_attr.tenant_id_ = MTL_ID();
-  mem_attr.ctx_id_ = ObCtxIds::MDS_DATA_ID;
-  mem_attr.label_ = "MdsTable";
-  MDS_TG(10_ms);
-  if (MDS_FAIL(allocator_.init(OB_MALLOC_NORMAL_BLOCK_SIZE, block_alloc_, mem_attr))) {
-    MDS_LOG(WARN, "init vslice allocator failed",
-            K(ret), K(OB_MALLOC_NORMAL_BLOCK_SIZE), KP(this), K(mem_attr));
-  } else {
-    allocator_.set_nway(MDS_ALLOC_CONCURRENCY);
-  }
-  return ret;
-}
-
-void *ObTenantMdsAllocator::alloc(const int64_t size)
-{
-  void *obj = allocator_.alloc(size);
-  MDS_LOG(DEBUG, "mds alloc ", K(size), KP(obj));
-  if (OB_NOT_NULL(obj)) {
-    MTL(ObTenantMdsService*)->record_alloc_backtrace(obj,
-                                                    __thread_mds_tag__,
-                                                    __thread_mds_alloc_type__,
-                                                    __thread_mds_alloc_file__,
-                                                    __thread_mds_alloc_func__,
-                                                    __thread_mds_alloc_line__);// for debug mem leak
-  }
-  return obj;
-}
-
-void *ObTenantMdsAllocator::alloc(const int64_t size, const ObMemAttr &attr)
-{
-  UNUSED(attr);
-  void *obj = alloc(size);
-  MDS_LOG_RET(WARN, OB_INVALID_ARGUMENT, "VSLICE Allocator not support mark attr", KP(obj), K(size), K(attr));
-  return obj;
-}
-
-void ObTenantMdsAllocator::free(void *ptr)
-{
-  allocator_.free(ptr);
-  MTL(ObTenantMdsService*)->erase_alloc_backtrace(ptr);
-}
-
-void ObTenantMdsAllocator::set_attr(const ObMemAttr &attr)
-{
-  allocator_.set_attr(attr);
-}
-
-void *ObTenantBufferCtxAllocator::alloc(const int64_t size)
-{
-  void *obj = share::mtl_malloc(size, ObMemAttr(MTL_ID(), "MDS_CTX_DEFAULT", ObCtxIds::MDS_CTX_ID));
-  if (OB_NOT_NULL(obj)) {
-    MTL(ObTenantMdsService*)->record_alloc_backtrace(obj,
-                                                     __thread_mds_tag__,
-                                                     __thread_mds_alloc_type__,
-                                                     __thread_mds_alloc_file__,
-                                                     __thread_mds_alloc_func__,
-                                                     __thread_mds_alloc_line__);// for debug mem leak
-  }
-  return obj;
-}
-
-void *ObTenantBufferCtxAllocator::alloc(const int64_t size, const ObMemAttr &attr)
-{
-  void *obj = share::mtl_malloc(size, attr);
-  if (OB_NOT_NULL(obj)) {
-    MTL(ObTenantMdsService*)->record_alloc_backtrace(obj,
-                                                     __thread_mds_tag__,
-                                                     __thread_mds_alloc_type__,
-                                                     __thread_mds_alloc_file__,
-                                                     __thread_mds_alloc_func__,
-                                                     __thread_mds_alloc_line__);// for debug mem leak
-  }
-  return obj;
-}
-
-void ObTenantBufferCtxAllocator::free(void *ptr)
-{
-  share::mtl_free(ptr);
-  MTL(ObTenantMdsService*)->erase_alloc_backtrace(ptr);
-}
-
 int ObTenantMdsService::mtl_init(ObTenantMdsService *&mds_service)
 {
   int ret = OB_SUCCESS;
@@ -180,8 +96,6 @@ int ObTenantMdsService::mtl_init(ObTenantMdsService *&mds_service)
     MDS_LOG(ERROR, "init mds tenant service twice!", KR(ret), KPC(mds_service));
   } else if (MDS_FAIL(mds_service->memory_leak_debug_map_.init("MdsDebugMap", MTL_ID()))) {
     MDS_LOG(WARN, "init map failed", K(ret));
-  } else if (MDS_FAIL(mds_service->mds_allocator_.init())) {
-    MDS_LOG(ERROR, "fail to init allocator", KR(ret), KPC(mds_service));
   } else if (MDS_FAIL(mds_service->mds_timer_.timer_.init_and_start(1/*worker number*/,
                                                                     100_ms/*precision*/,
                                                                     "MdsT"/*thread name*/))) {
@@ -273,6 +187,7 @@ void ObTenantMdsTimer::dump_special_mds_table_status_task()
         (void) mds_table.operate([ls_mds_freezing_scn](MdsTableBase &mds_table)-> int {// with MdsTable's lock protected
           int ret = OB_SUCCESS;
           if (mds_table.get_rec_scn() <= ls_mds_freezing_scn) {
+            // ignore ret
             MDS_LOG_NOTICE(WARN, "dump rec_scn lagging freeze_scn mds_table", K(ls_mds_freezing_scn), K(mds_table));
           }
           return OB_SUCCESS;// keep iterating
@@ -283,6 +198,7 @@ void ObTenantMdsTimer::dump_special_mds_table_status_task()
         (void) mds_table.operate([](MdsTableBase &mds_table)-> int {// with MdsTable's lock protected
           int ret = OB_SUCCESS;
           if (ObClockGenerator::getClock() - mds_table.get_removed_from_t3m_ts() > 1_min) {
+            // ignore ret
             MDS_LOG_NOTICE(WARN, "dump maybe leaked mds_table", K(mds_table));
           }
           return OB_SUCCESS;// keep iterating
@@ -319,6 +235,8 @@ int ObTenantMdsService::for_each_ls_in_tenant(const ObFunction<int(ObLS &)> &op)
         }
       } else if (MDS_FAIL(op(*ls))) {
         MDS_LOG_NONE(WARN, "fail to for each ls", K(succ_num));
+      } else {
+        MDS_LOG_NONE(DEBUG, "succeed to operate one ls", K(ret), "ls_id", ls->get_ls_id());
       }
     } while (++succ_num && OB_SUCC(ret));
   }
@@ -372,7 +290,6 @@ int ObTenantMdsService::for_each_mds_table_in_ls(ObLS &ls, const ObFunction<int(
   #define PRINT_WRAPPER KR(ret), K(ls), K(mds_table_total_num), K(ids_in_t3m_array.count())
   int ret = OB_SUCCESS;
   int64_t succ_num = 0;
-  ObLSTabletIterator tablet_iter(storage::ObMDSGetTabletMode::READ_WITHOUT_CHECK);
   MDS_TG(10_s);
 
   int64_t mds_table_total_num = 0;
@@ -407,8 +324,10 @@ int ObTenantMdsService::for_each_mds_table_in_ls(ObLS &ls, const ObFunction<int(
 
 int ObTenantMdsTimer::process_with_tablet_(ObTablet &tablet)
 {
-  #define PRINT_WRAPPER KR(ret), KPC(this), K(tablet_oldest_scn), K(tablet.get_tablet_meta().tablet_id_)
+  #define PRINT_WRAPPER KR(ret), KPC(this), K(tablet_oldest_scn), K(ls_id), K(tablet_id)
   int ret = OB_SUCCESS;
+  const share::ObLSID &ls_id = tablet.get_ls_id();
+  const common::ObTabletID &tablet_id = tablet.get_tablet_id();
   share::SCN tablet_oldest_scn;
   MDS_TG(10_ms);
   if (MDS_FAIL(get_tablet_oldest_scn_(tablet, tablet_oldest_scn))) {
@@ -430,25 +349,32 @@ int ObTenantMdsTimer::process_with_tablet_(ObTablet &tablet)
 
 int ObTenantMdsTimer::get_tablet_oldest_scn_(ObTablet &tablet, share::SCN &oldest_scn)
 {
-  #define PRINT_WRAPPER KR(ret), K(tablet.get_tablet_meta().tablet_id_), K(oldest_scn), KPC(this)
+  #define PRINT_WRAPPER KR(ret), K(ls_id), K(tablet_id), K(oldest_scn), K(op.min_mds_ckpt_scn_), KPC(this)
   int ret = OB_SUCCESS;
+  const share::ObLSID &ls_id = tablet.get_ls_id();
+  const common::ObTabletID &tablet_id = tablet.get_tablet_id();
   MDS_TG(5_ms);
+  oldest_scn = SCN::min_scn();// means can not recycle any node
+  ScanAllVersionTabletsOp::GetMinMdsCkptScnOp op(oldest_scn);
   if (OB_ISNULL(MTL(ObTenantMetaMemMgr*))) {
     ret = OB_BAD_NULL_ERROR;
     MDS_LOG_GC(ERROR, "MTL ObTenantMetaMemMgr is NULL");
-  } else if (MDS_FAIL(MTL(ObTenantMetaMemMgr*)->get_min_mds_ckpt_scn(ObTabletMapKey(tablet.get_tablet_meta().ls_id_,
-                                                                                    tablet.get_tablet_meta().tablet_id_),
-                                                                     oldest_scn))) {
+  } else if (MDS_FAIL(MTL(ObTenantMetaMemMgr*)->scan_all_version_tablets(ObTabletMapKey(ls_id, tablet_id), op))) {
     if (OB_ENTRY_NOT_EXIST == ret) {
       ret = OB_SUCCESS;
       MDS_LOG_GC(WARN, "get_min_mds_ckpt_scn meet OB_ENTRY_NOT_EXIST");
+    } else if (OB_ITEM_NOT_SETTED == ret) {
+      ret = OB_SUCCESS;
+      MDS_LOG_GC(WARN, "get_min_mds_ckpt_scn meet OB_ITEM_NOT_SETTED");
     } else {
       MDS_LOG_GC(WARN, "fail to get oldest tablet min_mds_ckpt_scn");
     }
-    oldest_scn = SCN::min_scn();// means can not recycle any node
-  } else if (oldest_scn.is_max() || !oldest_scn.is_valid()) {
-    oldest_scn = SCN::min_scn();// means can not recycle any node
   }
+  if (oldest_scn.is_max() || !oldest_scn.is_valid()) {
+    MDS_LOG_GC(WARN, "get min_mds_ckpt_scn, but is invalid");
+    oldest_scn.set_min();
+  }
+  MDS_LOG_GC(DEBUG, "get tablet oldest scn");
   return ret;
   #undef PRINT_WRAPPER
 }

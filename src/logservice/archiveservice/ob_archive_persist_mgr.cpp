@@ -178,6 +178,9 @@ int ObArchivePersistMgr::get_ls_archive_progress(const ObLSID &id, LSN &lsn, SCN
       ret = OB_EAGAIN;
       ARCHIVE_LOG(WARN, "ls archive progress not match with tenant, need retry",
           K(key), K(is_madatory), K(info));
+    } else if (info.state_.is_interrupted()) {
+      ignore = true;
+      ARCHIVE_LOG(WARN, "ls archive progress is interrupted, skip it", K(id), K(info));
     } else {
       lsn = palf::LSN(info.lsn_);
       scn = info.checkpoint_scn_;
@@ -648,7 +651,7 @@ int ObArchivePersistMgr::do_persist_(const ObLSID &id, const bool exist, ObLSArc
       ARCHIVE_LOG(WARN, "get ls archive progress failed", K(ret), K(id));
     } else if (! record_exist || ! persist_info.is_valid()
         || persist_info.key_.piece_id_ < info.key_.piece_id_
-        || (persist_info.key_.piece_id_ == info.key_.piece_id_ && persist_info.checkpoint_scn_ < info.checkpoint_scn_)
+        || (persist_info.key_.piece_id_ == info.key_.piece_id_ && persist_info.lsn_ < info.lsn_)
         || (info.state_.is_interrupted() && ! persist_info.state_.is_interrupted())) {
       // 需要更新归档进度场景
       // 1. 不存在已持久化归档进度

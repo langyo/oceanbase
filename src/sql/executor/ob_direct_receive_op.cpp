@@ -239,15 +239,17 @@ int ObDirectReceiveOp::setup_next_scanner()
           ret = OB_ERR_UNEXPECTED;
           LOG_WARN("succ to alloc result, but result scanner is NULL", K(ret));
         } else if (OB_FAIL(resp_handler->get_more(*result_scanner))) {
+          ObCStringHelper helper;
           LOG_WARN("fail wait response",
-                   K(ret), "dst_addr", to_cstring(resp_handler->get_dst_addr()));
+                   K(ret), "dst_addr", helper.convert(resp_handler->get_dst_addr()));
         } else if (OB_FAIL(result_scanner->get_err_code())) {
           int add_ret = OB_SUCCESS;
           const char* err_msg = result_scanner->get_err_msg();
           FORWARD_USER_ERROR(ret, err_msg);
+          ObCStringHelper helper;
           LOG_WARN("while getting more scanner, the remote rcode is not OB_SUCCESS",
                    K(ret), K(err_msg),
-                   "dst_addr", to_cstring(resp_handler->get_dst_addr()));
+                   "dst_addr", helper.convert(resp_handler->get_dst_addr()));
         } else {
           scanner_ = result_scanner;
           found_rows_ += scanner_->get_found_rows();
@@ -257,6 +259,8 @@ int ObDirectReceiveOp::setup_next_scanner()
         }
       } else {
         ret = OB_ITER_END;
+        plan_ctx->add_total_memstore_read_row_count(scanner_->get_memstore_read_row_count());
+        plan_ctx->add_total_ssstore_read_row_count(scanner_->get_ssstore_read_row_count());
         // only successful select affect last_insert_id
         // for select, last_insert_id may changed because last_insert_id(#) called
         // last_insert_id values should be the last row calling last_insert_id(#)

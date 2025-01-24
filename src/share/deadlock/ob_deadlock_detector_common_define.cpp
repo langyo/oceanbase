@@ -27,7 +27,7 @@ int64_t ObIDeadLockDetector::total_destructed_count = 0;
 
 OB_SERIALIZE_MEMBER(ObDetectorUserReportInfo, module_name_, resource_visitor_,
                     required_resource_, extra_columns_names_, extra_columns_values_,
-                    valid_extra_column_size_);
+                    valid_extra_column_size_, blocked_seq_);
 OB_SERIALIZE_MEMBER(ObDetectorInnerReportInfo, binary_key_, tenant_id_, addr_,
                     detector_id_, report_time_,
                     created_time_, event_id_, role_, start_delay_, priority_, user_report_info_);
@@ -358,9 +358,9 @@ int ObDetectorUserReportInfo::set_columns_(const int64_t idx,
     ret = OB_INVALID_ARGUMENT;
     DETECT_LOG(WARN, "string length reach limit", PRINT_WRAPPER, K(STR_LEN_LIMIT));
   } else if (ValueType::COLUMN_NAME == type) {
-    extra_columns_names_.push_back(ObString(str_len, column_info));
+    ret = extra_columns_names_.push_back(ObString(str_len, column_info));
   } else if (ValueType::COLUMN_VALUE == type) {
-    extra_columns_values_.push_back(ObString(str_len, column_info));
+    ret = extra_columns_values_.push_back(ObString(str_len, column_info));
   } else {
     ret = OB_ERR_UNEXPECTED;
     int type_ = static_cast<int>(type);
@@ -379,13 +379,15 @@ int ObDetectorUserReportInfo::set_columns_(const int64_t idx,
   int ret = OB_SUCCESS;
 
   if (ValueType::COLUMN_NAME == type) {
-    extra_columns_names_guard_.push_back(column_info);
-    extra_columns_names_.push_back(ObString(strlen(column_info.get_ptr()),
-                                            column_info.get_ptr()));
+    if (OB_FAIL(extra_columns_names_guard_.push_back(column_info))) {
+    } else if (OB_FAIL(extra_columns_names_.push_back(ObString(strlen(column_info.get_ptr()), column_info.get_ptr())))) {
+      extra_columns_names_guard_.pop_back();
+    }
   } else if (ValueType::COLUMN_VALUE == type) {
-    extra_columns_values_guard_.push_back(column_info);
-    extra_columns_values_.push_back(ObString(strlen(column_info.get_ptr()),
-                                    column_info.get_ptr()));
+    if (OB_FAIL(extra_columns_values_guard_.push_back(column_info))) {
+    } else if (extra_columns_values_.push_back(ObString(strlen(column_info.get_ptr()), column_info.get_ptr()))) {
+      extra_columns_values_guard_.pop_back();
+    }
   } else {
     ret = OB_ERR_UNEXPECTED;
     int type_ = static_cast<int>(type);
@@ -409,7 +411,7 @@ int ObDetectorUserReportInfo::assign(const ObDetectorUserReportInfo &rhs)
     DETECT_LOG(WARN, "fail to copy array", K(rhs));
   } else {
     module_name_ = rhs.module_name_;
-    resource_visitor_ = rhs.required_resource_;
+    resource_visitor_ = rhs.resource_visitor_;
     required_resource_ = rhs.required_resource_;
     valid_extra_column_size_ = rhs.valid_extra_column_size_;
     module_name_guard_ = rhs.module_name_guard_;

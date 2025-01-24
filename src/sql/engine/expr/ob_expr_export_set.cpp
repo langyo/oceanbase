@@ -70,7 +70,7 @@ int ObExprExportSet::calc_result_typeN(ObExprResType& type, ObExprResType* types
     type.set_varchar();
     // set collation_type for string type
     OZ(ObExprOperator::aggregate_charsets_for_string_result_with_comparison(
-        type, &types_array[1], str_num, type_ctx.get_coll_type()));
+        type, &types_array[1], str_num, type_ctx));
     for (int64_t i = 1; OB_SUCC(ret) && i <= str_num; ++i) {
       types_array[i].set_calc_meta(type);
     }
@@ -199,6 +199,13 @@ int ObExprExportSet::eval_export_set(const ObExpr& expr, ObEvalCtx& ctx, ObDatum
       expr_datum.set_string(output);
     }
   }
+  return ret;
+}
+
+DEF_SET_LOCAL_SESSION_VARS(ObExprExportSet, raw_expr) {
+  int ret = OB_SUCCESS;
+  SET_LOCAL_SYSVAR_CAPACITY(1);
+  EXPR_ADD_LOCAL_SYSVAR(share::SYS_VAR_COLLATION_CONNECTION);
   return ret;
 }
 

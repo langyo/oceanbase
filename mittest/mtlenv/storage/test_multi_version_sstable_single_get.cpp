@@ -1,3 +1,6 @@
+// owner: dengzhi.ldz
+// owner group: storage
+
 /**
  * Copyright (c) 2021 OceanBase
  * OceanBase CE is licensed under Mulan PubL v2.
@@ -95,6 +98,7 @@ void TestMultiVersionSSTableSingleGet::prepare_query_param(
   iter_param_.vectorized_enabled_ = false;
   ASSERT_EQ(OB_SUCCESS,
             store_ctx_.init_for_read(ls_id,
+                                     iter_param_.tablet_id_,
                                      INT64_MAX, // query_expire_ts
                                      -1, // lock_timeout_us
                                      share::SCN::max_scn()));

@@ -1,3 +1,6 @@
+// owner: gengli.wzy
+// owner group: transaction
+
 /**
  * Copyright (c) 2021 OceanBase
  * OceanBase CE is licensed under Mulan PubL v2.
@@ -85,7 +88,7 @@ int ObTxCtxMemtableScanIterator::serialize_next_tx_ctx_(ObTxLocalBuffer &buffer,
   if (OB_FAIL(ret)) {
     STORAGE_LOG(INFO, "get next tx ctx table info failed", KR(ret), KPC(tx_ctx));
   } else if (SLEEP_BEFORE_DUMP_TX_CTX) {
-    fprintf(stdout, "ready to dump tx ctx, undo status node ptr : %p\n", tx_ctx->ctx_tx_data_.tx_data_guard_.tx_data()->undo_status_list_.head_);
+    fprintf(stdout, "ready to dump tx ctx, undo status node ptr : %p\n", tx_ctx->ctx_tx_data_.tx_data_guard_.tx_data()->op_guard_->get_undo_status_list().head_);
     fprintf(stdout, "sleep 20 seconds before dump\n");
     HAS_GOT_TX_CTX = true;
     SLEEP_BEFORE_DUMP_TX_CTX = false;

@@ -46,26 +46,28 @@ public:
       options_(options),
       is_geog_(is_geog),
       invalid_(false),
-      has_reset_(false)
+      has_reset_(false),
+      cell_union_(),
+      bounder_()
     {
       mbr_ = S2LatLngRect::Empty();
     }
   ~ObWkbToS2Visitor() { reset(); }
   template<typename T_IBIN>
-  S2Cell* MakeS2Point(T_IBIN *geo);
-  template<typename T_IBIN, typename T_BIN>
-  S2Polyline* MakeS2Polyline(T_IBIN *geo);
+  int MakeS2Point(T_IBIN *geo, S2Cell *&res);
+  template<typename T_IBIN>
+  int MakeS2Polyline(T_IBIN *geo, S2Polyline *&res);
   template<typename T_IBIN, typename T_BIN,
            typename T_BIN_RING, typename T_BIN_INNER_RING>
-  S2Polygon* MakeS2Polygon(T_IBIN *geo);
+  int MakeS2Polygon(T_IBIN *geo, S2Polygon *&res);
 
   template<typename T_IBIN>
-  S2Cell* MakeProjS2Point(T_IBIN *geo);
-  template<typename T_IBIN, typename T_BIN>
-  S2Polyline* MakeProjS2Polyline(T_IBIN *geo);
+  int MakeProjS2Point(T_IBIN *geo, S2Cell *&res);
+  template<typename T_IBIN>
+  int MakeProjS2Polyline(T_IBIN *geo, S2Polyline *&res);
   template<typename T_IBIN, typename T_BIN,
            typename T_BIN_RING, typename T_BIN_INNER_RING>
-  S2Polygon* MakeProjS2Polygon(T_IBIN *geo);
+  int MakeProjS2Polygon(T_IBIN *geo, S2Polygon *&res);
 
   bool prepare(ObGeometry *geo);
   // wkb
@@ -92,16 +94,24 @@ public:
   int finish(ObIWkbGeomCollection *geo) { UNUSED(geo); return OB_SUCCESS; }
 
   int64_t get_cellids(ObS2Cellids &cells, bool is_query, bool need_buffer, S1Angle distance);
+  int64_t get_cellids_and_unrepeated_ancestors(ObS2Cellids &cells, ObS2Cellids &ancestors, bool need_buffer, S1Angle distance);
   int64_t get_inner_cover_cellids(ObS2Cellids &cells);
   int64_t get_mbr(S2LatLngRect &mbr, bool need_buffer, S1Angle distance);
   bool is_invalid() { return invalid_; }
   void reset();
+  int get_s2_cell_union();
 private:
   double stToUV(double s);
   bool exceedsBounds(double x, double y);
   S2Point MakeS2PointFromXy(double x, double y);
-  void add_cell_from_point(S2Point point);
-  void add_cell_from_point(S2LatLng point);
+  int add_cell_from_point(S2Point point);
+  int add_cell_from_point(S2LatLng point);
+  bool is_full_range_cell_union(S2CellUnion &cellids);
+  template <typename ElementType>
+  static int vector_push_back(std::vector<ElementType> &vector, ElementType &element);
+  static int vector_emplace_back(std::vector<std::unique_ptr<S2Loop>> &vector, S2Loop *element);
+  template <typename ElementType>
+  static int vector_emplace_back(std::vector<std::unique_ptr<S2Region>> &vector, ElementType *element);
   // S2对象内部使用了std::vector实现，在这里统一使用std::vector管理这些对象
   std::vector<std::unique_ptr<S2Region>> s2v_;
   S2LatLngRect mbr_;
@@ -111,6 +121,8 @@ private:
   bool is_geog_;
   bool invalid_;
   bool has_reset_;
+  S2CellUnion cell_union_;
+  S2LatLngRectBounder bounder_;
   DISALLOW_COPY_AND_ASSIGN(ObWkbToS2Visitor);
 };
 

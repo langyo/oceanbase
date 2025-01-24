@@ -1,3 +1,6 @@
+// owner: cxf262476
+// owner group: transaction
+
 /**
  * Copyright (c) 2021 OceanBase
  * OceanBase CE is licensed under Mulan PubL v2.
@@ -110,7 +113,7 @@ TEST_F(TestObjLock, in_trans_lock)
   bool is_try_lock = true;
   int64_t expired_time = 0;
   ObTxIDSet conflict_tx_set;
-  unsigned char lock_mode_in_same_trans = 0x0;
+  uint64_t lock_mode_cnt_in_same_trans[TABLE_LOCK_MODE_COUNT] = {0, 0, 0, 0, 0};
   // int64_t expired_time = ObClockGenerator::getClock() + 1000;
 
 
@@ -126,7 +129,7 @@ TEST_F(TestObjLock, in_trans_lock)
   ret = obj_lock_.lock(param,
                        store_ctx,
                        DEFAULT_IN_TRANS_LOCK_OP,
-                       lock_mode_in_same_trans,
+                       lock_mode_cnt_in_same_trans,
                        allocator_,
                        conflict_tx_set);
   ASSERT_EQ(OB_SUCCESS, ret);
@@ -140,7 +143,7 @@ TEST_F(TestObjLock, in_trans_lock)
   ret = obj_lock_.lock(param,
                        store_ctx,
                        DEFAULT_IN_TRANS_LOCK_OP,
-                       lock_mode_in_same_trans,
+                       lock_mode_cnt_in_same_trans,
                        allocator_,
                        conflict_tx_set);
   ASSERT_EQ(OB_SUCCESS, ret);
@@ -153,7 +156,7 @@ TEST_F(TestObjLock, in_trans_lock)
   ret = obj_lock_.lock(param,
                        store_ctx,
                        DEFAULT_IN_TRANS_LOCK_OP,
-                       lock_mode_in_same_trans,
+                       lock_mode_cnt_in_same_trans,
                        allocator_,
                        conflict_tx_set);
   ASSERT_EQ(OB_SUCCESS, ret);
@@ -182,7 +185,7 @@ TEST_F(TestObjLock, out_trans_lock)
   share::SCN min_commited_scn;
   share::SCN flushed_scn;
   ObTxIDSet conflict_tx_set;
-  unsigned char lock_mode_in_same_trans = 0x0;
+  uint64_t lock_mode_cnt_in_same_trans[TABLE_LOCK_MODE_COUNT] = {0, 0, 0, 0, 0};
   ObLockParam param;
 
   MyTxCtx default_ctx;
@@ -200,7 +203,7 @@ TEST_F(TestObjLock, out_trans_lock)
   ret = obj_lock_.lock(param,
                        store_ctx,
                        DEFAULT_OUT_TRANS_LOCK_OP,
-                       lock_mode_in_same_trans,
+                       lock_mode_cnt_in_same_trans,
                        allocator_,
                        conflict_tx_set);
   ASSERT_EQ(OB_SUCCESS, ret);
@@ -246,7 +249,7 @@ TEST_F(TestObjLock, out_trans_lock)
   ret = obj_lock_.lock(param,
                        store_ctx,
                        DEFAULT_OUT_TRANS_LOCK_OP,
-                       lock_mode_in_same_trans,
+                       lock_mode_cnt_in_same_trans,
                        allocator_,
                        conflict_tx_set);
   ASSERT_EQ(OB_SUCCESS, ret);
@@ -302,7 +305,7 @@ TEST_F(TestObjLock, out_trans_unlock_twice)
   share::SCN commit_version;
   share::SCN commit_scn;
   ObTxIDSet conflict_tx_set;
-  unsigned char lock_mode_in_same_trans = 0x0;
+  uint64_t lock_mode_cnt_in_same_trans[TABLE_LOCK_MODE_COUNT] = {0, 0, 0, 0, 0};
   ObLockParam param;
 
   MyTxCtx default_ctx;
@@ -325,7 +328,7 @@ TEST_F(TestObjLock, out_trans_unlock_twice)
   ret = obj_lock_.lock(param,
                        store_ctx,
                        DEFAULT_OUT_TRANS_LOCK_OP,
-                       lock_mode_in_same_trans,
+                       lock_mode_cnt_in_same_trans,
                        allocator_,
                        conflict_tx_set);
   ASSERT_EQ(OB_SUCCESS, ret);
@@ -512,7 +515,7 @@ TEST_F(TestObjLock, lock_conflict_in_in)
   int64_t expired_time = 0;
   ObTxIDSet conflict_tx_set;
   int64_t conflict_modes;
-  unsigned char lock_mode_in_same_trans = 0x0;
+  uint64_t lock_mode_cnt_in_same_trans[TABLE_LOCK_MODE_COUNT] = {0, 0, 0, 0, 0};
   ObLockParam param;
 
   MyTxCtx default_ctx;
@@ -533,14 +536,14 @@ TEST_F(TestObjLock, lock_conflict_in_in)
   ret = obj_lock_.lock(param,
                        store_ctx,
                        DEFAULT_IN_TRANS_LOCK_OP,
-                       lock_mode_in_same_trans,
+                       lock_mode_cnt_in_same_trans,
                        allocator_,
                        conflict_tx_set);
   ASSERT_EQ(OB_SUCCESS, ret);
   ret = obj_lock_.lock(param,
                        store_ctx,
                        DEFAULT_CONFLICT_OUT_TRANS_LOCK_OP,
-                       lock_mode_in_same_trans,
+                       lock_mode_cnt_in_same_trans,
                        allocator_,
                        conflict_tx_set);
   ASSERT_EQ(OB_TRY_LOCK_ROW_CONFLICT, ret);
@@ -552,7 +555,7 @@ TEST_F(TestObjLock, lock_conflict_in_in)
   ret = obj_lock_.lock(param,
                        store_ctx,
                        DEFAULT_CONFLICT_OUT_TRANS_LOCK_OP,
-                       lock_mode_in_same_trans,
+                       lock_mode_cnt_in_same_trans,
                        allocator_,
                        conflict_tx_set);
   if (DEFAULT_CONFLICT_OUT_TRANS_LOCK_OP.is_dml_lock_op()) {
@@ -579,26 +582,26 @@ TEST_F(TestObjLock, lock_conflict_in_in)
   lock_second.create_trans_id_ = TRANS_ID2;
   for (int first = 0; first < TABLE_LOCK_MODE_COUNT; first++) {
     // lock the first lock
-    printf("first lock index:%d\n", first);
-    lock_first.lock_mode_ = LOCK_MODE_ARRAY[first];
+    lock_first.lock_mode_ = get_lock_mode_by_index(first);
+    printf("first lock index: %d, mode: %d\n", first, lock_first.lock_mode_);
     ret = obj_lock_.lock(param,
                          store_ctx,
                          lock_first,
-                         lock_mode_in_same_trans,
+                         lock_mode_cnt_in_same_trans,
                          allocator_,
                          conflict_tx_set);
     ASSERT_EQ(OB_SUCCESS, ret);
     // lock the second lock and check conflict
     for (int second = 0; second < TABLE_LOCK_MODE_COUNT; second++) {
-      printf("second lock index:%d\n", second);
-      lock_second.lock_mode_ = LOCK_MODE_ARRAY[second];
+      lock_second.lock_mode_ = get_lock_mode_by_index(second);
+      printf("second lock index: %d, mode: %d\n", second, lock_second.lock_mode_);
       is_conflict = !request_lock(lock_first.lock_mode_,
                                   lock_second.lock_mode_,
                                   conflict_modes);
       ret = obj_lock_.lock(param,
                            store_ctx2,
                            lock_second,
-                           lock_mode_in_same_trans,
+                           lock_mode_cnt_in_same_trans,
                            allocator_,
                            conflict_tx_set);
       if (is_conflict) {
@@ -627,7 +630,7 @@ TEST_F(TestObjLock, lock_conflict_in_out)
   int64_t expired_time = 0;
   ObTxIDSet conflict_tx_set;
   int64_t conflict_modes = 0;
-  unsigned char lock_mode_in_same_trans = 0x0;
+  uint64_t lock_mode_cnt_in_same_trans[TABLE_LOCK_MODE_COUNT] = {0, 0, 0, 0, 0};
   ObLockParam param;
 
   MyTxCtx default_ctx;
@@ -655,26 +658,26 @@ TEST_F(TestObjLock, lock_conflict_in_out)
   param.expired_time_ = expired_time;
   for (int first = 0; first < TABLE_LOCK_MODE_COUNT; first++) {
     // lock the first lock
-    printf("first lock index:%d\n", first);
-    lock_first.lock_mode_ = LOCK_MODE_ARRAY[first];
+    lock_first.lock_mode_ = get_lock_mode_by_index(first);
+    printf("first lock index: %d, mode: %d\n", first, lock_first.lock_mode_);
     ret = obj_lock_.lock(param,
                          store_ctx,
                          lock_first,
-                         lock_mode_in_same_trans,
+                         lock_mode_cnt_in_same_trans,
                          allocator_,
                          conflict_tx_set);
     ASSERT_EQ(OB_SUCCESS, ret);
     // lock the second lock and check conflict
     for (int second = 0; second < TABLE_LOCK_MODE_COUNT; second++) {
-      printf("second lock index:%d\n", second);
-      lock_second.lock_mode_ = LOCK_MODE_ARRAY[second];
+      lock_second.lock_mode_ = get_lock_mode_by_index(second);
+      printf("second lock index: %d, mode: %d\n", second, lock_second.lock_mode_);
       is_conflict = !request_lock(lock_first.lock_mode_,
                                   lock_second.lock_mode_,
                                   conflict_modes);
       ret = obj_lock_.lock(param,
                            store_ctx2,
                            lock_second,
-                           lock_mode_in_same_trans,
+                           lock_mode_cnt_in_same_trans,
                            allocator_,
                            conflict_tx_set);
       if (is_conflict) {
@@ -702,7 +705,7 @@ TEST_F(TestObjLock, lock_conflict_out_in)
   int64_t expired_time = 0;
   ObTxIDSet conflict_tx_set;
   int64_t conflict_modes = 0;
-  unsigned char lock_mode_in_same_trans = 0x0;
+  uint64_t lock_mode_cnt_in_same_trans[TABLE_LOCK_MODE_COUNT] = {0, 0, 0, 0, 0};
   ObLockParam param;
 
   MyTxCtx default_ctx;
@@ -729,26 +732,26 @@ TEST_F(TestObjLock, lock_conflict_out_in)
   param.expired_time_ = expired_time;
   for (int first = 0; first < TABLE_LOCK_MODE_COUNT; first++) {
     // lock the first lock
-    printf("first lock index:%d\n", first);
-    lock_first.lock_mode_ = LOCK_MODE_ARRAY[first];
+    lock_first.lock_mode_ = get_lock_mode_by_index(first);
+    printf("first lock index: %d, mode: %d\n", first, lock_first.lock_mode_);
     ret = obj_lock_.lock(param,
                          store_ctx,
                          lock_first,
-                         lock_mode_in_same_trans,
+                         lock_mode_cnt_in_same_trans,
                          allocator_,
                          conflict_tx_set);
     ASSERT_EQ(OB_SUCCESS, ret);
     // lock the second lock and check conflict
     for (int second = 0; second < TABLE_LOCK_MODE_COUNT; second++) {
-      printf("second lock index:%d\n", second);
-      lock_second.lock_mode_ = LOCK_MODE_ARRAY[second];
+      lock_second.lock_mode_ = get_lock_mode_by_index(second);
+      printf("second lock index: %d, mode: %d\n", second, lock_second.lock_mode_);
       is_conflict = !request_lock(lock_first.lock_mode_,
                                   lock_second.lock_mode_,
                                   conflict_modes);
       ret = obj_lock_.lock(param,
                            store_ctx2,
                            lock_second,
-                           lock_mode_in_same_trans,
+                           lock_mode_cnt_in_same_trans,
                            allocator_,
                            conflict_tx_set);
       if (is_conflict) {
@@ -776,7 +779,7 @@ TEST_F(TestObjLock, lock_conflict_out_out)
   int64_t expired_time = 0;
   ObTxIDSet conflict_tx_set;
   int64_t conflict_modes = 0;
-  unsigned char lock_mode_in_same_trans = 0x0;
+  uint64_t lock_mode_cnt_in_same_trans[TABLE_LOCK_MODE_COUNT] = {0, 0, 0, 0, 0};
   ObLockParam param;
 
   MyTxCtx default_ctx;
@@ -803,26 +806,26 @@ TEST_F(TestObjLock, lock_conflict_out_out)
   param.expired_time_ = expired_time;
   for (int first = 0; first < TABLE_LOCK_MODE_COUNT; first++) {
     // lock the first lock
-    printf("first lock index:%d\n", first);
-    lock_first.lock_mode_ = LOCK_MODE_ARRAY[first];
+    lock_first.lock_mode_ = get_lock_mode_by_index(first);
+    printf("first lock index: %d, mode: %d\n", first, lock_first.lock_mode_);
     ret = obj_lock_.lock(param,
                          store_ctx,
                          lock_first,
-                         lock_mode_in_same_trans,
+                         lock_mode_cnt_in_same_trans,
                          allocator_,
                          conflict_tx_set);
     ASSERT_EQ(OB_SUCCESS, ret);
     // lock the second lock and check conflict
     for (int second = 0; second < TABLE_LOCK_MODE_COUNT; second++) {
-      printf("second lock index:%d\n", second);
-      lock_second.lock_mode_ = LOCK_MODE_ARRAY[second];
+      lock_second.lock_mode_ = get_lock_mode_by_index(second);
+      printf("second lock index: %d, mode: %d\n", second, lock_second.lock_mode_);
       is_conflict = !request_lock(lock_first.lock_mode_,
                                   lock_second.lock_mode_,
                                   conflict_modes);
       ret = obj_lock_.lock(param,
                            store_ctx2,
                            lock_second,
-                           lock_mode_in_same_trans,
+                           lock_mode_cnt_in_same_trans,
                            allocator_,
                            conflict_tx_set);
       if (is_conflict) {

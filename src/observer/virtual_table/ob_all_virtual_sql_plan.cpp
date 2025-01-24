@@ -538,30 +538,31 @@ int ObAllVirtualSqlPlan::dump_tenant_plans(int64_t tenant_id)
 int ObAllVirtualSqlPlan::prepare_next_plan()
 {
   int ret = OB_SUCCESS;
-
+  //init plan item array
+  plan_items_.reuse();
+  plan_item_idx_ = 0;
   if (plan_idx_ >= plan_ids_.count()) {
     ret = OB_ERR_UNEXPECTED;
     SERVER_LOG(WARN, "no more plan", K(ret));
   } else if (OB_INVALID_INDEX == plan_ids_.at(plan_idx_).tenant_id_ ||
              OB_INVALID_INDEX == plan_ids_.at(plan_idx_).plan_id_) {
     SERVER_LOG(DEBUG, "invalid tenant_id or plan_id");
+    //next plan
+    ++plan_idx_;
   } else {
     tenant_id_ = plan_ids_.at(plan_idx_).tenant_id_;
     plan_id_ = plan_ids_.at(plan_idx_).plan_id_;
     //next plan
     ++plan_idx_;
-    //init plan item array
-    plan_items_.reuse();
-    plan_item_idx_ = 0;
     ObPhysicalPlan *plan = NULL;
     // !!!引用plan cache资源之前必须加ObReqTimeGuard
     ObReqTimeGuard req_timeinfo_guard;
     ObPlanCache *plan_cache = NULL;
-    ObCacheObjGuard guard(SQL_PLAN_HANDLE);
+    ObCacheObjGuard guard(PC_DIAG_HANDLE);
     int tmp_ret = OB_SUCCESS;
     MTL_SWITCH(tenant_id_) {
       plan_cache = MTL(ObPlanCache*);
-      if (OB_SUCCESS != (tmp_ret = plan_cache->ref_plan(plan_id_, guard))) {
+      if (OB_SUCCESS != (tmp_ret = plan_cache->ref_alloc_plan(plan_id_, guard))) {
         // should not panic
       } else if (FALSE_IT(plan = static_cast<ObPhysicalPlan*>(guard.get_cache_obj()))) {
         // do nothing

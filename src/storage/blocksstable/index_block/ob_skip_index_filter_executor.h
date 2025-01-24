@@ -1,13 +1,13 @@
 /**
  * Copyright (c) 2022 OceanBase
- * OceanBase CE is licensed under Mulan PubL v2.
- * You can use this software according to the terms and conditions of the Mulan
- * PubL v2. You may obtain a copy of Mulan PubL v2 at:
+ * OceanBase is licensed under Mulan PubL v2.
+ * You can use this software according to the terms and conditions of the Mulan PubL v2.
+ * You may obtain a copy of Mulan PubL v2 at:
  *          http://license.coscl.org.cn/MulanPubL-2.0
- * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY
- * KIND, EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO
- * NON-INFRINGEMENT, MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE. See the
- * Mulan PubL v2 for more details.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND,
+ * EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
+ * MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
+ * See the Mulan PubL v2 for more details.
  */
 
 #ifndef OCEANBASE_STORAGE_BLOCKSSTABLE_OB_SKIP_INDEX_FILTER_EXECUTOR_H
@@ -28,21 +28,33 @@ class ObSkipIndexFilterExecutor final
 {
 public:
   ObSkipIndexFilterExecutor()
-      : agg_row_reader_(), meta_() {}
+      : agg_row_reader_(), meta_(), skip_bit_(nullptr), allocator_(nullptr), is_inited_(false) {}
   ~ObSkipIndexFilterExecutor() { reset(); }
   void reset()
   {
     agg_row_reader_.reset();
+    if (OB_NOT_NULL(allocator_)) {
+      if (OB_NOT_NULL(skip_bit_)) {
+        allocator_->free(skip_bit_);
+        skip_bit_ = nullptr;
+      }
+    }
+    allocator_ = nullptr;
+    is_inited_ = false;
   }
+  int init(const int64_t batch_size, common::ObIAllocator *allocator);
   int falsifiable_pushdown_filter(const uint32_t col_idx,
+                                  const ObObjMeta &obj_meta,
                                   const ObSkipIndexType index_type,
                                   const ObMicroIndexInfo &index_info,
-                                  sql::ObWhiteFilterExecutor &filter,
-                                  common::ObIAllocator &allocator);
+                                  sql::ObPhysicalFilterExecutor &filter,
+                                  common::ObIAllocator &allocator,
+                                  const bool use_vectorize);
 
 private:
   int filter_on_min_max(const uint32_t col_idx,
                         const uint64_t row_count,
+                        const ObObjMeta &obj_meta,
                         sql::ObWhiteFilterExecutor &filter,
                         common::ObIAllocator &allocator);
 
@@ -97,9 +109,19 @@ private:
                   const common::ObDatum &min_datum,
                   const common::ObDatum &max_datum,
                   sql::ObBoolMask &fal_desc);
+
+  int black_filter_on_min_max(const uint32_t col_idx,
+                              const uint64_t row_count,
+                              const ObObjMeta &obj_meta,
+                              sql::ObBlackFilterExecutor &filter,
+                              common::ObIAllocator &allocator,
+                              const bool use_vectorize);
 private:
   ObAggRowReader agg_row_reader_;
   ObSkipIndexColMeta meta_;
+  sql::ObBitVector *skip_bit_;      // to be compatible with the black filter filter() method
+  common::ObIAllocator *allocator_;
+  bool is_inited_;
   DISALLOW_COPY_AND_ASSIGN(ObSkipIndexFilterExecutor);
 };
 

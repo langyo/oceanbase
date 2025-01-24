@@ -21,14 +21,16 @@ namespace common
  * -------------------------------------------- ObDataBlockCachePreWarmer --------------------------------------------
  */
 ObDataBlockCachePreWarmer::ObDataBlockCachePreWarmer()
-  : base_percentage_(0),
+  : share::ObIPreWarmer(),
+    base_percentage_(0),
     cache_(nullptr),
     rest_size_(0),
     warm_size_percentage_(100),
     update_step_(0),
     kvpair_(nullptr),
     inst_handle_(),
-    cache_handle_()
+    cache_handle_(),
+    table_read_info_(nullptr)
 {
 }
 
@@ -44,6 +46,8 @@ void ObDataBlockCachePreWarmer::reset()
   rest_size_ = 0;
   warm_size_percentage_ = 100;
   update_step_ = 0;
+  table_read_info_ = nullptr;
+  is_inited_ = false;
   reuse();
 }
 
@@ -54,22 +58,32 @@ void ObDataBlockCachePreWarmer::reuse()
   cache_handle_.reset();
 }
 
-void ObDataBlockCachePreWarmer::init()
+int ObDataBlockCachePreWarmer::init(const ObITableReadInfo *table_read_info)
 {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(inner_init(DATA_BLOCK_CACHE_PERCENTAGE, OB_STORE_CACHE.get_block_cache()))) {
-    COMMON_LOG(WARN, "Fail to inner init data block cache pre warmer", K(ret));
+  if (OB_UNLIKELY(is_inited_)) {
+    ret = OB_INIT_TWICE;
+    COMMON_LOG(WARN, "pre warmer init twice", K(ret));
+  } else {
+    table_read_info_ = table_read_info;
+    cache_ = &OB_STORE_CACHE.get_block_cache();
+    warm_size_percentage_ = DATA_BLOCK_CACHE_PERCENTAGE;
+    inner_update_rest();
+    is_inited_ = true;
   }
+  return ret;
 }
 
-int ObDataBlockCachePreWarmer::reserve_kvpair(const blocksstable::ObMicroBlockDesc &micro_block_desc,
-                                              const int64_t level)
+int ObDataBlockCachePreWarmer::reserve(const blocksstable::ObMicroBlockDesc &micro_block_desc,
+                                       bool &reserve_succ_flag, const int64_t level)
 {
   int ret = OB_SUCCESS;
-
+  reserve_succ_flag = false;
   int64_t kvpair_size = 0;
-  if (OB_UNLIKELY(nullptr == cache_)) {
-    ret = OB_NOT_INIT;
+  if (IS_NOT_INIT) {
+    // do nothing, and do not return errno
+  } else if (OB_UNLIKELY(nullptr == cache_)) {
+    ret = OB_ERR_UNEXPECTED;
     COMMON_LOG(WARN, "The block cache pre warmer is not inited", K(ret), KP(cache_));
   } else if (OB_UNLIKELY(!micro_block_desc.is_valid() || level < 0)) {
     ret = OB_INVALID_ARGUMENT;
@@ -82,22 +96,27 @@ int ObDataBlockCachePreWarmer::reserve_kvpair(const blocksstable::ObMicroBlockDe
       COMMON_LOG(WARN, "Fail to reserve block cache value", K(ret), K(micro_block_desc));
     } else {
       rest_size_ = MAX(0, rest_size_ - kvpair_size);
+      reserve_succ_flag = true;
     }
     update_rest();
   }
-  COMMON_LOG(DEBUG, "pre warmer reserve cache value details", K(ret), K(kvpair_size), K(level),
-                                                              K(micro_block_desc));
-
+  COMMON_LOG(DEBUG, "pre warmer reserve cache value details", K(ret), K(kvpair_size), K(level),                                                            K(micro_block_desc));
   return ret;
 }
 
-int ObDataBlockCachePreWarmer::update_and_put_kvpair(const blocksstable::ObMicroBlockDesc &micro_block_desc)
+int ObDataBlockCachePreWarmer::add(
+  const blocksstable::ObMicroBlockDesc &micro_block_desc,
+  const bool reserve_succ_flag)
 {
   int ret = OB_SUCCESS;
 
   blocksstable::ObIMicroBlockCache::BaseBlockCache *kvcache = nullptr;
-  if (OB_ISNULL(cache_)) {
-    ret = OB_NOT_INIT;
+  if (IS_NOT_INIT) {
+    // do nothing, and do not return errno
+  } else if (!reserve_succ_flag) {
+    // do nothing
+  } else if (OB_ISNULL(cache_)) {
+    ret = OB_ERR_UNEXPECTED;
     COMMON_LOG(WARN, "The block cache pre warmer is not inited", K(ret), KP(cache_));
   } else if (OB_FAIL(cache_->get_cache(kvcache))) {
     COMMON_LOG(WARN, "Fail to get block kvcache", K(ret));
@@ -107,23 +126,6 @@ int ObDataBlockCachePreWarmer::update_and_put_kvpair(const blocksstable::ObMicro
   COMMON_LOG(DEBUG, "pre warmer build cache key and put details", K(ret), K(MTL_ID()), K(rest_size_), K(update_step_),
                                                                   K(micro_block_desc), KPC(micro_block_desc.header_));
   // reuse handles outside
-
-  return ret;
-}
-
-int ObDataBlockCachePreWarmer::inner_init(const int64_t percentage,
-                                           blocksstable::ObIMicroBlockCache &block_cache)
-{
-  int ret = OB_SUCCESS;
-
-  if (OB_UNLIKELY(percentage < 0)) {
-    ret = OB_INVALID_ARGUMENT;
-    COMMON_LOG(WARN, "Invalid argument", K(ret), K(percentage));
-  } else {
-    cache_ = &block_cache;
-    warm_size_percentage_ = percentage;
-    inner_update_rest();
-  }
 
   return ret;
 }
@@ -181,11 +183,18 @@ int ObDataBlockCachePreWarmer::do_put_kvpair(
     ret = OB_INVALID_ARGUMENT;
     COMMON_LOG(WARN, "Invalid argument", K(ret), K(micro_block_desc), K(inst_handle_), K(cache_handle_), K(kvpair_));
   } else {
-    static_cast<blocksstable::ObMicroBlockCacheKey *>(kvpair_->key_)->set(
-      MTL_ID(),
-      micro_block_desc.macro_id_,
-      micro_block_desc.block_offset_,
-      micro_block_desc.buf_size_ + micro_block_desc.header_->header_size_);
+    if (micro_block_desc.logic_micro_id_.is_valid()) {
+      static_cast<blocksstable::ObMicroBlockCacheKey *>(kvpair_->key_)->set(
+        MTL_ID(),
+        micro_block_desc.logic_micro_id_,
+        micro_block_desc.header_->data_checksum_);
+    } else {
+      static_cast<blocksstable::ObMicroBlockCacheKey *>(kvpair_->key_)->set(
+        MTL_ID(),
+        micro_block_desc.macro_id_,
+        micro_block_desc.block_offset_,
+        micro_block_desc.buf_size_ + micro_block_desc.header_->header_size_);
+    }
     if (OB_FAIL(kvcache.put_kvpair(inst_handle_, kvpair_, cache_handle_))) {
       COMMON_LOG(WARN, "failed to put kvpair to block cache", K(ret));
     }
@@ -210,12 +219,20 @@ ObIndexBlockCachePreWarmer::~ObIndexBlockCachePreWarmer()
 {
 }
 
-void ObIndexBlockCachePreWarmer::init()
+int ObIndexBlockCachePreWarmer::init(const ObITableReadInfo *table_read_info)
 {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(inner_init(INDEX_BLOCK_CACHE_PERCENTAGE, OB_STORE_CACHE.get_index_block_cache()))) {
-    COMMON_LOG(WARN, "Fail to inner init index block cache pre warmer", K(ret));
+  if (OB_UNLIKELY(is_inited_)) {
+    ret = OB_INIT_TWICE;
+    COMMON_LOG(WARN, "pre warmer init twice", K(ret));
+  } else {
+    table_read_info_ = table_read_info;
+    cache_ = &OB_STORE_CACHE.get_index_block_cache();
+    warm_size_percentage_ = INDEX_BLOCK_BASE_PERCENTAGE;
+    inner_update_rest();
+    is_inited_ = true;
   }
+  return ret;
 }
 
 void ObIndexBlockCachePreWarmer::calculate_base_percentage(const int64_t free_memory)
@@ -232,7 +249,7 @@ int ObIndexBlockCachePreWarmer::do_reserve_kvpair(
   allocator_.reuse();
   blocksstable::ObMicroBlockData micro_data(micro_block_desc.get_block_buf(), micro_block_desc.get_block_size());
   char *allocated_buf = nullptr;
-  if (OB_FAIL(idx_transformer_.transform(micro_data, value_.get_block_data(), allocator_, allocated_buf))) {
+  if (OB_FAIL(idx_transformer_.transform(micro_data, value_.get_block_data(), allocator_, allocated_buf, table_read_info_))) {
     COMMON_LOG(WARN, "Fail to transform index block to memory format", K(ret));
   } else {
     kvpair_size = sizeof(blocksstable::ObMicroBlockCacheKey) + value_.size();
@@ -249,11 +266,18 @@ int ObIndexBlockCachePreWarmer::do_put_kvpair(
     ret = OB_INVALID_ARGUMENT;
     COMMON_LOG(WARN, "Invalid argument", K(ret), K(micro_block_desc), K_(value));
   } else {
-    key_.set(
+    if (micro_block_desc.logic_micro_id_.is_valid()) {
+      key_.set(
+        MTL_ID(),
+        micro_block_desc.logic_micro_id_,
+        micro_block_desc.header_->data_checksum_);
+    } else {
+      key_.set(
         MTL_ID(),
         micro_block_desc.macro_id_,
         micro_block_desc.block_offset_,
         micro_block_desc.buf_size_ + micro_block_desc.header_->header_size_);
+    }
     if (OB_FAIL(kvcache.put(key_, value_))) {
       COMMON_LOG(WARN, "failed to put index block to cache", K(ret), K_(key), K_(value));
     }

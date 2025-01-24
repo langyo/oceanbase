@@ -18,6 +18,7 @@
 #include "storage/blocksstable/ob_block_manager.h"
 #include "lib/task/ob_timer.h"
 #include "storage/compaction/ob_compaction_util.h"
+#include "storage/meta_mem/ob_tablet_pointer.h"
 
 namespace oceanbase
 {
@@ -67,6 +68,7 @@ public:
   int write_block(const char* buf, const int64_t size, ObBlockInfo &block_info, ObMacroBlocksWriteCtx &write_ctx);
   int add_block(const MacroBlockId &block_id, const int64_t block_size);
   int free_block(const MacroBlockId &block_id, const int64_t block_size);
+  bool is_recyclable(const MacroBlockId &macro_id, const int64_t &used_size) const ;
 
   TO_STRING_KV(K_(macro_handle), K_(offset), K_(header_size));
 
@@ -91,8 +93,8 @@ private:
   struct GetSmallBlockOp
   {
   public:
-    GetSmallBlockOp(ObIArray<MacroBlockId> &block_ids, ObIArray<MacroBlockId> &unused_block_ids)
-        : block_ids(block_ids), unused_block_ids(unused_block_ids), execution_ret_(OB_SUCCESS) {}
+    GetSmallBlockOp(ObSharedMacroBlockMgr &shared_mgr, ObIArray<MacroBlockId> &block_ids, ObIArray<MacroBlockId> &unused_block_ids)
+        : shared_mgr_(shared_mgr), block_ids(block_ids), unused_block_ids(unused_block_ids), execution_ret_(OB_SUCCESS) {}
     bool operator()(const MacroBlockId &id, const int32_t used_size)
     {
       int ret = OB_SUCCESS;
@@ -109,7 +111,7 @@ private:
         } else {
           bool_ret = true;
         }
-      } else if (used_size > 0 && used_size < RECYCLABLE_BLOCK_SIZE) {
+      } else if (shared_mgr_.is_recyclable(id, used_size)) {
         if (OB_FAIL(block_ids.push_back(id))) {
           STORAGE_LOG(WARN, "fail to get small block", K(ret), K(id));
         } else {
@@ -123,6 +125,7 @@ private:
     }
     int64_t get_execution_ret() { return execution_ret_; }
   private:
+    ObSharedMacroBlockMgr &shared_mgr_;
     ObIArray<MacroBlockId> &block_ids;
     ObIArray<MacroBlockId> &unused_block_ids;
     int64_t execution_ret_; // if the number of recyclable blocks reaches 1000, set it to OB_ITER_END
@@ -149,6 +152,7 @@ private:
       const ObTablet &tablet,
       const ObSSTableBasicMeta &basic_meta,
       const compaction::ObMergeType &merge_type,
+      const storage::ObITable::TableKey &table_key,
       const int64_t snapshot_version,
       const int64_t cluster_version,
       const share::SCN &end_scn,
@@ -169,8 +173,14 @@ private:
       ObSSTable &new_sstable) const;
   int parse_merge_type(const ObSSTable &sstable, compaction::ObMergeType &merge_type) const;
   int try_switch_macro_block();
-  int check_write_complete(const MacroBlockId &macro_id, const int64_t macro_size);
-  int do_write_block(const ObMacroBlockWriteInfo &write_info, ObBlockInfo &block_info);
+  static int check_write_complete(
+    const MacroBlockId &macro_id,
+    const int64_t offset,
+    const int64_t size);
+  static int do_write_block(
+      const MacroBlockId& macro_id,
+      const ObMacroBlockWriteInfo &write_info,
+      ObBlockInfo &block_info);
   DISALLOW_COPY_AND_ASSIGN(ObSharedMacroBlockMgr);
 
 private:
@@ -189,9 +199,18 @@ private:
   lib::ObMutex blocks_mutex_; // protect block_used_size_
   ObLinearHashMap<MacroBlockId, int32_t> block_used_size_;
   ObBlockDefragmentationTask defragmentation_task_;
-  common::ObArenaAllocator io_allocator_;
   int tg_id_;
+  bool need_defragment_;
   bool is_inited_;
+};
+
+class ObHasNestedTableFilterOp final : public ObITabletFilterOp
+{
+public:
+	int do_filter(const ObTabletResidentInfo &info, bool &is_skipped) override {
+    is_skipped = !info.has_nested_table();
+    return OB_SUCCESS;
+  }
 };
 
 } // namespace blocksstable

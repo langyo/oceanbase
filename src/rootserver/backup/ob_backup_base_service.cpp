@@ -61,10 +61,11 @@ int ObBackupBaseService::create(const char* thread_name, ObBackupBaseService &te
   } else if (OB_FAIL(thread_cond_.init(event_no))) {
     LOG_WARN("fail to init thread cond", K(ret), K(event_no));
   } else {
-    stop();
     thread_name_ = thread_name;
     wakeup_cnt_ = 0;
     is_created_ = true;
+    stop();
+    LOG_INFO("[BACKUP_SERVICE] thread create", K(tg_id_), K(thread_name_));
   }
   return ret;
 }
@@ -131,6 +132,7 @@ void ObBackupBaseService::idle()
   if (has_set_stop() || wakeup_cnt_ > 0) {
     wakeup_cnt_ = 0;
   } else {
+    ObBKGDSessInActiveGuard inactive_guard;
     thread_cond_.wait_us(interval_idle_time_us_);
   }
 }

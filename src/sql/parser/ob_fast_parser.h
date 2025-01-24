@@ -34,19 +34,22 @@ public:
 	ObCharsets4Parser charsets4parser_;
 	ObSQLMode sql_mode_;
 	QuestionMarkDefNameCtx *def_name_ctx_;
+  bool is_format_;
 
 	FPContext()
 		: enable_batched_multi_stmt_(false),
 			is_udr_mode_(false),
 			sql_mode_(0),
-			def_name_ctx_(nullptr)
+			def_name_ctx_(nullptr),
+      is_format_(false)
 	{}
 	FPContext(ObCharsets4Parser charsets4parser)
 		: enable_batched_multi_stmt_(false),
 			is_udr_mode_(false),
 			charsets4parser_(charsets4parser),
 			sql_mode_(0),
-			def_name_ctx_(nullptr)
+			def_name_ctx_(nullptr),
+      is_format_(false)
 	{}
 };
 
@@ -86,6 +89,10 @@ struct ObRawSql {
 	inline bool is_search_end()
 	{
 		return search_end_ || cur_pos_ > raw_sql_len_ - 1;
+	}
+	inline bool is_search_end(const int64_t pos)
+	{
+		return search_end_ || pos > raw_sql_len_ - 1;
 	}
 	inline char peek()
 	{
@@ -238,6 +245,7 @@ protected:
 	// this will not affect any correctness issues, and will make the code look better
 	static const int64_t PARSER_NODE_SIZE = sizeof(ParseNode);
 	static const int64_t FIEXED_PARAM_NODE_SIZE = PARSER_NODE_SIZE + sizeof(ParamList);
+	static const int64_t CHECK_STATUS_TRY_TIMES = 512;
 
 protected:
 	/**
@@ -377,8 +385,9 @@ protected:
 		return is_valid_char(ch) && USER_VAR_CHAR[static_cast<uint8_t>(ch)];
 	}
 	void reset_parser_node(ParseNode *node);
+	int64_t notascii_gb_char(const int64_t pos);
 	//{U}
-	int64_t is_latin1_char(const int64_t pos);
+	int64_t is_single_byte_char(const int64_t pos);
 	// ({U_2}{U}|{U_3}{U}{U}|{U_4}{U}{U}{U}
 	int64_t is_utf8_char(const int64_t pos);
 	// NOTES: No boundary check, the caller guarantees safety!!!
@@ -391,6 +400,11 @@ protected:
 	// ([\\\xef\][\\\xbc\][\\\x89])
 	int64_t is_utf8_multi_byte_right_parenthesis(const char *str, const int64_t start_pos);
 	// {GB_1}{GB_2}
+	int64_t is_hk_char(const int64_t pos);
+	int64_t is_hk_multi_byte_space(const char *str, const int64_t start_pos);
+	int64_t is_hk_multi_byte_comma(const char *str, const int64_t start_pos);
+	int64_t is_hk_multi_byte_left_parenthesis(const char *str, const int64_t start_pos);
+	int64_t is_hk_multi_byte_right_parenthesis(const char *str, const int64_t start_pos);
 	int64_t is_gbk_char(const int64_t pos);
 	// ([\\\xa1][\\\xa1])
 	int64_t is_gbk_multi_byte_space(const char *str, const int64_t start_pos);
@@ -430,13 +444,34 @@ protected:
 		return is_valid_char(ch) &&
 		static_cast<uint8_t>(ch) >= 0x81 && static_cast<uint8_t>(ch) <= 0xfe;
 	}
+	// [\x81-\xfe]
+	inline bool is_hk1(char ch)
+	{
+		return is_valid_char(ch) &&
+		static_cast<uint8_t>(ch) >= 0x81 && static_cast<uint8_t>(ch) <= 0xfe;
+	}
+
 	// [\x40-\xfe]
 	inline bool is_gb2(char ch)
 	{
 		return is_valid_char(ch) &&
 		static_cast<uint8_t>(ch) >= 0x40 && static_cast<uint8_t>(ch) <= 0xfe;
 	}
-    inline bool is_latin1(char ch)
+
+	// [\x81-\xfe]
+	inline bool is_hk2(char ch)
+	{
+		return is_valid_char(ch) &&
+		((static_cast<uint8_t>(ch) >= 0x40 && static_cast<uint8_t>(ch) <= 0x7e)
+		|| (static_cast<uint8_t>(ch) >= 0xa1 && static_cast<uint8_t>(ch) <= 0xfe));
+	}
+
+	inline bool notascii(char ch)
+	{
+		return 	is_valid_char(ch) &&
+				(static_cast<uint8_t>(ch) >= 0x80 && static_cast<uint8_t>(ch) <= 0xFF);
+	}
+    inline bool is_single_byte(char ch)
 	{
 		return is_valid_char(ch) &&
 		static_cast<uint8_t>(ch) >= 0x80 && static_cast<uint8_t>(ch) <= 0xFF;
@@ -606,8 +641,18 @@ protected:
 
 	int check_is_on_duplicate_key(ObRawSql &raw_sql, bool &is_on_duplicate_key);
 	bool skip_space(ObRawSql &raw_sql);
-
+  void skip_invalid_charactar(int64_t& pos, int& token_len, ObRawSql &raw_sql);
+  bool is_invalid_character(ObRawSql &raw_sql, int64_t pos, int64_t& skip_len);
+  int extend_alloc_sql_buffer();
+	int process_format_token();
+	int try_check_status();
 protected:
+  enum FoundInsertTokenStatus
+  {
+    NOT_FOUND_INSERT_TOKEN,
+    FOUND_INSERT_TOKEN_ONCE, // find one insert token
+    INVALID_TOKEN_STATUS,  // find insert token more than one time
+  };
 	ObRawSql raw_sql_;
 	char *no_param_sql_;
 	int64_t no_param_sql_len_;
@@ -622,17 +667,23 @@ protected:
 	char *tmp_buf_;
 	int64_t tmp_buf_len_;
 	int64_t last_escape_check_pos_;
-	ParamList *param_node_list_;
+	uint64_t try_check_tick_;
+public:
+  ParamList *param_node_list_;
 	ParamList *tail_param_node_;
 	TokenType cur_token_type_;
 	ObQuestionMarkCtx question_mark_ctx_;
 	common::ObIAllocator &allocator_;
 	common::ObCharsetType charset_type_;
 	const ObCharsetInfo *charset_info_;
-	bool get_insert_;
+	FoundInsertTokenStatus found_insert_status_;
 	int64_t values_token_pos_;
 	ParseNextTokenFunc parse_next_token_func_;
 	ProcessIdfFunc process_idf_func_;
+  bool is_format_;
+  bool need_caseup_;
+  int alloc_len_;
+	common::ObCollationType col_type_;
 
 private:
 	DISALLOW_COPY_AND_ASSIGN(ObFastParserBase);
@@ -670,6 +721,7 @@ private:
 	int process_string(const char quote);
 	int process_zero_identifier();
 	int process_identifier_begin_with_n();
+	int process_identifier_begin_with_backslash();
 private:
 	ObSEArray<ObValuesTokenPos, 4> values_tokens_;
 	DISALLOW_COPY_AND_ASSIGN(ObFastParserMysql);
@@ -700,11 +752,6 @@ private:
 	 */
 	int process_string(const bool in_q_quote);
 	int process_identifier_begin_with_n();
-	char *parse_strndup_with_trim_space_for_new_line(const char *str,
-                                                     size_t nbyte,
-													 char *buf,
-													 int *connection_collation,
-												     int64_t *new_len);
 
 private:
 	DISALLOW_COPY_AND_ASSIGN(ObFastParserOracle);

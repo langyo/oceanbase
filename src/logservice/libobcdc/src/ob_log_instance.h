@@ -92,7 +92,7 @@ public:
 
 typedef common::sqlclient::ObMySQLServerProvider ServerProviderType;
 
-class ObLogInstance : public IObCDCInstance, public IObLogErrHandler
+class ObLogInstance : public IObCDCInstance, public IObLogErrHandler, public lib::ThreadPool
 {
 public:
   virtual ~ObLogInstance();
@@ -218,6 +218,8 @@ private:
   static void *flow_control_thread_func_(void *args);
   int start_threads_();
   void wait_threads_stop_();
+  void run1() override;
+  int daemon_handle_storage_op_thd_();
   void reload_config_();
   void print_tenant_memory_usage_();
   void global_flow_control_();
@@ -242,7 +244,8 @@ private:
   int get_task_count_(
       int64_t &ready_to_seq_task_count,
       int64_t &seq_trans_count,
-      int64_t &part_trans_task_resuable_count);
+      int64_t &part_trans_task_resuable_count,
+      int64_t &ddl_part_trans_count);
 
   // next record
   void do_drc_consume_tps_stat_();
@@ -285,10 +288,14 @@ private:
   int config_data_start_schema_version_(const int64_t global_data_start_schema_version);
   int update_data_start_schema_version_on_split_mode_();
   int set_all_tenant_compat_mode_();
+  void dump_malloc_sample_();
 
 private:
   static ObLogInstance *instance_;
-
+  // Threads that runs with instance
+  // thread count = 1, start from idx 0;
+  // thread 0: use to operate storage(manul flush and compact)
+  static const int64_t DAEMON_THREAD_COUNT;
 private:
   bool                    inited_;
   bool                    is_running_;

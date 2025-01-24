@@ -95,7 +95,7 @@ private:
     {
       lib::set_thread_name("LogLimiterRefresh");
       while (!has_set_stop()) {
-        ob_usleep(100000);
+        ob_usleep(100000, true/*is_idle_sleep*/);
         limiter_.refresh();
       }
     }
@@ -282,7 +282,7 @@ void ObTaskController::calc_log_rate()
 {
   const double total = std::accumulate(
       rate_pctgs_, rate_pctgs_ + MAX_TASK_ID, .0);
-  for (int i = 0; total != 0 && i < MAX_TASK_ID; i++) {
+  for (int i = 0; total > 0 && i < MAX_TASK_ID; i++) {
     limiters_[i]->set_rate(
         static_cast<int64_t>(
             rate_pctgs_[i]/total * static_cast<double>(log_rate_limit_)));

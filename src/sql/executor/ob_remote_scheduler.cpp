@@ -164,7 +164,8 @@ int ObRemoteScheduler::build_remote_task(ObExecContext &ctx,
       K(task_exec_ctx.get_query_sys_begin_schema_version()));
   remote_task.set_remote_sql_info(&plan_ctx->get_remote_sql_info());
   ObDASTabletLoc *first_tablet_loc = DAS_CTX(ctx).get_table_loc_list().get_first()->get_first_tablet_loc();
-  if (OB_ISNULL(session = ctx.get_my_session())) {
+  if (OB_FAIL(ret)){
+  } else if (OB_ISNULL(session = ctx.get_my_session())) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("session is null", K(ret));
   } else {
@@ -174,7 +175,9 @@ int ObRemoteScheduler::build_remote_task(ObExecContext &ctx,
     task_id.set_server(ctx.get_addr());
     task_id.set_task_id(0);
     remote_task.set_task_id(task_id);
-    remote_task.set_snapshot(ctx.get_das_ctx().get_snapshot());
+    if (OB_FAIL(remote_task.set_snapshot(ctx.get_das_ctx().get_snapshot()))) {
+      LOG_WARN("fail to set snapshot", K(ret));
+    }
   }
   return ret;
 }

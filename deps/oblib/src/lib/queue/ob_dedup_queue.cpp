@@ -180,6 +180,7 @@ int ObDedupQueue::add_task(const IObDedupTask &task)
     if (REACH_TIME_INTERVAL(THREAD_CHECK_INTERVAL)) {
       for (int64_t i = 0; i < thread_num_; i++) {
         if (thread_metas_[i].check_dead(thread_dead_threshold_)) {
+          // ignore ret
           COMMON_LOG(WARN, "thread maybe dead", K(i), K(thread_metas_[i]));
         }
       }
@@ -397,6 +398,7 @@ void ObDedupQueue::run1()
       } else {
         ObThreadCondGuard guard(task_queue_sync_);
         if (0 == task_queue_.get_total()) {
+          ObBKGDSessInActiveGuard inactive_guard;
           if (OB_SUCCESS != (tmp_ret = task_queue_sync_.wait(QUEUE_WAIT_TIME_MS))) {
             if (OB_TIMEOUT != tmp_ret) {
               COMMON_LOG_RET(WARN, tmp_ret, "Fail to wait task queue sync, ", K(tmp_ret));

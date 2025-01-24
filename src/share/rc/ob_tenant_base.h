@@ -21,19 +21,24 @@
 #include "lib/thread/threads.h"
 #include "lib/thread/thread_mgr.h"
 #include "lib/allocator/ob_malloc.h"
+#include "lib/task/ob_timer_service.h" // ObTimerService
 #include "share/ob_tenant_role.h"//ObTenantRole
 #ifdef OB_BUILD_DBLINK
 #include "lib/oracleclient/ob_oci_environment.h"
+#include "lib/mysqlclient/ob_dblink_error_trans.h"
 #endif
 #include "lib/mysqlclient/ob_tenant_oci_envs.h"
+#include "observer/mysql/ob_query_response_time.h"
 namespace oceanbase
 {
 namespace common {
   class ObLDHandle;
   class ObTenantIOManager;
+  class ObDiagnosticInfoContainer;
   template<typename T> class ObServerObjectPool;
   class ObDetectManager;
   class ObOptStatMonitorManager;
+  class ObRbMemMgr;
 }
 namespace omt {
  class ObPxPools;
@@ -60,10 +65,15 @@ namespace sql {
   class ObUDRMgr;
   class ObPlanCache;
   class ObPsCache;
+  class ObAuditLogger;
+  class ObAuditLogUpdater;
 }
 namespace blocksstable {
   class ObSharedMacroBlockMgr;
   class ObDecodeResourcePool;
+}
+namespace tmp_file {
+  class ObTenantTmpFileManager;
 }
 namespace storage {
 namespace mds {
@@ -73,8 +83,8 @@ class ObTenantMdsService;
   class ObAccessService;
   class ObTenantFreezer;
   class ObTenantMetaMemMgr;
-  class ObStorageLogger;
-  class ObTenantCheckpointSlogHandler;
+  class ObTenantStorageMetaService;
+  class ObTenantFTPluginMgr;
   class ObTenantFreezeInfoMgr;
   class ObStorageHAService;
   class ObStorageHAHandlerService;
@@ -84,14 +94,30 @@ class ObTenantMdsService;
   namespace checkpoint {
     class ObCheckPointService;
     class ObTabletGCService;
+    class ObCheckpointDiagnoseMgr;
   }
   class ObLobManager;
   class ObTransferService;
   class ObRebuildService;
+  class ObTenantRestoreInfoMgr;
   class ObTableScanIterator;
+  class ObTenantSnapshotService;
   class ObTenantCGReadInfoMgr;
+  class ObTenantDirectLoadMgr;
   class ObEmptyReadBucket;
+  class ObTabletMemtableMgrPool;
+#ifdef OB_BUILD_SHARED_STORAGE
+  class ObTenantDiskSpaceManager;
+  class ObTenantFileManager;
+  class ObSSMicroCachePrewarmService;
+  class ObSSMicroCache;
+  class ObPublicBlockGCService;
+#else
+#endif
+
+  class ObGlobalIteratorPool;
 } // namespace storage
+
 namespace transaction {
   class ObTenantWeakReadService; // 租户弱一致性读服务
   class ObTransService;          // 事务服务
@@ -115,6 +141,9 @@ namespace table
   class ObTTLService;
   class ObHTableLockMgr;
   class ObTableApiSessPoolMgr;
+  class ObTableGroupCommitMgr;
+  class ObHTableRowkeyMgr;
+  class ObTableClientInfoMgr;
 }
 namespace logservice
 {
@@ -139,9 +168,13 @@ namespace compaction
   class ObTenantCompactionProgressMgr;
   class ObServerCompactionEventHistory;
   class ObScheduleSuspectInfoMgr;
+  class ObCompactionSuggestionMgr;
   class ObDiagnoseTabletMgr;
   class ObTenantMediumChecker;
   class ObTenantTabletScheduler;
+  class ObTenantCompactionObjMgr;
+  class ObTenantLSMergeScheduler;
+  class ObTenantLSMergeChecker;
 }
 namespace memtable
 {
@@ -166,15 +199,23 @@ namespace rootserver
   class ObBackupCleanService;
   class ObArchiveSchedulerService;
   class ObArbitrationService;
+  class ObDBMSSchedService;
   class ObHeartbeatService;
   class ObStandbySchemaRefreshTrigger;
+  class ObTenantSnapshotScheduler;
+  class ObCloneScheduler;
+  class ObMViewMaintenanceService;
 }
 namespace observer
 {
   class ObTenantMetaChecker;
   class QueueThread;
   class ObTableLoadService;
+  class ObTableLoadResourceService;
+  class ObStartupAccelTaskHandler;
   class ObTabletTableUpdater;
+  class ObTenantQueryRespTimeCollector;
+  class ObTableQueryASyncMgr;
 }
 
 // for ObTenantSwitchGuard 临时使用>>>>>>>>
@@ -189,6 +230,7 @@ namespace observer
 }
 namespace storage {
   class MockTenantModuleEnv;
+  class ObStorageHADiagMgr;
 }
 
 namespace share
@@ -201,6 +243,13 @@ class ObGlobalAutoIncService;
 class ObDagWarningHistoryManager;
 class ObTenantErrsimModuleMgr;
 class ObTenantErrsimEventMgr;
+class ObSharedMemAllocMgr;
+class ObIndexUsageInfoMgr;
+class ObStorageIOUsageRepoter;
+class ObResourceLimitCalculator;
+class ObWorkloadRepositoryContext;
+class ObPluginVectorIndexService;
+class ObAutoSplitTaskCache;
 namespace schema
 {
   class ObTenantSchemaService;
@@ -224,6 +273,26 @@ namespace detector
 #define TenantErrsimEvent
 #endif
 
+#ifdef OB_BUILD_SHARED_STORAGE
+#define TenantDiskSpaceManager storage::ObTenantDiskSpaceManager*,
+#define TenantFileManager storage::ObTenantFileManager*,
+#define SSMicroCachePrewarmService storage::ObSSMicroCachePrewarmService*,
+#define SSMicroCache storage::ObSSMicroCache*,
+#define TenantCompactionObjMgr compaction::ObTenantCompactionObjMgr*,
+#define TenantLSMergeScheduler compaction::ObTenantLSMergeScheduler*,
+#define TenantLSMergeChecker compaction::ObTenantLSMergeChecker*,
+#define PublicBlockGCService storage::ObPublicBlockGCService*,
+#else
+#define TenantDiskSpaceManager
+#define TenantFileManager
+#define SSMicroCachePrewarmService
+#define SSMicroCache
+#define TenantCompactionObjMgr
+#define TenantLSMergeScheduler
+#define TenantLSMergeChecker
+#define PublicBlockGCService
+#endif
+
 // 在这里列举需要添加的租户局部变量的类型，租户会为每种类型创建一个实例。
 // 实例的初始化和销毁逻辑由MTL_BIND接口指定。
 // 使用MTL接口可以获取实例。
@@ -231,22 +300,31 @@ using ObPartTransCtxObjPool = common::ObServerObjectPool<transaction::ObPartTran
 using ObTableScanIteratorObjPool = common::ObServerObjectPool<oceanbase::storage::ObTableScanIterator>;
 #define MTL_MEMBERS                                  \
   MTL_LIST(                                          \
-      omt::ObSharedTimer*,                           \
+      common::ObDiagnosticInfoContainer*,            \
+      ObTimerService*,                               \
       blocksstable::ObDecodeResourcePool*,           \
+      omt::ObSharedTimer*,                           \
+      oceanbase::sql::ObTenantSQLSessionMgr*,        \
       storage::ObTenantMetaMemMgr*,                  \
+      storage::ObTenantFTPluginMgr*,                 \
       ObPartTransCtxObjPool*,                        \
       ObTableScanIteratorObjPool*,                   \
       common::ObTenantIOManager*,                    \
       storage::mds::ObTenantMdsService*,             \
-      storage::ObStorageLogger*,                     \
       blocksstable::ObSharedMacroBlockMgr*,          \
+      share::ObSharedMemAllocMgr*,                   \
       transaction::ObTransService*,                  \
       logservice::coordinator::ObLeaderCoordinator*, \
       logservice::coordinator::ObFailureDetector*,   \
       logservice::ObLogService*,                     \
       logservice::ObGarbageCollector*,               \
+      TenantDiskSpaceManager                         \
+      TenantFileManager                              \
+      SSMicroCache                                   \
+      SSMicroCachePrewarmService                     \
       storage::ObLSService*,                         \
-      storage::ObTenantCheckpointSlogHandler*,       \
+      storage::ObTenantStorageMetaService*,          \
+      tmp_file::ObTenantTmpFileManager*,             \
       compaction::ObTenantCompactionProgressMgr*,    \
       compaction::ObServerCompactionEventHistory*,   \
       storage::ObTenantTabletStatMgr*,               \
@@ -275,6 +353,7 @@ using ObTableScanIteratorObjPool = common::ObServerObjectPool<oceanbase::storage
       storage::ObTenantSSTableMergeInfoMgr*,         \
       share::ObDagWarningHistoryManager*,            \
       compaction::ObScheduleSuspectInfoMgr*,         \
+      compaction::ObCompactionSuggestionMgr*,        \
       compaction::ObDiagnoseTabletMgr *,             \
       storage::ObLobManager*,                        \
       share::ObGlobalAutoIncService*,                \
@@ -288,13 +367,14 @@ using ObTableScanIteratorObjPool = common::ObServerObjectPool<oceanbase::storage
       sql::ObPlanBaselineMgr*,                       \
       sql::ObPsCache*,                               \
       sql::ObPlanCache*,                             \
+      oceanbase::common::ObDetectManager*,           \
       sql::dtl::ObTenantDfc*,                        \
-      sql::dtl::ObDTLIntermResultManager*,           \
       omt::ObPxPools*,                               \
       lib::Worker::CompatMode,                       \
       obmysql::ObMySQLRequestManager*,               \
       transaction::ObTenantWeakReadService*,         \
       sql::ObTenantSqlMemoryManager*,                \
+      sql::dtl::ObDTLIntermResultManager*,           \
       sql::ObPlanMonitorNodeList*,                   \
       sql::ObDataAccessService*,                     \
       sql::ObDASIDService*,                          \
@@ -306,9 +386,12 @@ using ObTableScanIteratorObjPool = common::ObServerObjectPool<oceanbase::storage
       compaction::ObTenantTabletScheduler*,          \
       compaction::ObTenantMediumChecker*,            \
       storage::ObTenantCompactionMemPool*,           \
+      TenantCompactionObjMgr                         \
       share::ObTenantDagScheduler*,                  \
       storage::ObStorageHAService*,                  \
       storage::ObTenantFreezeInfoMgr*,               \
+      TenantLSMergeScheduler                         \
+      TenantLSMergeChecker                           \
       transaction::ObTxLoopWorker *,                 \
       storage::ObAccessService*,                     \
       storage::ObTransferService*,                   \
@@ -317,6 +400,7 @@ using ObTableScanIteratorObjPool = common::ObServerObjectPool<oceanbase::storage
       datadict::ObDataDictService*,                  \
       ArbMTLMember                                   \
       observer::ObTableLoadService*,                 \
+      observer::ObTableLoadResourceService*,         \
       concurrency_control::ObMultiVersionGarbageCollector*, \
       sql::ObUDRMgr*,                        \
       sql::ObFLTSpanMgr*,                            \
@@ -324,21 +408,51 @@ using ObTableScanIteratorObjPool = common::ObServerObjectPool<oceanbase::storage
       ObTestModule*,                                 \
       oceanbase::common::sqlclient::ObTenantOciEnvs*, \
       rootserver::ObHeartbeatService*,              \
-      oceanbase::common::ObDetectManager*,          \
       storage::ObEmptyReadBucket*,                  \
+      rootserver::ObDBMSSchedService*,              \
       TenantErrsimModule                            \
       TenantErrsimEvent                             \
-      oceanbase::sql::ObTenantSQLSessionMgr*,       \
+      storage::ObTenantDirectLoadMgr*,              \
       oceanbase::common::ObOptStatMonitorManager*,  \
       omt::ObTenantSrs*,                            \
       table::ObHTableLockMgr*,                      \
       table::ObTTLService*,                         \
-      table::ObTableApiSessPoolMgr*                \
+      table::ObTableApiSessPoolMgr*,                \
+      rootserver::ObTenantSnapshotScheduler*,       \
+      storage::ObTenantSnapshotService*,            \
+      rootserver::ObCloneScheduler*,                \
+      share::ObIndexUsageInfoMgr*,                  \
+      storage::ObTabletMemtableMgrPool*,            \
+      rootserver::ObMViewMaintenanceService*,       \
+      PublicBlockGCService                          \
+      share::ObStorageIOUsageRepoter*,              \
+      share::ObResourceLimitCalculator*,            \
+      storage::checkpoint::ObCheckpointDiagnoseMgr*, \
+      storage::ObStorageHADiagMgr*,                  \
+      common::sqlclient::ObTenantDblinkKeeper*,      \
+      storage::ObGlobalIteratorPool*,                \
+      common::ObRbMemMgr*,                           \
+      share::ObPluginVectorIndexService*,            \
+      storage::ObTenantRestoreInfoMgr*,              \
+      share::ObAutoSplitTaskCache*    ,              \
+      sql::ObAuditLogger*,                           \
+      sql::ObAuditLogUpdater*,                       \
+      share::ObWorkloadRepositoryContext*,           \
+      observer::ObTenantQueryRespTimeCollector*,     \
+      table::ObTableGroupCommitMgr*,                 \
+      observer::ObTableQueryASyncMgr*,               \
+      table::ObTableClientInfoMgr*,                  \
+      table::ObHTableRowkeyMgr*                      \
   )
 
 
 // 获取租户ID
 #define MTL_ID() share::ObTenantEnv::get_tenant_local()->id()
+// 获取租户epoch id
+#define MTL_EPOCH_ID() share::ObTenantEnv::get_tenant_local()->get_epoch()
+// 租户switchover epoch
+#define MTL_GET_SWITCHOVER_EPOCH() share::ObTenantEnv::get_tenant()->get_switchover_epoch()
+#define MTL_SET_SWITCHOVER_EPOCH(switchover_epoch) share::ObTenantEnv::get_tenant()->set_switchover_epoch(switchover_epoch)
 // 获取是否为主租户
 #define MTL_TENANT_ROLE_CACHE_IS_PRIMARY() share::ObTenantEnv::get_tenant()->is_primary_tenant()
 //由于之前租户默认为主库，兼容性写法
@@ -347,6 +461,8 @@ using ObTableScanIteratorObjPool = common::ObServerObjectPool<oceanbase::storage
 #define MTL_TENANT_ROLE_CACHE_IS_INVALID() share::ObTenantEnv::get_tenant()->is_invalid_tenant()
 // 租户是否处于恢复中
 #define MTL_TENANT_ROLE_CACHE_IS_RESTORE() share::ObTenantEnv::get_tenant()->is_restore_tenant()
+// 租户是否处于克隆中
+#define MTL_TENANT_ROLE_CACHE_IS_CLONE() share::ObTenantEnv::get_tenant()->is_clone_tenant()
 // 更新租户role
 #define MTL_SET_TENANT_ROLE_CACHE(tenant_role) share::ObTenantEnv::get_tenant()->set_tenant_role(tenant_role)
 // 获取租户role
@@ -366,10 +482,9 @@ using ObTableScanIteratorObjPool = common::ObServerObjectPool<oceanbase::storage
 #define MTL_IS_MINI_MODE() share::ObTenantEnv::get_tenant()->is_mini_mode()
 #define MTL_CPU_COUNT() share::ObTenantEnv::get_tenant()->unit_max_cpu()
 #define MTL_MEM_SIZE() share::ObTenantEnv::get_tenant()->unit_memory_size()
+#define MTL_DATA_DISK_SIZE() share::ObTenantEnv::get_tenant()->unit_data_disk_size()
 
 // 注意MTL_BIND调用需要在租户创建之前，否则会导致租户创建时无法调用到绑定的函数。
-#define MTL_BIND(INIT, DESTROY) \
-  share::ObTenantBase::mtl_bind_func(nullptr, INIT, nullptr, nullptr, nullptr, DESTROY);
 #define MTL_BIND2(NEW, INIT, START, STOP, WAIT, DESTROY) \
   share::ObTenantBase::mtl_bind_func(NEW, INIT, START, STOP, WAIT, DESTROY);
 
@@ -493,6 +608,11 @@ public:
     return orig_size;
   }
   int64_t unit_memory_size() const { return unit_memory_size_; }
+  void set_unit_data_disk_size(int64_t data_disk_size)
+  {
+    unit_data_disk_size_ = data_disk_size;
+  }
+  int64_t unit_data_disk_size() const { return unit_data_disk_size_; }
   bool update_mini_mode(bool mini_mode)
   {
     bool orig_mode = mini_mode_;
@@ -510,19 +630,22 @@ public:
   int register_module_thread_dynamic(double dynamic_factor, ThreadDynamicImpl *impl);
   int unregister_module_thread_dynamic(ThreadDynamicImpl *impl);
 public:
-  ObTenantBase(const uint64_t id, bool enable_tenant_ctx_check = false);
+  ObTenantBase(const uint64_t id, const int64_t epoch = 0, bool enable_tenant_ctx_check = false);
   ObTenantBase &operator=(const ObTenantBase &ctx);
   int init(ObCgroupCtrl *cgroup = nullptr);
   void destroy();
   virtual inline uint64_t id() const override { return id_; }
+  OB_INLINE int64_t get_epoch() const { return epoch_; }
   ObCgroupCtrl *get_cgroup();
 
   const ObTenantModuleInitCtx *get_mtl_init_ctx() const { return mtl_init_ctx_; }
 
   void set_tenant_role(const share::ObTenantRole::Role tenant_role_value)
   {
+    if (get_tenant_role() != tenant_role_value) {
+      SHARE_LOG(INFO, "set tenant role", K(tenant_role_value), K(tenant_role_value_));
+    }
     (void)ATOMIC_STORE(&tenant_role_value_, tenant_role_value);
-    return ;
   }
 
   share::ObTenantRole::Role get_tenant_role() const
@@ -539,7 +662,7 @@ public:
   {
     share::ObTenantRole::Role tenant_role = get_tenant_role();
     return share::is_primary_tenant(tenant_role)
-           or share::is_invalid_tenant(tenant_role);
+           || share::is_invalid_tenant(tenant_role);
   }
 
   bool is_restore_tenant()
@@ -547,9 +670,28 @@ public:
     return share::is_restore_tenant(ATOMIC_LOAD(&tenant_role_value_));
   }
 
+  bool is_clone_tenant()
+  {
+    return share::is_clone_tenant(ATOMIC_LOAD(&tenant_role_value_));
+  }
+
   bool is_invalid_tenant()
   {
     return share::is_invalid_tenant(ATOMIC_LOAD(&tenant_role_value_));
+  }
+
+  void set_switchover_epoch(const int64_t switchover_epoch)
+  {
+    int64_t cached_switchover_epoch = get_switchover_epoch();
+    if (OB_INVALID_VERSION != switchover_epoch && cached_switchover_epoch < switchover_epoch) {
+      SHARE_LOG(INFO, "try set switchover_epoch", K(switchover_epoch), K(cached_switchover_epoch));
+      ATOMIC_BCAS(&switchover_epoch_, cached_switchover_epoch, switchover_epoch);
+    }
+  }
+
+  int64_t get_switchover_epoch() const
+  {
+    return ATOMIC_LOAD(&switchover_epoch_);
   }
 
   template<class T>
@@ -557,6 +699,11 @@ public:
 
   template<class T>
   void set(T v) { return inner_set(v); }
+
+  ObTimerService *get_timer_service() override
+  {
+    return get<ObTimerService *>();
+  }
 
 
 private:
@@ -619,6 +766,7 @@ protected:
 protected:
   // tenant id
   uint64_t id_;
+  int64_t epoch_;
   bool inited_;
   bool created_;
   share::ObTenantModuleInitCtx *mtl_init_ctx_;
@@ -627,6 +775,9 @@ protected:
   double unit_max_cpu_;
   double unit_min_cpu_;
   int64_t unit_memory_size_;
+  // tenant data disk size
+  int64_t unit_data_disk_size_;
+  int64_t switchover_epoch_;
 
 private:
   common::hash::ObHashSet<int64_t> tg_set_;
@@ -664,7 +815,7 @@ public:
   static inline ObTenantBase *get_tenant_local()
   {
 #ifdef ENABLE_INITIAL_EXEC_TLS_MODEL
-    static thread_local ObTenantBase __attribute__((tls_model("initial-exec"))) ctx(OB_INVALID_TENANT_ID);
+    static thread_local ObTenantBase __attribute__((tls_model("initial-exec"))) ctx(OB_INVALID_TENANT_ID, 0);
 #else
     static thread_local ObTenantBase __attribute__((tls_model("local-dynamic"))) ctx(OB_INVALID_TENANT_ID);
 #endif
@@ -804,8 +955,22 @@ inline ObTenantSwitchGuard _make_tenant_switch_guard()
     } while(0)
 
 
-#define mtl_sop_borrow(type) MTL(common::ObServerObjectPool<type>*)->borrow_object()
-#define mtl_sop_return(type, ptr) MTL(common::ObServerObjectPool<type>*)->return_object(ptr)
+#define mtl_sop_borrow(type)                                                                                    \
+  ({                                                                                                            \
+    type *iter = MTL(common::ObServerObjectPool<type>*)->borrow_object();                                       \
+    if (OB_NOT_NULL(iter)) {                                                                                    \
+      storage::ObStorageLeakChecker::get_instance().handle_hold(iter, storage::ObStorageCheckID::STORAGE_ITER); \
+    }                                                                                                           \
+    (iter);                                                                                                     \
+  })
+
+#define mtl_sop_return(type, ptr)                                                                               \
+  do {                                                                                                          \
+    if (OB_NOT_NULL(ptr)) {                                                                                     \
+      storage::ObStorageLeakChecker::get_instance().handle_reset(ptr, storage::ObStorageCheckID::STORAGE_ITER); \
+    }                                                                                                           \
+    MTL(common::ObServerObjectPool<type>*)->return_object(ptr);                                                 \
+  } while (false)
 
 } // end of namespace share
 

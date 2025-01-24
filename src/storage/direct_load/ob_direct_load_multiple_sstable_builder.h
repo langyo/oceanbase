@@ -30,8 +30,9 @@ public:
   ObDirectLoadMultipleSSTableBuildParam();
   ~ObDirectLoadMultipleSSTableBuildParam();
   bool is_valid() const;
-  TO_STRING_KV(K_(table_data_desc), KP_(datum_utils), KP_(file_mgr));
+  TO_STRING_KV(K_(tablet_id), K_(table_data_desc), KP_(datum_utils), KP_(file_mgr));
 public:
+  common::ObTabletID tablet_id_;
   ObDirectLoadTableDataDesc table_data_desc_;
   const blocksstable::ObStorageDatumUtils *datum_utils_;
   ObDirectLoadTmpFileManager *file_mgr_;
@@ -64,10 +65,23 @@ private:
   public:
     DataBlockFlushCallback();
     virtual ~DataBlockFlushCallback();
-    int init(ObDirectLoadSSTableIndexBlockWriter *index_block_writer);
+    int init(ObDirectLoadSSTableIndexBlockWriter *index_block_writer,
+             ObDirectLoadSSTableDataBlockWriter<RowType> *data_block_writer,
+             ObDirectLoadSSTableDataBlockWriter<RowkeyType> *rowkey_block_writer,
+             const int64_t data_block_count_per_rowkey,
+             const bool need_write_rowkey);
     int write(char *buf, int64_t buf_size, int64_t offset) override;
+    void mark_close() { is_mark_close_ = true; }
+    int64_t get_rowkey_count() const { return rowkey_count_; }
   private:
     ObDirectLoadSSTableIndexBlockWriter *index_block_writer_;
+    ObDirectLoadSSTableDataBlockWriter<RowType> *data_block_writer_;
+    ObDirectLoadSSTableDataBlockWriter<RowkeyType> *rowkey_block_writer_;
+    int64_t data_block_count_per_rowkey_;
+    int64_t data_block_count_;
+    int64_t rowkey_count_;
+    bool need_write_rowkey_;
+    bool is_mark_close_;
     bool is_inited_;
   };
 private:
@@ -79,8 +93,10 @@ private:
   common::ObArenaAllocator last_rowkey_allocator_;
   ObDirectLoadTmpFileHandle index_file_handle_;
   ObDirectLoadTmpFileHandle data_file_handle_;
+  ObDirectLoadTmpFileHandle rowkey_file_handle_;
   ObDirectLoadSSTableIndexBlockWriter index_block_writer_;
   ObDirectLoadSSTableDataBlockWriter<RowType> data_block_writer_;
+  ObDirectLoadSSTableDataBlockWriter<RowkeyType> rowkey_block_writer_;
   DataBlockFlushCallback callback_;
   int64_t row_count_;
   bool is_closed_;

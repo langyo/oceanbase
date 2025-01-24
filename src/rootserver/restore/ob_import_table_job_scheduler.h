@@ -51,6 +51,7 @@ public:
 private:
   int check_compatible_() const;
   int process_(share::ObImportTableJob &job);
+  int wait_src_tenant_schema_refreshed_(const uint64_t tenant_id);
   int gen_import_table_task_(share::ObImportTableJob &job);
   int deal_with_import_table_task_(share::ObImportTableJob &job);
   int process_import_table_task_(share::ObImportTableTask &task);
@@ -72,6 +73,8 @@ private:
   common::ObMySQLProxy                       *sql_proxy_;
   share::ObImportTableJobPersistHelper       job_helper_;
   share::ObImportTableTaskPersistHelper      task_helper_;
+  const static int64_t DEFAULT_RECOVER_TABLE_CONCURRENCY = 1;
+  const static int64_t MAX_RECOVER_TABLE_CONCURRENCY = 16;
   DISALLOW_COPY_AND_ASSIGN(ObImportTableJobScheduler);
 };
 
@@ -100,6 +103,8 @@ private:
   int gen_import_ddl_task_();
   int wait_import_ddl_task_finish_(bool &is_finish);
   void wakeup_();
+
+  const static int64_t DEFAULT_RECOVER_TABLE_DOP = 1;
 protected:
   bool is_inited_;
   share::schema::ObMultiVersionSchemaService *schema_service_;

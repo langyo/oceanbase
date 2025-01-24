@@ -13,7 +13,7 @@
 #ifndef _OB_MACRO_UTILS_H_
 #define _OB_MACRO_UTILS_H_
 
-#define SELECT110_(_0, _1, _2, _3, _4, _5, _6, _7, _8, _9,           \
+#define SELECT150_(_0, _1, _2, _3, _4, _5, _6, _7, _8, _9,           \
                    _10, _11, _12, _13, _14, _15, _16, _17, _18, _19, \
                    _20, _21, _22, _23, _24, _25, _26, _27, _28, _29, \
                    _30, _31, _32, _33, _34, _35, _36, _37, _38, _39, \
@@ -23,15 +23,24 @@
                    _70, _71, _72, _73, _74, _75, _76, _77, _78, _79, \
                    _80, _81, _82, _83, _84, _85, _86, _87, _88, _89, \
                    _90, _91, _92, _93, _94, _95, _96, _97, _98, _99, \
-                   _100, _101, _102, _103, _104, _105, _106, _107, _108, _109, _110, ...) _110
+                   _100, _101, _102, _103, _104, _105, _106, _107, _108, _109, \
+                   _110, _111, _112, _113, _114, _115, _116, _117, _118, _119, \
+                   _120, _121, _122, _123, _124, _125, _126, _127, _128, _129, \
+                   _130, _131, _132, _133, _134, _135, _136, _137, _138, _139, \
+                   _140, _141, _142, _143, _144, _145, _146, _147, _148, _149, \
+                   _150, ...) _150
 
-// These two macros do same work that select the 110th argument from
+// These two macros do same work that select the 120th argument from
 // argument list.
-#define SELECT110(...) SELECT110_(__VA_ARGS__)
+#define SELECT150(...) SELECT150_(__VA_ARGS__)
 
 // Expand to the number of arguments
 #define ARGS_NUM(args...)                               \
-  SELECT110(, ##args,                                   \
+  SELECT150(, ##args,                                   \
+            149, 148, 147, 146, 145, 144, 143, 142, 141, 140, \
+            139, 138, 137, 136, 135, 134, 133, 132, 131, 130, \
+            129, 128, 127, 126, 125, 124, 123, 122, 121, 120, \
+            119, 118, 117, 116, 115, 114, 113, 112, 111, 110, \
             109, 108, 107, 106, 105, 104, 103, 102, 101, 100, \
             99, 98, 97, 96, 95, 94, 93, 92, 91, 90,\
             89, 88, 87, 86, 85, 84, 83, 82, 81, 80,     \
@@ -176,6 +185,46 @@
 #define APPLY108(f, ...) APPLY_VARGS(f, APPLY107(f, ##__VA_ARGS__))
 #define APPLY109(f, ...) APPLY_VARGS(f, APPLY108(f, ##__VA_ARGS__))
 #define APPLY110(f, ...) APPLY_VARGS(f, APPLY109(f, ##__VA_ARGS__))
+#define APPLY111(f, ...) APPLY_VARGS(f, APPLY110(f, ##__VA_ARGS__))
+#define APPLY112(f, ...) APPLY_VARGS(f, APPLY111(f, ##__VA_ARGS__))
+#define APPLY113(f, ...) APPLY_VARGS(f, APPLY112(f, ##__VA_ARGS__))
+#define APPLY114(f, ...) APPLY_VARGS(f, APPLY113(f, ##__VA_ARGS__))
+#define APPLY115(f, ...) APPLY_VARGS(f, APPLY114(f, ##__VA_ARGS__))
+#define APPLY116(f, ...) APPLY_VARGS(f, APPLY115(f, ##__VA_ARGS__))
+#define APPLY117(f, ...) APPLY_VARGS(f, APPLY116(f, ##__VA_ARGS__))
+#define APPLY118(f, ...) APPLY_VARGS(f, APPLY117(f, ##__VA_ARGS__))
+#define APPLY119(f, ...) APPLY_VARGS(f, APPLY118(f, ##__VA_ARGS__))
+#define APPLY120(f, ...) APPLY_VARGS(f, APPLY119(f, ##__VA_ARGS__))
+#define APPLY121(f, ...) APPLY_VARGS(f, APPLY120(f, ##__VA_ARGS__))
+#define APPLY122(f, ...) APPLY_VARGS(f, APPLY121(f, ##__VA_ARGS__))
+#define APPLY123(f, ...) APPLY_VARGS(f, APPLY122(f, ##__VA_ARGS__))
+#define APPLY124(f, ...) APPLY_VARGS(f, APPLY123(f, ##__VA_ARGS__))
+#define APPLY125(f, ...) APPLY_VARGS(f, APPLY124(f, ##__VA_ARGS__))
+#define APPLY126(f, ...) APPLY_VARGS(f, APPLY125(f, ##__VA_ARGS__))
+#define APPLY127(f, ...) APPLY_VARGS(f, APPLY126(f, ##__VA_ARGS__))
+#define APPLY128(f, ...) APPLY_VARGS(f, APPLY127(f, ##__VA_ARGS__))
+#define APPLY129(f, ...) APPLY_VARGS(f, APPLY128(f, ##__VA_ARGS__))
+#define APPLY130(f, ...) APPLY_VARGS(f, APPLY129(f, ##__VA_ARGS__))
+#define APPLY131(f, ...) APPLY_VARGS(f, APPLY130(f, ##__VA_ARGS__))
+#define APPLY132(f, ...) APPLY_VARGS(f, APPLY131(f, ##__VA_ARGS__))
+#define APPLY133(f, ...) APPLY_VARGS(f, APPLY132(f, ##__VA_ARGS__))
+#define APPLY134(f, ...) APPLY_VARGS(f, APPLY133(f, ##__VA_ARGS__))
+#define APPLY135(f, ...) APPLY_VARGS(f, APPLY134(f, ##__VA_ARGS__))
+#define APPLY136(f, ...) APPLY_VARGS(f, APPLY135(f, ##__VA_ARGS__))
+#define APPLY137(f, ...) APPLY_VARGS(f, APPLY136(f, ##__VA_ARGS__))
+#define APPLY138(f, ...) APPLY_VARGS(f, APPLY137(f, ##__VA_ARGS__))
+#define APPLY139(f, ...) APPLY_VARGS(f, APPLY138(f, ##__VA_ARGS__))
+#define APPLY140(f, ...) APPLY_VARGS(f, APPLY139(f, ##__VA_ARGS__))
+#define APPLY141(f, ...) APPLY_VARGS(f, APPLY140(f, ##__VA_ARGS__))
+#define APPLY142(f, ...) APPLY_VARGS(f, APPLY141(f, ##__VA_ARGS__))
+#define APPLY143(f, ...) APPLY_VARGS(f, APPLY142(f, ##__VA_ARGS__))
+#define APPLY144(f, ...) APPLY_VARGS(f, APPLY143(f, ##__VA_ARGS__))
+#define APPLY145(f, ...) APPLY_VARGS(f, APPLY144(f, ##__VA_ARGS__))
+#define APPLY146(f, ...) APPLY_VARGS(f, APPLY145(f, ##__VA_ARGS__))
+#define APPLY147(f, ...) APPLY_VARGS(f, APPLY146(f, ##__VA_ARGS__))
+#define APPLY148(f, ...) APPLY_VARGS(f, APPLY147(f, ##__VA_ARGS__))
+#define APPLY149(f, ...) APPLY_VARGS(f, APPLY148(f, ##__VA_ARGS__))
+#define APPLY150(f, ...) APPLY_VARGS(f, APPLY149(f, ##__VA_ARGS__))
 #define APPLY(n, f, ...) APPLY ## n (f, ##__VA_ARGS__)
 
 // select nth argument
@@ -297,6 +346,46 @@
 #define LST_DO_108(M, s, P, ...) LST_DO_107(M, s, P, ##__VA_ARGS__)SELF s P(M, 108, ##__VA_ARGS__)
 #define LST_DO_109(M, s, P, ...) LST_DO_108(M, s, P, ##__VA_ARGS__)SELF s P(M, 109, ##__VA_ARGS__)
 #define LST_DO_110(M, s, P, ...) LST_DO_109(M, s, P, ##__VA_ARGS__)SELF s P(M, 110, ##__VA_ARGS__)
+#define LST_DO_111(M, s, P, ...) LST_DO_110(M, s, P, ##__VA_ARGS__)SELF s P(M, 111, ##__VA_ARGS__)
+#define LST_DO_112(M, s, P, ...) LST_DO_111(M, s, P, ##__VA_ARGS__)SELF s P(M, 112, ##__VA_ARGS__)
+#define LST_DO_113(M, s, P, ...) LST_DO_112(M, s, P, ##__VA_ARGS__)SELF s P(M, 113, ##__VA_ARGS__)
+#define LST_DO_114(M, s, P, ...) LST_DO_113(M, s, P, ##__VA_ARGS__)SELF s P(M, 114, ##__VA_ARGS__)
+#define LST_DO_115(M, s, P, ...) LST_DO_114(M, s, P, ##__VA_ARGS__)SELF s P(M, 115, ##__VA_ARGS__)
+#define LST_DO_116(M, s, P, ...) LST_DO_115(M, s, P, ##__VA_ARGS__)SELF s P(M, 116, ##__VA_ARGS__)
+#define LST_DO_117(M, s, P, ...) LST_DO_116(M, s, P, ##__VA_ARGS__)SELF s P(M, 117, ##__VA_ARGS__)
+#define LST_DO_118(M, s, P, ...) LST_DO_117(M, s, P, ##__VA_ARGS__)SELF s P(M, 118, ##__VA_ARGS__)
+#define LST_DO_119(M, s, P, ...) LST_DO_118(M, s, P, ##__VA_ARGS__)SELF s P(M, 119, ##__VA_ARGS__)
+#define LST_DO_120(M, s, P, ...) LST_DO_119(M, s, P, ##__VA_ARGS__)SELF s P(M, 120, ##__VA_ARGS__)
+#define LST_DO_121(M, s, P, ...) LST_DO_120(M, s, P, ##__VA_ARGS__)SELF s P(M, 121, ##__VA_ARGS__)
+#define LST_DO_122(M, s, P, ...) LST_DO_121(M, s, P, ##__VA_ARGS__)SELF s P(M, 122, ##__VA_ARGS__)
+#define LST_DO_123(M, s, P, ...) LST_DO_122(M, s, P, ##__VA_ARGS__)SELF s P(M, 123, ##__VA_ARGS__)
+#define LST_DO_124(M, s, P, ...) LST_DO_123(M, s, P, ##__VA_ARGS__)SELF s P(M, 124, ##__VA_ARGS__)
+#define LST_DO_125(M, s, P, ...) LST_DO_124(M, s, P, ##__VA_ARGS__)SELF s P(M, 125, ##__VA_ARGS__)
+#define LST_DO_126(M, s, P, ...) LST_DO_125(M, s, P, ##__VA_ARGS__)SELF s P(M, 126, ##__VA_ARGS__)
+#define LST_DO_127(M, s, P, ...) LST_DO_126(M, s, P, ##__VA_ARGS__)SELF s P(M, 127, ##__VA_ARGS__)
+#define LST_DO_128(M, s, P, ...) LST_DO_127(M, s, P, ##__VA_ARGS__)SELF s P(M, 128, ##__VA_ARGS__)
+#define LST_DO_129(M, s, P, ...) LST_DO_128(M, s, P, ##__VA_ARGS__)SELF s P(M, 129, ##__VA_ARGS__)
+#define LST_DO_130(M, s, P, ...) LST_DO_129(M, s, P, ##__VA_ARGS__)SELF s P(M, 130, ##__VA_ARGS__)
+#define LST_DO_131(M, s, P, ...) LST_DO_130(M, s, P, ##__VA_ARGS__)SELF s P(M, 131, ##__VA_ARGS__)
+#define LST_DO_132(M, s, P, ...) LST_DO_131(M, s, P, ##__VA_ARGS__)SELF s P(M, 132, ##__VA_ARGS__)
+#define LST_DO_133(M, s, P, ...) LST_DO_132(M, s, P, ##__VA_ARGS__)SELF s P(M, 133, ##__VA_ARGS__)
+#define LST_DO_134(M, s, P, ...) LST_DO_133(M, s, P, ##__VA_ARGS__)SELF s P(M, 134, ##__VA_ARGS__)
+#define LST_DO_135(M, s, P, ...) LST_DO_134(M, s, P, ##__VA_ARGS__)SELF s P(M, 135, ##__VA_ARGS__)
+#define LST_DO_136(M, s, P, ...) LST_DO_135(M, s, P, ##__VA_ARGS__)SELF s P(M, 136, ##__VA_ARGS__)
+#define LST_DO_137(M, s, P, ...) LST_DO_136(M, s, P, ##__VA_ARGS__)SELF s P(M, 137, ##__VA_ARGS__)
+#define LST_DO_138(M, s, P, ...) LST_DO_137(M, s, P, ##__VA_ARGS__)SELF s P(M, 138, ##__VA_ARGS__)
+#define LST_DO_139(M, s, P, ...) LST_DO_138(M, s, P, ##__VA_ARGS__)SELF s P(M, 139, ##__VA_ARGS__)
+#define LST_DO_140(M, s, P, ...) LST_DO_139(M, s, P, ##__VA_ARGS__)SELF s P(M, 140, ##__VA_ARGS__)
+#define LST_DO_141(M, s, P, ...) LST_DO_140(M, s, P, ##__VA_ARGS__)SELF s P(M, 141, ##__VA_ARGS__)
+#define LST_DO_142(M, s, P, ...) LST_DO_141(M, s, P, ##__VA_ARGS__)SELF s P(M, 142, ##__VA_ARGS__)
+#define LST_DO_143(M, s, P, ...) LST_DO_142(M, s, P, ##__VA_ARGS__)SELF s P(M, 143, ##__VA_ARGS__)
+#define LST_DO_144(M, s, P, ...) LST_DO_143(M, s, P, ##__VA_ARGS__)SELF s P(M, 144, ##__VA_ARGS__)
+#define LST_DO_145(M, s, P, ...) LST_DO_144(M, s, P, ##__VA_ARGS__)SELF s P(M, 145, ##__VA_ARGS__)
+#define LST_DO_146(M, s, P, ...) LST_DO_145(M, s, P, ##__VA_ARGS__)SELF s P(M, 146, ##__VA_ARGS__)
+#define LST_DO_147(M, s, P, ...) LST_DO_146(M, s, P, ##__VA_ARGS__)SELF s P(M, 147, ##__VA_ARGS__)
+#define LST_DO_148(M, s, P, ...) LST_DO_147(M, s, P, ##__VA_ARGS__)SELF s P(M, 148, ##__VA_ARGS__)
+#define LST_DO_149(M, s, P, ...) LST_DO_148(M, s, P, ##__VA_ARGS__)SELF s P(M, 149, ##__VA_ARGS__)
+#define LST_DO_150(M, s, P, ...) LST_DO_149(M, s, P, ##__VA_ARGS__)SELF s P(M, 150, ##__VA_ARGS__)
 
 #define LST_DO__(N, M, s, P, ...) LST_DO_ ## N(M, s, P, ##__VA_ARGS__)
 #define LST_DO_(...) LST_DO__(__VA_ARGS__)
@@ -312,6 +401,22 @@
 // LST_DO_CODE(CHECK, arg1, arg2) => CHECK(arg1); CHECK(arg2)
 #define LST_DO_CODE(M, ...) LST_DO(M, (;), ## __VA_ARGS__)
 
+#define LST_DEFINE_0(...)
+#define LST_DEFINE_1(A, ...) class A;
+#define LST_DEFINE_2(A, ...) class A; LST_DEFINE_1(__VA_ARGS__)
+#define LST_DEFINE_3(A, ...) class A; LST_DEFINE_2(__VA_ARGS__)
+#define LST_DEFINE_4(A, ...) class A; LST_DEFINE_3(__VA_ARGS__)
+#define LST_DEFINE_5(A, ...) class A; LST_DEFINE_4(__VA_ARGS__)
+#define LST_DEFINE_6(A, ...) class A; LST_DEFINE_5(__VA_ARGS__)
+#define LST_DEFINE_7(A, ...) class A; LST_DEFINE_6(__VA_ARGS__)
+#define LST_DEFINE_8(A, ...) class A; LST_DEFINE_7(__VA_ARGS__)
+#define LST_DEFINE_9(A, ...) class A; LST_DEFINE_8(__VA_ARGS__)
+#define LST_DEFINE_10(A, ...) class A; LST_DEFINE_9(__VA_ARGS__)
+
+#define LST_DEFINE__(N, ...) LST_DEFINE_ ## N(__VA_ARGS__)
+#define LST_DEFINE_(...) LST_DEFINE__(__VA_ARGS__)
+#define LST_DEFINE(...) LST_DEFINE_(ARGS_NUM(__VA_ARGS__), __VA_ARGS__)
+
 #define ONE_TO_HUNDRED \
     1, 2, 3, 4, 5, 6, 7, 8, 9,                 \
     10, 11, 12, 13, 14, 15, 16, 17, 18, 19,    \
@@ -323,7 +428,11 @@
     70, 71, 72, 73, 74, 75, 76, 77, 78, 79,    \
     80, 81, 82, 83, 84, 85, 86, 87, 88, 89,    \
     90, 91, 92, 93, 94, 95, 96, 97, 98, 99,    \
-    100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110
+    100, 101, 102, 103, 104, 105, 106, 107, 108, 109,   \
+    110, 111, 112, 113, 114, 115, 116, 117, 118, 119,   \
+    120, 121, 122, 123, 124, 125, 126, 127, 128, 129,   \
+    130, 131, 132, 133, 134, 135, 136, 137, 138, 139,   \
+    140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150
 
 #define MSTR(X) #X
 
@@ -599,6 +708,26 @@ for (__typeof__((c).at(0)) *it = ((extra_condition) && (c).count() > 0 ? &(c).at
   } while(false)
 #endif
 
+#ifndef ENABLE_DEBUG_LOG
+#define OB_SAFE_ASSERT(x)                                                                   \
+    do{                                                                                     \
+    bool v=(x);                                                                             \
+    if(OB_UNLIKELY(!(v))) {                                                                 \
+      _OB_LOG_RET(ERROR, oceanbase::common::OB_ERROR, "assert fail, exp=%s", #x);           \
+      BACKTRACE_RET(ERROR, oceanbase::common::OB_ERROR, 1, "assert fail");                  \
+    }                                                                                       \
+  } while(false)
+#else
+#define OB_SAFE_ASSERT(x)                                                                   \
+    do{                                                                                     \
+    bool v=(x);                                                                             \
+    if(OB_UNLIKELY(!(v))) {                                                                 \
+      _OB_LOG_RET(ERROR, oceanbase::common::OB_ERROR, "assert fail, exp=%s", #x);           \
+      BACKTRACE_RET(ERROR, oceanbase::common::OB_ERROR, 1, "assert fail");                  \
+      assert(v);                                                                            \
+    }                                                                                       \
+  } while(false)
+#endif
 
 #define OB_ASSERT_MSG(x, msg...)                      \
   do{                                                 \
@@ -623,6 +752,13 @@ for (__typeof__((c).at(0)) *it = ((extra_condition) && (c).count() > 0 ? &(c).at
 
 //#define ob_assert(x) OB_ASSERT(x)
 #define ob_assert(x) ob_release_assert(x)
+
+#ifndef ENABLE_DEBUG_LOG
+#define OB_SAFE_ABORT()
+#else
+#define OB_SAFE_ABORT() ob_abort()
+#endif
+
 ////////////////////////////////////////////////////////////////
 // interval
 
@@ -664,7 +800,21 @@ for (__typeof__((c).at(0)) *it = ((extra_condition) && (c).count() > 0 ? &(c).at
     bret; \
   })
 
-#define REACH_TENANT_TIME_INTERVAL(i) \
+#define REACH_TIME_INTERVAL_NO_INSTANT(i) \
+  ({                                      \
+    bool bret = false;                    \
+    if (REACH_TIME_INTERVAL(i)) {         \
+      static bool first_call = false;     \
+      if (!first_call) {                  \
+        first_call = true;                \
+      } else {                            \
+        bret = true;                      \
+      }                                   \
+    }                                     \
+    bret;                                 \
+  })
+
+#define REACH_THREAD_TIME_INTERVAL(i) \
   ({ \
     bool bret = false; \
     RLOCAL_STATIC(int64_t, last_time) = ObClockGenerator::getClock(); \

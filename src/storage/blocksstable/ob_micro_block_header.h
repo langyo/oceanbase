@@ -14,8 +14,11 @@
 #define OCEANBASE_STORAGE_BLOCKSSTABLE_OB_MICRO_BLOCK_H_
 #include "stdint.h"
 #include  "lib/utility/ob_print_utils.h"
+#include "storage/ob_i_store.h"
 namespace oceanbase
 {
+using namespace common;
+using namespace storage;
 namespace blocksstable
 {
 struct ObMicroBlockHeader
@@ -34,7 +37,8 @@ public:
     uint16_t all_lob_in_row_ : 1; // compatible with 4.0, we assume that all lob is out row in old data
     uint16_t contains_hash_index_   : 1;
     uint16_t hash_index_offset_from_end_ : 10;
-    uint16_t reserved16_          : 2;
+    uint16_t has_min_merged_trans_version_   : 1;
+    uint16_t reserved16_          : 1;
   };
   uint32_t row_count_;
   uint8_t row_store_type_;
@@ -71,7 +75,10 @@ public:
   int32_t data_length_;
   int32_t data_zlength_;
   int64_t data_checksum_;
-  int64_t *column_checksums_;
+  union {
+    int64_t *column_checksums_;
+    int64_t min_merged_trans_version_;
+  };
 public:
   ObMicroBlockHeader();
   ~ObMicroBlockHeader() = default;
@@ -101,7 +108,7 @@ public:
   }
   TO_STRING_KV(K_(magic), K_(version), K_(header_size), K_(header_checksum),
       K_(column_count), K_(rowkey_column_count), K_(has_column_checksum), K_(row_count), K_(row_store_type),
-      K_(opt), K_(var_column_count), K_(compressor_type), K_(row_offset), K_(original_length), K_(max_merged_trans_version),
+      K_(opt), K_(var_column_count), K_(compressor_type), K_(row_offset), K_(original_length), K_(max_merged_trans_version), K_(min_merged_trans_version),
       K_(data_length), K_(data_zlength), K_(data_checksum), KP_(column_checksums), K_(single_version_rows),
       K_(contain_uncommitted_rows),  K_(is_last_row_last_flag), K(is_valid()));
 public:
@@ -111,6 +118,8 @@ public:
   OB_INLINE bool has_lob_out_row() const { return !all_lob_in_row_; }
   bool is_last_row_last_flag() const { return is_last_row_last_flag_; }
   bool is_contain_hash_index() const;
+  bool is_trans_version_column_idx(const int64_t col_idx) const
+  { return  rowkey_column_count_ > 0 && col_idx == rowkey_column_count_ - ObMultiVersionRowkeyHelpper::get_extra_rowkey_col_cnt(); }
 }__attribute__((packed));
 }//end namespace blocksstable
 }//end namespace oceanbase

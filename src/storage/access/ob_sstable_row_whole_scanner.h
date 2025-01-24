@@ -14,6 +14,7 @@
 #define OB_STORAGE_OB_SSTABLE_ROW_WHOLE_SCANNER_H_
 
 #include "storage/blocksstable/index_block/ob_index_block_macro_iterator.h"
+#include "storage/blocksstable/index_block/ob_index_block_dual_meta_iterator.h"
 #include "storage/blocksstable/ob_micro_block_row_scanner.h"
 #include "storage/blocksstable/ob_macro_block_bare_iterator.h"
 #include "ob_store_row_iterator.h"
@@ -40,7 +41,7 @@ private:
     ~MacroScanHandle() {}
     void reset();
 
-    blocksstable::ObMacroBlockHandle macro_io_handle_;
+    blocksstable::ObStorageObjectHandle macro_io_handle_;
     blocksstable::ObMacroBlockDesc macro_block_desc_;
     int64_t start_row_offset_;
     bool is_left_border_;
@@ -56,7 +57,7 @@ public:
       access_ctx_(nullptr),
       sstable_(nullptr),
       allocator_(common::ObModIds::OB_SSTABLE_READER, OB_MALLOC_NORMAL_BLOCK_SIZE, MTL_ID()),
-      io_allocator_("SSTRWS_IOUB", OB_MALLOC_NORMAL_BLOCK_SIZE, MTL_ID()),
+      io_buf_(),
       prefetch_macro_cursor_(0),
       cur_macro_cursor_(0),
       is_macro_prefetch_end_(false),
@@ -67,13 +68,13 @@ public:
       is_inited_(false),
       last_micro_block_recycled_(false),
       last_mvcc_row_already_output_(false),
-      iter_macro_cnt_(0),
-      buf_(nullptr)
+      iter_macro_cnt_(0)
   {}
 
   virtual ~ObSSTableRowWholeScanner();
-  int alloc_io_buf();
+  int alloc_io_buf(compaction::ObCompactionBuffer &io_buf, int64_t buf_size);
   virtual void reset() override;
+  virtual void reuse() override;
   int open(
       const ObTableIterParam &iter_param,
       ObTableAccessContext &access_ctx,
@@ -97,7 +98,6 @@ protected:
       ObITable *table,
       const void *query_range) override;
   virtual int inner_get_next_row(const blocksstable::ObDatumRow *&row) override;
-  virtual void reuse() override;
 private:
   int init_micro_scanner(const blocksstable::ObDatumRange *range);
   int open_macro_block();
@@ -126,7 +126,7 @@ private:
   blocksstable::ObSSTable *sstable_;
   blocksstable::ObDatumRange query_range_;
   common::ObArenaAllocator allocator_;
-  common::ObArenaAllocator io_allocator_;
+  compaction::ObCompactionBuffer io_buf_[PREFETCH_DEPTH];
   int64_t prefetch_macro_cursor_;
   int64_t cur_macro_cursor_;
   bool is_macro_prefetch_end_;
@@ -140,8 +140,6 @@ private:
   bool last_micro_block_recycled_;
   bool last_mvcc_row_already_output_;
   int64_t iter_macro_cnt_;
-  char *buf_;
-  char *io_buf_[PREFETCH_DEPTH];
 };
 
 }

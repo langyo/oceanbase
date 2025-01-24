@@ -25,6 +25,7 @@ namespace oceanbase
 namespace observer
 {
 class ObTableLoadStoreCtx;
+class ObTableLoadStoreTableCtx;
 class ObTableLoadTask;
 
 class ObTableLoadParallelMergeSSTableCompare
@@ -58,8 +59,8 @@ public:
   int64_t range_sstable_count_;
   lib::ObMutex mutex_; // for alloc range sstable
   common::ObArenaAllocator range_allocator_; // for alloc range and range sstable
-  common::ObSEArray<ObDirectLoadMultipleDatumRange, 64> ranges_;
-  common::ObSEArray<storage::ObDirectLoadMultipleSSTable *, 64> range_sstables_;
+  common::ObArray<ObDirectLoadMultipleDatumRange> ranges_;
+  common::ObArray<storage::ObDirectLoadMultipleSSTable *> range_sstables_;
 };
 
 class ObTableLoadParallelMergeCb
@@ -81,7 +82,7 @@ public:
   typedef TabletCtxMap::const_iterator TabletCtxIterator;
   ObTableLoadParallelMergeCtx();
   ~ObTableLoadParallelMergeCtx();
-  int init(ObTableLoadStoreCtx *store_ctx);
+  int init(ObTableLoadStoreCtx *store_ctx, ObTableLoadStoreTableCtx *store_table_ctx, const ObDirectLoadTableDataDesc &table_data_desc);
   int add_tablet_sstable(storage::ObDirectLoadMultipleSSTable *sstable);
   int start(ObTableLoadParallelMergeCb *cb);
   void stop();
@@ -104,6 +105,8 @@ private:
   int64_t get_idle_thread_count() const;
 private:
   ObTableLoadStoreCtx *store_ctx_;
+  ObDirectLoadTableDataDesc table_data_desc_;
+  ObTableLoadStoreTableCtx *store_table_ctx_;
   int64_t thread_count_;
   ObTableLoadParallelMergeCb *cb_;
   common::ObArenaAllocator allocator_;

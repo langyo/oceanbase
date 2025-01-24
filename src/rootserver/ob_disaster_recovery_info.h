@@ -20,6 +20,7 @@
 #include "share/schema/ob_schema_getter_guard.h"
 #include "share/ls/ob_ls_info.h"
 #include "share/ls/ob_ls_status_operator.h"
+#include "share/ob_unit_table_operator.h"
 namespace oceanbase
 {
 
@@ -91,7 +92,7 @@ struct DRUnitStatInfo
 public:
   DRUnitStatInfo() : unit_id_(common::OB_INVALID_ID),
                      in_pool_(false),
-                     unit_info_(),
+                     unit_(),
                      server_stat_(nullptr),
                      outside_replica_cnt_(0) {}
 public:
@@ -101,7 +102,7 @@ public:
   
   TO_STRING_KV(K_(unit_id),
                K_(in_pool),
-               K_(unit_info),
+               K_(unit),
                KPC_(server_stat));
   
   int assign(
@@ -110,20 +111,20 @@ public:
   int init(
       const uint64_t unit_id,
       const bool in_pool,
-      const share::ObUnitInfo &unit_info,
+      const share::ObUnit &unit,
       DRServerStatInfo *server_stat,
       const int64_t outside_replica_cnt);
 public:
   uint64_t get_unit_id() const { return unit_id_; }
   bool is_in_pool() const { return in_pool_; }
-  const share::ObUnitInfo &get_unit_info() const { return unit_info_; }
+  const share::ObUnit &get_unit() const { return unit_; }
   const DRServerStatInfo *get_server_stat() const { return server_stat_; }
   int64_t get_outside_replica_cnt() const { return outside_replica_cnt_; }
   void inc_outside_replica_cnt() { ++outside_replica_cnt_; }
 private:
   uint64_t unit_id_;
   bool in_pool_;
-  share::ObUnitInfo unit_info_;
+  share::ObUnit unit_;
   DRServerStatInfo *server_stat_;
   int64_t outside_replica_cnt_;
 };
@@ -139,12 +140,10 @@ class DRLSInfo
 {
 public:
   DRLSInfo(const uint64_t resource_tenant_id,
-           ObUnitManager *unit_mgr,
            ObZoneManager *zone_mgr,
            share::schema::ObMultiVersionSchemaService *schema_service)
     : resource_tenant_id_(resource_tenant_id),
       sys_schema_guard_(),
-      unit_mgr_(unit_mgr),
       zone_mgr_(zone_mgr),
       schema_service_(schema_service),
       unit_stat_info_map_("DRUnitStatMap"),
@@ -163,7 +162,7 @@ public:
       inited_(false) {}
   virtual ~DRLSInfo() {}
 public:
-  // use user_tenant_id to init unit_info and locality
+  // use user_tenant_id to init unit and locality
   int init();
   int build_disaster_ls_info(
       const share::ObLSInfo &ls_info,
@@ -206,7 +205,28 @@ public:
   int get_leader_and_member_list(
       common::ObAddr &leader_addr,
       common::ObMemberList &member_list,
-      GlobalLearnerList &learner_list);
+      GlobalLearnerList &learner_list) const;
+
+  // get data_source from leader replcia
+  // @param [out] data_source, leader replica
+  // @param [out] data_size, leader replica data_size
+  int get_default_data_source(
+      ObReplicaMember &data_source,
+      int64_t &data_size) const;
+
+  // get member by server address in leader's learner list and member list
+  // @param [in] server_addr, which server the member in
+  // @param [out] member, target member
+  int get_member_by_server(
+      const common::ObAddr& server_addr,
+      ObMember &member) const;
+
+  // check and get if there is a replica on the target server
+  // @param [in] server_addr, which server the replica in
+  // @param [out] ls_replica, target replic
+  int check_replica_exist_and_get_ls_replica(
+      const common::ObAddr& server_addr,
+      share::ObLSReplica& ls_replica) const;
 private:
   int construct_filtered_ls_info_to_use_(
       const share::ObLSInfo &input_ls_info,
@@ -241,7 +261,7 @@ private:
 private:
   uint64_t resource_tenant_id_;
   share::schema::ObSchemaGetterGuard sys_schema_guard_;
-  ObUnitManager *unit_mgr_;
+  share::ObUnitTableOperator unit_operator_;
   ObZoneManager *zone_mgr_;
   share::schema::ObMultiVersionSchemaService *schema_service_;
   UnitStatInfoMap unit_stat_info_map_;

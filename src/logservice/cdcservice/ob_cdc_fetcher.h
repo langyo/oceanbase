@@ -18,12 +18,13 @@
 #include "logservice/palf/lsn.h"                // LSN
 #include "logservice/palf/log_group_entry.h"    // LogGroupEntry
 #include "logservice/palf/log_entry.h"          // LogEntry
-#include "logservice/palf/palf_iterator.h"      // PalfGroupBufferIterator
 #include "logservice/palf_handle_guard.h"       // PalfHandleGuard
 #include "ob_cdc_req.h"                         // RPC Request and Response
+#include "ob_cdc_raw_log_req.h"
 #include "ob_cdc_define.h"
 #include "ob_cdc_struct.h"                      // ClientLSCtx
 #include "logservice/archiveservice/large_buffer_pool.h" // LargeBufferPool
+#include "logservice/ob_log_handler.h" // PalfGroupBufferIterator
 
 namespace oceanbase
 {
@@ -41,6 +42,8 @@ using oceanbase::palf::LogEntry;
 
 struct FetchRunTime;
 
+class ObCdcService;
+
 class ObCdcFetcher
 {
   // When fetch log finds that the remaining time is less than RPC_QIT_RESERVED_TIME,
@@ -52,6 +55,7 @@ public:
   ~ObCdcFetcher();
   int init(const uint64_t tenant_id,
       ObLSService *ls_service,
+      ObCdcService *host,
       archive::LargeBufferPool *buffer_pool,
       logservice::ObLogExternalStorageHandler *log_ext_handler);
   void destroy();
@@ -59,12 +63,18 @@ public:
 public:
   // Fetch LogGroupEntry
   int fetch_log(const obrpc::ObCdcLSFetchLogReq &req,
-      obrpc::ObCdcLSFetchLogResp &resp);
+      obrpc::ObCdcLSFetchLogResp &resp,
+      ClientLSCtx &ctx,
+      ObCdcFetchLogTimeStats &fetch_log_time_stat);
 
   // Fetch Missing LogEntry
   // TODO optimize fetch LogEntry(Random read)
   int fetch_missing_log(const obrpc::ObCdcLSFetchMissLogReq &req,
       obrpc::ObCdcLSFetchLogResp &resp);
+
+  int fetch_raw_log(const obrpc::ObCdcFetchRawLogReq &req,
+      obrpc::ObCdcFetchRawLogResp &resp,
+      ClientLSCtx &ctx);
 
 private:
   // @retval OB_SUCCESS         Success
@@ -72,18 +82,13 @@ private:
   int init_palf_handle_guard_(const ObLSID &ls_id,
       palf::PalfHandleGuard &palf_handle_guard);
 
-  // @retval OB_SUCCESS         Success
-  // @retval OB_ENTRY_NOT_EXIST LS not exist in this server
-  int init_group_iterator_(const ObLSID &ls_id,
-      const LSN &start_lsn,
-      palf::PalfHandleGuard &palf_handle_guard,
-      palf::PalfGroupBufferIterator &group_iter);
   int do_fetch_log_(const obrpc::ObCdcLSFetchLogReq &req,
       FetchRunTime &fetch_runtime,
       obrpc::ObCdcLSFetchLogResp &resp,
       ClientLSCtx &ctx,
       ObCdcFetchLogTimeStats &fetch_time_stat);
   int set_fetch_mode_before_fetch_log_(const ObLSID &ls_id,
+      const LSN &start_lsn,
       const bool test_switch_fetch_mode,
       bool &ls_exist_in_palf,
       palf::PalfHandleGuard &palf_guard,
@@ -111,8 +116,7 @@ private:
   // return OB_ITER_END when no more log could be iterated
   template <class LogEntryType>
   int fetch_log_in_palf_(const ObLSID &ls_id,
-      palf::PalfIterator<palf::DiskIteratorStorage, LogEntryType> &iter,
-      palf::PalfHandleGuard &palf_guard,
+      palf::PalfIterator<LogEntryType> &iter,
       const LSN &start_lsn,
       const bool need_init_iter,
       const SCN &replayable_point_scn,
@@ -135,6 +139,27 @@ private:
       LogEntryType &log_group_entry,
       LSN &lsn,
       ClientLSCtx &ctx);
+
+  int fetch_missing_logs_in_palf_(const ObLSID &ls_id,
+      palf::PalfHandleGuard &palf_handle_guard,
+      const obrpc::ObCdcLSFetchMissLogReq::MissLogParamArray &miss_log_array,
+      int64_t &cur_idx,
+      obrpc::ObCdcLSFetchLogResp &resp,
+      FetchRunTime &frt);
+
+  int fetch_missing_logs_in_archive_(const ObLSID &ls_id,
+      ClientLSCtx &ctx,
+      const obrpc::ObCdcLSFetchMissLogReq::MissLogParamArray &miss_log_array,
+      int64_t &cur_idx,
+      obrpc::ObCdcLSFetchLogResp &resp,
+      FetchRunTime &frt);
+
+  int calc_raw_read_size_(const obrpc::ObCdcLSFetchMissLogReq::MissLogParamArray &miss_log_array,
+      const int64_t cur_idx,
+      const int64_t read_buf_len,
+      int64_t &read_size,
+      int64_t &target_idx);
+
   int init_archive_source_(ClientLSCtx &ctx, ObLSID ls_id);
   // Check whether has reached time limit
   inline bool is_time_up_(const int64_t scan_round, const int64_t end_tstamp)
@@ -180,6 +205,11 @@ private:
   int check_lag_follower_(const ObLSID &ls_id,
       palf::PalfHandleGuard &palf_handle_guard,
       obrpc::ObCdcLSFetchLogResp &resp);
+
+  int check_ls_sync_status_(const ObLSID &ls_id,
+      palf::PalfHandleGuard &palf_handle_guard,
+      ObRole &role,
+      bool &in_sync);
   int do_fetch_missing_log_(const obrpc::ObCdcLSFetchMissLogReq &req,
       FetchRunTime &frt,
       obrpc::ObCdcLSFetchLogResp &resp,
@@ -201,9 +231,30 @@ private:
       bool &ls_exist_in_palf,
       bool &archive_is_on);
 
+  int do_fetch_raw_log_(const obrpc::ObCdcFetchRawLogReq &req,
+      obrpc::ObCdcFetchRawLogResp &resp,
+      ClientLSCtx &ctx);
+
+  int fetch_raw_log_in_palf_(const ObLSID &ls_id,
+      const LSN &start_lsn,
+      const int64_t req_size,
+      obrpc::ObCdcFetchRawLogResp &resp,
+      bool &ls_exist_in_palf,
+      bool &fetch_log_succ,
+      ClientLSCtx &ctx);
+
+  int fetch_raw_log_in_archive_(const ObLSID &ls_id,
+      const LSN &start_lsn,
+      const int64_t req_size,
+      const int64_t progress,
+      obrpc::ObCdcFetchRawLogResp &resp,
+      bool &archive_is_on,
+      bool &fetch_log_succ,
+      ClientLSCtx &ctx);
 private:
   bool is_inited_;
   uint64_t           tenant_id_;
+  ObCdcService       *host_;
   ObLSService        *ls_service_;
   archive::LargeBufferPool *large_buffer_pool_;
   logservice::ObLogExternalStorageHandler *log_ext_handler_;

@@ -41,6 +41,16 @@ int ObTabletCacheInterval::next_value(uint64_t &next_value)
   return ret;
 }
 
+int ObTabletCacheInterval::get_value(uint64_t &value)
+{
+  int ret = OB_SUCCESS;
+  value = next_value_;
+  if (value + 1 > end_) {
+    ret = OB_EAGAIN;
+  }
+  return ret;
+}
+
 int ObTabletCacheInterval::fetch(uint64_t count, ObTabletCacheInterval &dest)
 {
   int ret = OB_SUCCESS;
@@ -190,7 +200,7 @@ bool ObTabletAutoincSeq::is_valid() const
   return 0 != intervals_count_ && nullptr != intervals_;
 }
 
-int ObTabletAutoincSeq::get_autoinc_seq_value(uint64_t &autoinc_seq)
+int ObTabletAutoincSeq::get_autoinc_seq_value(uint64_t &autoinc_seq) const
 {
   int ret = OB_SUCCESS;
   if (0 == intervals_count_) {
@@ -282,8 +292,8 @@ int ObTabletAutoincSeq::deserialize(
 {
   int ret = OB_SUCCESS;
   int64_t len = 0;
-  OB_UNIS_DECODEx(version_);
-  OB_UNIS_DECODEx(len);
+  OB_UNIS_DECODE(version_);
+  OB_UNIS_DECODE(len);
   if (OB_SUCC(ret)) {
     int64_t tmp_pos = 0;
     if (OB_FAIL(deserialize_(allocator, buf + pos, len, tmp_pos))) {

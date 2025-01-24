@@ -42,6 +42,7 @@ public:
   int deduce_general_predicates(ObTransformerCtx &ctx,
                                 ObIArray<ObRawExpr *> &target_exprs,
                                 ObIArray<ObRawExpr *> &other_preds,
+                                ObIArray<std::pair<ObRawExpr *, ObRawExpr *>> &lossless_preds,
                                 ObIArray<ObRawExpr *> &result);
 
   int deduce_aggr_bound_predicates(ObTransformerCtx &ctx,
@@ -74,14 +75,14 @@ public:
 
   static inline bool contain_special_expr(ObRawExpr &expr)
   {
-    return expr.has_flag(CNT_RAND_FUNC) ||
-           expr.has_flag(CNT_SUB_QUERY) ||
+    return !expr.is_deterministic() ||
            expr.has_flag(CNT_ROWNUM) ||
-           expr.has_flag(CNT_SEQ_EXPR) ||
-           expr.has_flag(CNT_STATE_FUNC) ||
-           expr.has_flag(CNT_DYNAMIC_USER_VARIABLE);
+           expr.has_flag(CNT_SUB_QUERY);
   }
 
+  static int check_lossless_cast_table_filter(ObRawExpr *expr,
+                                              ObRawExpr *&cast_expr,
+                                              bool &is_valid);
 private:
 
   int init();

@@ -13,7 +13,7 @@
 #include <iterator>
 #include "sql/resolver/expr/ob_raw_expr.h"
 #include "sql/ob_sql_init.h"
-#include "sql/ob_select_stmt_printer.h"
+#include "sql/printer/ob_select_stmt_printer.h"
 #include "sql/resolver/dml/ob_select_stmt.h"
 #include "sql/resolver/dml/ob_insert_stmt.h"
 #include "sql/resolver/dml/ob_update_stmt.h"
@@ -92,9 +92,11 @@ bool TestResolver::is_show_sql(const ParseNode &node) const
     case T_SHOW_PROCESSLIST:
     case T_SHOW_SERVER_STATUS:
     case T_SHOW_WARNINGS:
+    case T_SHOW_ERRORS:
     case T_SHOW_RESTORE_PREVIEW:
     case T_SHOW_SEQUENCES:
-    case T_SHOW_GRANTS:{
+    case T_SHOW_GRANTS:
+    case T_SHOW_CREATE_USER:{
       ret = true;
       break;
     }
@@ -319,7 +321,7 @@ void TestResolver::do_join_order_test()
       const ObTableSchema *table_schema = NULL;
       OK(schema_guard_.get_table_schema(ref_id, table_schema));
       ObSEArray<ObAuxTableMetaInfo, 16> simple_index_infos;
-      int ret = table_schema->get_simple_index_infos(simple_index_infos, false/*with mv*/);
+      int ret = table_schema->get_simple_index_infos(simple_index_infos);
       ASSERT_EQ(ret, OB_SUCCESS);
       of_tmp << "table [" << table_schema->get_table_name() << "]" << std::endl;
       for (int i = 0; i <= simple_index_infos.count(); ++i) {
@@ -338,7 +340,8 @@ void TestResolver::do_join_order_test()
                                                      table_id,
                                                      *idx_schema,
                                                      index_keys,
-                                                     ordering);
+                                                     ordering,
+                                                     &session_info_);
         ASSERT_EQ(ret, OB_SUCCESS);
         std::string idx_name_with_column;
         get_index_name(idx_name_with_column, *idx_schema);

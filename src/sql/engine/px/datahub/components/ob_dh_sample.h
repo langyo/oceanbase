@@ -48,7 +48,7 @@ public:
   using Parent = ObDatahubPieceMsg<dtl::ObDtlMsgType::DH_DYNAMIC_SAMPLE_PIECE_MSG>;
 public:
   ObDynamicSamplePieceMsg();
-  virtual ~ObDynamicSamplePieceMsg() = default;
+  virtual ~ObDynamicSamplePieceMsg() { reset(); }
   void reset();
   bool is_valid() const;
   bool is_row_sample() const { return ObPxSampleType::HEADER_INPUT_SAMPLE == sample_type_||
@@ -74,7 +74,7 @@ class ObDynamicSampleWholeMsg
 {
   OB_UNIS_VERSION_V(1);
 public:
-  using WholeMsgProvider = ObWholeMsgProvider<ObDynamicSampleWholeMsg>;
+  using WholeMsgProvider = ObWholeMsgProvider<ObDynamicSamplePieceMsg, ObDynamicSampleWholeMsg>;
 public:
   ObDynamicSampleWholeMsg();
   virtual ~ObDynamicSampleWholeMsg() = default;

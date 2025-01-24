@@ -60,7 +60,9 @@ int ObExprGetPackageVar::calc(ObObj &result,
   } else if (OB_ISNULL(pl_engine = session_info->get_pl_engine())) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("pl engine is null", K(ret));
-  } else if (OB_ISNULL(package_guard = exec_ctx->get_package_guard())) {
+  } else if (OB_FAIL(exec_ctx->get_package_guard(package_guard))) {
+    LOG_WARN("get package guard failed", K(ret));
+  } else if (OB_ISNULL(package_guard)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("package guard is null", K(ret));
   } else if (OB_NOT_NULL(exec_ctx->get_sql_ctx())
@@ -101,7 +103,8 @@ int ObExprGetPackageVar::calc_result_typeN(ObExprResType &type,
     type.set_collation_type(result_type->get_collation_type());
     type.set_collation_level(result_type->get_collation_level());
   } else if (ob_is_number_tc(result_type->get_type()) ||
-             ob_is_interval_tc(result_type->get_type())) {
+             ob_is_interval_tc(result_type->get_type()) ||
+             ob_is_decimal_int_tc(result_type->get_type())) {
     type.set_precision(result_type->get_precision());
     type.set_scale(result_type->get_scale());
   } else if (ob_is_text_tc(result_type->get_type())

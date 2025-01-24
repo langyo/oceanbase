@@ -126,8 +126,14 @@ int ObAgentTableBase::do_open()
     mapping_.set_block_allocator(ObWrapperAllocator(allocator_));
     FOREACH_CNT_X(c, scan_param_->column_ids_, OB_SUCC(ret)) {
       if (OB_ISNULL(table_schema_->get_column_schema(*c))) {
-        ret = OB_ERR_UNEXPECTED;
-        LOG_WARN("unexpected column id", K(ret), K(*c));
+        if (OB_HIDDEN_TRANS_VERSION_COLUMN_ID == *c) {
+          ret = OB_NOT_SUPPORTED;
+          LOG_WARN("rowscn not supported", K(ret));
+          LOG_USER_ERROR(OB_NOT_SUPPORTED, "rowscn");
+        } else {
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("unexpected column id", K(ret), K(*c));
+        }
       }
     }
     if (OB_FAIL(ret)) {
@@ -321,9 +327,13 @@ int ObAgentTableBase::cast_as_default_value(
       if (column->get_meta_type().is_varchar()
           || column->get_meta_type().is_varbinary()) {
         // 1. varchar, varbinary
-        if (OB_FAIL(sql.append_fmt("%s '%s' AS %.*s",
+        ObCStringHelper helper;
+        const char *default_value_str = nullptr;
+        if (OB_FAIL(helper.convert(ObHexEscapeSqlStr(default_value.get_string()), default_value_str))) {
+          LOG_WARN("fail to convert default_value", KR(ret));
+        } else if (OB_FAIL(sql.append_fmt("%s '%s' AS %.*s",
             first_column ? "" : ", ",
-            to_cstring(ObHexEscapeSqlStr(default_value.get_string())),
+            default_value_str,
             name.length(), name.ptr()))) {
           LOG_WARN("append sql failed", KR(ret));
         }

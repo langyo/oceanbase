@@ -38,19 +38,21 @@ public:
   explicit ObPsPrepareStatusGuard(ObSQLSessionInfo &session_info)
     : session_info_(session_info)
   {
+    old_value_ = session_info_.is_varparams_sql_prepare();
   }
   ~ObPsPrepareStatusGuard()
   {
-    session_info_.set_is_varparams_sql_prepare(false);
+    session_info_.set_is_varparams_sql_prepare(old_value_);
   }
-  void is_varparams_sql_prepare(bool is_from_pl, bool with_template)
+  void is_varparams_sql_prepare(bool with_template)
   {
-    if (!is_from_pl && with_template) {
+    if (with_template) {
       session_info_.set_is_varparams_sql_prepare(true);
     }
   }
 private:
   ObSQLSessionInfo &session_info_;
+  bool old_value_;
 };
 class ObPsCacheEliminationTask : public common::ObTimerTask
 {
@@ -88,15 +90,14 @@ public:
   // always make sure stmt_id is inner_stmt_id!!!
   int64_t get_tenant_id() const { return tenant_id_; }
   int get_stmt_info_guard(const ObPsStmtId ps_stmt_id, ObPsStmtInfoGuard &guard);
-  int ref_stmt_item(const uint64_t db_id, const common::ObString &ps_sql, ObPsStmtItem *&stmt_item);
+  int ref_stmt_item(const ObPsSqlKey &ps_sql_key, ObPsStmtItem *&stmt_item);
   int ref_stmt_info(const ObPsStmtId stmt_id, ObPsStmtInfo *&ps_stmt_info);
   int deref_stmt_info(const ObPsStmtId stmt_id);
   int deref_all_ps_stmt(const ObIArray<ObPsStmtId> &ps_stmt_ids);
-  int ref_stmt_item(const ObPsSqlKey &ps_sql_key, ObPsStmtItem *&ps_stmt_item);
+  int inner_ref_stmt_item(const ObPsSqlKey &ps_sql_key, ObPsStmtItem *&ps_stmt_item);
   int deref_stmt_item(const ObPsSqlKey &ps_sql_key);
-  int deref_ps_stmt(const ObPsStmtId stmt_id, bool erase_item = false);
-  int get_or_add_stmt_item(const uint64_t db_id,
-                           const common::ObString &ps_sql,
+  int deref_ps_stmt(const ObPsStmtId stmt_id);
+  int get_or_add_stmt_item(const ObPsSqlKey &ps_key,
                            const bool is_contain_tmp_tbl,
                            ObPsStmtItem *&ps_item_value);
   int get_or_add_stmt_info(const PsCacheInfoCtx &info_ctx,
@@ -128,7 +129,9 @@ public:
                            ObPsStmtInfo &stmt_info,
                            bool &is_expired);
   int erase_stmt_item(ObPsStmtId stmt_id, const ObPsSqlKey &ps_key);
+
 private:
+  int destroy_cached_ps(const ObPsStmtId inner_stmt_id);
   int inner_cache_evict(bool is_evict_all);
   int fill_ps_stmt_info(const ObResultSet &result,
                         int64_t param_cnt,

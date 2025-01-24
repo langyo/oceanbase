@@ -18,11 +18,17 @@
 #include "lib/utility/ob_hang_fatal_error.h"
 #include "lib/geo/ob_geo_to_tree_visitor.h"
 #include "common/ob_smart_call.h"
+#include "share/rc/ob_tenant_base.h"
 
 namespace oceanbase
 {
 namespace common
 {
+enum class ObBGStrategyType {
+  DEFAULT_NONE = 0,
+  PL_PA_STRATEGY,
+  LL_LA_AA_STRATEGY,
+};
 
 class ObGeoFuncUtils
 {
@@ -31,7 +37,7 @@ public:
   virtual ~ObGeoFuncUtils() = default;
 
   template<typename MultiPointType, typename MultiLineType, typename MultiPolygonType>
-  static int ob_geo_gc_union(common::ObIAllocator &allocator,
+  static int ob_geo_gc_union(lib::MemoryContext &mem_ctx,
                              const common::ObSrsItem &srs,
                              MultiPointType *&mps,
                              MultiLineType *&mls,
@@ -51,6 +57,8 @@ public:
                            typename GcTreeType::sub_ml_type *&multi_line,
                            typename GcTreeType::sub_mp_type *&multi_poly);
 
+  static int apply_bg_to_tree(const ObGeometry *g1, const ObGeoEvalCtx &context, ObGeometry *&result);
+
 private:
   template<typename GcTreeType>
   static int ob_geo_gc_split_inner(const GcTreeType &gc,
@@ -60,7 +68,7 @@ private:
 };
 
 template<typename MultiPointType, typename MultiLineType, typename MultiPolygonType>
-int ObGeoFuncUtils::ob_geo_gc_union(ObIAllocator &allocator,
+int ObGeoFuncUtils::ob_geo_gc_union(lib::MemoryContext &mem_ctx,
                                     const ObSrsItem &srs,
                                     MultiPointType *&mps,
                                     MultiLineType *&mls,
@@ -68,11 +76,12 @@ int ObGeoFuncUtils::ob_geo_gc_union(ObIAllocator &allocator,
 {
   INIT_SUCC(ret);
   ObGeometry *func_result = NULL;
+  ObIAllocator &allocator = mem_ctx->get_arena_allocator();
   if (!mps->is_tree() || !mls->is_tree() || !mpols->is_tree()) {
     ret = OB_INVALID_ARGUMENT;
     OB_LOG(WARN, "invalid geometry type, must be geotree", K(ret));
   } else {
-    MultiPolygonType *mpols_res = OB_NEWx(MultiPolygonType, (&allocator));
+    MultiPolygonType *mpols_res = OB_NEWx(MultiPolygonType, (&allocator), mpols->get_srid(), allocator);
     if (OB_ISNULL(mpols_res)) {
       ret = OB_ALLOCATE_MEMORY_FAILED;
     } else {
@@ -85,7 +94,7 @@ int ObGeoFuncUtils::ob_geo_gc_union(ObIAllocator &allocator,
           boost::geometry::correct(*pol, area_strategy);
         }
 
-        ObGeoEvalCtx gis_context(&allocator, &srs);
+        ObGeoEvalCtx gis_context(mem_ctx, &srs);
         if (OB_FAIL(gis_context.append_geo_arg(&(*pol)))
             || OB_FAIL(gis_context.append_geo_arg(&(*mpols_res)))) {
           OB_LOG(WARN, "failed to append geo to ctx", K(ret));
@@ -108,7 +117,7 @@ int ObGeoFuncUtils::ob_geo_gc_union(ObIAllocator &allocator,
     }
 
     if (OB_SUCC(ret)) {
-      ObGeoEvalCtx line_diff_context(&allocator, &srs);
+      ObGeoEvalCtx line_diff_context(mem_ctx, &srs);
       if (OB_FAIL(line_diff_context.append_geo_arg(mls))
           || OB_FAIL(line_diff_context.append_geo_arg(mpols))) {
         OB_LOG(WARN, "failed to append geo to ctx", K(ret));
@@ -123,7 +132,7 @@ int ObGeoFuncUtils::ob_geo_gc_union(ObIAllocator &allocator,
     }
 
     for (uint8_t i = 0; i < 2 && OB_SUCC(ret); i++) {
-      ObGeoEvalCtx point_diff_context(&allocator, &srs);
+      ObGeoEvalCtx point_diff_context(mem_ctx, &srs);
       ObGeometry *tmp_geo = NULL;
       if (i == 0) {
         tmp_geo = mls;
@@ -198,15 +207,31 @@ int ObGeoFuncUtils::ob_gc_prepare(const ObGeoEvalCtx &context,
   INIT_SUCC(ret);
   ObIAllocator *allocator = context.get_allocator();
   const ObSrsItem *srs = context.get_srs();
-  ObGeoToTreeVisitor tree_visitor(allocator);
+  const GcTreeType *gc_tree = nullptr;
+  ObArenaAllocator tmp_alloc;
+  if (gc->is_tree()) {
+    gc_tree = static_cast<const GcTreeType *>(gc);
+  } else {
+    ObGeoToTreeVisitor tree_visitor(&tmp_alloc);
+    if (OB_FAIL(gc->do_visit(tree_visitor))) {
+      OB_LOG(WARN, "failed to transform gc to tree", K(ret));
+    } else {
+      gc_tree = static_cast<const GcTreeType *>(tree_visitor.get_geometry());
+    }
+  }
+  // ob_geo_gc_union will rewrite multi_line/multi_poly if success
+  // so mls/mpy can be temporary
+  multi_line = OB_NEWx(typename GcTreeType::sub_ml_type, &tmp_alloc, gc->get_srid(), tmp_alloc);
+  multi_poly = OB_NEWx(typename GcTreeType::sub_mp_type, &tmp_alloc, gc->get_srid(), tmp_alloc);
+  multi_point = OB_NEWx(typename GcTreeType::sub_mpt_type, allocator, gc->get_srid(), *allocator);
 
-  if (OB_FAIL(gc->do_visit(tree_visitor))) {
-    OB_LOG(WARN, "failed to transform gc to tree", K(ret));
-  } else if (OB_FAIL(ObGeoFuncUtils::ob_geo_gc_split(*allocator,
-              *static_cast<const GcTreeType *>(tree_visitor.get_geometry()),
-              multi_point, multi_line, multi_poly))) {
-    OB_LOG(WARN, "failed to do gc split", K(ret));
-  } else if (OB_FAIL(ObGeoFuncUtils::ob_geo_gc_union(*allocator, *srs, multi_point,
+  if (OB_FAIL(ret)) {
+  } else if (OB_ISNULL(multi_point)) {
+    ret = OB_ALLOCATE_MEMORY_FAILED;
+    OB_LOG(WARN, "failed to allocate memory", K(ret));
+  } else if (OB_FAIL(ObGeoFuncUtils::ob_geo_gc_split_inner(*gc_tree, *multi_point, *multi_line, *multi_poly))) {
+    OB_LOG(WARN, "failed to falatten geometrycollection", K(ret));
+  } else if (OB_FAIL(ObGeoFuncUtils::ob_geo_gc_union(context.get_mem_ctx(), *srs, multi_point,
                                                       multi_line, multi_poly))) {
     OB_LOG(WARN, "failed to do gc union", K(ret));
   } else { /* do nothing */ }

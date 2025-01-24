@@ -139,6 +139,9 @@ public:
       palf::LSN &sys_ls_min_handle_log_lsn) = 0;
 
   virtual void print_stat_info() = 0;
+  // compact redo storaged in storage in case of occupy too much resource
+  virtual void flush_storaged_redo() = 0;
+  virtual void compact_storaged_redo() = 0;
 
   virtual int register_ls_add_callback(LSAddCallback *callback) = 0;
   virtual int register_ls_recycle_callback(LSRecycleCallback *callback) = 0;
@@ -174,7 +177,9 @@ public:
   virtual ~ObLogTenantMgr();
 
 public:
-  int init(const bool enable_oracle_mode_match_case_sensitive, const RefreshMode &refresh_mode);
+  int init(const bool enable_oracle_mode_match_case_sensitive,
+      const bool enable_white_black_list,
+      const RefreshMode &refresh_mode);
   void destroy();
 
   int register_ls_add_callback(LSAddCallback *callback);
@@ -229,6 +234,8 @@ public:
       palf::LSN &sys_ls_min_handle_log_lsn);
   virtual bool is_inited() { return inited_; }
   void print_stat_info();
+  void flush_storaged_redo();
+  void compact_storaged_redo();
 
   template <typename Func> int for_each_tenant(Func &func)
   {
@@ -338,6 +345,16 @@ private:
     bool operator()(const TenantID &tid, ObLogTenant *tenant);
   };
 
+  enum TenantStorageOp {FLUSH = 0, COMPACT=1};
+
+  struct TenantRedoStorageOperator
+  {
+    IObStoreService &store_service_;
+    TenantStorageOp op_;
+    TenantRedoStorageOperator(IObStoreService &store_service, TenantStorageOp &op) : store_service_(store_service), op_(op) {}
+    bool operator()(const TenantID &tid, ObLogTenant *tenant);
+  };
+
   struct SetDataStartSchemaVersionFunc
   {
     int64_t data_start_schema_version_;
@@ -401,6 +418,7 @@ private:
       int64_t &start_commit_version);
   int get_min_add_tenant_start_ddl_commit_version_(int64_t &commit_version);
   void try_del_tenant_start_ddl_info_(const uint64_t tenant_id);
+  int filter_by_current_tenant_status_(common::ObIArray<uint64_t> &tenant_id_list);
 private:
   bool                inited_;
   RefreshMode         refresh_mode_;
@@ -421,6 +439,7 @@ private:
   ObLogLsGetter       ls_getter_;
 
   bool                enable_oracle_mode_match_case_sensitive_;
+  bool                enable_white_black_list_;
 private:
   DISALLOW_COPY_AND_ASSIGN(ObLogTenantMgr);
 };

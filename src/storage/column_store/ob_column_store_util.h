@@ -15,7 +15,6 @@
 #include "lib/ob_define.h"
 #include "lib/utility/ob_print_utils.h"
 #include "lib/container/ob_iarray.h"
-#include "storage/ob_table_store_stat_mgr.h"
 #include "storage/blocksstable/ob_datum_range.h"
 
 namespace oceanbase
@@ -27,9 +26,9 @@ struct ObTableAccessParam;
 
 typedef int64_t ObCSRowId;
 const ObCSRowId OB_INVALID_CS_ROW_ID = -1;
-const int64_t OB_CS_SCAN_GROUP_SIZE = 8192;
 const uint32_t OB_CS_INVALID_CG_IDX = INT32_MAX;
 const uint32_t OB_CS_VIRTUAL_CG_IDX = INT32_MAX - 1;
+const uint32_t OB_CS_COLUMN_REPLICA_ROWKEY_CG_IDX = 0;
 
 OB_INLINE bool is_virtual_cg(const uint32_t cg_idx)
 {
@@ -59,10 +58,15 @@ struct ObCSRange
     start_row_id_ = start;
     end_row_id_ = start + count - 1;
   }
+  OB_INLINE void set(const ObCSRowId start, const ObCSRowId end)
+  {
+    start_row_id_ = start;
+    end_row_id_ = end;
+  }
   OB_INLINE ObCSRowId begin() const { return start_row_id_; }
   OB_INLINE ObCSRowId end() const { return end_row_id_; }
   OB_INLINE void reset() { start_row_id_ = OB_INVALID_CS_ROW_ID; end_row_id_ = OB_INVALID_CS_ROW_ID; }
-  OB_INLINE bool is_valid() const { return OB_INVALID_CS_ROW_ID != start_row_id_ && end_row_id_ >= start_row_id_; }
+  OB_INLINE bool is_valid() const { return start_row_id_ >= 0 && end_row_id_ >= start_row_id_; }
   OB_INLINE int64_t get_row_count() const { return end_row_id_ - start_row_id_ + 1; }
   int compare(const ObCSRowId idx) const
   {

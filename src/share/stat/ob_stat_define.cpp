@@ -33,7 +33,7 @@ void ObAnalyzeSampleInfo::set_rows(double row_num)
   sample_value_ = row_num;
 }
 
-bool ObColumnStatParam::is_valid_opt_col_type(const ObObjType type)
+bool ObColumnStatParam::is_valid_opt_col_type(const ObObjType type, bool is_online_stat)
 {
   bool ret = false;
   // currently, we only support the following type to collect histogram
@@ -54,8 +54,9 @@ bool ObColumnStatParam::is_valid_opt_col_type(const ObObjType type)
       type_class == ColumnTypeClass::ObEnumSetTC ||
       type_class == ColumnTypeClass::ObIntervalTC ||
       type_class == ColumnTypeClass::ObDecimalIntTC ||
-      (lib::is_mysql_mode() && (type == ObTinyTextType ||
-                                type == ObTextType))) {
+      (!is_online_stat && lib::is_mysql_mode() && type_class == ColumnTypeClass::ObTextTC) ||
+      type_class == ColumnTypeClass::ObMySQLDateTC ||
+      type_class == ColumnTypeClass::ObMySQLDateTimeTC) {
     ret = true;
   }
   return ret;
@@ -85,10 +86,8 @@ int StatTable::assign(const StatTable &other)
   int ret = OB_SUCCESS;
   database_id_ = other.database_id_;
   table_id_ = other.table_id_;
-  incremental_stat_ = other.incremental_stat_;
   stale_percent_ = other.stale_percent_;
-  need_gather_subpart_ = other.need_gather_subpart_;
-  return no_regather_partition_ids_.assign(other.no_regather_partition_ids_);
+  return partition_stat_infos_.assign(other.partition_stat_infos_);
 }
 
 /**
@@ -150,7 +149,6 @@ int ObTableStatParam::assign(const ObTableStatParam &other)
   tab_name_ = other.tab_name_;
   table_id_ = other.table_id_;
   part_level_ = other.part_level_;
-  total_part_cnt_ = other.total_part_cnt_;
   part_name_ = other.part_name_;
   sample_info_.is_sample_ = other.sample_info_.is_sample_;
   sample_info_.is_block_sample_ = other.sample_info_.is_block_sample_;
@@ -185,6 +183,21 @@ int ObTableStatParam::assign(const ObTableStatParam &other)
   is_temp_table_ = other.is_temp_table_;
   allocator_ = other.allocator_;
   ref_table_type_ = other.ref_table_type_;
+  is_async_gather_ = other.is_async_gather_;
+  async_full_table_size_ = other.async_full_table_size_;
+  async_partition_ids_ = other.async_partition_ids_;
+  hist_sample_info_.is_sample_ = other.hist_sample_info_.is_sample_;
+  hist_sample_info_.is_block_sample_ = other.hist_sample_info_.is_block_sample_;
+  hist_sample_info_.sample_type_ = other.hist_sample_info_.sample_type_;
+  hist_sample_info_.sample_value_ = other.hist_sample_info_.sample_value_;
+  is_auto_gather_ = other.is_auto_gather_;
+  is_auto_sample_size_ = other.is_auto_sample_size_;
+  need_refine_min_max_ = other.need_refine_min_max_;
+  auto_sample_row_cnt_ = other.auto_sample_row_cnt_;
+  consumer_group_id_ = other.consumer_group_id_;
+  min_iops_ = other.min_iops_;
+  max_iops_ = other.max_iops_;
+  weight_iops_ = other.weight_iops_;
   if (OB_FAIL(part_infos_.assign(other.part_infos_))) {
     LOG_WARN("failed to assign", K(ret));
   } else if (OB_FAIL(subpart_infos_.assign(other.subpart_infos_))) {
@@ -192,10 +205,6 @@ int ObTableStatParam::assign(const ObTableStatParam &other)
   } else if (OB_FAIL(approx_part_infos_.assign(other.approx_part_infos_))) {
     LOG_WARN("failed to assign", K(ret));
   } else if (OB_FAIL(column_params_.assign(other.column_params_))) {
-    LOG_WARN("failed to assign", K(ret));
-  } else if (OB_FAIL(part_ids_.assign(other.part_ids_))) {
-    LOG_WARN("failed to assign", K(ret));
-  } else if (OB_FAIL(subpart_ids_.assign(other.subpart_ids_))) {
     LOG_WARN("failed to assign", K(ret));
   } else if (OB_FAIL(no_regather_partition_ids_.assign(other.no_regather_partition_ids_))) {
     LOG_WARN("failed to assign", K(ret));
@@ -233,8 +242,125 @@ int ObTableStatParam::assign_common_property(const ObTableStatParam &other)
   need_approx_ndv_ = other.need_approx_ndv_;
   duration_time_ = other.duration_time_;
   allocator_ = other.allocator_;
+  online_sample_percent_ = other.online_sample_percent_;
+  hist_sample_info_.is_sample_ = other.hist_sample_info_.is_sample_;
+  hist_sample_info_.is_block_sample_ = other.hist_sample_info_.is_block_sample_;
+  hist_sample_info_.sample_type_ = other.hist_sample_info_.sample_type_;
+  hist_sample_info_.sample_value_ = other.hist_sample_info_.sample_value_;
+  is_auto_gather_ = other.is_auto_gather_;
+  is_auto_sample_size_ = other.is_auto_sample_size_;
+  need_refine_min_max_ = other.need_refine_min_max_;
+  auto_sample_row_cnt_ = other.auto_sample_row_cnt_;
+  consumer_group_id_ = other.consumer_group_id_;
+  min_iops_ = other.min_iops_;
+  max_iops_ = other.max_iops_;
+  weight_iops_ = other.weight_iops_;
   return ret;
 }
+
+int ObOptStatGatherParam::assign(const ObOptStatGatherParam &other)
+{
+  int ret = OB_SUCCESS;
+  tenant_id_ = other.tenant_id_;
+  db_name_ = other.db_name_;
+  tab_name_ = other.tab_name_;
+  table_id_ = other.table_id_;
+  stat_level_ = other.stat_level_;
+  need_histogram_ = other.need_histogram_;
+  sample_info_.is_sample_ = other.sample_info_.is_sample_;
+  sample_info_.is_block_sample_ = other.sample_info_.is_block_sample_;
+  sample_info_.sample_type_ = other.sample_info_.sample_type_;
+  sample_info_.sample_value_ = other.sample_info_.sample_value_;
+  degree_ = other.degree_;
+  allocator_ = other.allocator_;
+  partition_id_block_map_ = other.partition_id_block_map_;
+  gather_start_time_ = other.gather_start_time_;
+  stattype_ = other.stattype_;
+  is_split_gather_ = other.is_split_gather_;
+  max_duration_time_ = other.max_duration_time_;
+  need_approx_ndv_ = other.need_approx_ndv_;
+  data_table_name_ = other.data_table_name_;
+  global_part_id_ = other.global_part_id_;
+  gather_vectorize_ = other.gather_vectorize_;
+  sepcify_scn_ = other.sepcify_scn_;
+  hist_sample_info_.is_sample_ = other.hist_sample_info_.is_sample_;
+  hist_sample_info_.is_block_sample_ = other.hist_sample_info_.is_block_sample_;
+  hist_sample_info_.sample_type_ = other.hist_sample_info_.sample_type_;
+  hist_sample_info_.sample_value_ = other.hist_sample_info_.sample_value_;
+  is_auto_sample_size_ = other.is_auto_sample_size_;
+  need_refine_min_max_ = other.need_refine_min_max_;
+  auto_sample_row_cnt_ = other.auto_sample_row_cnt_;
+  data_table_id_ = other.data_table_id_;
+  is_global_index_ = other.is_global_index_;
+  part_level_ = other.part_level_;
+  consumer_group_id_ = other.consumer_group_id_;
+  if (OB_FAIL(partition_infos_.assign(other.partition_infos_))) {
+    LOG_WARN("failed to assign", K(ret));
+  } else if (OB_FAIL(column_params_.assign(other.column_params_))) {
+    LOG_WARN("failed to assign", K(ret));
+  } else {/*do nothing*/}
+  return ret;
+}
+
+bool ObTableStatParam::is_specify_partition() const
+{
+  bool is_specify = false;
+  if (part_level_ == share::schema::PARTITION_LEVEL_ZERO) {
+    //do nothing
+  } else if (part_level_ == share::schema::PARTITION_LEVEL_ONE) {
+    is_specify = part_infos_.count() != all_part_infos_.count();
+  } else if (part_level_ == share::schema::PARTITION_LEVEL_TWO) {
+    is_specify = (part_infos_.count() + approx_part_infos_.count() != all_part_infos_.count()) ||
+                 (subpart_infos_.count() != all_subpart_infos_.count());
+  }
+  return is_specify;
+}
+
+bool ObTableStatParam::is_specify_column() const
+{
+  bool is_specify = false;
+  for (int64_t i = 0; !is_specify && i < column_params_.count(); ++i) {
+    is_specify = column_params_.at(i).is_valid_opt_col() && !column_params_.at(i).need_basic_stat();
+  }
+  return is_specify;
+}
+
+int64_t ObTableStatParam::get_need_gather_column() const
+{
+  int64_t valid_column = 0;
+  for (int64_t i = 0; i < column_params_.count(); ++i) {
+    if (column_params_.at(i).need_basic_stat()) {
+      ++ valid_column;
+    }
+  }
+  return valid_column;
+}
+
+int64_t ObOptStatGatherParam::get_need_gather_column() const
+{
+  int64_t valid_column = 0;
+  for (int64_t i = 0; i < column_params_.count(); ++i) {
+    if (column_params_.at(i).need_basic_stat()) {
+      ++ valid_column;
+    }
+  }
+  return valid_column;
+}
+
+int AsyncStatTable::assign(const AsyncStatTable &other)
+{
+  int ret = OB_SUCCESS;
+  table_id_ = other.table_id_;
+  return partition_ids_.assign(other.partition_ids_);
+}
+
+OB_SERIALIZE_MEMBER(ObOptDmlStat,
+                    tenant_id_,
+                    table_id_,
+                    tablet_id_,
+                    insert_row_count_,
+                    update_row_count_,
+                    delete_row_count_);
 
 }
 }

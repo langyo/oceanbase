@@ -98,6 +98,9 @@ create table t (t1 tinyint,
 insert into t values (1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7,
                      '1993-03-20', '1993-03-20', '1993-03-20', '10:10:10', '1993', '0.8', '0.9', '1.0', '1.1',
                      '1.2', 1, 'b', 'b');
+Warnings:
+Warning	1265	Data truncated for column 't15' at row 1
+Warning	1265	Data truncated for column '"test"."t"."t16"' at row 1
 
 
 
@@ -597,7 +600,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([t.t1 XOR cast(t.t25, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([t.t1 XOR cast(t.t25, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t1], [t.t25]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -617,7 +620,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([t.t1 XOR cast(t.t26, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([t.t1 XOR cast(t.t26, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t1], [t.t26]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -1177,7 +1180,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([t.t2 XOR cast(t.t25, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([t.t2 XOR cast(t.t25, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t2], [t.t25]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -1197,7 +1200,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([t.t2 XOR cast(t.t26, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([t.t2 XOR cast(t.t26, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t2], [t.t26]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -1757,7 +1760,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([t.t3 XOR cast(t.t25, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([t.t3 XOR cast(t.t25, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t3], [t.t25]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -1777,7 +1780,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([t.t3 XOR cast(t.t26, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([t.t3 XOR cast(t.t26, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t3], [t.t26]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -2337,7 +2340,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([t.t4 XOR cast(t.t25, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([t.t4 XOR cast(t.t25, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t4], [t.t25]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -2357,7 +2360,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([t.t4 XOR cast(t.t26, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([t.t4 XOR cast(t.t26, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t4], [t.t26]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -2917,7 +2920,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([t.t5 XOR cast(t.t25, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([t.t5 XOR cast(t.t25, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t5], [t.t25]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -2937,7 +2940,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([t.t5 XOR cast(t.t26, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([t.t5 XOR cast(t.t26, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t5], [t.t26]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -3497,7 +3500,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([t.t6 XOR cast(t.t25, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([t.t6 XOR cast(t.t25, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t6], [t.t25]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -3517,7 +3520,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([t.t6 XOR cast(t.t26, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([t.t6 XOR cast(t.t26, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t6], [t.t26]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -4077,7 +4080,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([t.t7 XOR cast(t.t25, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([t.t7 XOR cast(t.t25, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t7], [t.t25]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -4097,7 +4100,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([t.t7 XOR cast(t.t26, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([t.t7 XOR cast(t.t26, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t7], [t.t26]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -4657,7 +4660,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([t.t8 XOR cast(t.t25, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([t.t8 XOR cast(t.t25, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t8], [t.t25]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -4677,7 +4680,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([t.t8 XOR cast(t.t26, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([t.t8 XOR cast(t.t26, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t8], [t.t26]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -5237,7 +5240,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([t.t9 XOR cast(t.t25, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([t.t9 XOR cast(t.t25, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t9], [t.t25]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -5257,7 +5260,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([t.t9 XOR cast(t.t26, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([t.t9 XOR cast(t.t26, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t9], [t.t26]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -5817,7 +5820,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([t.t10 XOR cast(t.t25, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([t.t10 XOR cast(t.t25, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t10], [t.t25]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -5837,7 +5840,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([t.t10 XOR cast(t.t26, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([t.t10 XOR cast(t.t26, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t10], [t.t26]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -6397,7 +6400,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([t.t11 XOR cast(t.t25, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([t.t11 XOR cast(t.t25, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t11], [t.t25]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -6417,7 +6420,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([t.t11 XOR cast(t.t26, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([t.t11 XOR cast(t.t26, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t11], [t.t26]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -6977,7 +6980,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([t.t12 XOR cast(t.t25, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([t.t12 XOR cast(t.t25, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t12], [t.t25]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -6997,7 +7000,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([t.t12 XOR cast(t.t26, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([t.t12 XOR cast(t.t26, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t12], [t.t26]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -7557,7 +7560,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([t.t13 XOR cast(t.t25, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([t.t13 XOR cast(t.t25, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t13], [t.t25]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -7577,7 +7580,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([t.t13 XOR cast(t.t26, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([t.t13 XOR cast(t.t26, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t13], [t.t26]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -8137,7 +8140,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([t.t14 XOR cast(t.t25, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([t.t14 XOR cast(t.t25, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t14], [t.t25]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -8157,7 +8160,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([t.t14 XOR cast(t.t26, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([t.t14 XOR cast(t.t26, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t14], [t.t26]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -8717,7 +8720,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([t.t15 XOR cast(t.t25, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([t.t15 XOR cast(t.t25, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t15], [t.t25]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -8737,7 +8740,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([t.t15 XOR cast(t.t26, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([t.t15 XOR cast(t.t26, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t15], [t.t26]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -9297,7 +9300,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([t.t16 XOR cast(t.t25, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([t.t16 XOR cast(t.t25, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t16], [t.t25]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -9317,7 +9320,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([t.t16 XOR cast(t.t26, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([t.t16 XOR cast(t.t26, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t16], [t.t26]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -9877,7 +9880,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t17, DOUBLE(-1, -1)) XOR cast(t.t25, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([cast(t.t17, DOUBLE(-1, -1)) XOR cast(t.t25, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t17], [t.t25]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -9897,7 +9900,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t17, DOUBLE(-1, -1)) XOR cast(t.t26, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([cast(t.t17, DOUBLE(-1, -1)) XOR cast(t.t26, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t17], [t.t26]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -10457,7 +10460,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t18, DOUBLE(-1, -1)) XOR cast(t.t25, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([cast(t.t18, DOUBLE(-1, -1)) XOR cast(t.t25, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t18], [t.t25]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -10477,7 +10480,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t18, DOUBLE(-1, -1)) XOR cast(t.t26, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([cast(t.t18, DOUBLE(-1, -1)) XOR cast(t.t26, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t18], [t.t26]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -11037,7 +11040,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t19, DOUBLE(-1, -1)) XOR cast(t.t25, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([cast(t.t19, DOUBLE(-1, -1)) XOR cast(t.t25, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t19], [t.t25]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -11057,7 +11060,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t19, DOUBLE(-1, -1)) XOR cast(t.t26, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([cast(t.t19, DOUBLE(-1, -1)) XOR cast(t.t26, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t19], [t.t26]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -11617,7 +11620,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t20, DOUBLE(-1, -1)) XOR cast(t.t25, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([cast(t.t20, DOUBLE(-1, -1)) XOR cast(t.t25, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t20], [t.t25]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -11637,7 +11640,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t20, DOUBLE(-1, -1)) XOR cast(t.t26, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([cast(t.t20, DOUBLE(-1, -1)) XOR cast(t.t26, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t20], [t.t26]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -12197,7 +12200,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t21, DOUBLE(-1, -1)) XOR cast(t.t25, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([cast(t.t21, DOUBLE(-1, -1)) XOR cast(t.t25, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t21], [t.t25]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -12217,7 +12220,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t21, DOUBLE(-1, -1)) XOR cast(t.t26, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([cast(t.t21, DOUBLE(-1, -1)) XOR cast(t.t26, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t21], [t.t26]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -12777,7 +12780,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t22, DOUBLE(-1, -1)) XOR cast(t.t25, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([cast(t.t22, DOUBLE(-1, -1)) XOR cast(t.t25, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t22], [t.t25]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -12797,7 +12800,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t22, DOUBLE(-1, -1)) XOR cast(t.t26, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([cast(t.t22, DOUBLE(-1, -1)) XOR cast(t.t26, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t22], [t.t26]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -13357,7 +13360,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t23, DOUBLE(-1, -1)) XOR cast(t.t25, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([cast(t.t23, DOUBLE(-1, -1)) XOR cast(t.t25, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t23], [t.t25]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -13377,7 +13380,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t23, DOUBLE(-1, -1)) XOR cast(t.t26, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([cast(t.t23, DOUBLE(-1, -1)) XOR cast(t.t26, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t23], [t.t26]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -13937,7 +13940,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t24, DOUBLE(-1, -1)) XOR cast(t.t25, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([cast(t.t24, DOUBLE(-1, -1)) XOR cast(t.t25, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t24], [t.t25]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -13957,7 +13960,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t24, DOUBLE(-1, -1)) XOR cast(t.t26, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([cast(t.t24, DOUBLE(-1, -1)) XOR cast(t.t26, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t24], [t.t26]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -14037,7 +14040,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t25, DOUBLE(-1, -1)) XOR t.t1]), filter(nil)
+  0 - output([cast(t.t25, DOUBLE(-1, -1)) XOR t.t1]), filter(nil), rowset=16
       access([t.t25], [t.t1]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -14057,7 +14060,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t25, DOUBLE(-1, -1)) XOR t.t2]), filter(nil)
+  0 - output([cast(t.t25, DOUBLE(-1, -1)) XOR t.t2]), filter(nil), rowset=16
       access([t.t25], [t.t2]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -14077,7 +14080,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t25, DOUBLE(-1, -1)) XOR t.t3]), filter(nil)
+  0 - output([cast(t.t25, DOUBLE(-1, -1)) XOR t.t3]), filter(nil), rowset=16
       access([t.t25], [t.t3]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -14097,7 +14100,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t25, DOUBLE(-1, -1)) XOR t.t4]), filter(nil)
+  0 - output([cast(t.t25, DOUBLE(-1, -1)) XOR t.t4]), filter(nil), rowset=16
       access([t.t25], [t.t4]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -14117,7 +14120,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t25, DOUBLE(-1, -1)) XOR t.t5]), filter(nil)
+  0 - output([cast(t.t25, DOUBLE(-1, -1)) XOR t.t5]), filter(nil), rowset=16
       access([t.t25], [t.t5]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -14137,7 +14140,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t25, DOUBLE(-1, -1)) XOR t.t6]), filter(nil)
+  0 - output([cast(t.t25, DOUBLE(-1, -1)) XOR t.t6]), filter(nil), rowset=16
       access([t.t25], [t.t6]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -14157,7 +14160,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t25, DOUBLE(-1, -1)) XOR t.t7]), filter(nil)
+  0 - output([cast(t.t25, DOUBLE(-1, -1)) XOR t.t7]), filter(nil), rowset=16
       access([t.t25], [t.t7]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -14177,7 +14180,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t25, DOUBLE(-1, -1)) XOR t.t8]), filter(nil)
+  0 - output([cast(t.t25, DOUBLE(-1, -1)) XOR t.t8]), filter(nil), rowset=16
       access([t.t25], [t.t8]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -14197,7 +14200,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t25, DOUBLE(-1, -1)) XOR t.t9]), filter(nil)
+  0 - output([cast(t.t25, DOUBLE(-1, -1)) XOR t.t9]), filter(nil), rowset=16
       access([t.t25], [t.t9]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -14217,7 +14220,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t25, DOUBLE(-1, -1)) XOR t.t10]), filter(nil)
+  0 - output([cast(t.t25, DOUBLE(-1, -1)) XOR t.t10]), filter(nil), rowset=16
       access([t.t25], [t.t10]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -14237,7 +14240,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t25, DOUBLE(-1, -1)) XOR t.t11]), filter(nil)
+  0 - output([cast(t.t25, DOUBLE(-1, -1)) XOR t.t11]), filter(nil), rowset=16
       access([t.t25], [t.t11]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -14257,7 +14260,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t25, DOUBLE(-1, -1)) XOR t.t12]), filter(nil)
+  0 - output([cast(t.t25, DOUBLE(-1, -1)) XOR t.t12]), filter(nil), rowset=16
       access([t.t25], [t.t12]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -14277,7 +14280,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t25, DOUBLE(-1, -1)) XOR t.t13]), filter(nil)
+  0 - output([cast(t.t25, DOUBLE(-1, -1)) XOR t.t13]), filter(nil), rowset=16
       access([t.t25], [t.t13]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -14297,7 +14300,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t25, DOUBLE(-1, -1)) XOR t.t14]), filter(nil)
+  0 - output([cast(t.t25, DOUBLE(-1, -1)) XOR t.t14]), filter(nil), rowset=16
       access([t.t25], [t.t14]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -14317,7 +14320,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t25, DOUBLE(-1, -1)) XOR t.t15]), filter(nil)
+  0 - output([cast(t.t25, DOUBLE(-1, -1)) XOR t.t15]), filter(nil), rowset=16
       access([t.t25], [t.t15]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -14337,7 +14340,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t25, DOUBLE(-1, -1)) XOR t.t16]), filter(nil)
+  0 - output([cast(t.t25, DOUBLE(-1, -1)) XOR t.t16]), filter(nil), rowset=16
       access([t.t25], [t.t16]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -14357,7 +14360,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t25, DOUBLE(-1, -1)) XOR cast(t.t17, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([cast(t.t25, DOUBLE(-1, -1)) XOR cast(t.t17, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t25], [t.t17]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -14377,7 +14380,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t25, DOUBLE(-1, -1)) XOR cast(t.t18, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([cast(t.t25, DOUBLE(-1, -1)) XOR cast(t.t18, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t25], [t.t18]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -14397,7 +14400,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t25, DOUBLE(-1, -1)) XOR cast(t.t19, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([cast(t.t25, DOUBLE(-1, -1)) XOR cast(t.t19, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t25], [t.t19]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -14417,7 +14420,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t25, DOUBLE(-1, -1)) XOR cast(t.t20, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([cast(t.t25, DOUBLE(-1, -1)) XOR cast(t.t20, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t25], [t.t20]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -14437,7 +14440,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t25, DOUBLE(-1, -1)) XOR cast(t.t21, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([cast(t.t25, DOUBLE(-1, -1)) XOR cast(t.t21, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t25], [t.t21]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -14457,7 +14460,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t25, DOUBLE(-1, -1)) XOR cast(t.t22, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([cast(t.t25, DOUBLE(-1, -1)) XOR cast(t.t22, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t25], [t.t22]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -14477,7 +14480,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t25, DOUBLE(-1, -1)) XOR cast(t.t23, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([cast(t.t25, DOUBLE(-1, -1)) XOR cast(t.t23, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t25], [t.t23]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -14497,7 +14500,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t25, DOUBLE(-1, -1)) XOR cast(t.t24, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([cast(t.t25, DOUBLE(-1, -1)) XOR cast(t.t24, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t25], [t.t24]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -14517,7 +14520,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t25, DOUBLE(-1, -1)) XOR cast(t.t25, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([cast(t.t25, DOUBLE(-1, -1)) XOR cast(t.t25, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t25]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -14537,7 +14540,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t25, DOUBLE(-1, -1)) XOR cast(t.t26, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([cast(t.t25, DOUBLE(-1, -1)) XOR cast(t.t26, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t25], [t.t26]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -14557,7 +14560,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t25, DOUBLE(-1, -1)) XOR t.t27]), filter(nil)
+  0 - output([cast(t.t25, DOUBLE(-1, -1)) XOR t.t27]), filter(nil), rowset=16
       access([t.t25], [t.t27]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -14577,7 +14580,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t25, DOUBLE(-1, -1)) XOR cast(t.t28, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([cast(t.t25, DOUBLE(-1, -1)) XOR cast(t.t28, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t25], [t.t28]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -14597,7 +14600,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t25, DOUBLE(-1, -1)) XOR cast(t.t29, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([cast(t.t25, DOUBLE(-1, -1)) XOR cast(t.t29, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t25], [t.t29]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -14617,7 +14620,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t26, DOUBLE(-1, -1)) XOR t.t1]), filter(nil)
+  0 - output([cast(t.t26, DOUBLE(-1, -1)) XOR t.t1]), filter(nil), rowset=16
       access([t.t26], [t.t1]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -14637,7 +14640,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t26, DOUBLE(-1, -1)) XOR t.t2]), filter(nil)
+  0 - output([cast(t.t26, DOUBLE(-1, -1)) XOR t.t2]), filter(nil), rowset=16
       access([t.t26], [t.t2]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -14657,7 +14660,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t26, DOUBLE(-1, -1)) XOR t.t3]), filter(nil)
+  0 - output([cast(t.t26, DOUBLE(-1, -1)) XOR t.t3]), filter(nil), rowset=16
       access([t.t26], [t.t3]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -14677,7 +14680,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t26, DOUBLE(-1, -1)) XOR t.t4]), filter(nil)
+  0 - output([cast(t.t26, DOUBLE(-1, -1)) XOR t.t4]), filter(nil), rowset=16
       access([t.t26], [t.t4]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -14697,7 +14700,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t26, DOUBLE(-1, -1)) XOR t.t5]), filter(nil)
+  0 - output([cast(t.t26, DOUBLE(-1, -1)) XOR t.t5]), filter(nil), rowset=16
       access([t.t26], [t.t5]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -14717,7 +14720,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t26, DOUBLE(-1, -1)) XOR t.t6]), filter(nil)
+  0 - output([cast(t.t26, DOUBLE(-1, -1)) XOR t.t6]), filter(nil), rowset=16
       access([t.t26], [t.t6]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -14737,7 +14740,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t26, DOUBLE(-1, -1)) XOR t.t7]), filter(nil)
+  0 - output([cast(t.t26, DOUBLE(-1, -1)) XOR t.t7]), filter(nil), rowset=16
       access([t.t26], [t.t7]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -14757,7 +14760,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t26, DOUBLE(-1, -1)) XOR t.t8]), filter(nil)
+  0 - output([cast(t.t26, DOUBLE(-1, -1)) XOR t.t8]), filter(nil), rowset=16
       access([t.t26], [t.t8]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -14777,7 +14780,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t26, DOUBLE(-1, -1)) XOR t.t9]), filter(nil)
+  0 - output([cast(t.t26, DOUBLE(-1, -1)) XOR t.t9]), filter(nil), rowset=16
       access([t.t26], [t.t9]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -14797,7 +14800,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t26, DOUBLE(-1, -1)) XOR t.t10]), filter(nil)
+  0 - output([cast(t.t26, DOUBLE(-1, -1)) XOR t.t10]), filter(nil), rowset=16
       access([t.t26], [t.t10]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -14817,7 +14820,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t26, DOUBLE(-1, -1)) XOR t.t11]), filter(nil)
+  0 - output([cast(t.t26, DOUBLE(-1, -1)) XOR t.t11]), filter(nil), rowset=16
       access([t.t26], [t.t11]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -14837,7 +14840,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t26, DOUBLE(-1, -1)) XOR t.t12]), filter(nil)
+  0 - output([cast(t.t26, DOUBLE(-1, -1)) XOR t.t12]), filter(nil), rowset=16
       access([t.t26], [t.t12]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -14857,7 +14860,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t26, DOUBLE(-1, -1)) XOR t.t13]), filter(nil)
+  0 - output([cast(t.t26, DOUBLE(-1, -1)) XOR t.t13]), filter(nil), rowset=16
       access([t.t26], [t.t13]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -14877,7 +14880,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t26, DOUBLE(-1, -1)) XOR t.t14]), filter(nil)
+  0 - output([cast(t.t26, DOUBLE(-1, -1)) XOR t.t14]), filter(nil), rowset=16
       access([t.t26], [t.t14]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -14897,7 +14900,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t26, DOUBLE(-1, -1)) XOR t.t15]), filter(nil)
+  0 - output([cast(t.t26, DOUBLE(-1, -1)) XOR t.t15]), filter(nil), rowset=16
       access([t.t26], [t.t15]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -14917,7 +14920,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t26, DOUBLE(-1, -1)) XOR t.t16]), filter(nil)
+  0 - output([cast(t.t26, DOUBLE(-1, -1)) XOR t.t16]), filter(nil), rowset=16
       access([t.t26], [t.t16]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -14937,7 +14940,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t26, DOUBLE(-1, -1)) XOR cast(t.t17, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([cast(t.t26, DOUBLE(-1, -1)) XOR cast(t.t17, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t26], [t.t17]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -14957,7 +14960,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t26, DOUBLE(-1, -1)) XOR cast(t.t18, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([cast(t.t26, DOUBLE(-1, -1)) XOR cast(t.t18, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t26], [t.t18]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -14977,7 +14980,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t26, DOUBLE(-1, -1)) XOR cast(t.t19, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([cast(t.t26, DOUBLE(-1, -1)) XOR cast(t.t19, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t26], [t.t19]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -14997,7 +15000,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t26, DOUBLE(-1, -1)) XOR cast(t.t20, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([cast(t.t26, DOUBLE(-1, -1)) XOR cast(t.t20, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t26], [t.t20]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -15017,7 +15020,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t26, DOUBLE(-1, -1)) XOR cast(t.t21, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([cast(t.t26, DOUBLE(-1, -1)) XOR cast(t.t21, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t26], [t.t21]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -15037,7 +15040,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t26, DOUBLE(-1, -1)) XOR cast(t.t22, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([cast(t.t26, DOUBLE(-1, -1)) XOR cast(t.t22, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t26], [t.t22]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -15057,7 +15060,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t26, DOUBLE(-1, -1)) XOR cast(t.t23, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([cast(t.t26, DOUBLE(-1, -1)) XOR cast(t.t23, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t26], [t.t23]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -15077,7 +15080,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t26, DOUBLE(-1, -1)) XOR cast(t.t24, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([cast(t.t26, DOUBLE(-1, -1)) XOR cast(t.t24, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t26], [t.t24]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -15097,7 +15100,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t26, DOUBLE(-1, -1)) XOR cast(t.t25, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([cast(t.t26, DOUBLE(-1, -1)) XOR cast(t.t25, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t26], [t.t25]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -15117,7 +15120,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t26, DOUBLE(-1, -1)) XOR cast(t.t26, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([cast(t.t26, DOUBLE(-1, -1)) XOR cast(t.t26, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t26]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -15137,7 +15140,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t26, DOUBLE(-1, -1)) XOR t.t27]), filter(nil)
+  0 - output([cast(t.t26, DOUBLE(-1, -1)) XOR t.t27]), filter(nil), rowset=16
       access([t.t26], [t.t27]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -15157,7 +15160,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t26, DOUBLE(-1, -1)) XOR cast(t.t28, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([cast(t.t26, DOUBLE(-1, -1)) XOR cast(t.t28, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t26], [t.t28]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -15177,7 +15180,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t26, DOUBLE(-1, -1)) XOR cast(t.t29, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([cast(t.t26, DOUBLE(-1, -1)) XOR cast(t.t29, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t26], [t.t29]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -15677,7 +15680,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([t.t27 XOR cast(t.t25, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([t.t27 XOR cast(t.t25, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t27], [t.t25]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -15697,7 +15700,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([t.t27 XOR cast(t.t26, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([t.t27 XOR cast(t.t26, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t27], [t.t26]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -16257,7 +16260,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t28, DOUBLE(-1, -1)) XOR cast(t.t25, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([cast(t.t28, DOUBLE(-1, -1)) XOR cast(t.t25, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t28], [t.t25]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -16277,7 +16280,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t28, DOUBLE(-1, -1)) XOR cast(t.t26, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([cast(t.t28, DOUBLE(-1, -1)) XOR cast(t.t26, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t28], [t.t26]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -16837,7 +16840,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t29, DOUBLE(-1, -1)) XOR cast(t.t25, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([cast(t.t29, DOUBLE(-1, -1)) XOR cast(t.t25, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t29], [t.t25]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true
@@ -16857,7 +16860,7 @@ Query Plan
 ===============================================
 Outputs & filters:
 -------------------------------------
-  0 - output([cast(t.t29, DOUBLE(-1, -1)) XOR cast(t.t26, DOUBLE(-1, -1))]), filter(nil)
+  0 - output([cast(t.t29, DOUBLE(-1, -1)) XOR cast(t.t26, DOUBLE(-1, -1))]), filter(nil), rowset=16
       access([t.t29], [t.t26]), partitions(p0)
       is_index_back=false, is_global_index=false, 
       range_key([t.__pk_increment]), range(MIN ; MAX)always true

@@ -149,12 +149,17 @@ inline common::ObString concat_qualified_name(const common::ObString &db_name, c
   int64_t pos = 0;
   if (OB_LIKELY(buffer != nullptr)) {
     if (tbl_name.length() > 0 && db_name.length() > 0) {
-      common::databuff_printf(buffer, CSTRING_BUFFER_LEN, pos, "%s.%s.%s",
-                              to_cstring(db_name), to_cstring(tbl_name), to_cstring(col_name));
+      common::databuff_printf(buffer, CSTRING_BUFFER_LEN, pos, db_name);
+      common::databuff_printf(buffer, CSTRING_BUFFER_LEN, pos, ".");
+      common::databuff_printf(buffer, CSTRING_BUFFER_LEN, pos, tbl_name);
+      common::databuff_printf(buffer, CSTRING_BUFFER_LEN, pos, ".");
+      common::databuff_printf(buffer, CSTRING_BUFFER_LEN, pos, col_name);
     } else if (tbl_name.length() > 0) {
-      common::databuff_printf(buffer, CSTRING_BUFFER_LEN, pos, "%s.%s", to_cstring(tbl_name), to_cstring(col_name));
+      common::databuff_printf(buffer, CSTRING_BUFFER_LEN, pos, tbl_name);
+      common::databuff_printf(buffer, CSTRING_BUFFER_LEN, pos, ".");
+      common::databuff_printf(buffer, CSTRING_BUFFER_LEN, pos, col_name);
     } else {
-      common::databuff_printf(buffer, CSTRING_BUFFER_LEN, pos, "%s", to_cstring(col_name));
+      common::databuff_printf(buffer, CSTRING_BUFFER_LEN, pos, col_name);
     }
   }
   return common::ObString(pos, buffer);
@@ -166,9 +171,11 @@ inline common::ObString concat_table_name(const common::ObString &db_name, const
   int64_t pos = 0;
   if (OB_LIKELY(buffer != nullptr)) {
     if (db_name.length() > 0) {
-      common::databuff_printf(buffer, CSTRING_BUFFER_LEN, pos, "%s.%s", to_cstring(db_name), to_cstring(tbl_name));
+      common::databuff_printf(buffer, CSTRING_BUFFER_LEN, pos, db_name);
+      common::databuff_printf(buffer, CSTRING_BUFFER_LEN, pos, ".");
+      common::databuff_printf(buffer, CSTRING_BUFFER_LEN, pos, tbl_name);
     } else {
-      common::databuff_printf(buffer, CSTRING_BUFFER_LEN, pos, "%s", to_cstring(tbl_name));
+      common::databuff_printf(buffer, CSTRING_BUFFER_LEN, pos, tbl_name);
     }
   }
   return common::ObString(pos, buffer);
@@ -249,6 +256,7 @@ inline int databuff_print_key_obj(char *buf, const int64_t buf_len, int64_t &pos
 namespace pl
 {
 class ObPLBlockNS;
+class ObPLPackageGuard;
 }
 
 namespace sql
@@ -264,9 +272,10 @@ const int64_t FAST_ARRAY_COUNT = OB_DEFAULT_SE_ARRAY_COUNT;
 typedef common::ObFastArray<int64_t, FAST_ARRAY_COUNT> IntFastArray;
 typedef common::ObFastArray<uint64_t, FAST_ARRAY_COUNT> UIntFastArray;
 typedef common::ObFastArray<ObRawExpr *, FAST_ARRAY_COUNT> RawExprFastArray;
+typedef common::ObTuple<ObRawExpr*, ObConstRawExpr*, int64_t> ExternalParamInfo;
 
 struct ExternalParams{
-  ExternalParams() : by_name_(false), params_( ){}
+  ExternalParams() : by_name_(false), need_clear_(false), params_() {}
   ~ExternalParams() {}
 
 public:
@@ -275,20 +284,39 @@ public:
   int assign(ExternalParams &other)
   {
     by_name_ = other.by_name_;
+    need_clear_ = need_clear_;
     return params_.assign(other.params_);
   }
-  std::pair<ObRawExpr*, ObConstRawExpr*> &at(int64_t i)
+  ExternalParamInfo &at(int64_t i)
   {
     return params_.at(i);
   }
-  int push_back(const std::pair<ObRawExpr*, ObConstRawExpr*> &param)
+  int push_back(const ExternalParamInfo &param)
   {
     return params_.push_back(param);
   }
 
 public:
   bool by_name_;
-  common::ObSEArray<std::pair<ObRawExpr*, ObConstRawExpr*>, 8> params_;
+  bool need_clear_ = false;
+  common::ObSEArray<ExternalParamInfo, 8> params_;
+};
+
+struct ObStarExpansionInfo{
+  ObStarExpansionInfo()
+      :start_pos_(0),
+       end_pos_(0),
+       column_name_list_()
+  {}
+
+  ~ObStarExpansionInfo() {}
+
+public:
+  int64_t start_pos_;
+  int64_t end_pos_;
+  common::ObArray<ObString> column_name_list_;
+
+  TO_STRING_KV(K_(start_pos), K_(end_pos), K_(column_name_list));
 };
 
 struct ObResolverParams
@@ -314,6 +342,7 @@ struct ObResolverParams
        is_from_show_resolver_(false),
        is_restore_(false),
        is_from_create_view_(false),
+       is_from_create_mview_(false),
        is_from_create_table_(false),
        is_prepare_protocol_(false),
        is_pre_execute_(false),
@@ -336,17 +365,23 @@ struct ObResolverParams
        new_cte_tid_(common::OB_MIN_CTE_TABLE_ID + 1),
        new_gen_wid_(1),
        is_resolve_table_function_expr_(false),
-       has_cte_param_list_(false),
-       has_recursive_word_(false),
        tg_timing_event_(-1),
        is_column_ref_(true),
-       table_ids_(),
        hidden_column_scope_(T_NONE_SCOPE),
+       hidden_column_name_(NULL),
        outline_parse_result_(NULL),
        is_execute_call_stmt_(false),
        enable_res_map_(false),
        need_check_col_dup_(true),
-       is_specified_col_name_(false)
+       is_specified_col_name_(false),
+       is_in_sys_view_(false),
+       is_expanding_view_(false),
+       is_resolve_lateral_derived_table_(false),
+       package_guard_(NULL),
+       star_expansion_infos_(),
+       is_for_rt_mv_(false),
+       is_resolve_fake_cte_table_(false),
+       is_returning_(false)
   {}
   bool is_force_trace_log() { return force_trace_log_; }
 
@@ -374,6 +409,7 @@ public:
   //查询建表、创建视图不能包含临时表;
   //前者是实现起来问题, 后者是兼容MySQL;
   bool is_from_create_view_;
+  bool is_from_create_mview_;
   bool is_from_create_table_;
   bool is_prepare_protocol_;
   bool is_pre_execute_;
@@ -401,18 +437,23 @@ private:
   friend class ObStmtResolver;
 public:
   bool is_resolve_table_function_expr_;  // used to mark resolve table function expr.
-  bool has_cte_param_list_;
-  bool has_recursive_word_;
   int64_t tg_timing_event_;      // mysql mode, trigger的触发时机和类型
   bool is_column_ref_;                   // used to mark normal column ref
-  common::hash::ObPlacementHashSet<uint64_t, common::OB_MAX_TABLE_NUM_PER_STMT, true> table_ids_;
   ObStmtScope hidden_column_scope_; // record scope for first hidden column which need check hidden_column_visable in opt_param hint
+  const char *hidden_column_name_;  // record column name for first hidden column which need check hidden_column_visable in opt_param hint
   ParseResult *outline_parse_result_;
   bool is_execute_call_stmt_;
   bool enable_res_map_;
   bool need_check_col_dup_;
   bool is_specified_col_name_;//mark if specify the column name in create view or create table as..
   bool is_in_sys_view_;
+  bool is_expanding_view_;
+  bool is_resolve_lateral_derived_table_; // used to mark resolve lateral derived table.
+  pl::ObPLPackageGuard *package_guard_;
+  common::ObArray<ObStarExpansionInfo> star_expansion_infos_;
+  bool is_for_rt_mv_; // call resolve in transformation for expanding inline real-time materialized view
+  bool is_resolve_fake_cte_table_;
+  bool is_returning_;
 };
 } // end namespace sql
 } // end namespace oceanbase

@@ -39,6 +39,16 @@ public:
   virtual ~TestRefCnt();
   virtual void SetUp();
   virtual void TearDown();
+  static void SetUpTestCase()
+  {
+    ASSERT_EQ(OB_SUCCESS, ObTimerService::get_instance().start());
+  }
+  static void TearDownTestCase()
+  {
+    ObTimerService::get_instance().stop();
+    ObTimerService::get_instance().wait();
+    ObTimerService::get_instance().destroy();
+  }
 };
 
 TestRefCnt::TestRefCnt()
@@ -163,11 +173,11 @@ TEST_F(TestRefCnt, server_super_block)
   ASSERT_EQ(common::OB_SUCCESS, ret);
   ASSERT_EQ(des_sb.get_serialize_size(), pos);
 
-  ret = OB_SERVER_BLOCK_MGR.write_super_block(super_block);
+  ret = OB_SERVER_BLOCK_MGR.write_super_block(super_block, OB_STORAGE_OBJECT_MGR.super_block_buf_holder_);
   ASSERT_EQ(common::OB_SUCCESS, ret);
 
   ObServerSuperBlock ret_sb;
-  ret = OB_SERVER_BLOCK_MGR.read_super_block(ret_sb);
+  ret = OB_SERVER_BLOCK_MGR.read_super_block(ret_sb,  OB_STORAGE_OBJECT_MGR.super_block_buf_holder_);
   ASSERT_EQ(common::OB_SUCCESS, ret);
 
   ASSERT_EQ(super_block.body_.macro_block_size_, ret_sb.body_.macro_block_size_);
@@ -190,7 +200,9 @@ TEST_F(TestRefCnt, test_inc_and_dec_ref)
     ASSERT_EQ(OB_SUCCESS, ret);
   }
   ObMacroBlockInfo block_info;
-  ret = OB_SERVER_BLOCK_MGR.get_macro_block_info(macro_id, block_info);
+  ObMacroBlockHandle block_handle;
+  ret = OB_SERVER_BLOCK_MGR.get_macro_block_info(macro_id, block_info, block_handle);
+  block_handle.reset();
   ASSERT_EQ(OB_SUCCESS, ret);
   ASSERT_EQ(1, block_info.ref_cnt_);
 }
@@ -229,7 +241,9 @@ TEST_F(TestRefCnt, test_overmuch_dec_ref)
   }
   ASSERT_EQ(OB_ERR_SYS, ret);
   ObMacroBlockInfo block_info;
-  ret = OB_SERVER_BLOCK_MGR.get_macro_block_info(macro_id, block_info);
+  ObMacroBlockHandle block_handle;
+  ret = OB_SERVER_BLOCK_MGR.get_macro_block_info(macro_id, block_info, block_handle);
+  block_handle.reset();
   ASSERT_EQ(OB_SUCCESS, ret);
   ASSERT_EQ(0, block_info.ref_cnt_);
 }
@@ -250,7 +264,9 @@ TEST_F(TestRefCnt, test_1_0_1)
     ASSERT_EQ(OB_SUCCESS, ret);
   }
   ObMacroBlockInfo block_info;
-  ret = OB_SERVER_BLOCK_MGR.get_macro_block_info(macro_id, block_info);
+  ObMacroBlockHandle block_handle;
+  ret = OB_SERVER_BLOCK_MGR.get_macro_block_info(macro_id, block_info, block_handle);
+  block_handle.reset();
   ASSERT_EQ(OB_SUCCESS, ret);
   ASSERT_EQ(1, block_info.ref_cnt_);
 
@@ -265,7 +281,9 @@ TEST_F(TestRefCnt, test_1_0_1)
     ASSERT_EQ(OB_SUCCESS, ret);
   }
 
-  ret = OB_SERVER_BLOCK_MGR.get_macro_block_info(macro_id, block_info);
+  ObMacroBlockHandle tmp_block_handle;
+  ret = OB_SERVER_BLOCK_MGR.get_macro_block_info(macro_id, block_info, tmp_block_handle);
+  tmp_block_handle.reset();
   ASSERT_EQ(OB_SUCCESS, ret);
   ASSERT_EQ(1, block_info.ref_cnt_);
 

@@ -14,13 +14,16 @@
 
 #include "ob_table_load_control_rpc_struct.h"
 #include "observer/table_load/ob_table_load_utils.h"
+#include "sql/engine/ob_exec_context.h"
 
 namespace oceanbase
 {
 namespace observer
 {
 using namespace sql;
+using namespace storage;
 using namespace table;
+using namespace common;
 
 OB_SERIALIZE_MEMBER(ObDirectLoadControlRequest,
                     command_type_,
@@ -60,12 +63,16 @@ ObDirectLoadControlPreBeginArg::ObDirectLoadControlPreBeginArg()
     dup_action_(ObLoadDupActionType::LOAD_INVALID_MODE),
     px_mode_(false),
     online_opt_stat_gather_(false),
-    dest_table_id_(common::OB_INVALID_ID),
-    task_id_(0),
-    schema_version_(0),
-    snapshot_version_(0),
-    data_version_(0),
-    session_info_(nullptr)
+    session_info_(nullptr),
+    avail_memory_(0),
+    write_session_count_(0),
+    exe_mode_(ObTableLoadExeMode::MAX_TYPE),
+    method_(ObDirectLoadMethod::INVALID_METHOD),
+    insert_mode_(ObDirectLoadInsertMode::INVALID_INSERT_MODE),
+    load_mode_(ObDirectLoadMode::INVALID_MODE),
+    compressor_type_(ObCompressorType::INVALID_COMPRESSOR),
+    online_sample_percent_(1.),
+    allocator_("TLD_pre_begin")
 {
   free_session_ctx_.sessid_ = ObSQLSessionInfo::INVALID_SESSID;
 }
@@ -80,7 +87,26 @@ ObDirectLoadControlPreBeginArg::~ObDirectLoadControlPreBeginArg()
   }
 }
 
-OB_DEF_SERIALIZE_SIMPLE(ObDirectLoadControlPreBeginArg)
+int ObDirectLoadControlPreBeginArg::set_exec_ctx_serialized_str(const sql::ObExecContext &exec_ctx)
+{
+  int ret = OB_SUCCESS;
+  int64_t size = exec_ctx.get_serialize_size();
+  char *buf = (char *)allocator_.alloc(size);
+  int64_t pos = 0;
+
+  if (buf == nullptr) {
+    ret = OB_ALLOCATE_MEMORY_FAILED;
+    LOG_WARN("fail to alloc buf", KR(ret), K(size));
+  } else if (OB_FAIL(exec_ctx.serialize(buf, size, pos))) {
+    LOG_WARN("fail to serialize exec ctx", KR(ret));
+  } else {
+    exec_ctx_serialized_str_.assign(buf, pos);
+  }
+
+  return ret;
+}
+
+OB_DEF_SERIALIZE(ObDirectLoadControlPreBeginArg)
 {
   int ret = OB_SUCCESS;
   LST_DO_CODE(OB_UNIS_ENCODE,
@@ -90,11 +116,7 @@ OB_DEF_SERIALIZE_SIMPLE(ObDirectLoadControlPreBeginArg)
               dup_action_,
               px_mode_,
               online_opt_stat_gather_,
-              dest_table_id_,
-              task_id_,
-              schema_version_,
-              snapshot_version_,
-              data_version_,
+              ddl_param_,
               partition_id_array_,
               target_partition_id_array_);
   if (OB_SUCC(ret)) {
@@ -105,10 +127,20 @@ OB_DEF_SERIALIZE_SIMPLE(ObDirectLoadControlPreBeginArg)
       OB_UNIS_ENCODE(*session_info_);
     }
   }
+  LST_DO_CODE(OB_UNIS_ENCODE,
+              avail_memory_,
+              write_session_count_,
+              exe_mode_,
+              method_,
+              insert_mode_,
+              load_mode_,
+              compressor_type_,
+              online_sample_percent_,
+              exec_ctx_serialized_str_);
   return ret;
 }
 
-OB_DEF_DESERIALIZE_SIMPLE(ObDirectLoadControlPreBeginArg)
+OB_DEF_DESERIALIZE(ObDirectLoadControlPreBeginArg)
 {
   int ret = OB_SUCCESS;
   LST_DO_CODE(OB_UNIS_DECODE,
@@ -118,11 +150,7 @@ OB_DEF_DESERIALIZE_SIMPLE(ObDirectLoadControlPreBeginArg)
               dup_action_,
               px_mode_,
               online_opt_stat_gather_,
-              dest_table_id_,
-              task_id_,
-              schema_version_,
-              snapshot_version_,
-              data_version_,
+              ddl_param_,
               partition_id_array_,
               target_partition_id_array_);
   if (OB_SUCC(ret)) {
@@ -132,10 +160,26 @@ OB_DEF_DESERIALIZE_SIMPLE(ObDirectLoadControlPreBeginArg)
       OB_UNIS_DECODE(*session_info_);
     }
   }
+  LST_DO_CODE(OB_UNIS_DECODE,
+              avail_memory_,
+              write_session_count_,
+              exe_mode_,
+              method_,
+              insert_mode_,
+              load_mode_,
+              compressor_type_,
+              online_sample_percent_,
+              exec_ctx_serialized_str_);
+
+  if (OB_SUCC(ret)) {
+    if (OB_FAIL(ob_write_string(allocator_, exec_ctx_serialized_str_, exec_ctx_serialized_str_))) {
+      LOG_WARN("fail to copy string", KR(ret));
+    }
+  }
   return ret;
 }
 
-OB_DEF_SERIALIZE_SIZE_SIMPLE(ObDirectLoadControlPreBeginArg)
+OB_DEF_SERIALIZE_SIZE(ObDirectLoadControlPreBeginArg)
 {
   int ret = OB_SUCCESS;
   int64_t len = 0;
@@ -146,11 +190,7 @@ OB_DEF_SERIALIZE_SIZE_SIMPLE(ObDirectLoadControlPreBeginArg)
               dup_action_,
               px_mode_,
               online_opt_stat_gather_,
-              dest_table_id_,
-              task_id_,
-              schema_version_,
-              snapshot_version_,
-              data_version_,
+              ddl_param_,
               partition_id_array_,
               target_partition_id_array_);
   if (OB_SUCC(ret)) {
@@ -161,104 +201,123 @@ OB_DEF_SERIALIZE_SIZE_SIMPLE(ObDirectLoadControlPreBeginArg)
       OB_UNIS_ADD_LEN(*session_info_);
     }
   }
+  LST_DO_CODE(OB_UNIS_ADD_LEN,
+              avail_memory_,
+              write_session_count_,
+              exe_mode_,
+              method_,
+              insert_mode_,
+              load_mode_,
+              compressor_type_,
+              online_sample_percent_,
+              exec_ctx_serialized_str_);
   return len;
 }
 
 // confirm_begin
-OB_SERIALIZE_MEMBER_SIMPLE(ObDirectLoadControlConfirmBeginArg,
-                           table_id_,
-                           task_id_);
+OB_SERIALIZE_MEMBER(ObDirectLoadControlConfirmBeginArg,
+                    table_id_,
+                    task_id_);
 
 // pre_merge
-OB_SERIALIZE_MEMBER_SIMPLE(ObDirectLoadControlPreMergeArg,
-                           table_id_,
-                           task_id_,
-                           committed_trans_id_array_);
+OB_SERIALIZE_MEMBER(ObDirectLoadControlPreMergeArg,
+                    table_id_,
+                    task_id_,
+                    committed_trans_id_array_);
 
 // start_merge
-OB_SERIALIZE_MEMBER_SIMPLE(ObDirectLoadControlStartMergeArg,
-                           table_id_,
-                           task_id_);
+OB_SERIALIZE_MEMBER(ObDirectLoadControlStartMergeArg,
+                    table_id_,
+                    task_id_);
 
 // commit
-OB_SERIALIZE_MEMBER_SIMPLE(ObDirectLoadControlCommitArg,
-                           table_id_,
-                           task_id_);
+OB_SERIALIZE_MEMBER(ObDirectLoadControlCommitArg,
+                    table_id_,
+                    task_id_);
 
-OB_SERIALIZE_MEMBER_SIMPLE(ObDirectLoadControlCommitRes,
-                           result_info_,
-                           sql_statistics_);
+OB_SERIALIZE_MEMBER(ObDirectLoadControlCommitRes,
+                    result_info_,
+                    sql_statistics_,
+                    trans_result_,
+                    dml_stats_);
 
 // abort
-OB_SERIALIZE_MEMBER_SIMPLE(ObDirectLoadControlAbortArg,
-                           table_id_,
-                           task_id_);
+OB_SERIALIZE_MEMBER(ObDirectLoadControlAbortArg,
+                    table_id_,
+                    task_id_);
 
-OB_SERIALIZE_MEMBER_SIMPLE(ObDirectLoadControlAbortRes,
-                           is_stopped_);
+OB_SERIALIZE_MEMBER(ObDirectLoadControlAbortRes,
+                    is_stopped_);
 
 // get_status
-OB_SERIALIZE_MEMBER_SIMPLE(ObDirectLoadControlGetStatusArg,
-                           table_id_,
-                           task_id_);
+OB_SERIALIZE_MEMBER(ObDirectLoadControlGetStatusArg,
+                    table_id_,
+                    task_id_);
 
-OB_SERIALIZE_MEMBER_SIMPLE(ObDirectLoadControlGetStatusRes,
-                           status_,
-                           error_code_);
+OB_SERIALIZE_MEMBER(ObDirectLoadControlGetStatusRes,
+                    status_,
+                    error_code_);
 
 // heartbeat
-OB_SERIALIZE_MEMBER_SIMPLE(ObDirectLoadControlHeartBeatArg,
-                           table_id_,
-                           task_id_);
+OB_SERIALIZE_MEMBER(ObDirectLoadControlHeartBeatArg,
+                    table_id_,
+                    task_id_);
 
 // pre_start_trans
-OB_SERIALIZE_MEMBER_SIMPLE(ObDirectLoadControlPreStartTransArg,
-                           table_id_,
-                           task_id_,
-                           trans_id_);
+OB_SERIALIZE_MEMBER(ObDirectLoadControlPreStartTransArg,
+                    table_id_,
+                    task_id_,
+                    trans_id_);
 
 // confirm_start_trans
-OB_SERIALIZE_MEMBER_SIMPLE(ObDirectLoadControlConfirmStartTransArg,
-                           table_id_,
-                           task_id_,
-                           trans_id_);
+OB_SERIALIZE_MEMBER(ObDirectLoadControlConfirmStartTransArg,
+                    table_id_,
+                    task_id_,
+                    trans_id_);
 
 // pre_finish_trans
-OB_SERIALIZE_MEMBER_SIMPLE(ObDirectLoadControlPreFinishTransArg,
-                           table_id_,
-                           task_id_,
-                           trans_id_);
+OB_SERIALIZE_MEMBER(ObDirectLoadControlPreFinishTransArg,
+                    table_id_,
+                    task_id_,
+                    trans_id_);
 
 // confirm_finish_trans
-OB_SERIALIZE_MEMBER_SIMPLE(ObDirectLoadControlConfirmFinishTransArg,
-                           table_id_,
-                           task_id_,
-                           trans_id_);
+OB_SERIALIZE_MEMBER(ObDirectLoadControlConfirmFinishTransArg,
+                    table_id_,
+                    task_id_,
+                    trans_id_);
 
 // abandon_trans
-OB_SERIALIZE_MEMBER_SIMPLE(ObDirectLoadControlAbandonTransArg,
-                           table_id_,
-                           task_id_,
-                           trans_id_);
+OB_SERIALIZE_MEMBER(ObDirectLoadControlAbandonTransArg,
+                    table_id_,
+                    task_id_,
+                    trans_id_);
 
 // get_trans_status
-OB_SERIALIZE_MEMBER_SIMPLE(ObDirectLoadControlGetTransStatusArg,
-                           table_id_,
-                           task_id_,
-                           trans_id_);
+OB_SERIALIZE_MEMBER(ObDirectLoadControlGetTransStatusArg,
+                    table_id_,
+                    task_id_,
+                    trans_id_);
 
-OB_SERIALIZE_MEMBER_SIMPLE(ObDirectLoadControlGetTransStatusRes,
-                           trans_status_,
-                           error_code_);
+OB_SERIALIZE_MEMBER(ObDirectLoadControlGetTransStatusRes,
+                    trans_status_,
+                    error_code_);
 
 // insert_trans
-OB_SERIALIZE_MEMBER_SIMPLE(ObDirectLoadControlInsertTransArg,
-                           table_id_,
-                           task_id_,
-                           trans_id_,
-                           session_id_,
-                           sequence_no_,
-                           payload_);
+OB_SERIALIZE_MEMBER(ObDirectLoadControlInsertTransArg,
+                    table_id_,
+                    task_id_,
+                    trans_id_,
+                    session_id_,
+                    sequence_no_,
+                    payload_);
+
+// init empty tablets
+OB_SERIALIZE_MEMBER(ObDirectLoadControlInitEmptyTabletsArg,
+                    table_id_,
+                    ddl_param_,
+                    partition_id_array_,
+                    target_partition_id_array_);
 
 } // namespace observer
 } // namespace oceanbase

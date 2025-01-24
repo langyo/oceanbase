@@ -111,8 +111,10 @@ int ObDeadLockDetectorMgr::InnerAllocHandle::InnerFactory::create(const UserBina
                  is_successfully_constructed()) {
       ret = OB_INIT_FAIL;
       DETECT_LOG(WARN, "construct ObLCLNode obj failed", KR(ret));
+      mtl_free(p_detector);
+    } else {
+      ATOMIC_INC(&create_count_);
     }
-    ATOMIC_INC(&create_count_);
   }
 
   return ret;
@@ -185,7 +187,8 @@ int ObDeadLockDetectorMgr::init()
       proxy_ = new (proxy_) obrpc::ObDetectorRpcProxy();
       rpc_ = new (rpc_) ObDeadLockDetectorRpc();
     }
-    if (OB_FAIL(time_wheel_.init(TIME_WHEEL_PRECISION_US,
+    if (OB_FAIL(ret)) {
+    } else if (OB_FAIL(time_wheel_.init(TIME_WHEEL_PRECISION_US,
                                  TIMER_THREAD_COUNT,
                                  DETECTOR_TIMER_NAME))) {
       DETECT_LOG(WARN, "time_wheel_ init failed", PRINT_WRAPPER);
@@ -394,6 +397,7 @@ int ObDeadLockDetectorMgr::process_notify_parent_message(
     SET_USE_500(attr);
     ObDeadLockDetectorMgr *p_deadlock_detector_mgr = MTL(ObDeadLockDetectorMgr *);
     if (OB_ISNULL(p_deadlock_detector_mgr)) {
+      ret = OB_ERR_UNEXPECTED;
       DETECT_LOG(ERROR, "can not get ObDeadLockDetectorMgr", KP(p_deadlock_detector_mgr), K(MTL_ID()));
     } else if (OB_FAIL(p_deadlock_detector_mgr->inner_alloc_handle_.inner_factory_.create(binary_key,
                                                             [](const common::ObIArray<ObDetectorInnerReportInfo> &,

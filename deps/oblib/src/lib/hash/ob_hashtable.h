@@ -905,6 +905,24 @@ public:
     return bucket_iterator(this, bucket_num_, NULL);
   }
 
+  int get_bucket_iterator(const int64_t bucket_pos, bucket_iterator &iterator)
+  {
+    int ret = OB_SUCCESS;
+    hashbucket *bucket = NULL;
+    if (OB_UNLIKELY(!inited(buckets_)) || OB_UNLIKELY(NULL == allocer_)) {
+      ret = OB_NOT_INIT;
+      HASH_WRITE_LOG(HASH_WARNING, "hashtable not init, backtrace=%s", lbt());
+    } else if (OB_UNLIKELY((bucket_pos < 0) || (bucket_pos >= bucket_num_))) {
+      ret = OB_INVALID_ARGUMENT;
+      HASH_WRITE_LOG(HASH_WARNING, "invalid bucket pos, bucket_pos = %ld, bucket_num = %ld",
+                     bucket_pos, bucket_num_);
+    } else {
+      bucket = &buckets_[bucket_pos];
+      iterator = bucket_iterator(this, bucket_pos, bucket);
+    }
+    return ret;
+  }
+
   iterator begin()
   {
     hashnode *node = NULL;
@@ -1005,6 +1023,8 @@ private:
       node->magic_ = hashnode::MAGIC;
       if (OB_FAIL(copy_assign(node->data, value))) {
         HASH_WRITE_LOG(HASH_FATAL, "failed to copy data, ret = %d", ret);
+        allocer_->free(node);
+        node = NULL;
       } else {
         node->is_fake = is_fake;
         node->next = bucket.node;
@@ -1165,7 +1185,7 @@ public:
   // if callback failed, erase the node
   // parameters:
   //   flag: 0 shows that not cover existing object.
-  //   callback: MUST with a int operater()
+  //   callback: MUST with a int operator()
   // return value:
   //   OB_SUCCESS for success, the node is set
   //   OB_HASH_EXIST for node already exist

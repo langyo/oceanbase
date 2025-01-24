@@ -9,7 +9,6 @@
  * MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
  * See the Mulan PubL v2 for more details.
  */
-
 #pragma once
 
 #include "lib/allocator/page_arena.h"
@@ -20,9 +19,12 @@
 #include "share/table/ob_table_load_define.h"
 #include "sql/engine/cmd/ob_load_data_impl.h"
 #include "sql/engine/cmd/ob_load_data_parser.h"
+#include "sql/engine/cmd/ob_load_data_file_reader.h"
 #include "common/storage/ob_io_device.h"
 #include "observer/table_load/ob_table_load_exec_ctx.h"
 #include "observer/table_load/ob_table_load_instance.h"
+#include "storage/direct_load/ob_direct_load_struct.h"
+#include "sql/engine/cmd/ob_load_data_storage_info.h"
 
 namespace oceanbase
 {
@@ -34,6 +36,7 @@ class ObTableLoadExecCtx;
 class ObTableLoadCoordinator;
 class ObITableLoadTaskScheduler;
 class ObTableLoadInstance;
+class ObTableLoadBackupTable;
 } // namespace observer
 namespace sql
 {
@@ -64,10 +67,11 @@ private:
     TO_STRING_KV(K_(file_location), K_(file_column_num), K_(file_cs_type));
   public:
     ObLoadFileLocation file_location_;
-    share::ObBackupStorageInfo access_info_;
+    ObLoadDataStorageInfo access_info_;
     int64_t file_column_num_; // number of column in file
     ObDataInFileStruct file_format_;
     common::ObCollationType file_cs_type_;
+    ObCSVGeneralFormat::ObCSVCompression compression_format_;
   };
 
   struct LoadExecuteParam
@@ -75,14 +79,31 @@ private:
   public:
     LoadExecuteParam();
     bool is_valid() const;
-    TO_STRING_KV(K_(tenant_id), K_(database_id), K_(table_id), K_(combined_name), K_(parallel), K_(thread_count),
-                 K_(batch_row_count), K_(data_mem_usage_limit), K_(need_sort), K_(online_opt_stat_gather),
-                 K_(max_error_rows), K_(ignore_row_num), K_(data_access_param), K_(store_column_idxs));
+    TO_STRING_KV(K_(tenant_id),
+                 K_(database_id),
+                 K_(table_id),
+                 K_(combined_name),
+                 K_(parallel),
+                 K_(thread_count),
+                 K_(batch_row_count),
+                 K_(data_mem_usage_limit),
+                 K_(need_sort),
+                 K_(online_opt_stat_gather),
+                 K_(max_error_rows),
+                 K_(ignore_row_num),
+                 K_(dup_action),
+                 "method", storage::ObDirectLoadMethod::get_type_string(method_),
+                 "insert_mode", storage::ObDirectLoadInsertMode::get_type_string(insert_mode_),
+                 K_(load_level),
+                 K_(data_access_param),
+                 K_(column_ids),
+                 K_(compressor_type),
+                 K_(online_sample_percent),
+                 K_(tablet_ids));
   public:
     uint64_t tenant_id_;
     uint64_t database_id_;
     uint64_t table_id_;
-    uint64_t sql_mode_;
     common::ObString database_name_;
     common::ObString table_name_;
     common::ObString combined_name_; // database name + table name
@@ -95,9 +116,14 @@ private:
     int64_t max_error_rows_; // max allowed error rows
     int64_t ignore_row_num_; // number of rows to ignore per file
     sql::ObLoadDupActionType dup_action_;
+    storage::ObDirectLoadMethod::Type method_;
+    storage::ObDirectLoadInsertMode::Type insert_mode_;
+    storage::ObDirectLoadLevel::Type load_level_;
     DataAccessParam data_access_param_;
-    common::ObSEArray<int64_t, 16>
-      store_column_idxs_; // Mapping of stored columns to source data columns
+    ObArray<uint64_t> column_ids_;
+    ObCompressorType compressor_type_;
+    double online_sample_percent_;
+    ObArray<ObTabletID> tablet_ids_;
   };
 
   struct LoadExecuteContext
@@ -107,7 +133,7 @@ private:
     bool is_valid() const;
     TO_STRING_KV(K_(exec_ctx), KP_(allocator), KP_(direct_loader), KP_(job_stat), KP_(logger));
   public:
-    observer::ObTableLoadSqlExecCtx exec_ctx_;
+    observer::ObTableLoadExecCtx exec_ctx_;
     common::ObIAllocator *allocator_;
     observer::ObTableLoadInstance *direct_loader_;
     sql::ObLoadDataStat *job_stat_;
@@ -166,63 +192,8 @@ private:
     int get_next_data_desc(DataDesc &data_desc, int64_t &pos);
     TO_STRING_KV(K_(data_descs), K_(pos));
   private:
-    common::ObSEArray<DataDesc, 64> data_descs_;
+    common::ObArray<DataDesc> data_descs_;
     int64_t pos_;
-  };
-
-  class IRandomIODevice
-  {
-  public:
-    virtual ~IRandomIODevice() = default;
-    virtual int open(const DataAccessParam &data_access_param, const ObString &filename) = 0;
-    virtual int pread(char *buf, int64_t count, int64_t offset, int64_t &read_size) = 0;
-    virtual int get_file_size(int64_t &file_size) = 0;
-  };
-
-  class RandomFileReader : public IRandomIODevice
-  {
-  public:
-    RandomFileReader();
-    virtual ~RandomFileReader();
-    int open(const DataAccessParam &data_access_param, const ObString &filename) override;
-    int pread(char *buf, int64_t count, int64_t offset, int64_t &read_size) override;
-    int get_file_size(int64_t &file_size) override;
-  private:
-    ObString filename_;
-    ObFileReader file_reader_;
-    bool is_inited_;
-  };
-
-  class RandomOSSReader : public IRandomIODevice
-  {
-  public:
-    RandomOSSReader();
-    virtual ~RandomOSSReader();
-    int open(const DataAccessParam &data_access_param, const ObString &filename) override;
-    int pread(char *buf, int64_t count, int64_t offset, int64_t &read_size) override;
-    int get_file_size(int64_t &file_size) override;
-  private:
-    ObIODevice *device_handle_;
-    ObIOFd fd_;
-    bool is_inited_;
-  };
-
-  class SequentialDataAccessor
-  {
-  public:
-    SequentialDataAccessor();
-    ~SequentialDataAccessor();
-    int init(const DataAccessParam &data_access_param, const ObString &filename);
-    int read(char *buf, int64_t count, int64_t &read_size);
-    int get_file_size(int64_t &file_size);
-    void seek(int64_t offset) { offset_ = offset; }
-    int64_t get_offset() const { return offset_; }
-  private:
-    RandomFileReader random_file_reader_;
-    RandomOSSReader random_oss_reader_;
-    IRandomIODevice *random_io_device_;
-    int64_t offset_;
-    bool is_inited_;
   };
 
   struct DataBuffer
@@ -256,20 +227,26 @@ private:
   {
   public:
     DataReader();
+    ~DataReader();
     int init(const DataAccessParam &data_access_param, LoadExecuteContext &execute_ctx,
              const DataDesc &data_desc, bool read_raw = false);
     int get_next_buffer(ObLoadFileBuffer &file_buffer, int64_t &line_count,
                         int64_t limit = INT64_MAX);
     int get_next_raw_buffer(DataBuffer &data_buffer);
     bool has_incomplate_data() const { return data_trimer_.has_incomplate_data(); }
-    bool is_end_file() const { return io_accessor_.get_offset() >= end_offset_; }
+    bool is_end_file() const;
     ObCSVGeneralParser &get_csv_parser() { return csv_parser_; }
+
   private:
+    int read_buffer(ObLoadFileBuffer &file_buffer);
+
+  private:
+    ObArenaAllocator allocator_;
     LoadExecuteContext *execute_ctx_;
     ObCSVGeneralParser csv_parser_; // 用来计算完整行
     ObLoadFileDataTrimer data_trimer_; // 缓存不完整行的数据
-    SequentialDataAccessor io_accessor_;
-    int64_t end_offset_;
+    ObFileReader *file_reader_;
+    int64_t end_offset_; // use -1 in stream file such as load data local
     bool read_raw_;
     bool is_iter_end_;
     bool is_inited_;
@@ -399,6 +376,7 @@ private:
       table::ObTableLoadArray<ObObj> objs_;
     };
   protected:
+    ObArenaAllocator allocator_;
     const LoadExecuteParam *execute_param_;
     LoadExecuteContext *execute_ctx_;
     observer::ObTableLoadObjectAllocator<observer::ObTableLoadTask> task_allocator_;
@@ -408,8 +386,10 @@ private:
     // task ctrl
     ObParallelTaskController task_controller_;
     ObConcurrentFixedCircularArray<TaskHandle *> handle_reserve_queue_;
-    common::ObSEArray<TaskHandle *, 64> handle_resource_; // 用于释放资源
+    common::ObArray<TaskHandle *> handle_resource_; // 用于释放资源
     int64_t total_line_count_;
+    // trans
+    observer::ObTableLoadInstance::TransCtx trans_ctx_;
     bool is_inited_;
   private:
     DISALLOW_COPY_AND_ASSIGN(FileLoadExecutor);
@@ -472,9 +452,52 @@ private:
   class MultiFilesLoadTaskProcessor;
 
 private:
+  /**
+   * BackupLoadExecutor
+   */
+  class BackupLoadExecutor
+  {
+    const int64_t MIN_TASK_PER_WORKER = 4;
+  public:
+    BackupLoadExecutor();
+    ~BackupLoadExecutor();
+    int init(const LoadExecuteParam &execute_param, LoadExecuteContext &execute_ctx,
+             const ObString &path);
+    int execute();
+    int get_next_partition_task(int64_t &partition_idx, int64_t &subpart_count,
+                                int64_t &subpart_idx);
+    int process_partition(int32_t session_id, int64_t partition_idx, int64_t subpart_count = 1,
+                          int64_t subpart_idx = 0);
+    void task_finished(observer::ObTableLoadTask *task, int ret_code);
+    int64_t get_total_line_count() const { return total_line_count_; }
+    int check_status();
+  private:
+    int check_support_direct_load();
+  private:
+    ObArenaAllocator allocator_;
+    const LoadExecuteParam *execute_param_;
+    LoadExecuteContext *execute_ctx_;
+    observer::ObTableLoadBackupTable *backup_table_;
+    observer::ObTableLoadObjectAllocator<observer::ObTableLoadTask> task_allocator_;
+    observer::ObITableLoadTaskScheduler *task_scheduler_;
+    ObParallelTaskController task_controller_;
+    int64_t worker_count_;
+    int64_t partition_count_;
+    int64_t subpart_count_;
+    lib::ObMutex mutex_;
+    int64_t next_partition_idx_;
+    int64_t next_subpart_idx_;
+    int64_t total_line_count_;
+    int task_error_code_;
+    bool is_inited_;
+  };
+
+  class BackupLoadTaskProcessor;
+  class BackupLoadTaskCallback;
+
+private:
   int init_file_iter();
   // init execute param
-  int init_store_column_idxs(common::ObIArray<int64_t> &store_column_idxs);
   int init_execute_param();
   // init execute context
   int init_logger();
@@ -483,6 +506,7 @@ private:
 private:
   ObExecContext *ctx_;
   ObLoadDataStmt *load_stmt_;
+  ObPhysicalPlan plan_;
   LoadExecuteParam execute_param_;
   LoadExecuteContext execute_ctx_;
   observer::ObTableLoadInstance direct_loader_;

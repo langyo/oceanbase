@@ -60,12 +60,13 @@ int ObSqlEndTransCb::set_packet_param(const sql::ObEndTransCbPacketParam &pkt_pa
 int ObSqlEndTransCb::init(ObMPPacketSender& packet_sender, 
                           sql::ObSQLSessionInfo *sess_info, 
                           int32_t stmt_id,
-                          uint64_t params_num)
+                          uint64_t params_num,
+                          int64_t com_offset)
 {
   sess_info_ = sess_info;
   stmt_id_ = stmt_id;
   params_num_ = params_num;
-  return packet_sender_.clone_from(packet_sender);
+  return packet_sender_.clone_from(packet_sender, com_offset);
 }
 
 void ObSqlEndTransCb::callback(int cb_param, const transaction::ObTransID &trans_id)
@@ -132,7 +133,7 @@ void ObSqlEndTransCb::callback(int cb_param)
       session_info->reset_warnings_buf();
     }
 
-    ObPieceCache *piece_cache = static_cast<ObPieceCache*>(session_info->get_piece_cache());
+    ObPieceCache *piece_cache = session_info->get_piece_cache();
     if (OB_ISNULL(piece_cache)) {
       // do nothing
       // piece_cache not be null in piece data protocol
@@ -152,8 +153,10 @@ void ObSqlEndTransCb::callback(int cb_param)
       }
     }
 
-    ObActiveSessionGuard::get_stat().in_sql_execution_ = false;
-    ObActiveSessionGuard::setup_default_ash();
+    GET_DIAGNOSTIC_INFO->get_ash_stat().in_sql_execution_ = false;
+    session_info->reset_cur_sql_id();
+    session_info->reset_current_plan_hash();
+    session_info->reset_current_plan_id();
     session_info->set_session_sleep();
     if (OB_SUCCESS == ret) {
       if (need_disconnect_) {

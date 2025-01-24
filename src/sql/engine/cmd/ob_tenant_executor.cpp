@@ -24,7 +24,7 @@
 #include "share/ls/ob_ls_operator.h"
 #include "share/ob_leader_election_waiter.h"
 #include "share/ls/ob_ls_status_operator.h"       //ObLSStatusInfo, ObLSStatusOperator
-#include "share/ob_primary_standby_service.h" // ObPrimaryStandbyService
+#include "rootserver/standby/ob_standby_service.h" // ObStandbyService
 #include "sql/session/ob_sql_session_info.h"
 #include "sql/resolver/ddl/ob_create_tenant_stmt.h"
 #include "sql/resolver/ddl/ob_drop_tenant_stmt.h"
@@ -250,7 +250,7 @@ int ObCreateStandbyTenantExecutor::execute(ObExecContext &ctx, ObCreateTenantStm
   } else if (OB_ISNULL(common_rpc_proxy = task_exec_ctx->get_common_rpc())) {
     ret = OB_NOT_INIT;
     LOG_WARN("get common rpc proxy failed");
-  } else if (OB_FAIL(OB_PRIMARY_STANDBY_SERVICE.check_can_create_standby_tenant(
+  } else if (OB_FAIL(OB_STANDBY_SERVICE.check_can_create_standby_tenant(
                          create_tenant_arg.log_restore_source_, compat_mode))) {
     LOG_WARN("check can create standby_tenant failed", KR(ret), K(create_tenant_arg));
   } else {
@@ -264,7 +264,7 @@ int ObCreateStandbyTenantExecutor::execute(ObExecContext &ctx, ObCreateTenantStm
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("if_not_exist not set and tenant_id invalid tenant_id", KR(ret), K(create_tenant_arg), K(tenant_id));
   } else if (OB_INVALID_ID != tenant_id) {
-    if (OB_FAIL(OB_PRIMARY_STANDBY_SERVICE.wait_create_standby_tenant_end(tenant_id))) {
+    if (OB_FAIL(OB_STANDBY_SERVICE.wait_create_standby_tenant_end(tenant_id))) {
       LOG_WARN("failed to wait user create end", KR(ret), K(tenant_id));
     }
   }
@@ -342,7 +342,7 @@ int check_sys_var_options(ObExecContext &ctx,
             if (OB_FAIL(ObVariableSetExecutor::check_and_convert_sys_var(ctx, set_var, *sys_var, value_obj, out_obj, is_set_stmt))) {
               LOG_WARN("fail to check_and_convert_sys_var", K(cur_node), K(*sys_var), K(value_obj), K(ret));
             } else if (FALSE_IT(value_obj = out_obj)) {
-            } else if (OB_FAIL(ObVariableSetExecutor::cast_value(ctx, cur_node, fake_tenant_id, *expr_ctx.calc_buf_,
+            } else if (OB_FAIL(ObVariableSetExecutor::cast_value(ctx, cur_node, fake_tenant_id, ctx.get_allocator(),
                                           *sys_var, value_obj, out_obj))) {
               LOG_WARN("fail to cast value", K(cur_node), K(*sys_var), K(value_obj), K(ret));
             } else if (FALSE_IT(value_obj = out_obj)) {
@@ -492,6 +492,9 @@ int modify_progressive_merge_num_for_tenant(ObExecContext &ctx,
                 do_alter = false;
               }
               if (table->is_tmp_table()) {
+                do_alter = false;
+              }
+              if (table->is_external_table()) {
                 do_alter = false;
               }
               if (do_alter) {
@@ -777,11 +780,14 @@ int ObDropTenantExecutor::execute(ObExecContext &ctx, ObDropTenantStmt &stmt)
       LOG_USER_ERROR(OB_TENANT_NOT_EXIST, drop_tenant_arg.tenant_name_.length(), drop_tenant_arg.tenant_name_.ptr());
       LOG_WARN("tenant not exist", KR(ret), K(drop_tenant_arg));
     }
-  } else if (OB_FAIL(common_rpc_proxy->drop_tenant(drop_tenant_arg))) {
-    LOG_WARN("rpc proxy drop tenant failed", K(ret));
-  } else if (OB_FAIL(check_tenant_has_been_dropped_(
-             ctx, stmt, tenant_schema->get_tenant_id()))) {
-    LOG_WARN("fail to check tenant has been dropped", KR(ret), KPC(tenant_schema));
+  } else {
+    DEBUG_SYNC(BEFORE_DROP_TENANT);
+    if (OB_FAIL(common_rpc_proxy->drop_tenant(drop_tenant_arg))) {
+      LOG_WARN("rpc proxy drop tenant failed", K(ret));
+    } else if (OB_FAIL(check_tenant_has_been_dropped_(
+              ctx, stmt, tenant_schema->get_tenant_id()))) {
+      LOG_WARN("fail to check tenant has been dropped", KR(ret), KPC(tenant_schema));
+    }
   }
   return ret;
 }

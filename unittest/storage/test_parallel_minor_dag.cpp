@@ -79,7 +79,12 @@ void TestParallelMinorDag::SetUp()
   ObTenantMetaMemMgr *t3m = OB_NEW(ObTenantMetaMemMgr, ObModIds::TEST, tenant_id_);
   ASSERT_EQ(OB_SUCCESS, t3m->init());
 
+  ObTimerService *timer_service = OB_NEW(ObTimerService, ObModIds::TEST, tenant_id_);
+  ASSERT_NE(nullptr, timer_service);
+  ASSERT_EQ(OB_SUCCESS, timer_service->start());
+
   tenant_base_.set(t3m);
+  tenant_base_.set(timer_service);
   ObTenantEnv::set_tenant(&tenant_base_);
   ASSERT_EQ(OB_SUCCESS, tenant_base_.init());
 
@@ -98,6 +103,11 @@ void TestParallelMinorDag::TearDown()
 
   ObTenantMetaMemMgr *t3m = MTL(ObTenantMetaMemMgr *);
   t3m->destroy();
+  ObTimerService *timer_service = MTL(ObTimerService *);
+  ASSERT_NE(nullptr, timer_service);
+  timer_service->stop();
+  timer_service->wait();
+  timer_service->destroy();
   ObTenantEnv::set_tenant(nullptr);
 }
 
@@ -112,7 +122,6 @@ int TestParallelMinorDag::prepare_merge_result(
   result.version_range_.snapshot_version_ = 100;
   result.version_range_.multi_version_start_ = 100;
   result.merge_version_ = 0;
-  result.create_snapshot_version_ = 0;
 
   int64_t log_ts = 1;
   for (int i = 0; OB_SUCC(ret) && i < sstable_cnt; ++i) {

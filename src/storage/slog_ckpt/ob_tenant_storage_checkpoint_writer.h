@@ -17,26 +17,61 @@
 #include "storage/ob_super_block_struct.h"
 #include "storage/meta_mem/ob_tablet_map_key.h"
 #include "storage/meta_mem/ob_tenant_meta_mem_mgr.h"
+#include "storage/slog/ob_storage_log.h"
 
 namespace oceanbase
 {
+namespace share
+{
+class ObLSID;
+}
+
 namespace storage
 {
-class ObSharedBlockReaderWriter;
+struct ObLSCkptMember;
+
+enum class ObTenantStorageMetaType
+{
+  CKPT = 0,
+  SNAPSHOT = 1,
+  CLONE = 2,
+  INVALID_TYPE
+};
+
+class ObTenantCheckpointSlogHandler;
+
 class ObTenantStorageCheckpointWriter final
 {
+public:
+  static bool ignore_ret(int ret);
 public:
   ObTenantStorageCheckpointWriter();
   ~ObTenantStorageCheckpointWriter() = default;
   ObTenantStorageCheckpointWriter(const ObTenantStorageCheckpointWriter &) = delete;
   ObTenantStorageCheckpointWriter &operator=(const ObTenantStorageCheckpointWriter &) = delete;
-
-  int init();
+  int init(const ObTenantStorageMetaType meta_type,
+           ObTenantCheckpointSlogHandler *ckpt_slog_handler);
   void reset();
-  int write_checkpoint(ObTenantSuperBlock &super_block);
+
+  // record meta for ckpt
+  int record_meta(blocksstable::MacroBlockId &ls_meta_entry);
+
+  // record meta for snapshot
+  int record_single_ls_meta(
+      const blocksstable::MacroBlockId &orig_ls_meta_entry,
+      const share::ObLSID &ls_id,
+      ObIArray<blocksstable::MacroBlockId> &orig_linked_block_list,
+      blocksstable::MacroBlockId &ls_meta_entry,
+      share::SCN &clog_max_scn);
+  int delete_single_ls_meta(
+      const blocksstable::MacroBlockId &orig_ls_meta_entry,
+      const share::ObLSID &ls_id,
+      ObIArray<blocksstable::MacroBlockId> &orig_linked_block_list,
+      blocksstable::MacroBlockId &ls_meta_entry);
+
   int get_ls_block_list(common::ObIArray<blocksstable::MacroBlockId> *&block_list);
   int get_tablet_block_list(common::ObIArray<blocksstable::MacroBlockId> *&block_list);
-  int batch_compare_and_swap_tablet(const bool is_replay_old);
+  int batch_compare_and_swap_tablet();
   int rollback();
 
 private:
@@ -58,20 +93,35 @@ private:
     TO_STRING_KV(K_(tablet_key), K_(old_addr), K_(new_addr), K_(tablet_pool_type), K_(need_rollback));
   };
 
-  static bool ignore_ret(int ret);
+  int copy_ls_meta_for_deleting(const ObMetaDiskAddr &addr, const char *buf, const int64_t buf_len,
+                                const share::ObLSID &ls_id);
+  int copy_ls_meta_for_creating(const ObMetaDiskAddr &addr, const char *buf, const int64_t buf_len);
+  int write_item(const ObLSCkptMember &ls_ckpt_member);
+  int close(blocksstable::MacroBlockId &ls_meta_entry);
+  int do_record_ls_meta(ObLS &ls, share::SCN &clog_max_scn);
   int get_tablet_with_addr(
       const TabletItemAddrInfo &addr_info,
       ObTabletHandle &tablet_handle);
-  int do_rollback(const ObMetaDiskAddr &load_addr);
-  int write_ls_checkpoint(blocksstable::MacroBlockId &ls_entry_block);
-  int write_tablet_checkpoint(ObLS &ls, blocksstable::MacroBlockId &tablet_meta_entry);
-  int copy_one_tablet_item(
+  int record_ls_meta(blocksstable::MacroBlockId &ls_entry_block);
+  int record_tablet_meta(ObLS &ls, blocksstable::MacroBlockId &tablet_meta_entry, share::SCN &clog_max_scn);
+  int persist_and_copy_tablet(
       const ObTabletMapKey &tablet_key,
       const ObMetaDiskAddr &old_addr,
-      char *slog_buf);
+      char (&slog_buf)[sizeof(ObUpdateTabletLog)]);
+  int copy_tablet(
+      const ObTabletMapKey &tablet_key,
+      char (&slog_buf)[sizeof(ObUpdateTabletLog)],
+      share::SCN &clog_max_scn);
+  static int handle_old_version_tablet_for_compat(
+      common::ObArenaAllocator &allocator,
+      const ObTabletMapKey &tablet_key,
+      const ObTablet &old_tablet,
+      ObTabletHandle &new_tablet_handle);
 
 private:
   bool is_inited_;
+  ObTenantStorageMetaType meta_type_;
+  ObTenantCheckpointSlogHandler *ckpt_slog_handler_;
   common::ObArray<TabletItemAddrInfo> tablet_item_addr_info_arr_;
   ObLinkedMacroBlockItemWriter ls_item_writer_;
   ObLinkedMacroBlockItemWriter tablet_item_writer_;

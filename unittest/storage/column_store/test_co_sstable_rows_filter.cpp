@@ -178,6 +178,7 @@ public:
   ObPushdownFilterExecutor *filter_;
   ObPushdownOperator *pushdown_operator_;
   ObPushdownExprSpec *expr_spec_;
+  ObBitVector *skip_bit_;
   MockObCOSSTableRowsFilter co_filter_;
 };
 
@@ -186,7 +187,9 @@ void TestCOSSTableRowsFilter::init_vector_store()
   ObIAllocator* allocator_ptr = &allocator_;
   exec_ctx_ = OB_NEWx(ObExecContext, allocator_ptr, allocator_);
   eval_ctx_ = OB_NEWx(ObEvalCtx, allocator_ptr, *exec_ctx_);
-  vector_store_ = OB_NEWx(ObVectorStore, allocator_ptr, 64, *eval_ctx_, context_);
+  skip_bit_ = to_bit_vector(allocator_.alloc(ObBitVector::memory_size(64)));
+  ASSERT_NE(nullptr, skip_bit_);
+  vector_store_ = OB_NEWx(ObVectorStore, allocator_ptr, 64, *eval_ctx_, context_, skip_bit_);
   vector_store_->is_inited_ = true;
 }
 
@@ -257,7 +260,7 @@ ObPushdownFilterExecutor* TestCOSSTableRowsFilter::create_physical_filter(
     column_exprs->push_back(nullptr);
     cg_idxes.push_back(_cg_idxes.at(i));
   }
-  filter->cg_col_exprs_ = cg_col_exprs;
+  filter->cg_col_exprs_.assign(*cg_col_exprs);
   return filter;
 }
 
@@ -286,6 +289,7 @@ void TestCOSSTableRowsFilter::init_single_white_filter()
   ASSERT_FALSE(nullptr == filter_);
   co_filter_.filter_ = filter_;
   co_filter_.allocator_ = &allocator_;
+  co_filter_.access_ctx_ = &context_;
 }
 
 void TestCOSSTableRowsFilter::init_single_black_filter()
@@ -297,6 +301,7 @@ void TestCOSSTableRowsFilter::init_single_black_filter()
   ASSERT_FALSE(nullptr == filter_);
   co_filter_.filter_ = filter_;
   co_filter_.allocator_ = &allocator_;
+  co_filter_.access_ctx_ = &context_;
 }
 
 void TestCOSSTableRowsFilter::init_multi_white_filter(bool is_common)
@@ -319,6 +324,7 @@ void TestCOSSTableRowsFilter::init_multi_white_filter(bool is_common)
   filter_->set_childs(3, childs);
   co_filter_.filter_ = filter_;
   co_filter_.allocator_ = &allocator_;
+  co_filter_.access_ctx_ = &context_;
 }
 
 void TestCOSSTableRowsFilter::init_multi_black_filter(bool is_common)
@@ -348,6 +354,7 @@ void TestCOSSTableRowsFilter::init_multi_black_filter(bool is_common)
   filter_->set_childs(3, childs);
   co_filter_.filter_ = filter_;
   co_filter_.allocator_ = &allocator_;
+  co_filter_.access_ctx_ = &context_;
 }
 
 void TestCOSSTableRowsFilter::init_multi_white_and_black_filter_case_one()
@@ -380,6 +387,7 @@ void TestCOSSTableRowsFilter::init_multi_white_and_black_filter_case_one()
   filter_->set_childs(2, childs);
   co_filter_.filter_ = filter_;
   co_filter_.allocator_ = &allocator_;
+  co_filter_.access_ctx_ = &context_;
 }
 
 void TestCOSSTableRowsFilter::init_multi_white_and_black_filter_case_two()
@@ -431,6 +439,7 @@ void TestCOSSTableRowsFilter::init_multi_white_and_black_filter_case_two()
   filter_->set_childs(3, childs);
   co_filter_.filter_ = filter_;
   co_filter_.allocator_ = &allocator_;
+  co_filter_.access_ctx_ = &context_;
 }
 
 void TestCOSSTableRowsFilter::reset_filter()
@@ -446,7 +455,7 @@ TEST_F(TestCOSSTableRowsFilter, co_sstable_rows_filter_test_init)
   ASSERT_EQ(OB_INVALID_ARGUMENT, ret);
   init_all();
   ret = co_filter_.init(iter_param_, context_, &co_sstable_);
-  ASSERT_EQ(OB_ERR_UNEXPECTED, ret);
+  ASSERT_EQ(OB_SUCCESS, ret);
 }
 
 TEST_F(TestCOSSTableRowsFilter, co_sstable_rows_filter_test_rewrite_filter_case_one)
@@ -543,8 +552,8 @@ TEST_F(TestCOSSTableRowsFilter, co_sstable_rows_filter_test_rewrite_filter_case_
   init_multi_white_and_black_filter_case_two();
   ret = co_filter_.rewrite_filter();
   ASSERT_EQ(OB_SUCCESS, ret);
-  ASSERT_EQ(3, co_filter_.filter_iters_.count());
-  ASSERT_EQ(3, co_filter_.iter_filter_node_.count());
+  ASSERT_EQ(5, co_filter_.filter_iters_.count());
+  ASSERT_EQ(5, co_filter_.iter_filter_node_.count());
   ASSERT_EQ(3, co_filter_.bitmap_buffer_.count());
   ASSERT_EQ(ObICGIterator::ObCGIterType::OB_CG_SCANNER,
              co_filter_.filter_iters_[0]->get_type());

@@ -13,13 +13,14 @@
 #ifndef OCEANBASE_LOGSERVICE_LOG_REQ_
 #define OCEANBASE_LOGSERVICE_LOG_REQ_
 
-#include "lib/utility/ob_unify_serialize.h"                    // OB_UNIS_VERSION
-#include "lib/utility/ob_print_utils.h"                        // TO_STRING_KV
+#include "lib/utility/ob_unify_serialize.h"                 // OB_UNIS_VERSION
+#include "lib/utility/ob_print_utils.h"                     // TO_STRING_KV
 #include "log_define.h"
 #include "log_meta_info.h"
-#include "log_learner.h"                             // LogLearner, LogLearnerList
-#include "logservice/palf/lsn.h"                                     // LSN
+#include "log_learner.h"                                    // LogLearner, LogLearnerList
+#include "logservice/palf/lsn.h"                            // LSN
 #include "log_writer_utils.h"                               // LogWriteBuf
+#include "share/rpc/ob_batch_proxy.h"                       // BatchRPC
 
 namespace oceanbase
 {
@@ -31,15 +32,17 @@ enum PushLogType
 {
   PUSH_LOG = 0,
   FETCH_LOG_RESP = 1,
+  PUSH_LOG_WO_ACK = 2,
 };
 
 inline const char *push_log_type_2_str(const PushLogType type)
 {
-#define EXTRACT_PUSH_LOG_TYPE(type_var) ({ case(type_var): return #type_var; })
+#define EXTRACT_PUSH_LOG_TYPE(type_var) case(type_var): return #type_var
   switch(type)
   {
     EXTRACT_PUSH_LOG_TYPE(PUSH_LOG);
     EXTRACT_PUSH_LOG_TYPE(FETCH_LOG_RESP);
+    EXTRACT_PUSH_LOG_TYPE(PUSH_LOG_WO_ACK);
 
     default:
       return "Invalid Type";
@@ -72,6 +75,26 @@ public:
   LogWriteBuf write_buf_;
 };
 
+struct LogBatchPushReq : public LogPushReq, public obrpc::ObIFill {
+  LogBatchPushReq(const PushLogType push_log_type,
+                  const int64_t &msg_proposal_id,
+                  const int64_t &prev_log_proposal_id,
+                  const LSN &prev_lsn,
+                  const LSN &curr_lsn,
+                  const LogWriteBuf &write_buf) : LogPushReq(push_log_type, msg_proposal_id,
+                                                             prev_log_proposal_id, prev_lsn, curr_lsn, write_buf),
+                                                  ObIFill() {}
+  int fill_buffer(char* buf, int64_t size, int64_t &filled_size) const override final
+  {
+    filled_size = 0;
+    return serialize(buf, size, filled_size);
+  }
+  int64_t get_req_size() const override final
+  {
+    return get_serialize_size();
+  }
+};
+
 struct LogPushResp {
   OB_UNIS_VERSION(1);
 public:
@@ -86,6 +109,21 @@ public:
   LSN lsn_;
 };
 
+struct LogBatchPushResp : public LogPushResp, public obrpc::ObIFill {
+  LogBatchPushResp(const int64_t &msg_proposal_id,
+                  const LSN &lsn)
+      : LogPushResp(msg_proposal_id, lsn), ObIFill() {}
+  int fill_buffer(char* buf, int64_t size, int64_t &filled_size) const override final
+  {
+    filled_size = 0;
+    return serialize(buf, size, filled_size);
+  }
+  int64_t get_req_size() const override final
+  {
+    return get_serialize_size();
+  }
+};
+
 enum FetchLogType
 {
   FETCH_LOG_FOLLOWER = 0,
@@ -95,7 +133,7 @@ enum FetchLogType
 
 inline const char *fetch_type_2_str(const FetchLogType type)
 {
-#define EXTRACT_FETCH_TYPE(type_var) ({ case(type_var): return #type_var; })
+#define EXTRACT_FETCH_TYPE(type_var) case(type_var): return #type_var
   switch(type)
   {
     EXTRACT_FETCH_TYPE(FETCH_LOG_FOLLOWER);

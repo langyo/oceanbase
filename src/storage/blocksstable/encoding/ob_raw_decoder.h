@@ -31,7 +31,7 @@ class ObIRowIndex;
 typedef void (*raw_fix_batch_decode_func)(
             const int64_t col_len,
             const char *base_data,
-            const int64_t *row_ids,
+            const int32_t *row_ids,
             const int64_t row_cap,
             common::ObDatum *datums);
 
@@ -41,7 +41,7 @@ typedef void (*raw_var_batch_decode_func)(
             const int64_t header_off,
             const int64_t header_len,
             const int64_t header_var_col_cnt,
-            const int64_t *row_ids,
+            const int32_t *row_ids,
             const int64_t row_cap,
             common::ObDatum *datums);
 
@@ -66,6 +66,26 @@ typedef void (*raw_compare_function_with_null)(
             uint32_t from,
             uint32_t to);
 
+typedef void (*raw_min_max_function)(
+            const unsigned char *raw_data,
+            uint32_t from,
+            uint32_t to,
+            uint64_t &res);
+
+typedef void (*raw_min_max_function_with_null)(
+            const unsigned char *raw_data,
+            const uint64_t null_value,
+            uint32_t from,
+            uint32_t to,
+            uint64_t &res);
+
+typedef void (*raw_min_max_function_with_null_bitmap)(
+            const unsigned char* raw_data,
+            const uint8_t *null_bitmap,
+            uint32_t from,
+            uint32_t to,
+            uint64_t &res);
+
 class RawCompareFunctionFactory {
 public:
   static constexpr uint32_t IS_SIGNED_CNT = 2;
@@ -88,6 +108,33 @@ private:
   ObMultiDimArray_T<raw_compare_function, IS_SIGNED_CNT, FIX_LEN_TAG_CNT, OP_TYPE_CNT> functions_array_;
   ObMultiDimArray_T<raw_compare_function_with_null, FIX_LEN_TAG_CNT, OP_TYPE_CNT> cs_functions_with_null_array_;
 };
+
+class RawAggFunctionFactory
+{
+public:
+  static constexpr uint32_t FIX_LEN_TAG_CNT = 4;
+  static constexpr uint32_t MIN_MAX_CNT = 2;
+public:
+  static RawAggFunctionFactory &instance();
+  raw_min_max_function get_min_max_function(
+      const int32_t fix_len_tag,
+      const bool is_min);
+  raw_min_max_function_with_null get_cs_min_max_function_with_null(
+      const int32_t fix_len_tag,
+      const bool is_min);
+  raw_min_max_function_with_null_bitmap get_cs_min_max_function_with_null_bitmap(
+      const int32_t fix_len_tag,
+      const bool is_min);
+private:
+  RawAggFunctionFactory();
+  ~RawAggFunctionFactory() = default;
+  DISALLOW_COPY_AND_ASSIGN(RawAggFunctionFactory);
+private:
+  ObMultiDimArray_T<raw_min_max_function, FIX_LEN_TAG_CNT, MIN_MAX_CNT> min_max_functions_array_;
+  ObMultiDimArray_T<raw_min_max_function_with_null, FIX_LEN_TAG_CNT, MIN_MAX_CNT> cs_min_max_functions_with_null_array_;
+  ObMultiDimArray_T<raw_min_max_function_with_null_bitmap, FIX_LEN_TAG_CNT, MIN_MAX_CNT> cs_min_max_functions_with_null_bitmap_array_;
+};
+
 
 class ObRawDecoder : public ObIColumnDecoder
 {
@@ -131,10 +178,15 @@ public:
   virtual int batch_decode(
       const ObColumnDecoderCtx &ctx,
       const ObIRowIndex* row_index,
-      const int64_t *row_ids,
+      const int32_t *row_ids,
       const char **cell_datas,
       const int64_t row_cap,
       common::ObDatum *datums) const override;
+
+  virtual int decode_vector(
+      const ObColumnDecoderCtx &decoder_ctx,
+      const ObIRowIndex* row_index,
+      ObVectorDecodeCtx &vector_ctx) const override;
 
   virtual int pushdown_operator(
       const sql::ObPushdownFilterExecutor *parent,
@@ -148,7 +200,7 @@ public:
   virtual int get_null_count(
       const ObColumnDecoderCtx &ctx,
       const ObIRowIndex *row_index,
-      const int64_t *row_ids,
+      const int32_t *row_ids,
       const int64_t row_cap,
       int64_t &null_count) const override;
   virtual bool fast_decode_valid(const ObColumnDecoderCtx &ctx) const override;
@@ -164,14 +216,14 @@ private:
   int batch_decode_general(
       const ObColumnDecoderCtx &ctx,
       const ObIRowIndex* row_index,
-      const int64_t *row_ids,
+      const int32_t *row_ids,
       const char **cell_datas,
       const int64_t row_cap,
       common::ObDatum *datums) const;
   int batch_decode_fast(
       const ObColumnDecoderCtx &ctx,
       const ObIRowIndex* row_index,
-      const int64_t *row_ids,
+      const int32_t *row_ids,
       const int64_t row_cap,
       common::ObDatum *datums) const;
 
@@ -236,6 +288,59 @@ private:
       const sql::PushdownFilterInfo &pd_filter_info,
       ObBitmap &result_bitmap,
       Operator const &eval) const;
+private:
+  class ObRawDecoderFilterCmpFunc
+  {
+  public:
+    ObRawDecoderFilterCmpFunc(
+        const ObDatumCmpFuncType &type_cmp_func,
+        const ObGetFilterCmpRetFunc &get_cmp_ret)
+      : type_cmp_func_(type_cmp_func), get_cmp_ret_(get_cmp_ret) {}
+    ~ObRawDecoderFilterCmpFunc() = default;
+    int operator()(
+        const ObDatum &cur_datum,
+        const sql::ObWhiteFilterExecutor &filter,
+        bool &result) const;
+  private:
+    const ObDatumCmpFuncType &type_cmp_func_;
+    const ObGetFilterCmpRetFunc &get_cmp_ret_;
+  };
+  class ObRawDecoderFilterBetweenFunc
+  {
+  public:
+    ObRawDecoderFilterBetweenFunc(const ObDatumCmpFuncType &type_cmp_func) : type_cmp_func_(type_cmp_func)
+    {
+      get_le_cmp_ret_ = get_filter_cmp_ret_func(sql::WHITE_OP_LE);
+      get_ge_cmp_ret_ = get_filter_cmp_ret_func(sql::WHITE_OP_GE);
+    }
+    ~ObRawDecoderFilterBetweenFunc() = default;
+    int operator()(
+        const ObDatum &cur_datum,
+        const sql::ObWhiteFilterExecutor &filter,
+        bool &result) const;
+  private:
+    const ObDatumCmpFuncType &type_cmp_func_;
+    ObGetFilterCmpRetFunc get_le_cmp_ret_;
+    ObGetFilterCmpRetFunc get_ge_cmp_ret_;
+  };
+  class ObRawDecoderFilterInFunc
+  {
+  public:
+    ObRawDecoderFilterInFunc() {}
+    ~ObRawDecoderFilterInFunc() = default;
+    int operator()(
+        const ObDatum &cur_datum,
+        const sql::ObWhiteFilterExecutor &filter,
+        bool &result) const;
+  };
+
+  int decode_vector_bitpacked(
+      const ObColumnDecoderCtx &decoder_ctx,
+      ObVectorDecodeCtx &vector_ctx) const;
+  template<typename VectorType, bool HAS_NULL>
+  int decode_vector_bitpacked(
+      const ObColumnDecoderCtx &decoder_ctx,
+      ObVectorDecodeCtx &vector_ctx) const;
 
 private:
   ObObjTypeStoreClass store_class_;

@@ -32,23 +32,24 @@ public:
   ObTableRedefinitionTask();
   virtual ~ObTableRedefinitionTask();
   int init(
-      const uint64_t tenant_id,
-      const uint64_t dest_tenant_id,
+      const ObTableSchema* src_table_schema,
+      const ObTableSchema* dst_table_schema,
+      const int64_t parent_task_id,
       const int64_t task_id,
       const share::ObDDLType &ddl_type,
-      const int64_t data_table_id,
-      const int64_t dest_table_id,
-      const int64_t schema_version,
-      const int64_t dest_schema_version,
       const int64_t parallelism,
       const int64_t consumer_group_id,
+      const int32_t sub_task_trace_id,
       const obrpc::ObAlterTableArg &alter_table_arg,
+      const uint64_t tenant_data_version,
+      const bool ddl_need_retry_at_executor,
       const int64_t task_status = share::ObDDLTaskStatus::PREPARE,
       const int64_t snapshot_version = 0);
   int init(const ObDDLTaskRecord &task_record);
   virtual int process() override;
   virtual int update_complete_sstable_job_status(
       const common::ObTabletID &tablet_id,
+      const ObAddr &addr,
       const int64_t snapshot_version,
       const int64_t execution_id,
       const int ret_code,
@@ -60,18 +61,16 @@ public:
   inline void set_is_ignore_errors(const bool is_ignore_errors) {is_ignore_errors_ = is_ignore_errors;}
   inline void set_is_do_finish(const bool is_do_finish) {is_do_finish_ = is_do_finish;}
   virtual int serialize_params_to_message(char *buf, const int64_t buf_len, int64_t &pos) const override;
-  virtual int deserlize_params_from_message(const uint64_t tenant_id, const char *buf, const int64_t data_len, int64_t &pos) override;
+  virtual int deserialize_params_from_message(const uint64_t tenant_id, const char *buf, const int64_t data_len, int64_t &pos) override;
   virtual int64_t get_serialize_param_size() const override;
   int assign(const ObTableRedefinitionTask *table_redef_task);
   virtual int collect_longops_stat(share::ObLongopsValue &value) override;
   virtual bool support_longops_monitoring() const override { return true; }
-  virtual void flt_set_task_span_tag() const override;
-  virtual void flt_set_status_span_tag() const override;
   static bool check_task_status_is_pending(const share::ObDDLTaskStatus task_status);
   INHERIT_TO_STRING_KV("ObDDLRedefinitionTask", ObDDLRedefinitionTask,
       K(has_rebuild_index_), K(has_rebuild_constraint_), K(has_rebuild_foreign_key_),
       K(is_copy_indexes_), K(is_copy_triggers_), K(is_copy_constraints_),
-      K(is_copy_foreign_keys_), K(is_ignore_errors_), K(is_do_finish_));
+      K(is_copy_foreign_keys_), K(is_ignore_errors_), K(is_do_finish_), K(target_cg_cnt_));
 protected:
   int table_redefinition(const share::ObDDLTaskStatus next_task_status);
   int copy_table_dependent_objects(const share::ObDDLTaskStatus next_task_status);
@@ -81,6 +80,8 @@ protected:
                                 const int64_t row_scanned,
                                 const int64_t row_inserted);
   int repending(const share::ObDDLTaskStatus next_task_status);
+  virtual bool task_can_retry() const override { return share::ObDDLTaskStatus::REDEFINITION == task_status_ ? is_ddl_retryable_ : true; }
+  virtual bool is_ddl_retryable() const override { return is_ddl_retryable_; }
 private:
   inline bool get_is_copy_indexes() const {return is_copy_indexes_;}
   inline bool get_is_copy_triggers() const {return is_copy_triggers_;}
@@ -96,8 +97,17 @@ private:
   int check_build_replica_end(bool &is_end);
   int replica_end_check(const int ret_code);
   int check_modify_autoinc(bool &modify_autoinc);
-  int check_use_heap_table_ddl_plan(bool &use_heap_table_ddl_plan);
+  int check_use_heap_table_ddl_plan(const share::schema::ObTableSchema *target_table_schema);
   int get_direct_load_job_stat(common::ObArenaAllocator &allocator, sql::ObLoadDataStat &job_stat);
+  int check_target_cg_cnt();
+  int check_ddl_can_retry(const bool ddl_need_retry_at_executor, const share::schema::ObTableSchema *table_schema);
+  int check_take_effect_succ(bool &has_took_effect_succ);
+  virtual bool is_error_need_retry(const int ret_code) override
+  {
+    //we should always retry when the redefinition task is split recovery redefinition
+    return is_partition_split_recovery_table_redefinition(task_type_) ? (task_status_ <= share::ObDDLTaskStatus::TAKE_EFFECT)
+        : ObDDLTask::is_error_need_retry(ret_code);
+  }
 private:
   static const int64_t OB_TABLE_REDEFINITION_TASK_VERSION = 1L;
   bool has_rebuild_index_;
@@ -110,6 +120,9 @@ private:
   bool is_copy_foreign_keys_;
   bool is_ignore_errors_;
   bool is_do_finish_;
+  int64_t target_cg_cnt_;
+  bool use_heap_table_ddl_plan_;
+  bool is_ddl_retryable_;
 };
 
 }  // end namespace rootserver

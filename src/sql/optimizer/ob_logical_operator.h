@@ -31,6 +31,8 @@
 #include "sql/optimizer/ob_fd_item.h"
 #include "sql/monitor/ob_sql_plan.h"
 #include "sql/monitor/ob_plan_info_manager.h"
+#include "sql/optimizer/ob_px_resource_analyzer.h"
+
 namespace oceanbase
 {
 namespace sql
@@ -39,6 +41,7 @@ struct JoinFilterInfo;
 struct EstimateCostInfo;
 struct ObSqlPlanItem;
 struct PlanText;
+class ObPxResourceAnalyzer;
 struct partition_location
 {
   int64_t partition_id;
@@ -279,6 +282,17 @@ struct FilterCompare
   common::ObIArray<ObExprSelPair> &predicate_selectivities_;
 };
 
+typedef std::pair<double, ObRawExpr *> ObExprRankPair;
+
+struct ObExprRankPairCompare
+{
+  ObExprRankPairCompare() {};
+  bool operator()(ObExprRankPair &left, ObExprRankPair &right)
+  {
+    return left.first < right.first;
+  }
+};
+
 class AdjustSortContext
 {
  public:
@@ -392,12 +406,23 @@ public:
   int64_t multi_child_op_above_count_in_dfo_;
 };
 
-class AllocMDContext
+class AllocOpContext
 {
 public:
-  AllocMDContext() : org_op_id_(0) {};
-  ~AllocMDContext() = default;
-  int64_t org_op_id_;
+  AllocOpContext() :
+      visited_map_(), disabled_op_set_(), gen_temp_op_id_(false), next_op_id_(0) {}
+  ~AllocOpContext();
+
+  int init();
+  int visit(uint64_t op_id, uint8_t flag);
+  bool is_visited(uint64_t op_id, uint8_t flag);
+
+  // For the `blocking` hint, there are different insertion levels. We need to ensure that
+  // when multiple insertion levels exist, material ops will not be inserted repeatedly.
+  hash::ObHashMap<uint8_t, ObSEArray<uint64_t, 8>> visited_map_; // key:flag, value:op ids
+  hash::ObHashSet<uint64_t> disabled_op_set_;
+  bool gen_temp_op_id_;
+  uint64_t next_op_id_;
 };
 
 class AllocBloomFilterContext
@@ -1030,6 +1055,7 @@ public:
   inline uint64_t get_op_id() const { return op_id_; }
   inline void set_op_id(uint64_t op_id) { op_id_ = op_id; }
   inline bool is_partition_wise() const { return is_partition_wise_; }
+  int is_dfo_contains_partition_wise(bool &contain_partition_wise) const;
   inline void set_is_partition_wise(bool is_partition_wise)
   { is_partition_wise_ = is_partition_wise; }
   inline bool is_fully_partition_wise() const
@@ -1049,6 +1075,7 @@ public:
   {
     exchange_allocated_ = exchange_allocated;
   }
+
   virtual bool is_gi_above() const { return false; }
   inline void set_phy_plan_type(ObPhyPlanType phy_plan_type)
   {
@@ -1140,9 +1167,9 @@ public:
    * get cur_op's expected_ordering
    */
   inline void set_is_local_order(bool is_local_order) { is_local_order_ = is_local_order; }
-  inline bool get_is_local_order() { return is_local_order_; }
+  inline bool get_is_local_order() const { return is_local_order_; }
   inline void set_is_range_order(bool is_range_order) { is_range_order_ = is_range_order; }
-  inline bool get_is_range_order() { return is_range_order_; }
+  inline bool get_is_range_order() const { return is_range_order_; }
 
   inline void set_is_at_most_one_row(bool is_at_most_one_row) { is_at_most_one_row_ = is_at_most_one_row; }
   inline bool get_is_at_most_one_row() { return is_at_most_one_row_; }
@@ -1223,12 +1250,11 @@ public:
 
   int extract_non_const_exprs(const ObIArray<ObRawExpr*> &input_exprs,
                               ObIArray<ObRawExpr*> &non_const_exprs);
-  int check_need_pushdown_expr(const bool producer_id,
+  int check_need_pushdown_expr(const uint64_t producer_id,
                                bool &need_pushdown);
   int check_can_pushdown_expr(const ObRawExpr *expr, bool &can_pushdown);
   int get_pushdown_producer_id(const ObRawExpr *expr, uint64_t &producer_id);
 
-  int force_pushdown_exprs(ObAllocExprContext &ctx);
   int get_pushdown_producer_id(uint64_t &producer_id);
 
   int extract_shared_exprs(const ObIArray<ObRawExpr*> &exprs,
@@ -1297,6 +1323,9 @@ public:
   int re_est_cost(EstimateCostInfo &param, double &card, double &cost);
   virtual int do_re_est_cost(EstimateCostInfo &param, double &card, double &op_cost, double &cost);
 
+  virtual int est_ambient_card();
+  int inner_est_ambient_card_by_child(int64_t child_idx);
+
   /**
    * @brief compute_property
    * convert property fields from a path into a logical operator
@@ -1313,7 +1342,7 @@ public:
   virtual int compute_property();
 
   int check_property_valid() const;
-  int compute_normal_multi_child_parallel_and_server_info(bool is_partition_wise);
+  int compute_normal_multi_child_parallel_and_server_info();
   int set_parallel_and_server_info_for_match_all();
   int get_limit_offset_value(ObRawExpr *percent_expr,
                              ObRawExpr *limit_expr,
@@ -1343,8 +1372,19 @@ public:
    */
   int allocate_gi_recursively(AllocGIContext &ctx);
   /**
-   * Allocate m dump operator.
+   * Allocate op for monitering
    */
+  int alloc_op_pre(AllocOpContext& ctx);
+  int alloc_op_post(AllocOpContext& ctx);
+  int find_rownum_expr_recursively(const uint64_t &op_id, ObLogicalOperator *&rownum_op,
+                                   const ObRawExpr *expr);
+  int find_rownum_expr(const uint64_t &op_id, ObLogicalOperator *&rownum_op,
+                       const ObIArray<ObRawExpr *> &exprs);
+  int find_rownum_expr(const uint64_t &op_id, ObLogicalOperator *&rownum_op);
+  int gen_temp_op_id(AllocOpContext& ctx);
+  int recursively_disable_alloc_op_above(AllocOpContext& ctx);
+  int alloc_nodes_above(AllocOpContext& ctx, const uint64_t &flags);
+  int allocate_material_node_above();
   int allocate_monitoring_dump_node_above(uint64_t flags, uint64_t line_id);
 
   virtual int gen_location_constraint(void *ctx);
@@ -1373,9 +1413,9 @@ public:
   int check_exchange_rescan(bool &need_rescan);
 
   /**
-   * Check if has exchange below.
+   * Check if has target op below.
    */
-  int check_has_exchange_below(bool &has_exchange) const;
+  int check_has_op_below(const log_op_def::ObLogOpType target_type, bool &has) const;
   /**
    * Allocate runtime filter operator.
    */
@@ -1504,7 +1544,7 @@ public:
   {
     inherit_sharding_index_ = inherit_sharding_index;
   }
-
+  inline bool need_re_est_child_cost() const { return need_re_est_child_cost_; }
   inline bool need_osg_merge() const { return need_osg_merge_; }
   inline void set_need_osg_merge(bool v)
   {
@@ -1594,6 +1634,8 @@ public:
   int get_part_column_exprs(const uint64_t table_id,
                             const uint64_t ref_table_id,
                             ObIArray<ObRawExpr *> &part_cols) const;
+  bool is_parallel_more_than_part_cnt() const;
+  int64_t get_part_cnt() const;
   inline void set_parallel(int64_t parallel) { parallel_ = parallel; }
   inline int64_t get_parallel() const { return parallel_; }
   inline void set_op_parallel_rule(OpParallelRule op_parallel_rule) { op_parallel_rule_ = op_parallel_rule; }
@@ -1612,9 +1654,10 @@ public:
    *  be evaluated earlier.
    */
   int reorder_filter_exprs();
+  int reorder_filters_exprs(common::ObIArray<ObExprSelPair> &predicate_selectivities,
+                            ObIArray<ObRawExpr *> &filters_exprs);
 
   int find_shuffle_join_filter(bool &find) const;
-  int has_window_function_below(bool &has_win_func) const;
   int get_pushdown_op(log_op_def::ObLogOpType op_type, const ObLogicalOperator *&op) const;
 
   virtual int get_plan_item_info(PlanText &plan_text,
@@ -1665,7 +1708,28 @@ public:
                                ObIArray<ObExecParamRawExpr *> &right_above_params);
   // 生成 partition id 表达式
   int generate_pseudo_partition_id_expr(ObOpPseudoColumnRawExpr *&expr);
+  int pick_out_startup_filters();
+  int check_contain_false_startup_filter(bool &contain_false);
 
+  // Make the operator in state of output data.
+  // 1. If this operator is single-child and non-block, then open its child.
+  // 2. If this operator is single-child and block, then open and close its child.
+  // 3. If this operator has multiple children, open all children by default and
+  //    operators should override this function according to their unique execution logic.
+  // append_map = false means it's in the progress of LogSet searching for child
+  //   with max running thread/group count, and we will not modify max_count or max_map.
+  virtual int open_px_resource_analyze(OPEN_PX_RESOURCE_ANALYZE_DECLARE_ARG);
+  // Make the operator in state that all data has been outputted already.
+  virtual int close_px_resource_analyze(CLOSE_PX_RESOURCE_ANALYZE_DECLARE_ARG);
+  int find_max_px_resource_child(OPEN_PX_RESOURCE_ANALYZE_DECLARE_ARG, int64_t start_idx);
+
+  inline ObIArray<double> &get_ambient_card() { return ambient_card_; }
+
+  int pre_check_can_px_batch_rescan(bool &find_nested_rescan,
+                                    bool &find_rescan_px,
+                                    bool nested) const;
+  int check_contain_dist_das(const ObIArray<ObAddr> &exec_server_list,
+                             bool &contain_dist_das) const;
 public:
   ObSEArray<ObLogicalOperator *, 16, common::ModulePageAllocator, true> child_;
   ObSEArray<ObPCParamEqualInfo, 4, common::ModulePageAllocator, true> equal_param_constraints_;
@@ -1702,6 +1766,8 @@ protected:
   static int explain_print_partitions(const ObIArray<ObLogicalOperator::PartInfo> &part_infos,
                                       const bool two_level, char *buf,
                                       int64_t &buf_len, int64_t &pos);
+
+  int check_op_orderding_used_by_parent(bool &used);
 protected:
 
   void add_dist_flag(uint64_t &flags, DistAlgo method) const {
@@ -1719,6 +1785,19 @@ protected:
   void clear_dist_flag(uint64_t &flags) const {
     flags = 0;
   }
+
+  int find_table_scan(ObLogicalOperator* root_op,
+                    uint64_t table_id,
+                    ObLogicalOperator* &scan_op,
+                    bool& table_scan_has_exchange,
+                    bool &has_px_coord);
+
+  int check_sort_key_can_pushdown_to_tsc(
+      ObLogicalOperator *op,
+      common::ObSEArray<ObRawExpr *, 8, common::ModulePageAllocator, true> &effective_sk_exprs,
+      uint64_t table_id, ObLogicalOperator *&scan_op, bool &table_scan_has_exchange,
+      bool &has_px_coord, int64_t &effective_sk_cnt);
+
 protected:
 
   log_op_def::ObLogOpType type_;
@@ -1732,6 +1811,7 @@ protected:
   const EqualSets *output_equal_sets_;
   const ObFdItemSet *fd_item_set_;
   const ObRelIds *table_set_;
+  common::ObSEArray<double, 8, common::ModulePageAllocator, true> ambient_card_;
 
   uint64_t id_;                        // operator 0-based depth-first id
   uint64_t branch_id_;
@@ -1744,10 +1824,6 @@ private:
    */
   int numbering_operator_pre(NumberingCtx &ctx);
   void numbering_operator_post(NumberingCtx &ctx);
-  /**
-   *  allocate md operator
-   */
-  int alloc_md_post(AllocMDContext &ctx);
   /**
    * Numbering px transmit op with dfo id
    * for Explain display
@@ -1771,32 +1847,29 @@ private:
     ObLogicalOperator *op_sort,
     bool &need_remove,
     bool global_order);
-  int find_table_scan(ObLogicalOperator* root_op,
-                      uint64_t table_id,
-                      ObLogicalOperator* &scan_op,
-                      bool& table_scan_has_exchange,
-                      bool &has_px_coord);
   //private function, just used for allocating join filter node.
   int allocate_partition_join_filter(const ObIArray<JoinFilterInfo> &infos,
                                      int64_t &filter_id);
   int allocate_normal_join_filter(const ObIArray<JoinFilterInfo> &infos,
                                   int64_t &filter_id);
+  int calc_rf_max_wait_time(const ObLogicalOperator *node, uint64_t table_id,
+                            int64_t &max_wait_time_ms);
   int create_runtime_filter_info(
       ObLogicalOperator *op,
-      ObLogicalOperator *join_filter_creare_op,
+      ObLogicalOperator *join_filter_create_op,
       ObLogicalOperator *join_filter_use_op,
       double join_filter_rate);
   int add_join_filter_info(
-      ObLogicalOperator *join_filter_creare_op,
+      ObLogicalOperator *join_filter_create_op,
       ObLogicalOperator *join_filter_use_op,
       ObRawExpr *join_filter_expr,
       RuntimeFilterType type);
   int add_partition_join_filter_info(
-      ObLogicalOperator *join_filter_creare_op,
+      ObLogicalOperator *join_filter_create_op,
       RuntimeFilterType type);
   int generate_runtime_filter_expr(
       ObLogicalOperator *op,
-      ObLogicalOperator *join_filter_creare_op,
+      ObLogicalOperator *join_filter_create_op,
       ObLogicalOperator *join_filter_use_op,
       double join_filter_rate,
       RuntimeFilterType type);
@@ -1804,6 +1877,34 @@ private:
       ObLogJoinFilter *join_filter_use,
       ObRawExpr *join_use_expr,
       ObRawExpr *join_create_expr);
+  int check_can_extract_query_range_by_rf(
+    ObLogicalOperator *scan_node,
+    ObLogicalOperator *join_filter_create_op,
+    ObLogicalOperator *join_filter_use_op,
+    bool &can_extract_query_range,
+    ObIArray<int64_t> &prefix_col_idxs);
+  int try_prepare_rf_query_range_info(
+    ObLogicalOperator *join_filter_create_op,
+    ObLogicalOperator *join_filter_use_op,
+    ObLogicalOperator *scan_node,
+    const JoinFilterInfo &info);
+
+  int check_sort_key_can_pushdown_to_tsc_detail(ObLogicalOperator *op,
+                                                ObRawExpr *candidate_sk_expr, uint64_t table_id,
+                                                ObLogicalOperator *&scan_op, bool &find_table_scan,
+                                                bool &table_scan_has_exchange, bool &has_px_coord);
+  int check_sort_key_can_pushdown_to_tsc_for_gby(ObLogicalOperator *op,
+                                                ObRawExpr *candidate_sk_expr, uint64_t table_id,
+                                                ObLogicalOperator *&scan_op, bool &find_table_scan,
+                                                bool &table_scan_has_exchange, bool &has_px_coord);
+  int check_sort_key_can_pushdown_to_tsc_for_winfunc(ObLogicalOperator *op,
+                                                 ObRawExpr *candidate_sk_expr, uint64_t table_id,
+                                                 ObLogicalOperator *&scan_op, bool &find_table_scan,
+                                                 bool &table_scan_has_exchange, bool &has_px_coord);
+  int check_sort_key_can_pushdown_to_tsc_for_join(ObLogicalOperator *op,
+                                                ObRawExpr *candidate_sk_expr, uint64_t table_id,
+                                                ObLogicalOperator *&scan_op, bool &find_table_scan,
+                                                bool &table_scan_has_exchange, bool &has_px_coord);
 
 
   /* manual set dop for each dfo */
@@ -1818,6 +1919,8 @@ private:
   // alloc mat for sync in intput
   int need_alloc_material_for_push_down_wf(ObLogicalOperator &curr_op, bool &need_alloc);
   int check_need_parallel_valid(int64_t need_parallel) const;
+  virtual int get_card_without_filter(double &card);
+  virtual int check_use_child_ordering(bool &used, int64_t &inherit_child_ordering_index);
 private:
   ObLogicalOperator *parent_;                           // parent operator
   bool is_plan_root_;                                // plan root operator
@@ -1875,6 +1978,9 @@ protected:
   int64_t inherit_sharding_index_;
   // wether has allocated a osg_gather.
   bool need_osg_merge_;
+  int64_t max_px_thread_branch_;
+  int64_t max_px_group_branch_;
+  bool need_re_est_child_cost_;
 };
 
 template <typename Allocator>
@@ -1897,6 +2003,33 @@ int ObLogicalOperator::init_all_traverse_ctx(Allocator &alloc)
   }
   return ret;
 }
+
+// json table default value struct
+struct ObColumnDefault
+{
+public:
+  ObColumnDefault()
+    : column_id_(common::OB_NOT_EXIST_COLUMN_ID),
+      default_error_expr_(nullptr),
+      default_empty_expr_(nullptr)
+  {}
+  ObColumnDefault(int64_t column_id)
+    : column_id_(column_id),
+      default_error_expr_(nullptr),
+      default_empty_expr_(nullptr)
+  {}
+  void reset()
+  {
+    column_id_ = common::OB_NOT_EXIST_COLUMN_ID;
+    default_error_expr_ = nullptr;
+    default_empty_expr_ = nullptr;
+  }
+
+  TO_STRING_KV(K_(column_id), KPC_(default_error_expr), KPC_(default_empty_expr));
+  int64_t column_id_;
+  ObRawExpr* default_error_expr_;
+  ObRawExpr* default_empty_expr_;
+};
 
 } // end of namespace sql
 } // end of namespace oceanbase
