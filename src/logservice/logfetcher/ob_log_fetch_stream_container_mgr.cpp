@@ -12,16 +12,30 @@
 
 #define USING_LOG_PREFIX  OBLOG_FETCHER
 
-#include "share/rc/ob_tenant_base.h"  // MTL_ID
 #include "ob_log_fetch_stream_container_mgr.h"
+
+#ifdef ERRSIM
+ERRSIM_POINT_DEF(LOGFETCHER_ALLOC_FSC_FAILED);
+#endif
 
 namespace oceanbase
 {
 namespace logfetcher
 {
+bool ObFsContainerMgr::UpdateProtoFunc::operator() (const logservice::TenantLSID &key, FetchStreamContainer *value)
+{
+  int ret = OB_SUCCESS;
+  UNUSED(key);
+  if (NULL != value) {
+    value->update_fetch_stream_proto(proto_type_);
+  }
+  return true;
+}
+
 ObFsContainerMgr::ObFsContainerMgr() :
     is_inited_(false),
     self_tenant_id_(OB_INVALID_TENANT_ID),
+    proto_type_(obrpc::ObCdcFetchLogProtocolType::LogGroupEntryProto),
     rpc_(nullptr),
     stream_worker_(nullptr),
     progress_controller_(nullptr),
@@ -29,7 +43,8 @@ ObFsContainerMgr::ObFsContainerMgr() :
     fsc_map_(),
     fsc_pool_(),
     fs_pool_(),
-    rpc_result_pool_()
+    rpc_result_pool_(),
+    log_file_buffer_pool_(nullptr)
 {
 
 }
@@ -44,7 +59,7 @@ int ObFsContainerMgr::init(
     const uint64_t self_tenant_id,
     const int64_t svr_stream_cached_count,
     const int64_t fetch_stream_cached_count,
-    const int64_t rpc_result_cached_count,
+    LogFileDataBufferPool &log_file_pool,
     IObLogRpc &rpc,
     IObLSWorker &stream_worker,
     PartProgressController &progress_controller,
@@ -64,14 +79,15 @@ int ObFsContainerMgr::init(
     LOG_ERROR("init FetchStreamContainer pool fail", KR(ret));
   } else if (OB_FAIL(fs_pool_.init(fetch_stream_cached_count))) {
     LOG_ERROR("init fetch stream pool fail", KR(ret), K(fetch_stream_cached_count));
-  } else if (OB_FAIL(rpc_result_pool_.init(self_tenant_id, rpc_result_cached_count))) {
-    LOG_ERROR("init rpc result pool fail", KR(ret), K(source_tenant_id), K(rpc_result_cached_count));
+  } else if (OB_FAIL(rpc_result_pool_.init(self_tenant_id))) {
+    LOG_ERROR("init rpc result pool fail", KR(ret), K(source_tenant_id));
   } else {
     rpc_ = &rpc;
     self_tenant_id_ = self_tenant_id;
     stream_worker_ = &stream_worker;
     progress_controller_ = &progress_controller;
     log_handler_ = &log_handler;
+    log_file_buffer_pool_ = &log_file_pool;
     is_inited_ = true;
   }
 
@@ -83,6 +99,7 @@ void ObFsContainerMgr::destroy()
   if (is_inited_) {
     is_inited_ = false;
     self_tenant_id_ = OB_INVALID_TENANT_ID;
+    proto_type_ = obrpc::ObCdcFetchLogProtocolType::LogGroupEntryProto;
     rpc_ = nullptr;
     stream_worker_ = nullptr;
     progress_controller_ = nullptr;
@@ -111,6 +128,10 @@ int ObFsContainerMgr::add_fsc(const FetchStreamType stype,
     ret = OB_INVALID_ERROR;
     LOG_ERROR("invalid argument", KR(ret), K(stype), K(rpc_), K(stream_worker_),
         K(progress_controller_));
+#ifdef ERRSIM
+  } else if (OB_FAIL(LOGFETCHER_ALLOC_FSC_FAILED)) {
+    LOG_ERROR("ERRSIM: failed to alloc fsc");
+#endif
   } else if (OB_FAIL(fsc_pool_.alloc(fsc))) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
     LOG_ERROR("allocate fsc from pool failed", KR(ret), K(tls_id), K(fsc));
@@ -123,10 +144,11 @@ int ObFsContainerMgr::add_fsc(const FetchStreamType stype,
         *rpc_,
         fs_pool_,
         *stream_worker_,
+        *log_file_buffer_pool_,
         rpc_result_pool_,
         *progress_controller_,
         *log_handler_);
-
+    fsc->update_fetch_stream_proto(ATOMIC_LOAD(&proto_type_));
     if (OB_FAIL(fsc_map_.insert(tls_id, fsc))) {
       LOG_ERROR("insert into fsc_map_ fail", KR(ret), K(tls_id), K(fsc));
     } else {
@@ -146,14 +168,22 @@ int ObFsContainerMgr::remove_fsc(const logservice::TenantLSID &tls_id)
     ret = OB_NOT_INIT;
     LOG_ERROR("ObFsContainerMgr has not be inited");
   } else if (OB_FAIL(get_fsc(tls_id, fsc))) {
-    LOG_ERROR("ObFsContainerMgr get_fsc failed", KR(ret));
+    if (OB_ENTRY_NOT_EXIST != ret) {
+      LOG_ERROR("ObFsContainerMgr get_fsc failed", KR(ret));
+    } else {
+      LOG_WARN("tls_id not in fsc", K(tls_id));
+    }
   // explicitly call FetchStreamContainer::reset because ObSmallObjPool may not invoke the destructor of the object,
   // which cause incorrect destruct order of objects.
   } else if (FALSE_IT(fsc->reset())) {
   } else if (OB_FAIL(fsc_pool_.free(fsc))) {
     LOG_ERROR("fsc_pool_ free failed", KR(ret), K(tls_id), KPC(fsc));
   } else if (OB_FAIL(fsc_map_.erase(tls_id))) {
-    LOG_ERROR("fsc_map_ erase failed", KR(ret), K(tls_id));
+    if (OB_ENTRY_NOT_EXIST != ret) {
+      LOG_ERROR("fsc_map_ erase failed", KR(ret), K(tls_id));
+    } else {
+      LOG_WARN("tls_id not in fsc_map", K(tls_id));
+    }
   } else {}
 
   return ret;
@@ -182,7 +212,6 @@ int ObFsContainerMgr::get_fsc(const logservice::TenantLSID &tls_id,
 void ObFsContainerMgr::print_stat()
 {
   int ret = OB_SUCCESS;
-  SvrStreamStatFunc svr_stream_stat_func;
 
   int64_t alloc_count = fsc_pool_.get_alloc_count();
   int64_t free_count = fsc_pool_.get_free_count();
@@ -196,10 +225,36 @@ void ObFsContainerMgr::print_stat()
   fs_pool_.print_stat();
   rpc_result_pool_.print_stat();
 
-  // Statistics every FetchStreamContainer
-  if (OB_FAIL(fsc_map_.for_each(svr_stream_stat_func))) {
+  TenantStreamStatFunc tenant_stream_stat_func;
+  if (OB_FAIL(fsc_map_.for_each(tenant_stream_stat_func))) {
     LOG_ERROR("for each FetchStreamContainer map fail", KR(ret));
+  } else {
+    _LOG_INFO("[STAT] [FETCH_STREAM] TENANT=%lu/sec, TRAFFIC=%s/sec", self_tenant_id_, SIZE_TO_STR(tenant_stream_stat_func.total_traffic_));
   }
+}
+
+bool ObFsContainerMgr::TenantStreamStatFunc::operator() (const logservice::TenantLSID &key, FetchStreamContainer *value)
+{
+  int64_t ls_traffic = 0;
+  (void) value->do_stat(ls_traffic);
+  total_traffic_ += ls_traffic;
+  return true;
+}
+
+int ObFsContainerMgr::update_fetch_log_protocol(const obrpc::ObCdcFetchLogProtocolType proto)
+{
+  int ret = OB_SUCCESS;
+
+  if (proto_type_ != proto) {
+    LOG_INFO("update FsContainerMgr proto_type", K(proto_type_), K(proto));
+    ATOMIC_STORE(&proto_type_, proto);
+  }
+
+  UpdateProtoFunc update_proto_func(proto);
+  if (OB_FAIL(fsc_map_.for_each(update_proto_func))) {
+    LOG_ERROR("failed to update fetch stream proto", K(proto));
+  }
+  return ret;
 }
 
 } // namespace logfetcher

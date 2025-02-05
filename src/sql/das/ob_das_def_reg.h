@@ -26,6 +26,9 @@ struct ObDASOpTypeTraits
 {
 
   constexpr static bool registered_ = false;
+  //attached_=false means this computation is bound to other operations for execution
+  //and does not have its own operator.
+  constexpr static bool attached_ = false;
   typedef char DASOp;
   typedef char DASOpResult;
   typedef char DASCtDef;
@@ -45,6 +48,7 @@ struct ObDASOpTraits
   struct ObDASOpTypeTraits<type>                                                                \
   {                                                                                             \
     constexpr static bool registered_ = true;                                                   \
+    constexpr static bool attached_ = false;                                                    \
     typedef op DASOp;                                                                           \
     typedef op_result DASOpResult;                                                              \
     typedef ctdef DASCtDef;                                                                     \
@@ -100,6 +104,70 @@ class ObDASRangesCostResult;
 REGISTER_DAS_OP(DAS_OP_GET_RANGES_COST, ObDASRangesCostOp, ObDASRangesCostResult, ObDASEmptyCtDef, ObDASEmptyRtDef);
 
 #undef REGISTER_DAS_OP
+
+class ObDASEmptyOp;
+class ObDASEmptyResult;
+#define REGISTER_DAS_ATTACH_OP(type, ctdef, rtdef)                                              \
+  namespace das_reg {                                                                           \
+  template<>                                                                                    \
+  struct ObDASOpTypeTraits<type>                                                                \
+  {                                                                                             \
+    constexpr static bool registered_ = true;                                                   \
+    constexpr static bool attached_ = true;                                                     \
+    typedef ObDASEmptyOp DASOp;                                                                 \
+    typedef ObDASEmptyResult DASOpResult;                                                       \
+    typedef ctdef DASCtDef;                                                                     \
+    typedef rtdef DASRtDef;                                                                     \
+  };                                                                                            \
+  template <> struct ObDASOpTraits<ctdef> { constexpr static int type_ = type; };               \
+  }
+
+struct ObDASTableLookupCtDef;
+struct ObDASTableLookupRtDef;
+REGISTER_DAS_ATTACH_OP(DAS_OP_TABLE_LOOKUP, ObDASTableLookupCtDef, ObDASTableLookupRtDef);
+
+struct ObDASIRScanCtDef;
+struct ObDASIRScanRtDef;
+REGISTER_DAS_ATTACH_OP(DAS_OP_IR_SCAN, ObDASIRScanCtDef, ObDASIRScanRtDef);
+
+struct ObDASVecAuxScanCtDef;
+struct ObDASVecAuxScanRtDef;
+REGISTER_DAS_ATTACH_OP(DAS_OP_VEC_SCAN, ObDASVecAuxScanCtDef, ObDASVecAuxScanRtDef);
+
+struct ObDASIRAuxLookupCtDef;
+struct ObDASIRAuxLookupRtDef;
+REGISTER_DAS_ATTACH_OP(DAS_OP_IR_AUX_LOOKUP, ObDASIRAuxLookupCtDef, ObDASIRAuxLookupRtDef);
+
+struct ObDASSortCtDef;
+struct ObDASSortRtDef;
+REGISTER_DAS_ATTACH_OP(DAS_OP_SORT, ObDASSortCtDef, ObDASSortRtDef);
+
+struct ObDASDocIdMergeCtDef;
+struct ObDASDocIdMergeRtDef;
+REGISTER_DAS_ATTACH_OP(DAS_OP_DOC_ID_MERGE, ObDASDocIdMergeCtDef, ObDASDocIdMergeRtDef);
+
+struct ObDASVIdMergeCtDef;
+struct ObDASVIdMergeRtDef;
+REGISTER_DAS_ATTACH_OP(DAS_OP_VID_MERGE, ObDASVIdMergeCtDef, ObDASVIdMergeRtDef);
+
+struct ObDASFuncLookupCtDef;
+struct ObDASFuncLookupRtDef;
+REGISTER_DAS_ATTACH_OP(DAS_OP_FUNC_LOOKUP, ObDASFuncLookupCtDef, ObDASFuncLookupRtDef);
+
+struct ObDASIndexMergeCtDef;
+struct ObDASIndexMergeRtDef;
+REGISTER_DAS_ATTACH_OP(DAS_OP_INDEX_MERGE, ObDASIndexMergeCtDef, ObDASIndexMergeRtDef);
+
+struct ObDASIndexProjLookupCtDef;
+struct ObDASIndexProjLookupRtDef;
+REGISTER_DAS_ATTACH_OP(DAS_OP_INDEX_PROJ_LOOKUP, ObDASIndexProjLookupCtDef, ObDASIndexProjLookupRtDef);
+
+struct ObDASDomainIdMergeCtDef;
+struct ObDASDomainIdMergeRtDef;
+REGISTER_DAS_ATTACH_OP(DAS_OP_DOMAIN_ID_MERGE, ObDASDomainIdMergeCtDef, ObDASDomainIdMergeRtDef);
+
+
+#undef REGISTER_DAS_ATTACH_OP
 }  // namespace sql
 }  // namespace oceanbase
 

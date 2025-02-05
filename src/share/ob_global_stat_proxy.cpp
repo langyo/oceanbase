@@ -13,13 +13,7 @@
 #define USING_LOG_PREFIX SHARE
 
 #include "share/ob_global_stat_proxy.h"
-#include "share/ob_cluster_version.h"
-#include "share/ob_dml_sql_splicer.h"
-#include "share/inner_table/ob_inner_table_schema_constants.h"
-#include "share/config/ob_server_config.h"
-#include "common/ob_timeout_ctx.h"
 #include "rootserver/ob_root_utils.h"
-#include "observer/ob_server_struct.h"
 
 namespace oceanbase
 {
@@ -265,6 +259,74 @@ int ObGlobalStatProxy::get_target_data_version(
   return ret;
 }
 
+int ObGlobalStatProxy::update_finish_data_version(const uint64_t finish_data_version,
+                                                  const share::SCN &barrier_scn) {
+  int ret = OB_SUCCESS;
+  ObGlobalStatItem::ItemList list;
+  ObGlobalStatItem version_item(list, "finish_data_version", finish_data_version);
+  ObGlobalStatItem scn_item(list, "data_version_barrier_scn",
+                            barrier_scn.get_val_for_inner_table_field());
+  bool is_incremental = true;
+  if (!is_valid() || !barrier_scn.is_valid() || finish_data_version <= 0) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid arg", KR(ret), "valid", is_valid(), K(barrier_scn), K(finish_data_version));
+  } else if (OB_FAIL(update(list, is_incremental))) {
+    LOG_WARN("update failed", KR(ret), K(list));
+  }
+  return ret;
+}
+
+int ObGlobalStatProxy::get_finish_data_version(uint64_t &finish_data_version,
+                                               share::SCN &barrier_scn) {
+  int ret = OB_SUCCESS;
+  finish_data_version = 0;
+  ObGlobalStatItem::ItemList list;
+  ObGlobalStatItem version_item(list, "finish_data_version", OB_INVALID_VERSION);
+  ObGlobalStatItem scn_item(list, "data_version_barrier_scn", OB_INVALID_SCN_VAL);
+  if (!is_valid()) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid argument", KR(ret), "self valid", is_valid());
+  } else if (OB_FAIL(get(list))) {
+    LOG_WARN("get failed", KR(ret));
+  } else {
+    finish_data_version = static_cast<uint64_t>(version_item.value_);
+    barrier_scn.convert_for_inner_table_field(static_cast<uint64_t>(scn_item.value_));
+  }
+  return ret;
+}
+
+int ObGlobalStatProxy::update_major_refresh_mv_merge_scn(const share::SCN &scn, bool is_incremental)
+{
+  int ret = OB_SUCCESS;
+  ObGlobalStatItem::ItemList list;
+  ObGlobalStatItem scn_item(list, "major_refresh_mv_merge_scn",
+                            scn.get_val_for_inner_table_field());
+  if (!is_valid() || !scn.is_valid()) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid arg", KR(ret), "valid", is_valid(), K(scn));
+  } else if (OB_FAIL(update(list, is_incremental))) {
+    LOG_WARN("update failed", KR(ret), K(list));
+  }
+  return ret;
+}
+
+int ObGlobalStatProxy::get_major_refresh_mv_merge_scn(const bool for_update, share::SCN &scn)
+{
+  int ret = OB_SUCCESS;
+  scn.reset();
+  ObGlobalStatItem::ItemList list;
+  ObGlobalStatItem scn_item(list, "major_refresh_mv_merge_scn", OB_INVALID_SCN_VAL);
+  if (!is_valid()) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid argument", KR(ret), "self valid", is_valid());
+  } else if (OB_FAIL(get(list, for_update))) {
+    LOG_WARN("get failed", KR(ret));
+  } else {
+    scn.convert_for_inner_table_field(static_cast<uint64_t>(scn_item.value_));
+  }
+  return ret;
+}
+
 int ObGlobalStatProxy::get_target_data_version_ora_rowscn(
   const uint64_t tenant_id,
   share::SCN &target_data_version_ora_rowscn)
@@ -483,12 +545,20 @@ int ObGlobalStatProxy::get(
   return ret;
 }
 
+int ObGlobalStatProxy::select_snapshot_gc_scn_for_update_nowait(
+    common::ObISQLClient &sql_client,
+    const uint64_t tenant_id,
+    SCN &snapshot_gc_scn)
+{
+  return inner_get_snapshot_gc_scn_(sql_client, tenant_id, snapshot_gc_scn, "FOR UPDATE NOWAIT");
+}
+
 int ObGlobalStatProxy::select_snapshot_gc_scn_for_update(
     common::ObISQLClient &sql_client,
     const uint64_t tenant_id,
     SCN &snapshot_gc_scn)
 {
-  return inner_get_snapshot_gc_scn_(sql_client, tenant_id, snapshot_gc_scn, true);
+  return inner_get_snapshot_gc_scn_(sql_client, tenant_id, snapshot_gc_scn, "FOR UPDATE");
 }
 
 int ObGlobalStatProxy::get_snapshot_gc_scn(
@@ -496,14 +566,14 @@ int ObGlobalStatProxy::get_snapshot_gc_scn(
     const uint64_t tenant_id,
     SCN &snapshot_gc_scn)
 {
-  return inner_get_snapshot_gc_scn_(sql_client, tenant_id, snapshot_gc_scn, false);
+  return inner_get_snapshot_gc_scn_(sql_client, tenant_id, snapshot_gc_scn, "");
 }
 
 int ObGlobalStatProxy::inner_get_snapshot_gc_scn_(
     common::ObISQLClient &sql_client,
     const uint64_t tenant_id,
     SCN &snapshot_gc_scn,
-    const bool is_for_update)
+    const char *for_update_str)
 {
   int ret = OB_SUCCESS;
   uint64_t snapshot_gc_scn_val = 0;
@@ -512,7 +582,7 @@ int ObGlobalStatProxy::inner_get_snapshot_gc_scn_(
     ObSqlString sql;
     if (OB_FAIL(sql.assign_fmt(
                 "SELECT column_value FROM %s WHERE TABLE_NAME = '__all_global_stat' AND COLUMN_NAME"
-                " = 'snapshot_gc_scn' %s", OB_ALL_CORE_TABLE_TNAME, (is_for_update ? "FOR UPDATE" : "")))) {
+                " = 'snapshot_gc_scn' %s", OB_ALL_CORE_TABLE_TNAME, for_update_str))) {
       LOG_WARN("assign sql failed", K(ret));
     } else if (OB_FAIL(sql_client.read(res, tenant_id, sql.ptr()))) {
       LOG_WARN("execute sql failed", K(ret), K(sql));

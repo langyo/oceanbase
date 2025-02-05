@@ -14,11 +14,10 @@
 
 #include "rootserver/ob_upgrade_executor.h"
 #include "rootserver/ob_ls_service_helper.h"
-#include "observer/ob_server_struct.h"
+#include "rootserver/tenant_snapshot/ob_tenant_snapshot_util.h" //ObTenantSnapshotUtil
 #include "share/ob_global_stat_proxy.h"
 #include "share/ob_cluster_event_history_table_operator.h"//CLUSTER_EVENT_INSTANCE
-#include "share/ob_primary_standby_service.h" // ObPrimaryStandbyService
-#include "share/ob_tenant_info_proxy.h" //ObAllTenantInfoProxy
+#include "rootserver/standby/ob_standby_service.h" // ObStandbyService
 #include "observer/ob_service.h"
 
 namespace oceanbase
@@ -92,6 +91,7 @@ int ObUpgradeExecutor::init(
     share::schema::ObMultiVersionSchemaService &schema_service,
     rootserver::ObRootInspection &root_inspection,
     common::ObMySQLProxy &sql_proxy,
+    common::ObOracleSqlProxy &oracle_sql_proxy,
     obrpc::ObSrvRpcProxy &rpc_proxy,
     obrpc::ObCommonRpcProxy &common_proxy)
 {
@@ -101,12 +101,13 @@ int ObUpgradeExecutor::init(
     LOG_WARN("can't init twice", KR(ret));
   } else if (OB_FAIL(upgrade_processors_.init(
                      ObBaseUpgradeProcessor::UPGRADE_MODE_OB,
-                     sql_proxy, rpc_proxy, common_proxy, schema_service, *this))) {
+                     sql_proxy, oracle_sql_proxy, rpc_proxy, common_proxy, schema_service, *this))) {
     LOG_WARN("fail to init upgrade processors", KR(ret));
   } else {
     schema_service_ = &schema_service;
     root_inspection_ = &root_inspection;
     sql_proxy_ = &sql_proxy;
+    oralce_sql_proxy_ = &oracle_sql_proxy;
     rpc_proxy_ = &rpc_proxy;
     common_rpc_proxy_ = &common_proxy;
     stopped_ = false;
@@ -305,13 +306,14 @@ int ObUpgradeExecutor::execute(
   } else if (version > 0 && !ObUpgradeChecker::check_data_version_exist(version)) {
     ret = OB_NOT_SUPPORTED;
     LOG_WARN("unsupported version to run upgrade job", KR(ret), K(arg));
-  } else if (OB_FAIL(set_execute_mark_())) {
-    LOG_WARN("fail to set execute mark", KR(ret));
   } else if (OB_FAIL(construct_tenant_ids_(arg.tenant_ids_, tenant_ids))) {
     LOG_WARN("fail to construct tenant_ids", KR(ret), K(arg));
+  } else if (OB_FAIL(set_execute_mark_())) {
+    LOG_WARN("fail to set execute mark", KR(ret));
+    // NOTICE: don't add any `else if` after set_execute_mark_().
   } else {
     const uint64_t tenant_id = (1 == tenant_ids.count()) ?  tenant_ids.at(0) : 0;
-    const int64_t BUF_LEN = common::MAX_ROOTSERVICE_EVENT_EXTRA_INFO_LENGTH;
+    const int64_t BUF_LEN = common::MAX_ROOTSERVICE_JOB_EXTRA_INFO_LENGTH;
     char extra_buf[BUF_LEN] = {'\0'};
     int64_t job_id = OB_INVALID_ID;
     uint64_t current_data_version = 0;
@@ -320,7 +322,7 @@ int ObUpgradeExecutor::execute(
     } else if (OB_FAIL(fill_extra_info_(tenant_id, version,
                current_data_version, BUF_LEN, extra_buf))) {
       LOG_WARN("fail to fill extra info", KR(ret),
-               K(tenant_id), K(version), K(current_data_version));
+               K(tenant_id), KDV(version), KDV(current_data_version));
     } else if (OB_FAIL(RS_JOB_CREATE_WITH_RET(
                job_id, job_type, *sql_proxy_, "tenant_id", tenant_id,
                "extra_info", ObHexEscapeSqlStr(ObString(strlen(extra_buf), extra_buf))))) {
@@ -332,7 +334,7 @@ int ObUpgradeExecutor::execute(
       switch (action) {
         case obrpc::ObUpgradeJobArg::UPGRADE_POST_ACTION: {
           if (OB_FAIL(run_upgrade_post_job_(tenant_ids, version))) {
-            LOG_WARN("fail to run upgrade post job", KR(ret), K(version));
+            LOG_WARN("fail to run upgrade post job", KR(ret), KDV(version));
           }
           break;
         }
@@ -408,11 +410,11 @@ int ObUpgradeExecutor::execute(
       if (OB_INVALID_INDEX == ObClusterVersion::print_version_str(
           min_cluster_version_str, BUF_LEN, min_cluster_version)) {
          ret = OB_SIZE_OVERFLOW;
-         LOG_WARN("fail to print version str", KR(ret), K(min_cluster_version));
+         LOG_WARN("fail to print version str", KR(ret), KCV(min_cluster_version));
       } else if (OB_INVALID_INDEX == ObClusterVersion::print_version_str(
                  targe_data_version_str, BUF_LEN, target_data_version)) {
          ret = OB_SIZE_OVERFLOW;
-         LOG_WARN("fail to print version str", KR(ret), K(target_data_version));
+         LOG_WARN("fail to print version str", KR(ret), KDV(target_data_version));
       } else if (OB_FAIL(observer::ObService::get_build_version(build_version))) {
         LOG_WARN("fail to get build version", KR(ret));
       } else if (0 != tenant_id) {
@@ -420,7 +422,7 @@ int ObUpgradeExecutor::execute(
         if (OB_INVALID_INDEX == ObClusterVersion::print_version_str(
             current_data_version_str, BUF_LEN, current_data_version)) {
            ret = OB_SIZE_OVERFLOW;
-           LOG_WARN("fail to print version str", KR(ret), K(current_data_version));
+           LOG_WARN("fail to print version str", KR(ret), KDV(current_data_version));
         }
         CLUSTER_EVENT_SYNC_ADD("UPGRADE",
                                ObRsJobTableOperator::get_job_type_str(job_type),
@@ -477,7 +479,7 @@ int ObUpgradeExecutor::fill_extra_info_(
       if (OB_INVALID_INDEX == (version_len = ObClusterVersion::print_version_str(
           version_buf, VERSION_LEN, target_data_version))) {
         ret = OB_SIZE_OVERFLOW;
-        LOG_WARN("fail to print version", KR(ret), K(target_data_version));
+        LOG_WARN("fail to print version", KR(ret), KDV(target_data_version));
       } else if (OB_FAIL(databuff_printf(buf, buf_len, len,
                  "TARGET_DATA_VERSION: '%s'", version_buf))) {
         LOG_WARN("fail to print string", KR(ret), K(len));
@@ -492,7 +494,7 @@ int ObUpgradeExecutor::fill_extra_info_(
       } else if (OB_INVALID_INDEX == (version_len = ObClusterVersion::print_version_str(
           version_buf, VERSION_LEN, current_data_version))) {
         ret = OB_SIZE_OVERFLOW;
-        LOG_WARN("fail to print version", KR(ret), K(current_data_version));
+        LOG_WARN("fail to print version", KR(ret), KDV(current_data_version));
       } else if (OB_FAIL(databuff_printf(buf, buf_len, len,
                  ", CURRENT_DATA_VERSION: '%s'", version_buf))) {
         LOG_WARN("fail to print string", KR(ret), K(len));
@@ -515,14 +517,14 @@ int ObUpgradeExecutor::run_upgrade_post_job_(
     LOG_WARN("executor should stopped", KR(ret));
   } else if (!ObUpgradeChecker::check_data_version_exist(version)) {
     ret = OB_NOT_SUPPORTED;
-    LOG_WARN("unsupported version to run upgrade job", KR(ret), K(version));
+    LOG_WARN("unsupported version to run upgrade job", KR(ret), KDV(version));
   } else {
     ObBaseUpgradeProcessor *processor = NULL;
     int64_t backup_ret = OB_SUCCESS;
     int tmp_ret = OB_SUCCESS;
     if (OB_FAIL(upgrade_processors_.get_processor_by_version(
                        version, processor))) {
-      LOG_WARN("fail to get processor by version", KR(ret), K(version));
+      LOG_WARN("fail to get processor by version", KR(ret), KDV(version));
     } else {
       for (int64_t i = tenant_ids.count() - 1; OB_SUCC(ret) && i >= 0; i--) {
         const uint64_t tenant_id = tenant_ids.at(i);
@@ -530,16 +532,16 @@ int ObUpgradeExecutor::run_upgrade_post_job_(
         int64_t current_version = processor->get_version();
         processor->set_tenant_id(tenant_id);
         FLOG_INFO("[UPGRADE] start to run post upgrade job by version",
-                  K(tenant_id), K(current_version));
+                  K(tenant_id), KDV(current_version));
         if (OB_FAIL(check_stop())) {
           LOG_WARN("executor should stopped", KR(ret));
         } else if (OB_TMP_FAIL(processor->post_upgrade())) {
           LOG_WARN("run post upgrade by version failed",
-                   KR(tmp_ret), K(tenant_id), K(current_version));
+                   KR(tmp_ret), K(tenant_id), KDV(current_version));
           backup_ret = OB_SUCCESS == backup_ret ? tmp_ret : backup_ret;
         }
         FLOG_INFO("[UPGRADE] finish post upgrade job by version",
-                  KR(tmp_ret), K(tenant_id), K(current_version),
+                  KR(tmp_ret), K(tenant_id), KDV(current_version),
                   "cost", ObTimeUtility::current_time() - start_ts);
       } // end for
     }
@@ -596,6 +598,7 @@ int ObUpgradeExecutor::run_upgrade_begin_action_(
   int ret = OB_SUCCESS;
   ObMySQLTransaction trans;
   share::SCN sys_ls_target_scn = SCN::invalid_scn();
+  ObConflictCaseWithClone case_to_check(ObConflictCaseWithClone::UPGRADE);
   if (OB_FAIL(check_inner_stat_())) {
     LOG_WARN("fail to check inner stat", KR(ret));
   } else if (OB_FAIL(check_stop())) {
@@ -617,36 +620,41 @@ int ObUpgradeExecutor::run_upgrade_begin_action_(
         if (OB_ERR_NULL_VALUE != ret) {
           ret = OB_SUCC(ret) ? OB_ERR_UNEXPECTED : ret;
           LOG_WARN("current data version should be not exist",
-                   KR(ret), K(tenant_id), K(current_data_version));
+                   KR(ret), K(tenant_id), KDV(current_data_version));
         } else if (OB_FAIL(proxy.update_current_data_version(DEFAULT_DATA_VERSION))) {
           // overwrite ret
           LOG_WARN("fail to init current data version",
-                   KR(ret), K(tenant_id), K(DEFAULT_DATA_VERSION));
+                   KR(ret), K(tenant_id), KDV(DEFAULT_DATA_VERSION));
         } else {
           target_data_version = DEFAULT_DATA_VERSION;
           LOG_INFO("[UPGRADE] init missing current data version",
-                   KR(ret), K(tenant_id), K(DEFAULT_DATA_VERSION));
+                   KR(ret), K(tenant_id), KDV(DEFAULT_DATA_VERSION));
         }
       } else {
         LOG_WARN("fail to get target data version", KR(ret), K(tenant_id));
       }
     }
+    // check tenant not in cloning procedure in trans
+    if (OB_FAIL(ret)) {
+    } else if (OB_FAIL(ObTenantSnapshotUtil::check_tenant_not_in_cloning_procedure(tenant_id, case_to_check))) {
+      LOG_WARN("fail to check whether tenant is in cloning produre", KR(ret), K(tenant_id));
+    }
     // try update target_data_version
     if (OB_FAIL(ret)) {
     } else if (target_data_version >= DATA_CURRENT_VERSION) {
       LOG_INFO("[UPGRADE] target data version is new enough, just skip",
-               KR(ret), K(tenant_id), K(target_data_version));
+               KR(ret), K(tenant_id), KDV(target_data_version));
     } else if (OB_FAIL(proxy.update_target_data_version(DATA_CURRENT_VERSION))) {
       LOG_WARN("fail to update target data version",
-               KR(ret), K(tenant_id), "version", DATA_CURRENT_VERSION);
+               KR(ret), K(tenant_id), "version", DVP(DATA_CURRENT_VERSION));
     } else if (is_user_tenant(tenant_id)
-               && OB_FAIL(OB_PRIMARY_STANDBY_SERVICE.write_upgrade_barrier_log(
+               && OB_FAIL(OB_STANDBY_SERVICE.write_upgrade_barrier_log(
                                                      trans, tenant_id, DATA_CURRENT_VERSION))) {
       LOG_WARN("fail to write_upgrade_barrier_log",
-               KR(ret), K(tenant_id), "version", DATA_CURRENT_VERSION);
+               KR(ret), K(tenant_id), "version", DVP(DATA_CURRENT_VERSION));
     } else {
       LOG_INFO("[UPGRADE] update target data version",
-               KR(ret), K(tenant_id), "version", DATA_CURRENT_VERSION);
+               KR(ret), K(tenant_id), "version", DVP(DATA_CURRENT_VERSION));
     }
   }
   if (trans.is_started()) {
@@ -905,17 +913,18 @@ int ObUpgradeExecutor::upgrade_mysql_system_package_job_()
   int64_t timeout = GCONF._ob_ddl_timeout;
   const char *create_package_sql =
         "CREATE OR REPLACE PACKAGE __DBMS_UPGRADE \
-           PROCEDURE UPGRADE(package_name VARCHAR(1024)); \
-           PROCEDURE UPGRADE_ALL(); \
+           PROCEDURE UPGRADE(package_name VARCHAR(1024), \
+                             load_from_file BOOLEAN DEFAULT TRUE); \
+           PROCEDURE UPGRADE_ALL(load_from_file BOOLEAN DEFAULT TRUE); \
          END;";
   const char *create_package_body_sql =
         "CREATE OR REPLACE PACKAGE BODY __DBMS_UPGRADE \
-           PROCEDURE UPGRADE(package_name VARCHAR(1024)); \
+           PROCEDURE UPGRADE(package_name VARCHAR(1024), load_from_file BOOLEAN); \
              PRAGMA INTERFACE(c, UPGRADE_SINGLE); \
-           PROCEDURE UPGRADE_ALL(); \
+           PROCEDURE UPGRADE_ALL(load_from_file BOOLEAN); \
              PRAGMA INTERFACE(c, UPGRADE_ALL); \
          END;";
-  const char *upgrade_sql = "CALL __DBMS_UPGRADE.UPGRADE_ALL();";
+  const char *upgrade_sql = "CALL __DBMS_UPGRADE.UPGRADE_ALL(FALSE);";
   ObTimeoutCtx ctx;
   int64_t affected_rows = 0;
   if (OB_FAIL(check_inner_stat_())) {
@@ -964,17 +973,18 @@ int ObUpgradeExecutor::upgrade_oracle_system_package_job_()
   int64_t timeout = GCONF._ob_ddl_timeout;
   const char *create_package_sql =
         "CREATE OR REPLACE PACKAGE \"__DBMS_UPGRADE\" IS \
-           PROCEDURE UPGRADE(package_name VARCHAR2); \
-           PROCEDURE UPGRADE_ALL; \
+           PROCEDURE UPGRADE(package_name VARCHAR2, \
+                             load_from_file BOOLEAN DEFAULT TRUE); \
+           PROCEDURE UPGRADE_ALL(load_from_file BOOLEAN DEFAULT TRUE); \
          END;";
   const char *create_package_body_sql =
         "CREATE OR REPLACE PACKAGE BODY \"__DBMS_UPGRADE\" IS \
-           PROCEDURE UPGRADE(package_name VARCHAR2); \
+           PROCEDURE UPGRADE(package_name VARCHAR2, load_from_file BOOLEAN); \
              PRAGMA INTERFACE(c, UPGRADE_SINGLE); \
-           PROCEDURE UPGRADE_ALL; \
+           PROCEDURE UPGRADE_ALL(load_from_file BOOLEAN); \
              PRAGMA INTERFACE(c, UPGRADE_ALL); \
          END;";
-  const char *upgrade_sql = "CALL \"__DBMS_UPGRADE\".UPGRADE_ALL();";
+  const char *upgrade_sql = "BEGIN \"__DBMS_UPGRADE\".UPGRADE_ALL(FALSE); END;";
   ObTimeoutCtx ctx;
   int64_t affected_rows = 0;
   if (OB_FAIL(check_inner_stat_())) {
@@ -1007,9 +1017,9 @@ int ObUpgradeExecutor::upgrade_oracle_system_package_job_()
              OB_SYS_TENANT_ID, upgrade_sql,
              affected_rows, static_cast<int64_t>(mode)))) {
     LOG_WARN("fail to execute sql", KR(ret), "sql", upgrade_sql);
-  } else if (0 != affected_rows) {
+  } else if (1 != affected_rows) { // default value of oracle anonymous block affected_rows is 1
     ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("affected_rows expected to be zero", KR(ret), K(affected_rows));
+    LOG_WARN("affected_rows expected to be 1", KR(ret), K(affected_rows));
   }
   FLOG_INFO("[UPGRADE] finish run upgrade oracle system package job",
             KR(ret), "cost", ObTimeUtility::current_time() - start_ts);
@@ -1046,6 +1056,27 @@ int ObUpgradeExecutor::run_upgrade_all_post_action_(
   return ret;
 }
 
+int ObUpgradeExecutor::run_upgrade_processor_(const uint64_t tenant_id,
+    ObBaseUpgradeProcessor *processor, int64_t &version)
+{
+  int ret = OB_SUCCESS;
+  if (OB_FAIL(check_inner_stat_())) {
+    LOG_WARN("fail to check inner stat", KR(ret));
+  } else if (OB_ISNULL(processor) || !is_valid_tenant_id(tenant_id)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("invalid arguments", KR(ret), KP(processor), K(tenant_id));
+  } else {
+    processor->set_tenant_id(tenant_id);
+    version = processor->get_version();
+    if (OB_FAIL(check_schema_sync_(tenant_id))) {
+      LOG_WARN("fail to check schema sync", KR(ret), K(tenant_id));
+    } else if (OB_FAIL(processor->post_upgrade())) {
+      LOG_WARN("run post upgrade by version failed", KR(ret), K(tenant_id), KDV(version));
+    }
+  }
+  return ret;
+}
+
 int ObUpgradeExecutor::run_upgrade_all_post_action_(
     const uint64_t tenant_id)
 {
@@ -1059,34 +1090,79 @@ int ObUpgradeExecutor::run_upgrade_all_post_action_(
     int64_t start_idx = OB_INVALID_INDEX;
     int64_t end_idx = OB_INVALID_INDEX;
     ObGlobalStatProxy proxy(*sql_proxy_, tenant_id);
+    int64_t version = OB_INVALID_VERSION;
+    ObBaseUpgradeProcessor *processor  = NULL;
     if (OB_FAIL(proxy.get_current_data_version(current_data_version))) {
       LOG_WARN("fail to get current data version",
-               KR(ret), K(tenant_id), K(current_data_version));
+               KR(ret), K(tenant_id), KDV(current_data_version));
+    } else if (!ObUpgradeChecker::check_data_version_exist(current_data_version)) {
+      // current_data_version not exists in UPGRADE_PATH, maybe you should refresh master code
+      ret = OB_ERR_UNDEFINED;
+      LOG_WARN("current_data_version not exists in UPGRADE_PATH", KR(ret), KDV(current_data_version));
     } else if (OB_FAIL(upgrade_processors_.get_processor_idx_by_range(
                        current_data_version, DATA_CURRENT_VERSION,
                        start_idx, end_idx))) {
-      LOG_WARN("fail to get processor by version", KR(ret), K(current_data_version));
+      LOG_WARN("fail to get processor by version", KR(ret), KDV(current_data_version));
     }
     for (int64_t i = start_idx + 1; OB_SUCC(ret) && i <= end_idx; i++) {
-      ObBaseUpgradeProcessor *processor  = NULL;
-      int64_t version = OB_INVALID_VERSION;
+      processor = NULL;
+      version = OB_INVALID_VERSION;
       if (OB_FAIL(check_stop())) {
         LOG_WARN("executor should stopped", KR(ret));
       } else if (OB_FAIL(upgrade_processors_.get_processor_by_idx(i, processor))) {
-        LOG_WARN("fail to get processor", KR(ret), K(current_data_version), K(i));
-      } else if (FALSE_IT(version = processor->get_version())) {
-      } else if (FALSE_IT(processor->set_tenant_id(tenant_id))) {
+        LOG_WARN("fail to get processor", KR(ret), KDV(current_data_version), K(i));
+      } else if (OB_FAIL(run_upgrade_processor_(tenant_id, processor, version))) {
+        LOG_WARN("failed to run upgrade processor", KR(ret), K(tenant_id), KDV(version));
       } else if (OB_FAIL(check_schema_sync_(tenant_id))) {
         LOG_WARN("fail to check schema sync", KR(ret), K(tenant_id));
-      } else if (OB_FAIL(processor->post_upgrade())) {
-        LOG_WARN("run post upgrade by version failed", KR(ret), K(tenant_id), K(version));
-      } else if (OB_FAIL(check_schema_sync_(tenant_id))) {
-        LOG_WARN("fail to check schema sync", KR(ret), K(tenant_id));
-      } else if (OB_FAIL(proxy.update_current_data_version(version))) {
-        LOG_WARN("fail to update current data version", KR(ret), K(tenant_id), K(version));
+      } else if (i < end_idx) {
+        if (OB_FAIL(proxy.update_current_data_version(version))) {
+          LOG_WARN("fail to update current data version", KR(ret), K(tenant_id), KDV(version));
+        }
+      } else if (OB_FAIL(update_final_current_data_version_(tenant_id, version))) {
+        LOG_WARN("fail to update final current data version", KR(ret), K(tenant_id), KDV(version));
       }
     } // end for
+    // finish to run processor for each version, begin to run processor for all version
+    processor = NULL;
+    version = OB_INVALID_VERSION;
+    if (FAILEDx(upgrade_processors_.get_all_version_processor(processor))) {
+      LOG_WARN("failed to get all version processor", KR(ret));
+    } else if (OB_FAIL(run_upgrade_processor_(tenant_id, processor, version))) {
+      LOG_WARN("failed to run all version processor", KR(ret), K(tenant_id));
+    }
   }
+  return ret;
+}
+
+// for the final version, we need to write a data version barrier log when updating the
+// current_data_version
+int ObUpgradeExecutor::update_final_current_data_version_(const uint64_t tenant_id,
+                                                          const int64_t version)
+{
+  int ret = OB_SUCCESS;
+
+  ObMySQLTransaction trans;
+  if (OB_FAIL(trans.start(sql_proxy_, tenant_id))) {
+    LOG_WARN("fail to start trans", KR(ret), K(tenant_id));
+  } else {
+    ObGlobalStatProxy end_proxy(trans, tenant_id);
+    if (OB_FAIL(end_proxy.update_current_data_version(version))) {
+      LOG_WARN("fail to update current data version", KR(ret), K(tenant_id), KDV(version));
+    } else if (is_user_tenant(tenant_id) &&
+               OB_FAIL(OB_STANDBY_SERVICE.write_upgrade_data_version_barrier_log(
+                   trans, tenant_id, version))) {
+      LOG_WARN("fail to write_upgrade_data_version_barrier_log", KR(ret), K(tenant_id), KDV(version));
+    }
+  }
+  if (trans.is_started()) {
+    int tmp_ret = OB_SUCCESS;
+    if (OB_TMP_FAIL(trans.end(OB_SUCC(ret)))) {
+      LOG_WARN("trans end failed", KR(tmp_ret), K(ret));
+      ret = OB_SUCC(ret) ? tmp_ret : ret;
+    }
+  }
+
   return ret;
 }
 
@@ -1156,6 +1232,7 @@ int ObUpgradeExecutor::run_upgrade_end_action_(
     const uint64_t tenant_id)
 {
   int ret = OB_SUCCESS;
+  DEBUG_SYNC(BEFROE_UPDATE_DATA_VERSION);
   if (OB_FAIL(check_inner_stat_())) {
     LOG_WARN("fail to check inner stat", KR(ret));
   } else if (OB_FAIL(check_stop())) {
@@ -1174,14 +1251,14 @@ int ObUpgradeExecutor::run_upgrade_end_action_(
                || target_data_version != DATA_CURRENT_VERSION) {
       ret = OB_STATE_NOT_MATCH;
       LOG_WARN("data_version not match, upgrade process should be run",
-               KR(ret), K(tenant_id), K(target_data_version), K(current_data_version));
+               KR(ret), K(tenant_id), KDV(target_data_version), KDV(current_data_version));
     } else {
       // target_data_version == current_data_version == DATA_CURRENT_VERSION
       if (OB_FAIL(GET_MIN_DATA_VERSION(tenant_id, data_version))) {
         LOG_WARN("fail to get min data version", KR(ret), K(tenant_id));
       } else if (data_version >= current_data_version) {
         LOG_INFO("[UPGRADE] data version is not less than current data version, just skip",
-                 K(tenant_id), K(data_version), K(current_data_version));
+                 K(tenant_id), KDV(data_version), KDV(current_data_version));
       } else {
         HEAP_VAR(obrpc::ObAdminSetConfigItem, item) {
         ObSchemaGetterGuard guard;
@@ -1195,7 +1272,7 @@ int ObUpgradeExecutor::run_upgrade_end_action_(
         if (pos <= 0) {
           ret = OB_INVALID_ARGUMENT;
           LOG_WARN("current_data_version is invalid",
-                   KR(ret), K(tenant_id), K(current_data_version));
+                   KR(ret), K(tenant_id), KDV(current_data_version));
         } else if (OB_FAIL(GSCHEMASERVICE.get_tenant_schema_guard(OB_SYS_TENANT_ID, guard))) {
           LOG_WARN("fail to get schema guard", KR(ret));
         } else if (OB_FAIL(guard.get_tenant_info(tenant_id, tenant))) {
@@ -1278,17 +1355,29 @@ int ObUpgradeExecutor::construct_tenant_ids_(
 {
   int ret = OB_SUCCESS;
   ObArray<uint64_t> standby_tenants;
-  bool is_standby = false;
+  ObTenantRole tenant_role(share::ObTenantRole::INVALID_TENANT);
+  ObSchemaGetterGuard schema_guard;
   if (OB_FAIL(check_inner_stat_())) {
     LOG_WARN("fail to check inner stat", KR(ret));
+  } else if (OB_FAIL(schema_service_->get_tenant_schema_guard(OB_SYS_TENANT_ID, schema_guard))) {
+    LOG_WARN("fail to get sys tenant schema guard", KR(ret));
   } else if (src_tenant_ids.count() > 0) {
     for (int64_t i = 0; OB_SUCC(ret) && i < src_tenant_ids.count(); i++) {
       const uint64_t tenant_id = src_tenant_ids.at(i);
-      if (OB_FAIL(ObAllTenantInfoProxy::is_standby_tenant(sql_proxy_, tenant_id, is_standby))) {
-        LOG_WARN("fail to check is standby tenant", KR(ret), K(tenant_id));
-      } else if (is_standby) {
+      const ObSimpleTenantSchema *tenant_schema = nullptr;
+      if (OB_FAIL(schema_guard.get_tenant_info(tenant_id, tenant_schema))) {
+        LOG_WARN("fail to get tenant info", KR(ret), K(tenant_id));
+      } else if (OB_ISNULL(tenant_schema)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("tenant schema is null", KR(ret), KP(tenant_schema));
+      } else if (!tenant_schema->is_normal()) {
         ret = OB_NOT_SUPPORTED;
-        LOG_WARN("not support to upgrade a standby tenant", KR(ret), K(tenant_id));
+        LOG_WARN("tenant is not normal, can not do upgrade", KR(ret), K(tenant_id), KPC(tenant_schema));
+      } else if (OB_FAIL(ObAllTenantInfoProxy::get_tenant_role(sql_proxy_, tenant_id, tenant_role))) {
+        LOG_WARN("fail to get tenant role", KR(ret), K(tenant_id), K(tenant_role));
+      } else if (!tenant_role.is_primary()) {
+        ret = OB_NOT_SUPPORTED;
+        LOG_WARN("not support to upgrade a non-primary tenant", KR(ret), K(tenant_id), K(tenant_role));
       }
     } // end for
     // tenant_list is specified
@@ -1302,10 +1391,23 @@ int ObUpgradeExecutor::construct_tenant_ids_(
     }
     for (int64_t i = 0; OB_SUCC(ret) && i < tenant_ids.count(); i++) {
       const uint64_t tenant_id = tenant_ids.at(i);
-      if (OB_FAIL(ObAllTenantInfoProxy::is_standby_tenant(sql_proxy_, tenant_id, is_standby))) {
-        LOG_WARN("fail to check is standby tenant", KR(ret), K(tenant_id));
-      } else if (is_standby) {
+      const ObSimpleTenantSchema *tenant_schema = nullptr;
+      if (OB_FAIL(schema_guard.get_tenant_info(tenant_id, tenant_schema))) {
+        LOG_WARN("fail to get tenant info", KR(ret), K(tenant_id));
+      } else if (OB_ISNULL(tenant_schema)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("tenant schema is null", KR(ret), KP(tenant_schema));
+      } else if (!tenant_schema->is_normal()) {
+        ret = OB_NOT_SUPPORTED;
+        LOG_WARN("tenant is not normal, can not do upgrade", KR(ret), K(tenant_id), KPC(tenant_schema));
+      } else if (OB_FAIL(ObAllTenantInfoProxy::get_tenant_role(sql_proxy_, tenant_id, tenant_role))) {
+        LOG_WARN("fail to get tenant role", KR(ret), K(tenant_id), K(tenant_role));
+      } else if (tenant_role.is_standby()) {
         // skip
+      } else if (!tenant_role.is_primary()) {
+        ret = OB_NOT_SUPPORTED;
+        LOG_WARN("not support do upgrade with tenant role is neither primary nor standby",
+                 KR(ret), K(tenant_id), K(tenant_role));
       } else if (OB_FAIL(dst_tenant_ids.push_back(tenant_id))) {
         LOG_WARN("fail to push back tenant_id", KR(ret), K(tenant_id));
       }

@@ -1,3 +1,6 @@
+// owner: zjf225077
+// owner group: log
+
 // Copyright (c) 2021 OceanBase
 // OceanBase is licensed under Mulan PubL v2.
 // You can use this software according to the terms and conditions of the Mulan PubL v2.
@@ -7,13 +10,9 @@
 // EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
 // MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 // See the Mulan PubL v2 for more details.
-#include <cstdio>
-#include <gtest/gtest.h>
-#include <signal.h>
 #define private public
 #include "env/ob_simple_log_cluster_env.h"
 #undef private
-
 const std::string TEST_NAME = "single_arb_server";
 
 using namespace oceanbase::common;
@@ -33,6 +32,7 @@ public:
 int64_t ObSimpleLogClusterTestBase::member_cnt_ = 1;
 int64_t ObSimpleLogClusterTestBase::node_cnt_ = 1;
 bool ObSimpleLogClusterTestBase::need_add_arb_server_ = true;
+bool ObSimpleLogClusterTestBase::need_shared_storage_ = false;
 std::string ObSimpleLogClusterTestBase::test_name_ = TEST_NAME;
 
 bool check_dir_exist(const char *base_dir, const int64_t id)
@@ -168,10 +168,10 @@ TEST_F(TestObSimpleMutilArbServer, out_interface)
         palflite::PalfEnvKey(cluster_id, 1), arb_server->self_, 1000));
   palflite::PalfEnvLite *palf_env_lite = NULL;
   EXPECT_EQ(OB_SUCCESS, arb_server->palf_env_mgr_.get_palf_env_lite(
-        palflite::PalfEnvKey(cluster_id, OB_SERVER_TENANT_ID), palf_env_lite));
+        palflite::PalfEnvKey(cluster_id, ObISimpleLogServer::DEFAULT_TENANT_ID), palf_env_lite));
   arb_server->palf_env_mgr_.revert_palf_env_lite(palf_env_lite);
   EXPECT_EQ(OB_SUCCESS, arb_server->palf_env_mgr_.remove_palf_env_lite(
-        palflite::PalfEnvKey(cluster_id, OB_SERVER_TENANT_ID)));
+        palflite::PalfEnvKey(cluster_id, ObISimpleLogServer::DEFAULT_TENANT_ID)));
   EXPECT_EQ(OB_SUCCESS, arb_server->palf_env_mgr_.delete_arbitration_instance(
         palflite::PalfEnvKey(cluster_id, 1), arb_server->self_, 1000));
   CLOG_LOG(INFO, "end test out_interface");
@@ -185,7 +185,7 @@ TEST_F(TestObSimpleMutilArbServer, create_mutil_cluster)
   EXPECT_EQ(true, iserver->is_arb_server());
   ObSimpleArbServer *arb_server = dynamic_cast<ObSimpleArbServer*>(iserver);
   palflite::PalfEnvLiteMgr *palf_env_mgr = &arb_server->palf_env_mgr_;
-  std::vector<int64_t> cluster_ids = {2, 3, 4, 5, 6};
+  std::vector<int64_t> cluster_ids = {2, 3, 4, 5, 6, 7};
   arbserver::GCMsgEpoch epoch = arbserver::GCMsgEpoch(1, 1);
 
   // test add tenant without cluster, generate placeholder
@@ -218,6 +218,20 @@ TEST_F(TestObSimpleMutilArbServer, create_mutil_cluster)
   // empty cluster_name
   EXPECT_EQ(OB_SUCCESS, palf_env_mgr->add_cluster(iserver->get_addr(), cluster_ids[4], "", epoch));
   EXPECT_EQ(OB_ARBITRATION_SERVICE_ALREADY_EXIST, palf_env_mgr->add_cluster(iserver->get_addr(), cluster_ids[4], "test", epoch));
+
+  // long cluster_name
+  char *long_cluster_name = new char[OB_MAX_CLUSTER_NAME_LENGTH + 1];
+  MEMSET(long_cluster_name, '\0', OB_MAX_CLUSTER_NAME_LENGTH + 1);
+  MEMSET(long_cluster_name, 'a', OB_MAX_CLUSTER_NAME_LENGTH);
+  EXPECT_EQ(OB_SUCCESS, palf_env_mgr->add_cluster(iserver->get_addr(), cluster_ids[5], long_cluster_name, epoch));
+  EXPECT_EQ(OB_SUCCESS, palf_env_mgr->add_cluster(iserver->get_addr(), cluster_ids[5], long_cluster_name, epoch));
+  EXPECT_TRUE(palf_env_mgr->is_cluster_placeholder_exists(cluster_ids[0]));
+  EXPECT_EQ(OB_SUCCESS, restart_paxos_groups());
+  EXPECT_TRUE(palf_env_mgr->is_cluster_placeholder_exists(cluster_ids[0]));
+  palflite::ClusterMetaInfo long_cluster_meta_info;
+  EXPECT_EQ(OB_SUCCESS, palf_env_mgr->get_cluster_meta_info_(cluster_ids[5], long_cluster_meta_info));
+  EXPECT_EQ(0, strcmp(long_cluster_name, long_cluster_meta_info.cluster_name_));
+  EXPECT_EQ(OB_SUCCESS, palf_env_mgr->remove_cluster(iserver->get_addr(), cluster_ids[5], long_cluster_name, epoch));
 
   // test remove_cluster
   EXPECT_EQ(OB_SUCCESS, palf_env_mgr->remove_cluster(iserver->get_addr(), cluster_ids[0], "arbserver_test", epoch));
@@ -268,6 +282,116 @@ TEST_F(TestObSimpleMutilArbServer, create_mutil_cluster)
 
   EXPECT_EQ(OB_SUCCESS, palf_env_mgr->remove_cluster(iserver->get_addr(), cluster_ids[0], "arbserver_test", epoch));
   EXPECT_FALSE(palf_env_mgr->is_cluster_placeholder_exists(cluster_ids[0]));
+}
+
+TEST_F(TestObSimpleMutilArbServer, restart_arb)
+{
+  SET_CASE_LOG_FILE(TEST_NAME, "restart_arb");
+  OB_LOGGER.set_log_level("TRACE");
+  ObISimpleLogServer *iserver = get_cluster()[0];
+  EXPECT_EQ(true, iserver->is_arb_server());
+  ObSimpleArbServer *arb_server = dynamic_cast<ObSimpleArbServer*>(iserver);
+  palflite::PalfEnvLiteMgr *palf_env_mgr = &arb_server->palf_env_mgr_;
+  std::vector<int64_t> cluster_ids = {2, 3, 4, 5, 6, 7};
+  arbserver::GCMsgEpoch epoch = arbserver::GCMsgEpoch(1, 1);
+
+  // test add tenant without cluster, generate placeholder
+  EXPECT_EQ(OB_SUCCESS, palf_env_mgr->create_palf_env_lite(palflite::PalfEnvKey(cluster_ids[0], 1)));
+  EXPECT_TRUE(palf_env_mgr->is_cluster_placeholder_exists(cluster_ids[0]));
+
+  palflite::PalfEnvLite *palf_env_lite = NULL;
+  IPalfHandleImpl *ipalf_handle_impl = NULL;
+  {
+    PalfBaseInfo info; info.generate_by_default();
+    AccessMode mode(palf::AccessMode::APPEND);
+    EXPECT_EQ(OB_SUCCESS, palf_env_mgr->get_palf_env_lite(palflite::PalfEnvKey(cluster_ids[0], 1), palf_env_lite));
+    EXPECT_EQ(OB_SUCCESS, palf_env_lite->create_palf_handle_impl(1, mode, info, ipalf_handle_impl));
+    palflite::PalfHandleLite *palf_handle_lite = dynamic_cast<palflite::PalfHandleLite*>(ipalf_handle_impl);
+    ASSERT_NE(nullptr, palf_handle_lite);
+    LogEngine *log_engine = &palf_handle_lite->log_engine_;
+    LogMeta log_meta = log_engine->log_meta_;
+    int count = (2 * 1024 * 1024 - log_engine->log_meta_storage_.log_tail_.val_) / 4096;
+    while (count > 0) {
+      EXPECT_EQ(OB_SUCCESS, log_engine->append_log_meta_(log_meta));
+      count --;
+    }
+    while (log_engine->log_meta_storage_.log_tail_ != LSN(2*1024*1024)) {
+      sleep(1);
+    }
+    sleep(1);
+    EXPECT_EQ(2*1024*1024, log_engine->log_meta_storage_.log_tail_);
+    EXPECT_EQ(OB_SUCCESS, log_engine->log_meta_storage_.block_mgr_.switch_next_block(1));
+  }
+  palf_env_lite->revert_palf_handle_impl(ipalf_handle_impl);
+  palf_env_mgr->revert_palf_env_lite(palf_env_lite);
+  EXPECT_EQ(OB_SUCCESS, restart_server(0));
+}
+
+TEST_F(TestObSimpleMutilArbServer, multi_thread)
+{
+  SET_CASE_LOG_FILE(TEST_NAME, "restart_arb");
+  OB_LOGGER.set_log_level("TRACE");
+  ObISimpleLogServer *iserver = get_cluster()[0];
+  EXPECT_EQ(true, iserver->is_arb_server());
+  ObSimpleArbServer *arb_server = dynamic_cast<ObSimpleArbServer*>(iserver);
+  palflite::PalfEnvLiteMgr *palf_env_mgr = &arb_server->palf_env_mgr_;
+  int64_t cluster_id = 100;
+  arbserver::GCMsgEpoch epoch = arbserver::GCMsgEpoch(1, 1);
+
+  // test add tenant without cluster, generate placeholder
+  EXPECT_EQ(OB_SUCCESS, palf_env_mgr->create_palf_env_lite(palflite::PalfEnvKey(cluster_id, 1)));
+  EXPECT_TRUE(palf_env_mgr->is_cluster_placeholder_exists(cluster_id));
+
+  std::vector<int64_t> ls_ids = {1001, 1002, 1003, 1004, 1005, 1006, 1007};
+  int64_t create_success_count = 0;
+  auto create_func = [&]() {
+    for (auto ls_id : ls_ids) {
+      int ret = palf_env_mgr->create_arbitration_instance(
+            palflite::PalfEnvKey(cluster_id, 1), arb_server->self_, 1001,
+            ObTenantRole(ObTenantRole::PRIMARY_TENANT));
+      if (OB_SUCCESS == ret) {
+        ATOMIC_INC(&create_success_count);
+      }
+      if (OB_SUCCESS != ret) {
+        ASSERT_EQ(false, true);
+      } else {
+      }
+    }
+  };
+  int64_t remove_success_count = 0;
+  auto remove_func = [&] () {
+    for (auto ls_id : ls_ids) {
+      int ret = arb_server->palf_env_mgr_.delete_arbitration_instance(
+        palflite::PalfEnvKey(cluster_id, 1), arb_server->self_, ls_id);
+      if (OB_SUCCESS == ret) {
+        ATOMIC_INC(&remove_success_count);
+      }
+      if (OB_SUCCESS != ret) {
+        ASSERT_EQ(false, true);
+      } else {
+      }
+    }
+  };
+  int64_t thread_count = 8;
+  std::vector<std::thread> create_threads;
+  create_threads.reserve(thread_count);
+  for (int i = 0; i < thread_count; i++) {
+    create_threads.emplace_back(std::thread(create_func));
+  }
+  for (int i = 0; i < thread_count; i++) {
+    create_threads[i].join();
+  }
+  ASSERT_EQ(thread_count*ls_ids.size(), create_success_count);
+  std::vector<std::thread> remove_threads;
+  remove_threads.reserve(thread_count);
+  for (int i = 0; i < thread_count; i++) {
+    remove_threads.emplace_back(std::thread(remove_func));
+  }
+  for (int i = 0; i < thread_count; i++) {
+    remove_threads[i].join();
+  }
+  ASSERT_EQ(thread_count*ls_ids.size(), remove_success_count);
+
 }
 
 } // end unittest

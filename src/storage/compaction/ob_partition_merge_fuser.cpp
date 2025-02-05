@@ -11,10 +11,9 @@
  */
 
 #define USING_LOG_PREFIX STORAGE_COMPACTION
-#include "ob_partition_merge_fuser.h"
 
+#include "ob_partition_merge_fuser.h"
 #include "ob_tablet_merge_ctx.h"
-#include "sql/ob_sql_utils.h"
 #include "storage/column_store/ob_column_oriented_merge_fuser.h"
 
 namespace oceanbase
@@ -121,7 +120,12 @@ int ObMergeFuser::fuse_row(MERGE_ITER_ARRAY &macro_row_iters)
     STORAGE_LOG(WARN, "Invalid macro row iters to fuse row", K(ret), K(macro_row_iters));
   } else if (OB_FAIL(preprocess_fuse_row(*macro_row_iters.at(0)->get_curr_row(), is_need_fuse))) {
     STORAGE_LOG(WARN, "failed to preprocess_fuse_row", K(ret));
-  } else if (!is_need_fuse) {
+  } else if (!is_need_fuse && macro_row_iters.at(0)->get_curr_row()->row_flag_.is_delete()) {
+    result_row_.row_flag_.reset();
+    result_row_.row_flag_ = macro_row_iters.at(0)->get_curr_row()->row_flag_;
+    for (int64_t i = 1; i < macro_row_iters_cnt; ++i) {
+      result_row_.row_flag_.fuse_flag(macro_row_iters.at(i)->get_curr_row()->row_flag_);
+    }
   } else {
     bool final_result = false;
     for (int64_t i = 0; OB_SUCC(ret) && !final_result && i < macro_row_iters_cnt; ++i) {
@@ -135,6 +139,11 @@ int ObMergeFuser::fuse_row(MERGE_ITER_ARRAY &macro_row_iters)
     }
   }
   return ret;
+}
+
+int ObMergeFuser::make_result_row_shadow(const int64_t sql_sequence_col_idx)
+{
+  return ObShadowRowUtil::make_shadow_row(sql_sequence_col_idx, result_row_);
 }
 
 // fuse delete row
@@ -236,9 +245,11 @@ int ObMajorPartitionMergeFuser::inner_init(const ObMergeParameter &merge_param)
   const common::ObIArray<share::schema::ObColDesc> &multi_version_column_ids = merge_param.static_param_.multi_version_column_descs_;
   const ObStorageSchema *schema = merge_param.get_schema();
   column_cnt_ = multi_version_column_ids.count();
+  const bool need_trim_default_row = cluster_version_ >= DATA_VERSION_4_3_1_0 || cluster_version_ < DATA_VERSION_4_3_0_0;
+
   if (OB_FAIL(default_row_.init(allocator_, column_cnt_))) {
     STORAGE_LOG(WARN, "Failed to init datum row", K(ret), K_(column_cnt));
-  } else if (OB_FAIL(schema->get_orig_default_row(multi_version_column_ids, default_row_))) {
+  } else if (OB_FAIL(schema->get_orig_default_row(multi_version_column_ids, need_trim_default_row, default_row_))) {
     STORAGE_LOG(WARN, "Failed to get default row from table schema", K(ret), K(multi_version_column_ids));
   } else if (OB_FAIL(ObLobManager::fill_lob_header(allocator_, multi_version_column_ids, default_row_))) {
     STORAGE_LOG(WARN, "fail to fill lob header for default row", K(ret), K(multi_version_column_ids));
@@ -368,6 +379,7 @@ int ObMinorPartitionMergeFuser::preprocess_fuse_row(const blocksstable::ObDatumR
 
 
 int ObMergeFuserBuilder::build(const ObMergeParameter &merge_param,
+                               const int64_t cluster_version,
                                ObIAllocator &allocator,
                                ObIPartitionMergeFuser *&partition_fuser)
 {
@@ -379,11 +391,11 @@ int ObMergeFuserBuilder::build(const ObMergeParameter &merge_param,
     STORAGE_LOG(WARN, "Invalid argument to build MergeFuser", K(merge_param), K(ret));
   } else {
     const ObMergeType merge_type = merge_param.static_param_.get_merge_type();
-    if (is_major_merge_type(merge_type) && !merge_param.get_schema()->is_row_store()) {
+    if (is_major_or_meta_merge_type(merge_type) && !merge_param.get_schema()->is_row_store()) {
       partition_fuser = alloc_helper<ObCOMinorSSTableFuser>(allocator, allocator);
     } else if (is_major_or_meta_merge_type(merge_type)) {
       is_fuse_row_flag = false;
-      partition_fuser = alloc_helper<ObMajorPartitionMergeFuser>(allocator, allocator);
+      partition_fuser = alloc_helper<ObMajorPartitionMergeFuser>(allocator, allocator, cluster_version);
     } else {
       partition_fuser = alloc_helper<ObMinorPartitionMergeFuser>(allocator, allocator);
     }

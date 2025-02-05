@@ -30,6 +30,7 @@ class ObMySQLResult;
 namespace share
 {
 class ObDMLSqlSplicer;
+class ObTabletLSCache;
 
 // operator for __all_transfer_task
 class ObTransferTaskOperator final
@@ -407,6 +408,26 @@ public:
       ObTransferTaskID &max_task_id);
 
   /*
+   * get last transfer task from __all_transfer_task_history by balance_task_id
+   *
+   * @param [in] sql_proxy:       sql client
+   * @param [in] tenant_id:       target tenant_id
+   * @param [in] balance_task_id: target balance task id
+   * @param [out] last_task:      transfer task with max transfer_id in history
+   * @param [out] finish_time:    finish time of the last task
+   * @return
+   * - OB_SUCCESS:          successful
+   * - OB_ENTRY_NOT_EXIST:  no history
+   * - other:               failed
+   */
+  static int get_last_task_by_balance_task_id(
+      common::ObISQLClient &sql_proxy,
+      const uint64_t tenant_id,
+      const ObBalanceTaskID &balance_task_id,
+      ObTransferTask &last_task,
+      int64_t &finish_time);
+
+  /*
    * update comment in __all_transfer_task according to task_id
    *
    * @param [in] sql_proxy: sql client
@@ -423,6 +444,36 @@ public:
       const ObTransferTaskID task_id,
       const ObTransferTaskComment &comment);
 
+  /*
+   * generate new task_id for transfer task
+   *
+   * should be protected by trans to ensure task_id is unique
+   */
+  static int generate_transfer_task_id(
+             common::ObMySQLTransaction &trans,
+             const uint64_t tenant_id,
+             ObTransferTaskID &new_task_id);
+
+  /*-----For auto refresh tablet location----*/
+
+  static int fetch_initial_base_task_id(
+             common::ObISQLClient &sql_proxy,
+             const uint64_t tenant_id,
+             ObTransferTaskID &base_task_id);
+
+  static int fetch_inc_task_infos(
+             common::ObISQLClient &sql_proxy,
+             const uint64_t tenant_id,
+             const ObTransferTaskID &base_task_id,
+             common::ObIArray<ObTransferRefreshInfo> &inc_task_infos);
+
+  static int batch_get_tablet_ls_cache(
+             common::ObISQLClient &sql_proxy,
+             const uint64_t tenant_id,
+             const common::ObIArray<ObTransferTaskID> &task_ids,
+             common::ObIArray<ObTabletLSCache> &tablet_ls_caches);
+  /*-----------------------------------------*/
+
 private:
   static int get_by_ls_id_(
       common::ObISQLClient &sql_proxy,
@@ -432,12 +483,15 @@ private:
       const int32_t group_id,
       ObTransferTask &task);
   static int construct_transfer_tasks_(
+      const uint64_t tenant_id,
       common::sqlclient::ObMySQLResult &res,
       common::ObIArray<ObTransferTask> &tasks);
   static int construct_transfer_task_(
+      const uint64_t tenant_id,
       common::sqlclient::ObMySQLResult &res,
       ObTransferTask &task);
   static int parse_sql_result_(
+      const uint64_t tenant_id,
       common::sqlclient::ObMySQLResult &res,
       const bool with_time,
       ObTransferTask &task,
@@ -450,6 +504,12 @@ private:
       ObDMLSqlSplicer &dml_splicer,
       common::ObArenaAllocator &allocator,
       const ObTransferTask &task);
+  static int convert_data_version_(
+      const uint64_t tenant_id,
+      const bool is_history,
+      const bool column_not_exist,
+      const ObString &data_version_str,
+      uint64_t &data_version);
 };
 
 } // end namespace share

@@ -10,7 +10,7 @@
  * See the Mulan PubL v2 for more details.
  */
 #define USING_LOG_PREFIX SQL
-#include "share/external_table/ob_external_table_file_task.h"
+#include "ob_external_table_file_task.h"
 #include "share/external_table/ob_external_table_file_rpc_processor.h"
 
 namespace oceanbase
@@ -23,7 +23,7 @@ OB_SERIALIZE_MEMBER(ObFlushExternalTableFileCacheReq, tenant_id_, table_id_, par
 
 OB_SERIALIZE_MEMBER(ObFlushExternalTableFileCacheRes, rcode_);
 
-OB_SERIALIZE_MEMBER(ObLoadExternalFileListReq, location_);
+OB_SERIALIZE_MEMBER(ObLoadExternalFileListReq, location_, pattern_, regexp_vars_);
 
 OB_DEF_SERIALIZE(ObLoadExternalFileListRes)
 {

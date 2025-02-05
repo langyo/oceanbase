@@ -13,15 +13,6 @@
 #define USING_LOG_PREFIX SHARE_LOCATION
 
 #include "share/location_cache/ob_tablet_ls_service.h"
-#include "share/ob_share_util.h"
-#include "share/cache/ob_cache_name_define.h"
-#include "share/inner_table/ob_inner_table_schema.h"
-#include "lib/stat/ob_diagnose_info.h"
-#include "lib/string/ob_sql_string.h"
-#include "lib/ob_running_mode.h"
-#include "observer/ob_server_struct.h"
-#include "common/ob_timeout_ctx.h"
-#include "share/schema/ob_multi_version_schema_service.h" // ObMultiVersionSchemaService
 #include "share/tablet/ob_tablet_to_ls_operator.h" // ObTabletToLSOperator
 
 namespace oceanbase
@@ -31,7 +22,10 @@ using namespace common::hash;
 
 namespace share
 {
-int ObTabletLSService::init(common::ObMySQLProxy &sql_proxy)
+int ObTabletLSService::init(
+    share::schema::ObMultiVersionSchemaService &schema_service,
+    common::ObMySQLProxy &sql_proxy,
+    obrpc::ObSrvRpcProxy &srv_rpc_proxy)
 {
   int ret = OB_SUCCESS;
   const int64_t user_thread_cnt =
@@ -56,6 +50,12 @@ int ObTabletLSService::init(common::ObMySQLProxy &sql_proxy)
       CLEAR_EXPIRED_CACHE_INTERVAL_US,
       true/*repeat*/))) {
     LOG_WARN("schedule clear expired cache timer task failed", KR(ret));
+  } else if (OB_FAIL(auto_refresh_service_.init(*this, schema_service, sql_proxy))) {
+    LOG_WARN("fail to init auto refresh service", KR(ret));
+  } else if (OB_FAIL(broadcast_sender_.init(&srv_rpc_proxy))) {
+    LOG_WARN("broadcast_sender init failed", KR(ret));
+  } else if (OB_FAIL(broadcast_updater_.init(this))) {
+    LOG_WARN("broadcast_updater init failed", KR(ret));
   } else {
     sql_proxy_ = &sql_proxy;
     inited_ = true;
@@ -250,14 +250,29 @@ int ObTabletLSService::process_barrier(
   return OB_NOT_SUPPORTED;
 }
 
+int ObTabletLSService::start()
+{
+  int ret = OB_SUCCESS;
+  if (OB_FAIL(auto_refresh_service_.start())) {
+    LOG_WARN("fail to start auto refresh service", KR(ret));
+  }
+  return ret;
+}
+
 void ObTabletLSService::stop()
 {
   async_queue_.stop();
+  auto_refresh_service_.stop();
+  broadcast_sender_.stop();
+  broadcast_updater_.stop();
 }
 
 void ObTabletLSService::wait()
 {
   async_queue_.wait();
+  auto_refresh_service_.wait();
+  broadcast_sender_.wait();
+  broadcast_updater_.wait();
 }
 
 int ObTabletLSService::destroy()
@@ -267,6 +282,9 @@ int ObTabletLSService::destroy()
   inited_ = false;
   inner_cache_.destroy();
   async_queue_.destroy();
+  auto_refresh_service_.destroy();
+  broadcast_sender_.destroy();
+  broadcast_updater_.destroy();
   return ret;
 }
 
@@ -303,7 +321,7 @@ int ObTabletLSService::get_from_cache_(
         tablet_id,
         SYS_LS,
         now,
-        INT64_MAX))) {
+        0 /*transfer_seq*/))) {
       LOG_WARN("init tablet_cache failed",
           KR(ret), K(cache_key), K(SYS_LS), K(now));
     }
@@ -347,7 +365,7 @@ int ObTabletLSService::renew_cache_(
         tablet_id,
         SYS_LS,
         now,
-        INT64_MAX))) {
+        0 /*transfer_seq*/))) {
       LOG_WARN("init tablet_cache failed",
           KR(ret), K(tenant_id), K(tablet_id), K(SYS_LS), K(now));
     }
@@ -366,7 +384,9 @@ int ObTabletLSService::renew_cache_(
   return ret;
 }
 
-int ObTabletLSService::update_cache_(const ObTabletLSCache &tablet_cache)
+int ObTabletLSService::update_cache(
+    const ObTabletLSCache &tablet_cache,
+    const bool update_only)
 {
   int ret = OB_SUCCESS;
   if (OB_UNLIKELY(!inited_)) {
@@ -375,10 +395,25 @@ int ObTabletLSService::update_cache_(const ObTabletLSCache &tablet_cache)
   } else if (!tablet_cache.is_valid()) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid tablet_cache", KR(ret), K(tablet_cache));
-  } else if (OB_FAIL(inner_cache_.update(tablet_cache))) {
-    LOG_WARN("put tablet_cache to user inner_cache failed", KR(ret), K(tablet_cache));
+  } else if (OB_FAIL(inner_cache_.update(tablet_cache, update_only))) {
+    LOG_WARN("put tablet_cache to user inner_cache failed", KR(ret), K(tablet_cache), K(update_only));
   } else {
-    LOG_TRACE("renew tablet_cache in inner_cache succeed", KR(ret), K(tablet_cache));
+    LOG_TRACE("renew tablet_cache in inner_cache succeed", KR(ret), K(tablet_cache), K(update_only));
+  }
+  return ret;
+}
+
+int ObTabletLSService::get_tablet_ids_from_cache(
+    const uint64_t tenant_id,
+    common::ObIArray<ObTabletID> &tablet_ids)
+{
+  int ret = OB_SUCCESS;
+  tablet_ids.reset();
+  if (OB_UNLIKELY(!inited_)) {
+    ret = OB_NOT_INIT;
+    LOG_WARN("service not init", KR(ret));
+  } else if (OB_FAIL(inner_cache_.get_tablet_ids(tenant_id, tablet_ids))) {
+    LOG_WARN("fail to get tablet_ids", KR(ret), K(tenant_id));
   }
   return ret;
 }
@@ -427,7 +462,7 @@ int ObTabletLSService::batch_renew_tablet_ls_cache(
     FOREACH_X(tablet_id, tablet_list, OB_SUCC(ret)) {
       if (belong_to_sys_ls_(tenant_id, *tablet_id)) {
         ObTabletLSCache cache;
-        if (OB_FAIL(cache.init(tenant_id, *tablet_id, SYS_LS, now, INT64_MAX))) {
+        if (OB_FAIL(cache.init(tenant_id, *tablet_id, SYS_LS, now,  0 /*transfer_seq*/))) {
           LOG_WARN("init cache failed", KR(ret), K(tenant_id), K(*tablet_id), K(now));
         } else if (OB_FAIL(tablet_ls_caches.push_back(cache))) {
           LOG_WARN("push back failed", KR(ret), K(cache));
@@ -443,7 +478,9 @@ int ObTabletLSService::batch_renew_tablet_ls_cache(
       const int64_t single_get_timeout = GCONF.location_cache_refresh_sql_timeout;
       // calculate timeout by count of inner_sql
       const int64_t batch_get_timeout = (user_tablet_ids.count() / ObTabletToLSTableOperator::MAX_BATCH_COUNT + 1) * single_get_timeout;
-      if (OB_FAIL(ObShareUtil::set_default_timeout_ctx(ctx, batch_get_timeout))) {
+      if (OB_FAIL(auto_refresh_service_.try_init_base_point(tenant_id))) {
+        LOG_WARN("fail to init base point", KR(ret), K(tenant_id));
+      } else if (OB_FAIL(ObShareUtil::set_default_timeout_ctx(ctx, batch_get_timeout))) {
         LOG_WARN("fail to set default_timeout_ctx", KR(ret));
       } else if (OB_FAIL(ObTabletToLSTableOperator::batch_get_tablet_ls_cache(
           *sql_proxy_,
@@ -461,9 +498,10 @@ int ObTabletLSService::batch_renew_tablet_ls_cache(
       }
     }
     // update user tablet ls cache
+    bool update_only = false;
     ARRAY_FOREACH(user_tablet_ls_caches, idx) {
       const ObTabletLSCache &tablet_ls = user_tablet_ls_caches.at(idx);
-      if (OB_FAIL(update_cache_(tablet_ls))) {
+      if (OB_FAIL(update_cache(tablet_ls, update_only))) {
         LOG_WARN("update cache failed", KR(ret), K(tablet_ls));
       } else if (OB_FAIL(tablet_ls_caches.push_back(tablet_ls))) {
         LOG_WARN("push back faled", KR(ret), K(tablet_ls));
@@ -569,6 +607,7 @@ int ObTabletLSService::clear_expired_cache()
     ret = OB_NOT_INIT;
     LOG_WARN("service not init", KR(ret));
   } else if (OB_ISNULL(GCTX.schema_service_)) {
+    ret = OB_ERR_UNEXPECTED;
     LOG_WARN("GCTX.schema_service_ is null", KR(ret));
   } else if (!GCTX.schema_service_->is_tenant_refreshed(OB_SYS_TENANT_ID)) {
     ret = OB_NEED_RETRY;
@@ -595,6 +634,30 @@ int ObTabletLSService::clear_expired_cache()
       LOG_INFO("[TABLET_LOCATION] clear dropped tenant tablet ls cache successfully",
           "cache_size_before_clear", cache_size, "cache_size_after_clear", inner_cache_.size());
     }
+  }
+  return ret;
+}
+
+int ObTabletLSService::submit_broadcast_task(const ObTabletLocationBroadcastTask &task)
+{
+  int ret = OB_SUCCESS;
+  if (OB_UNLIKELY(!inited_)) {
+    ret = OB_NOT_INIT;
+    LOG_WARN("service not init", KR(ret));
+  } else if (OB_FAIL(broadcast_sender_.submit_broadcast_task(task))) {
+    LOG_WARN("failed to submit broadcast task by sender", KR(ret), K(task));
+  }
+  return ret;
+}
+
+int ObTabletLSService::submit_update_task(const ObTabletLocationBroadcastTask &task)
+{
+  int ret = OB_SUCCESS;
+  if (OB_UNLIKELY(!inited_)) {
+    ret = OB_NOT_INIT;
+    LOG_WARN("service not init", KR(ret));
+  } else if (OB_FAIL(broadcast_updater_.submit_update_task(task))) {
+    LOG_WARN("failed to submit broadcast task by sender", KR(ret));
   }
   return ret;
 }

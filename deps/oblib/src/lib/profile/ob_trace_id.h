@@ -20,9 +20,8 @@ namespace oceanbase
 {
 namespace common
 {
-#define TRACE_ID_FORMAT "Y%lX-%016lX"
-#define TRACE_ID_FORMAT_V2 "Y%lX-%016lX-%lx-%lx"
-#define TRACE_ID_FORMAT_PARAM(x) x[0], x[1], x[2], x[3]
+#define TRACE_ID_FORMAT_V4 "Y%lX-%016lX-%lx-%lx"
+#define TRACE_ID_FORMAT_V6 "Z%X-%016lX-%lx-%lx"
 struct ObCurTraceId
 {
   class SeqGenerator
@@ -52,6 +51,8 @@ struct ObCurTraceId
       id_.is_user_request_ = 0;
       id_.is_ipv6_ = ip_port.using_ipv6();
       id_.reserved_ = 0;
+      id_.inner_sql_id_ = 0;
+      id_.sub_task_ = 0;
       id_.port_ = static_cast<uint16_t>(ip_port.get_port());
       if (ip_port.using_ipv6()) {
         id_.ipv6_[0] = ip_port.get_ipv6_low();
@@ -112,20 +113,19 @@ struct ObCurTraceId
       }
       return ret;
     }
-
     inline int64_t to_string(char *buf, const int64_t buf_len) const
     {
       int64_t pos = 0;
-      common::databuff_printf(buf, buf_len, pos, TRACE_ID_FORMAT_V2, uval_[0], uval_[1], uval_[2], uval_[3]);
+      if (!id_.is_ipv6_) {
+        common::databuff_printf(buf, buf_len, pos, TRACE_ID_FORMAT_V4, uval_[0], uval_[1], uval_[2], uval_[3]);
+      } else {
+        common::databuff_printf(buf, buf_len, pos, TRACE_ID_FORMAT_V6, id_.bytes_no_ip_, uval_[1], uval_[2], uval_[3]);
+      }
 
       return pos;
     }
     int parse_from_buf(char* buf) {
-      int ret = OB_SUCCESS;
-      if (4 != sscanf(buf, TRACE_ID_FORMAT_V2, &uval_[0], &uval_[1], &uval_[2], &uval_[3])) {
-        ret = OB_INVALID_ARGUMENT;
-      }
-      return ret;
+      return set(buf);
     }
     inline bool equals(const TraceId &trace_id) const
     {
@@ -146,15 +146,31 @@ struct ObCurTraceId
     inline int set(const char *buf)
     {
       int ret = OB_SUCCESS;
-      if (OB_ISNULL(buf)) {
-        ret = OB_ERR_UNEXPECTED;
-      } else {
-        int32_t return_value = sscanf(buf, TRACE_ID_FORMAT, &uval_[0], &uval_[1]);
-        if (0 != return_value && 2 != return_value) {
-          ret = OB_ERR_UNEXPECTED;
-        }
+      int n_match = 0;
+      if (TRACE_ID_FORMAT_V4[0] == buf[0]) {
+        n_match = sscanf(buf, TRACE_ID_FORMAT_V4, &uval_[0], &uval_[1], &uval_[2], &uval_[3]);
+      } else if (TRACE_ID_FORMAT_V6[0] == buf[0]) {
+        n_match = sscanf(buf, TRACE_ID_FORMAT_V6, &id_.bytes_no_ip_, &uval_[1], &uval_[2], &uval_[3]);
+      }
+      if (n_match != 0 && n_match != 4) {
+        ret = OB_INVALID_ARGUMENT;
       }
       return ret;
+    }
+
+    inline void set_inner_sql_id(const int64_t inner_sql_id)
+    {
+      id_.inner_sql_id_ = inner_sql_id & ((1 << 4) - 1);
+    }
+
+    inline int64_t get_execution_id() const
+    {
+      return id_.inner_sql_id_;
+    }
+
+    inline void set_sub_id(const int32_t sub_id)
+    {
+      id_.sub_task_ = sub_id & ((1 << 8) - 1);
     }
 
     inline int64_t hash() const
@@ -169,9 +185,15 @@ struct ObCurTraceId
 
     inline int hash(uint64_t &hash_val) const { hash_val = hash(); return OB_SUCCESS; }
 
+    inline bool is_default() { return uval_[0] == 0 && uval_[1] == 0 && uval_[2] == 0 && uval_[3] == 0; }
+
     inline bool operator == (const TraceId &other) const
     {
       return equals(other);
+    }
+    inline bool operator != (const TraceId &other) const
+    {
+      return !equals(other);
     }
   private:
     union
@@ -179,10 +201,17 @@ struct ObCurTraceId
       struct
       {
         uint32_t ip_: 32;
-        uint16_t port_: 16;
-        uint8_t is_user_request_: 1;
-        uint8_t is_ipv6_:1;
-        uint16_t reserved_: 14;
+        union {
+          struct {
+            uint16_t port_: 16;
+            uint8_t is_user_request_: 1;
+            uint8_t is_ipv6_: 1;
+            uint16_t reserved_: 2;
+            uint16_t inner_sql_id_: 4;
+            uint16_t sub_task_: 8;
+          };
+          uint32_t bytes_no_ip_;
+        };
         uint64_t seq_: 64;
         uint64_t ipv6_[2];
       } id_;
@@ -214,6 +243,22 @@ struct ObCurTraceId
     }
   }
 
+  inline static void set_inner_sql_id(const int64_t execution_id)
+  {
+    TraceId *trace_id = get_trace_id();
+    if (nullptr != trace_id) {
+      trace_id->set_inner_sql_id(execution_id);
+    }
+  }
+
+  inline static void set_sub_id(const int32_t sub_id)
+  {
+    TraceId *trace_id = get_trace_id();
+    if (NULL != trace_id) {
+      trace_id->set_sub_id(sub_id);
+    }
+  }
+
   inline static void reset()
   {
     TraceId *trace_id = get_trace_id();
@@ -221,9 +266,18 @@ struct ObCurTraceId
       trace_id->reset();
     }
   }
-  static const char* get_trace_id_str()
+  static const char* get_trace_id_str(char *buf, int64_t buf_len)
   {
-    return to_cstring(*get_trace_id());
+    if (nullptr != buf && buf_len > 0) {
+      int64_t pos = 0;
+      (void)databuff_printf(buf, buf_len, pos, *get_trace_id());
+    }
+    return buf;
+  }
+  static const char *get_trace_id_str()
+  {
+    static __thread char buf[common::OB_MAX_TRACE_ID_BUFFER_SIZE];
+    return get_trace_id_str(buf, sizeof(buf));
   }
   inline static const uint64_t* get()
   {
@@ -300,6 +354,10 @@ private:
 
 }// namespace common
 }// namespace oceanbase
+
+extern "C" {
+  const char* trace_id_to_str_c(const uint64_t *uval, char *buf, int64_t buf_len);
+} /* extern "C" */
 
 
 #endif

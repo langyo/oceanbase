@@ -92,11 +92,20 @@ public:
   int del_tablets(const common::ObIArray<ObTabletID> &tablet_ids);
   int get_tablets(common::ObIArray<ObTabletID> &tablet_ids);
 
+  ObDDLRedoLogReplayer &get_ddl_log_replayer() { return ddl_log_replayer_; }
+
 private:
   int replay_ddl_redo_log_(const char *log_buf, const int64_t buf_size, int64_t pos, const share::SCN &scn);
   int replay_ddl_commit_log_(const char *log_buf, const int64_t buf_size, int64_t pos, const share::SCN &scn);
   int replay_ddl_tablet_schema_version_change_log_(const char *log_buf, const int64_t buf_size, int64_t pos, const share::SCN &scn);
   int replay_ddl_start_log_(const char *log_buf, const int64_t buf_size, int64_t pos, const share::SCN &scn);
+  int replay_tablet_split_start_log_(const char *log_buf, const int64_t buf_size, int64_t pos, const share::SCN &scn);
+  int replay_tablet_split_finish_log_(const char *log_buf, const int64_t buf_size, int64_t pos, const share::SCN &scn);
+  int replay_tablet_freeze_log_(const char *log_buf, const int64_t buf_size, int64_t pos, const share::SCN &scn);
+  #ifdef OB_BUILD_SHARED_STORAGE
+  int replay_ddl_finish_log_(const char *log_buf, const int64_t buf_size, int64_t pos, const share::SCN &scn);
+  #endif
+  void add_ddl_event(const int ret, const ObString &ddl_event_stmt);
 private:
   bool is_inited_;
   bool is_online_;

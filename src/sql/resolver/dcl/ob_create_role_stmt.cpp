@@ -13,10 +13,6 @@
 #define USING_LOG_PREFIX SQL_RESV
 #include "sql/resolver/dcl/ob_create_role_stmt.h"
 
-#include "share/ob_define.h"
-#include "lib/string/ob_string.h"
-#include "lib/string/ob_strings.h"
-#include "lib/utility/ob_print_utils.h"
 
 using namespace oceanbase;
 using namespace oceanbase::common;
@@ -27,7 +23,8 @@ ObCreateRoleStmt::ObCreateRoleStmt(ObIAllocator *name_pool)
       tenant_id_(OB_INVALID_ID),
       role_name_(),
       password_(),
-      need_enc_(false)
+      need_enc_(false),
+      if_not_exists_(false)
 {
 }
 
@@ -36,7 +33,8 @@ ObCreateRoleStmt::ObCreateRoleStmt()
       tenant_id_(OB_INVALID_ID),
       role_name_(),
       password_(),
-      need_enc_(false)
+      need_enc_(false),
+      if_not_exists_(false)
 {
 }
 

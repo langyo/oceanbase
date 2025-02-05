@@ -13,7 +13,6 @@
 #include "storage/concurrency_control/ob_multi_version_garbage_collector.h"
 #include "storage/tx_storage/ob_ls_service.h"
 #include "storage/tx/ob_trans_service.h"
-#include "src/storage/tx/ob_ts_mgr.h"
 #include "storage/tx/wrs/ob_weak_read_util.h"
 
 namespace oceanbase
@@ -331,18 +330,19 @@ int ObMultiVersionGarbageCollector::study()
   timeguard.click("study_min_unallocated_GTS");
 
   if (OB_SUCC(ret)) {
-    if (!GCTX.is_standby_cluster() && // standby cluster does not support WRS
-        OB_FAIL(study_min_unallocated_WRS(min_unallocated_WRS))) {
-      MVCC_LOG(WARN, "study min unallocated GTS failed", K(ret));
-    } else if (!min_unallocated_WRS.is_valid()
-               || min_unallocated_WRS.is_min()
-               || min_unallocated_WRS.is_max()) {
+    bool is_primary = true;
+    const uint64_t tenant_id = MTL_ID();
+    if (OB_FAIL(ObShareUtil::mtl_check_if_tenant_role_is_primary(tenant_id, is_primary))) {
+      MVCC_LOG(WARN, "fail to execute mtl_check_if_tenant_role_is_primary", KR(ret), K(tenant_id));
+    } else if (is_primary && OB_FAIL(study_min_unallocated_WRS(min_unallocated_WRS))) {
+      MVCC_LOG(WARN, "study min unallocated GTS failed", K(ret), K(is_primary));
+    } else if (!min_unallocated_WRS.is_valid() || min_unallocated_WRS.is_min()) {
       ret = OB_ERR_UNEXPECTED;
       MVCC_LOG(ERROR, "wrong min unallocated WRS",
-               K(ret), K(min_unallocated_WRS), KPC(this));
+               K(ret), K(min_unallocated_WRS), KPC(this), K(is_primary));
     } else {
       MVCC_LOG(INFO, "study min unallocated wrs succeed",
-               K(ret), K(min_unallocated_WRS), KPC(this));
+               K(ret), K(min_unallocated_WRS), KPC(this), K(is_primary));
     }
   }
 
@@ -600,7 +600,7 @@ void ObMultiVersionGarbageCollector::decide_reserved_snapshot_version_(
                  K(transaction::ObWeakReadUtil::max_stale_time_for_weak_consistency(MTL_ID())));
       } else if ((global_reserved_snapshot_.get_val_for_tx() -
                   reserved_snapshot.get_val_for_tx()) / 1000 > 100 * 1_min) {
-        MVCC_LOG(ERROR, "update a too too smaller reserved snapshot!!!", K(ret), KPC(this),
+        MVCC_LOG(WARN, "update a too too smaller reserved snapshot!!!", K(ret), KPC(this),
                  K(global_reserved_snapshot_), K(reserved_snapshot));
       } else {
         MVCC_LOG(WARN, "update a too smaller reserved snapshot!", K(ret), KPC(this),
@@ -627,12 +627,12 @@ share::SCN ObMultiVersionGarbageCollector::get_reserved_snapshot_for_active_txn(
   if (!tenant_config->_mvcc_gc_using_min_txn_snapshot) {
     return share::SCN::max_scn();
   } else if (refresh_error_too_long_) {
-    if (REACH_TENANT_TIME_INTERVAL(1_s)) {
+    if (REACH_THREAD_TIME_INTERVAL(1_s)) {
       MVCC_LOG_RET(WARN, OB_ERR_UNEXPECTED, "get reserved snapshot for active txn with long not updated", KPC(this));
     }
     return share::SCN::max_scn();
   } else if (gc_is_disabled_) {
-    if (REACH_TENANT_TIME_INTERVAL(1_s)) {
+    if (REACH_THREAD_TIME_INTERVAL(1_s)) {
       MVCC_LOG_RET(WARN, OB_ERR_UNEXPECTED, "get reserved snapshot for active txn with gc is disabled", KPC(this));
     }
     return share::SCN::max_scn();
@@ -1159,7 +1159,7 @@ int ObMultiVersionGarbageCollector::is_disk_almost_full_(bool &is_almost_full)
 
   // Case1: io device is almost full
   if (!is_almost_full
-      && OB_FAIL(THE_IO_DEVICE->check_space_full(required_size))) {
+      && OB_FAIL(LOCAL_DEVICE_INSTANCE.check_space_full(required_size))) {
     if (OB_SERVER_OUTOF_DISK_SPACE == ret) {
       ret = OB_SUCCESS;
       is_almost_full = true;
@@ -1354,7 +1354,7 @@ bool GetMinActiveSnapshotVersionFunctor::operator()(sql::ObSQLSessionMgr::Key ke
     sql::ObSQLSessionInfo::LockGuard data_lock_guard(sess_info->get_thread_data_lock());
     share::SCN snapshot_version(share::SCN::max_scn());
 
-    if (sess_info->is_in_transaction()) {
+    if (OB_NOT_NULL(sess_info->get_tx_desc())) {
       share::SCN desc_snapshot;
       transaction::ObTxDesc *tx_desc = nullptr;
       share::SCN sess_snapshot = sess_info->get_reserved_snapshot_version();

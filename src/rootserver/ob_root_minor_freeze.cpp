@@ -14,13 +14,9 @@
 
 #include "ob_root_minor_freeze.h"
 
-#include "share/ob_srv_rpc_proxy.h"
 #include "share/location_cache/ob_location_service.h"
 #include "share/ob_all_server_tracer.h"
-#include "lib/container/ob_se_array.h"
-#include "rootserver/ddl_task/ob_ddl_scheduler.h"
 #include "rootserver/ob_unit_manager.h"
-#include "rootserver/ob_rs_async_rpc_proxy.h"
 
 namespace oceanbase
 {
@@ -111,46 +107,6 @@ bool ObRootMinorFreeze::is_server_alive(const ObAddr &server) const
   return is_alive;
 }
 
-int ObRootMinorFreeze::get_tenant_server_list(uint64_t tenant_id,
-                                              ObIArray<ObAddr> &target_server_list) const
-{
-  int ret = OB_SUCCESS;
-
-  target_server_list.reset();
-  ObSEArray<uint64_t, 2> pool_ids;
-  if (OB_FAIL(unit_manager_->get_pool_ids_of_tenant(tenant_id, pool_ids))) {
-    LOG_WARN("fail to get pool ids of tenant", K(tenant_id), K(ret));
-  } else {
-    ObSEArray<share::ObUnitInfo, 4> units;
-
-    for (int i = 0; OB_SUCC(ret) && i < pool_ids.count(); ++i) {
-      units.reset();
-      if (OB_FAIL(unit_manager_->get_unit_infos_of_pool(pool_ids.at(i), units))) {
-        LOG_WARN("fail to get unit infos of pool", K(pool_ids.at(i)), K(ret));
-      } else {
-        for (int j = 0; j < units.count(); ++j) {
-          if (OB_LIKELY(units.at(j).is_valid())) {
-            const share::ObUnit &unit = units.at(j).unit_;
-            if (is_server_alive(unit.migrate_from_server_)) {
-              if (OB_FAIL(target_server_list.push_back(unit.migrate_from_server_))) {
-                LOG_WARN("fail to push server, ", K(ret));
-              }
-            }
-
-            if (is_server_alive(unit.server_)) {
-              if (OB_FAIL(target_server_list.push_back(unit.server_))) {
-                LOG_WARN("fail to push server, ", K(ret));
-              }
-            }
-          }
-        }
-      }
-    }
-  }
-
-  return ret;
-}
-
 int ObRootMinorFreeze::try_minor_freeze(const obrpc::ObRootMinorFreezeArg &arg) const
 {
   int ret = OB_SUCCESS;
@@ -200,31 +156,37 @@ int ObRootMinorFreeze::do_minor_freeze(const ParamsContainer &params) const
   ObMinorFreezeProxy proxy(*rpc_proxy_, &ObSrvRpcProxy::minor_freeze);
   LOG_INFO("do minor freeze", K(params));
 
-  for (int64_t i = 0; i < params.get_params().count() && OB_SUCC(check_cancel()); ++i) {
+  for (int64_t i = 0; OB_SUCC(ret) && i < params.get_params().count(); ++i) {
     const MinorFreezeParam &param = params.get_params().at(i);
-
-    if (OB_UNLIKELY(OB_SUCCESS != (tmp_ret = proxy.call(param.server,
-                                                        MINOR_FREEZE_TIMEOUT, param.arg)))) {
-      LOG_WARN("proxy call failed", K(tmp_ret), K(param.arg),
+    if (OB_FAIL(check_cancel())) {
+      LOG_WARN("fail to check cancel", KR(ret));
+    } else if (OB_TMP_FAIL(proxy.call(param.server, MINOR_FREEZE_TIMEOUT, param.arg))) {
+      LOG_WARN("proxy call failed", KR(tmp_ret), K(param.arg),
                "dest addr", param.server);
-      failure_cnt ++;
+      failure_cnt++;
     }
   }
 
-  if (OB_FAIL(proxy.wait())) {
-    LOG_WARN("proxy wait failed", K(ret));
+  ObArray<int> return_code_array;
+  if (OB_TMP_FAIL(proxy.wait_all(return_code_array))) {
+    LOG_WARN("proxy wait failed", KR(ret), KR(tmp_ret));
+    ret = OB_SUCC(ret) ? tmp_ret : ret;
+  } else if (OB_FAIL(ret)) {
+  } else if (OB_FAIL(proxy.check_return_cnt(return_code_array.count()))) {
+    LOG_WARN("return cnt not match", KR(ret), "return_cnt", return_code_array.count());
   } else {
     for (int i = 0; i < proxy.get_results().count(); ++i) {
-      if (OB_SUCCESS != (tmp_ret = static_cast<int>(*proxy.get_results().at(i)))) {
+      if (OB_TMP_FAIL(static_cast<int>(*proxy.get_results().at(i)))) {
         LOG_WARN("fail to do minor freeze on target server, ", K(tmp_ret),
                  "dest addr:", proxy.get_dests().at(i),
                  "param:", proxy.get_args().at(i));
-        failure_cnt ++;
+        failure_cnt++;
       }
     }
   }
 
-  if (0 != failure_cnt && OB_CANCELED != ret) {
+  if (OB_FAIL(ret)) {
+  } else if (0 != failure_cnt) {
     ret = OB_PARTIAL_FAILED;
     LOG_WARN("minor freeze partial failed", KR(ret), K(failure_cnt));
   }
@@ -328,7 +290,10 @@ int ObRootMinorFreeze::init_params_by_tenant(const ObIArray<uint64_t> &tenant_id
       }
     } else {
       // TODO: filter servers according to tenant_id
-      if (OB_FAIL(get_tenant_server_list(tenant_ids.at(i), target_server_list))) {
+      if (OB_ISNULL(unit_manager_)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("unit_manager_ is null", KR(ret), KP(unit_manager_));
+      } else if (OB_FAIL(unit_manager_->get_tenant_alive_servers_non_block(tenant_ids.at(i), target_server_list))) {
         LOG_WARN("fail to get tenant server list, ", K(ret));
       } else {
         bool server_in_zone = false;

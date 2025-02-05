@@ -12,13 +12,6 @@
 
 #define USING_LOG_PREFIX SHARE_SCHEMA
 #include "ob_database_sql_service.h"
-#include "lib/oblog/ob_log.h"
-#include "lib/oblog/ob_log_module.h"
-#include "lib/mysqlclient/ob_mysql_proxy.h"
-#include "share/ob_dml_sql_splicer.h"
-#include "share/schema/ob_schema_struct.h"
-#include "share/inner_table/ob_inner_table_schema_constants.h"
-#include "observer/ob_server_struct.h"
 #include "rootserver/ob_root_service.h"
 
 namespace oceanbase
@@ -47,7 +40,10 @@ int ObDatabaseSqlService::insert_database(const ObDatabaseSchema &database_schem
     LOG_WARN("database schema is invalid", K(ret));
   } else if (OB_FAIL(sql::ObSQLUtils::is_charset_data_version_valid(database_schema.get_charset_type(),
                                                                     exec_tenant_id))) {
-    LOG_WARN("failed to check charset data version valid", K(ret));
+    LOG_WARN("failed to check charset data version valid", K(database_schema.get_charset_type()), K(ret));
+  } else if (OB_FAIL(sql::ObSQLUtils::is_collation_data_version_valid(database_schema.get_collation_type(),
+                                                                      exec_tenant_id))) {
+    LOG_WARN("failed to check collation data version valid", K(database_schema.get_collation_type()), K(ret));
   } else {
     int64_t affected_rows = 0;
     ObDMLSqlSplicer dml;
@@ -125,7 +121,10 @@ int ObDatabaseSqlService::update_database(const ObDatabaseSchema &database_schem
     LOG_WARN("database scheam is invalid", K(ret));
   } else if (OB_FAIL(sql::ObSQLUtils::is_charset_data_version_valid(database_schema.get_charset_type(),
                                                                     exec_tenant_id))) {
-    LOG_WARN("failed to check charset data version valid", K(ret));
+    LOG_WARN("failed to check charset data version valid", K(database_schema.get_charset_type()), K(ret));
+  } else if (OB_FAIL(sql::ObSQLUtils::is_collation_data_version_valid(database_schema.get_collation_type(),
+                                                                      exec_tenant_id))) {
+    LOG_WARN("failed to check collation data version valid", K(database_schema.get_charset_type()), K(ret));
   } else {
     int64_t affected_rows = 0;
     ObDMLSqlSplicer dml;

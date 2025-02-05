@@ -13,8 +13,7 @@
 #define USING_LOG_PREFIX SQL_RESV
 
 #include "sql/resolver/ddl/ob_alter_sequence_resolver.h"
-#include "sql/resolver/ddl/ob_sequence_stmt.h"
-#include "sql/resolver/ddl/ob_sequence_resolver.h"
+#include "src/sql/resolver/ddl/ob_sequence_stmt.h"
 
 namespace oceanbase
 {
@@ -111,7 +110,8 @@ int ObAlterSequenceResolver::resolve(const ParseNode &parse_tree)
                   K(parse_tree.children_[1]->type_), K(ret));
       } else {
         ObSequenceResolver<ObAlterSequenceStmt> resolver;
-        ret = resolver.resolve_sequence_options(mystmt, parse_tree.children_[1]);
+        ret = resolver.resolve_sequence_options(session_info_->get_effective_tenant_id(), mystmt,
+                                                parse_tree.children_[1]);
       }
     } else {
       ret = OB_ERR_REQUIRE_ALTER_SEQ_OPTION;

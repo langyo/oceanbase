@@ -23,6 +23,7 @@
 #include "lib/utility/utility.h"
 #include "common/ob_accuracy.h"
 #include "common/object/ob_obj_type.h"
+#include "lib/enumset/ob_enum_set_meta.h"
 
 namespace oceanbase
 {
@@ -155,7 +156,8 @@ public:
     int ret = common::OB_SUCCESS;
     common::ObLength length = accuracy_.get_length();
     if (!is_string_type() && !is_enum_or_set() && !is_enumset_inner_type()
-        && !is_ext() && !is_lob_locator() && !is_user_defined_sql_type()) {
+        && !is_ext() && !is_lob_locator() && !is_user_defined_sql_type()
+        && !is_collection_sql_type()) {
       if (OB_FAIL(common::ObField::get_field_mb_length(get_type(),
                                                        get_accuracy(),
                                                        common::CS_TYPE_INVALID,
@@ -274,6 +276,7 @@ public:
   OB_INLINE bool is_not_null_for_write() const { return has_result_flag(NOT_NULL_WRITE_FLAG); }
   // calc_type: 表示表达式计算时，表达式将转换成calc_type后再计算
   OB_INLINE void set_calc_type(const common::ObObjType &type) { calc_type_.set_type(type); }
+  OB_INLINE void set_calc_subschema_id(const uint16_t subschema_id) { calc_type_.set_subschema_id(subschema_id); }
   OB_INLINE void set_calc_collation_utf8()
   {
     set_calc_collation_by_charset(common::CHARSET_UTF8MB4);
@@ -336,6 +339,16 @@ public:
   }
 
   uint64_t get_cast_mode() const { return cast_mode_; }
+
+  OB_INLINE void mark_enum_set_with_subschema()
+  {
+    if (is_enum_or_set()) {
+      set_scale(ObEnumSetMeta::MetaState::READY);
+    }
+  }
+  OB_INLINE bool is_enum_set_with_subschema() const
+  { return is_enum_or_set() && get_scale() == ObEnumSetMeta::MetaState::READY; }
+  OB_INLINE void reset_enum_set_meta_state() { set_scale(ObEnumSetMeta::MetaState::UNINITIALIZED); }
   uint64_t hash(uint64_t seed) const
   {
     seed = common::do_hash(type_, seed);
@@ -351,6 +364,11 @@ public:
 //      seed = common::do_hash(row_calc_cmp_types_.at(i), seed);
 //    }
     return seed;
+  }
+  int hash(uint64_t &hash_val, uint64_t seed) const
+  {
+    hash_val = hash(seed);
+    return OB_SUCCESS;
   }
   // others.
   INHERIT_TO_STRING_KV(N_META,

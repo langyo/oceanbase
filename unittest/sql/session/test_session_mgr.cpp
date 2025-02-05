@@ -11,14 +11,7 @@
  */
 
 #include <gtest/gtest.h>
-#include <stdlib.h>
-#include <algorithm>
-#include <pthread.h>
-#include <sys/time.h>
-#include "lib/stat/ob_session_stat.h"
 #include "sql/session/ob_sql_session_mgr.h"
-#include "lib/random/ob_random.h"
-#include "rpc/obmysql/obsm_struct.h"
 
 using namespace std;
 using namespace oceanbase;
@@ -123,7 +116,6 @@ TEST_F(DISABLED_TestSessionMgr, test_performace)
   gettimeofday(&get_end, NULL);
   gettimeofday(&stat_beg, NULL);
   for (uint32_t i = 1; i < SESSION_COUNT; ++i) {
-    ObSessionStatEstGuard guard(1, static_cast<uint32_t>(i));
     EVENT_DEC(ACTIVE_SESSIONS);
   }
   gettimeofday(&stat_end, NULL);

@@ -10,7 +10,6 @@
 
 #define USING_LOG_PREFIX OBLOG
 
-#include "lib/utility/ob_macro_utils.h"  // RETRY_FUNC
 #include "ob_log_meta_data_fetcher.h"
 #include "ob_log_fetcher.h"
 
@@ -70,7 +69,8 @@ int ObLogMetaDataFetcher::init(
     IObLogErrHandler *err_handler,
     const int64_t cluster_id,
     const ObLogConfig &cfg,
-    const int64_t start_seq)
+    const int64_t start_seq,
+    const bool enable_direct_load_inc)
 {
   int ret = OB_SUCCESS;
 
@@ -93,7 +93,7 @@ int ObLogMetaDataFetcher::init(
   } else {
     trans_task_pool_alloc_.set_label("DictConFAlloc");
     INIT(log_fetcher_, ObLogFetcher, true/*is_loading_data_dict_baseline_data*/,
-        fetching_mode, archive_dest, fetcher_dispatcher,
+        enable_direct_load_inc, fetching_mode, archive_dest, fetcher_dispatcher,
         sys_ls_handler, &trans_task_pool_, &log_entry_task_pool_, proxy, err_handler,
         cluster_id, cfg, start_seq);
 

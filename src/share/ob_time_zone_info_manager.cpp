@@ -11,17 +11,10 @@
  */
 
 #define USING_LOG_PREFIX SHARE
-#include "rootserver/ob_root_service.h"
-#include "share/ob_time_zone_info_manager.h"
-#include "lib/allocator/ob_mod_define.h"
-#include "lib/mysqlclient/ob_mysql_proxy.h"
-#include "lib/mysqlclient/ob_mysql_result.h"
-#include "lib/mysqlclient/ob_mysql_transaction.h"
-#include "lib/utility/ob_fast_convert.h"
+#include "ob_time_zone_info_manager.h"
 #include "observer/ob_server.h"
 #include "observer/omt/ob_tenant_timezone_mgr.h"
 #include "observer/ob_sql_client_decorator.h"
-#include "lib/lock/ob_spin_rwlock.h"
 
 using namespace oceanbase::share;
 using namespace oceanbase::observer;
@@ -52,7 +45,20 @@ const char *ObTimeZoneInfoManager::FETCH_TZ_INFO_SQL =
     "ORDER BY tz_info.time_zone_id, tz_info.transition_time ";
 
 const char *ObTimeZoneInfoManager::FETCH_TENANT_TZ_INFO_SQL =
-    "SELECT * "
+    "SELECT /*+ "
+    "  BEGIN_OUTLINE_DATA "
+    "  PQ_DISTRIBUTE_WINDOW(@\"SEL$0208448F\"  (0) NONE PARTITION_SORT) "
+    "  LEADING(@\"SEL$0208448F\" ((\"t1\"@\"SEL$2\" \"oceanbase\".\"t2\"@\"SEL$2\") \"oceanbase\".\"t3\"@\"SEL$2\")) "
+    "  USE_HASH(@\"SEL$0208448F\" \"oceanbase\".\"t3\"@\"SEL$2\") "
+    "  USE_HASH(@\"SEL$0208448F\" \"oceanbase\".\"t2\"@\"SEL$2\") "
+    "  PQ_DISTRIBUTE_WINDOW(@\"SEL$3\"  (0) NONE) "
+    "  FULL(@\"SEL$3\" \"oceanbase\".\"__all_tenant_time_zone_name\"@\"SEL$3\") "
+    "  FULL(@\"SEL$0208448F\" \"t2\"@\"SEL$2\") "
+    "  FULL(@\"SEL$0208448F\" \"t3\"@\"SEL$2\") "
+    "  PRED_DEDUCE(@\"SEL$2\") "
+    "  QUERY_TIMEOUT(100000000) "
+    "  OPTIMIZER_FEATURES_ENABLE('4.0.0.0') "
+    "  END_OUTLINE_DATA  */ * "
     "FROM ("
     "SELECT t1.time_zone_id, t1.inner_tz_id, t1.name, t3.transition_time, t2.offset, t2.is_dst, "
     "t2.transition_type_id, t2.abbreviation, "
@@ -154,9 +160,8 @@ void ObTimeZoneInfoManager::TaskProcessThread::handle(void *task)
 int ObTimeZoneInfoManager::fetch_time_zone_info()
 {
   int ret = OB_SUCCESS;
-  if (OB_UNLIKELY(!inited_)) {
-    ret = OB_NOT_INIT;
-    LOG_WARN("not init", K(ret));
+  if (!inited_ && OB_FAIL(init())) {
+    LOG_WARN("init failed", K(ret));
   } else {
     int64_t current_tz_version = -1;
     ObSQLClientRetryWeak sql_client_retry_weak(&sql_proxy_, tenant_id_, OB_ALL_SYS_STAT_TID);
@@ -244,7 +249,8 @@ int ObTimeZoneInfoManager::fetch_time_zone_info_from_tenant_table(const int64_t 
               // According to current design, upgrade timezone is not supported,
               // so ObTZInfoMap will not be used again. This is a defense code.
               new (&tz_info_map_buf_) ObTZInfoMap();
-              LOG_INFO("reset tz info map buf", K(tenant_id_));
+              inited_ = false;
+              LOG_INFO("reset tz info map buf", K(tenant_id_), K(ret));
               tz_info_map_.id_map_ = shared_tz_info_map_.id_map_;
               tz_info_map_.name_map_ = shared_tz_info_map_.name_map_;
             } else {

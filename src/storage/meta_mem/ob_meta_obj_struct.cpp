@@ -12,8 +12,7 @@
 
 #define USING_LOG_PREFIX STORAGE
 
-#include "common/log/ob_log_constants.h"
-#include "storage/meta_mem/ob_meta_obj_struct.h"
+#include "ob_meta_obj_struct.h"
 #include "storage/meta_mem/ob_tenant_meta_mem_mgr.h"
 
 namespace oceanbase
@@ -26,7 +25,8 @@ ObMetaDiskAddr::ObMetaDiskAddr()
     second_id_(0),
     third_id_(0),
     fourth_id_(0),
-    fifth_id_(0)
+    fifth_id_(0),
+    sixth_id_(0)
 {
   static_assert(DiskType::MAX <= MAX_TYPE, "ObMetaDiskAddr's disk type is overflow");
   type_ = DiskType::MAX;
@@ -39,6 +39,7 @@ void ObMetaDiskAddr::reset()
   third_id_ = 0;
   fourth_id_ = 0;
   fifth_id_ = 0;
+  sixth_id_ = 0;
   type_ = DiskType::MAX;
 }
 
@@ -48,11 +49,12 @@ int ObMetaDiskAddr::get_block_addr(
     int64_t &size) const
 {
   int ret = OB_SUCCESS;
-  if (OB_UNLIKELY(DiskType::BLOCK != type_)) {
+  if (OB_UNLIKELY(!is_block())) {
     ret = OB_NOT_SUPPORTED;
     LOG_WARN("type isn't block, not support", K(ret), KPC(this));
   } else {
-    const blocksstable::MacroBlockId id(first_id_, second_id_, third_id_);
+    blocksstable::MacroBlockId id(first_id_, second_id_, third_id_, fifth_id_);
+    id.set_version_v2();
     macro_id = id;
     offset = offset_;
     size = size_;
@@ -63,21 +65,24 @@ int ObMetaDiskAddr::get_block_addr(
 int ObMetaDiskAddr::set_block_addr(
     const blocksstable::MacroBlockId &macro_id,
     const int64_t offset,
-    const int64_t size)
+    const int64_t size,
+    const DiskType block_type)
 {
   int ret = OB_SUCCESS;
   if (OB_UNLIKELY(!macro_id.is_valid()
                 || offset < 0 || offset > MAX_OFFSET
-                || size < 0 || size > MAX_SIZE)) {
+                || size < 0 || size > MAX_SIZE
+                || (DiskType::RAW_BLOCK != block_type && DiskType::BLOCK != block_type))) {
     ret = OB_INVALID_ARGUMENT;
-    LOG_WARN("invalid argument", K(ret), K(macro_id), K(offset), K(size));
+    LOG_WARN("invalid argument", K(ret), K(macro_id), K(offset), K(size), K(block_type));
   } else {
     first_id_ = macro_id.first_id();
     second_id_ = macro_id.second_id();
     third_id_ = macro_id.third_id();
+    fifth_id_ = macro_id.fourth_id();
     offset_ = offset;
     size_ = size;
-    type_ = DiskType::BLOCK;
+    type_ = block_type;
   }
   return ret;
 }
@@ -142,7 +147,9 @@ OB_SERIALIZE_MEMBER(ObMetaDiskAddr,
                     first_id_,
                     second_id_,
                     third_id_,
-                    fourth_id_);
+                    fourth_id_,
+                    fifth_id_ // FOR the fourth_id_ of MacroBlockId // FARM COMPAT WHITELIST
+                    );
 
 bool ObMetaDiskAddr::is_valid() const
 {
@@ -155,6 +162,7 @@ bool ObMetaDiskAddr::is_valid() const
          && size_ <= ObLogConstants::MAX_LOG_FILE_SIZE;
       break;
     case DiskType::BLOCK:
+    case DiskType::RAW_BLOCK:
       ret = second_id_ >= -1 && second_id_ < INT64_MAX && size_ > 0;
       break;
     case DiskType::MEM:
@@ -174,33 +182,36 @@ bool ObMetaDiskAddr::is_valid() const
 int64_t ObMetaDiskAddr::to_string(char *buf, const int64_t buf_len) const
 {
   int64_t pos = 0;
+  // 1. print detail info of first_id
+  block_id().first_id_to_string(buf, buf_len, pos);
+
+  // 2. print other info
   switch (type_) {
   case FILE:
     databuff_printf(buf, buf_len, pos,
-                     "[%lu-%lu-%lu-%lu-%lu](file_id=%ld,offset=%lu,size=%lu,type=%lu,seq=%lu)",
-                     first_id_,
+                     "[2nd=%lu][3rd=%lu][file_id=%ld,offset=%lu,size=%lu,type=%lu,seq=%lu][5th=%lu][6th=%lu]}",
                      second_id_,
                      third_id_,
-                     fourth_id_,
-                     fifth_id_,
-                     file_id_,
                      (uint64_t) offset_,
                      (uint64_t) size_,
                      (uint64_t) type_,
-                     (uint64_t) seq_);
+                     (uint64_t) seq_,
+                     fifth_id_,
+                     sixth_id_,
+                     file_id_);
     break;
   default:
     databuff_printf(buf, buf_len, pos,
-                    "[%lu-%lu-%lu-%lu-%lu](offset=%lu,size=%lu,type=%lu,seq=%lu)",
-                    first_id_,
+                    "[2nd=%lu][3rd=%lu][offset=%lu,size=%lu,type=%lu,seq=%lu][trans_seq=%lu, sec_part=%lu][6th=%lu]}",
                     second_id_,
                     third_id_,
-                    fourth_id_,
-                    fifth_id_,
                     (uint64_t) offset_,
                     (uint64_t) size_,
                     (uint64_t) type_,
-                    (uint64_t) seq_);
+                    (uint64_t) seq_,
+                    (uint64_t) block_id().macro_transfer_seq(),
+                    (uint64_t) block_id().tenant_seq(),
+                    sixth_id_);
     break;
   };
 
@@ -209,7 +220,7 @@ int64_t ObMetaDiskAddr::to_string(char *buf, const int64_t buf_len) const
 
 bool ObMetaDiskAddr::operator ==(const ObMetaDiskAddr &other) const
 {
-  return is_equal_for_persistence(other) && fifth_id_ == other.fifth_id_;
+  return is_equal_for_persistence(other) && sixth_id_ == other.sixth_id_;
 }
 
 bool ObMetaDiskAddr::is_equal_for_persistence(const ObMetaDiskAddr &other) const
@@ -217,12 +228,29 @@ bool ObMetaDiskAddr::is_equal_for_persistence(const ObMetaDiskAddr &other) const
   return first_id_  == other.first_id_
       && second_id_ == other.second_id_
       && third_id_  == other.third_id_
-      && fourth_id_ == other.fourth_id_;
+      && fourth_id_ == other.fourth_id_
+      && fifth_id_ == other.fifth_id_;
 }
 
 bool ObMetaDiskAddr::operator !=(const ObMetaDiskAddr &other) const
 {
   return !(other == *this);
+}
+
+int ObMetaDiskAddr::memcpy_deserialize(const char* buf, const int64_t data_len, int64_t& pos)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(buf) || OB_UNLIKELY(data_len <= 0 || pos < 0 || pos >= data_len)) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid arguments.", KP(buf), K(data_len), K(pos), K(ret));
+  }
+  DESERIALIZE_MEMBER_WITH_MEMCPY(first_id_);
+  DESERIALIZE_MEMBER_WITH_MEMCPY(second_id_);
+  DESERIALIZE_MEMBER_WITH_MEMCPY(third_id_);
+  DESERIALIZE_MEMBER_WITH_MEMCPY(fourth_id_);
+  DESERIALIZE_MEMBER_WITH_MEMCPY(fifth_id_);
+  sixth_id_  = 0;
+  return ret;
 }
 
 } // end namespace storage

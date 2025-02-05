@@ -13,7 +13,6 @@
 #define USING_LOG_PREFIX COMMON
 #include "common/row/ob_row_store.h"
 #include "common/row/ob_row_util.h"
-#include "lib/utility/utility.h"
 namespace oceanbase
 {
 namespace common
@@ -748,7 +747,7 @@ int ObRowStore::add_row_by_projector(const ObNewRow &row,
         break;                  // done
       }
     } // end while
-    if (3 < retry) {
+    if (OB_SUCC(ret) && 3 < retry) {
       ret = OB_ERR_UNEXPECTED;
       OB_LOG(ERROR, "unexpected branch");
     }
@@ -967,6 +966,7 @@ int ObRowStore::assign(const ObRowStore &other_store)
   if (OB_FAIL(set_col_count(col_count))) {
     OB_LOG(WARN, "fail to set rowstore columns count", K(ret));
   } else if (OB_ISNULL(cell = static_cast<ObObj *>(alloca(sizeof(ObObj) * col_count)))) {
+    ret = OB_ALLOCATE_MEMORY_FAILED;
     OB_LOG(WARN, "fail to alloc obj array", K(ret));
   } else {
     cur_row.cells_ = cell;

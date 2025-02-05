@@ -18,6 +18,7 @@ namespace oceanbase
 namespace storage
 {
 using namespace common;
+using namespace observer;
 
 ObDirectLoadTableDataDesc::ObDirectLoadTableDataDesc()
   : rowkey_column_num_(0),
@@ -28,10 +29,13 @@ ObDirectLoadTableDataDesc::ObDirectLoadTableDataDesc()
     extra_buf_size_(0),
     compressor_type_(ObCompressorType::INVALID_COMPRESSOR),
     is_heap_table_(false),
+    is_shared_storage_(false),
     mem_chunk_size_(0),
     max_mem_chunk_count_(0),
     merge_count_per_round_(0),
-    heap_table_mem_chunk_size_(0)
+    heap_table_mem_chunk_size_(0),
+    session_count_(0),
+    exe_mode_(ObTableLoadExeMode::MAX_TYPE)
 {
 }
 
@@ -49,10 +53,13 @@ void ObDirectLoadTableDataDesc::reset()
   extra_buf_size_ = 0;
   compressor_type_ = ObCompressorType::INVALID_COMPRESSOR;
   is_heap_table_ = false;
+  is_shared_storage_ = false;
   mem_chunk_size_ = 0;
   max_mem_chunk_count_ = 0;
   merge_count_per_round_ = 0;
   heap_table_mem_chunk_size_ = 0;
+  session_count_ = 0;
+  exe_mode_ = ObTableLoadExeMode::MAX_TYPE;
 }
 
 bool ObDirectLoadTableDataDesc::is_valid() const
@@ -63,8 +70,8 @@ bool ObDirectLoadTableDataDesc::is_valid() const
          sstable_index_block_size_ > 0 && sstable_index_block_size_ % DIO_ALIGN_SIZE == 0 &&
          sstable_data_block_size_ > 0 && sstable_data_block_size_ % DIO_ALIGN_SIZE == 0 &&
          extra_buf_size_ > 0 && extra_buf_size_ % DIO_ALIGN_SIZE == 0 &&
-         compressor_type_ > ObCompressorType::INVALID_COMPRESSOR && mem_chunk_size_ > 0 &&
-         max_mem_chunk_count_ > 0 && merge_count_per_round_ > 0 && heap_table_mem_chunk_size_ > 0;
+         compressor_type_ > ObCompressorType::INVALID_COMPRESSOR &&
+         max_mem_chunk_count_ > 0 && merge_count_per_round_ > 0;
 }
 
 } // namespace storage

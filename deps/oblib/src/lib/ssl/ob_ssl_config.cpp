@@ -10,14 +10,8 @@
  * See the Mulan PubL v2 for more details.
  */
 
-#include <openssl/evp.h>
-#include <openssl/x509.h>
-#include <openssl/pem.h>
-#include <openssl/err.h>
 #include <openssl/engine.h>
 #include "ob_ssl_config.h"
-#include "lib/ob_define.h"
-#include "lib/oblog/ob_log.h"
 #include "lib/lock/ob_spin_rwlock.h"
 
 namespace oceanbase {
@@ -420,7 +414,10 @@ static SSL_CTX* ob_ssl_create_ssl_ctx(const ObSSLConfig& ssl_config)
     SSL_CTX_set_options(ctx, SSL_OP_TLS_BLOCK_PADDING_BUG);
     SSL_CTX_set_options(ctx, SSL_OP_DONT_INSERT_EMPTY_FRAGMENTS);
     SSL_CTX_set_options(ctx, SSL_OP_SINGLE_DH_USE);
-    SSL_CTX_set_read_ahead(ctx, 1);
+    /*set_read_ahead may cause the first application data that been sent after
+    * SSL handshake being unprocessed, forbid it.
+    */
+    SSL_CTX_set_read_ahead(ctx, 0);
   }
   return ctx;
 }

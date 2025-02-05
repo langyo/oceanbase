@@ -13,11 +13,8 @@
 #define USING_LOG_PREFIX  SQL_ENG
 
 #include "ob_number_format_models.h"
-#include "lib/charset/ob_charset.h"
 #include "sql/engine/ob_exec_context.h"
-#include "sql/engine/expr/ob_expr_util.h"
 #include "sql/engine/expr/ob_expr_func_round.h"
-#include "share/system_variable/ob_nls_system_variable.h"
 
 namespace oceanbase
 {
@@ -1696,7 +1693,11 @@ int ObNFMBase::num_str_to_sci(const common::ObString &num_str, const int32_t sca
           if (decimal_appear) {
             buf[digit_start_pos + 1] = '.';
           }
-          ++pow_size;
+          if ('-' == pow_str[1]) {
+            --pow_size;
+          } else {
+            ++pow_size;
+          }
         }
       }
     }
@@ -2455,7 +2456,7 @@ int ObNFMToNumber::process_hex_format(const common::ObString &in_str,
       number::ObNumber base_num;
       number::ObNumber power_num;
       number::ObNumber res;
-      if (base_num.from(base, allocator)) {
+      if (OB_FAIL(base_num.from(base, allocator))) {
         LOG_WARN("fail to cast uint64 to number", K(ret), K(base));
       } else if (OB_FAIL(base_num.power(exponent, power_num, allocator))) {
         LOG_WARN("power calc failed", K(ret));
@@ -2463,11 +2464,11 @@ int ObNFMToNumber::process_hex_format(const common::ObString &in_str,
         for (int32_t i = 0; OB_SUCC(ret) && i < hex_num_size; i++) {
           uint64_t val = nums.at(i);
           number::ObNumber num;
-          if (num.from(val, allocator)) {
+          if (OB_FAIL(num.from(val, allocator))) {
             LOG_WARN("fail to cast uint64 to number", K(ret), K(val));
           } else {
             for (int32_t j = i; OB_SUCC(ret) && j > 0; j--) {
-              if (num.mul_v2(power_num, num, allocator)) {
+              if (OB_FAIL(num.mul_v2(power_num, num, allocator))) {
                 LOG_WARN("fail to mul number", K(ret));
               }
             }

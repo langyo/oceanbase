@@ -27,6 +27,41 @@ namespace sql
 
 typedef std::pair<uint64_t, uint64_t> JoinTableIdPair;
 
+struct DistinctObjMeta
+{
+  ObObjType obj_type_;
+  ObCollationType coll_type_;
+  ObCollationLevel coll_level_;
+  ObScale scale_;
+
+  DistinctObjMeta(ObObjType obj_type, ObCollationType coll_type,
+                  ObCollationLevel coll_level, ObScale scale)
+    : obj_type_(obj_type), coll_type_(coll_type),
+      coll_level_(coll_level), scale_(scale)
+  {
+    if (!ObDatumFuncs::is_string_type(obj_type_) && !ob_is_enum_or_set_type(obj_type_)) {
+      coll_type_ = CS_TYPE_MAX;
+      coll_level_ = CS_LEVEL_INVALID;
+    }
+  }
+  DistinctObjMeta()
+    : obj_type_(common::ObMaxType), coll_type_(common::CS_TYPE_MAX) ,
+      coll_level_(CS_LEVEL_INVALID), scale_(-1) {}
+
+  bool operator==(const DistinctObjMeta &other) const
+  {
+    bool cs_level_equal = lib::is_oracle_mode() ? true : (coll_level_ == other.coll_level_);
+    bool res = obj_type_ == other.obj_type_ && coll_type_ == other.coll_type_ && cs_level_equal;
+    if (res && ob_is_double_type(obj_type_)) {
+      bool is_fixed_double_1 = SCALE_UNKNOWN_YET < scale_ && OB_MAX_DOUBLE_FLOAT_SCALE >= scale_;
+      bool is_fixed_double_2 = SCALE_UNKNOWN_YET < other.scale_ && OB_MAX_DOUBLE_FLOAT_SCALE >= other.scale_;
+      res = is_fixed_double_1 == is_fixed_double_2;
+    }
+    return res;
+  }
+  TO_STRING_KV(K_(obj_type), K_(coll_type), K_(coll_level), K_(scale));
+};
+
 class ObTransformPreProcess: public ObTransformRule
 {
 public:
@@ -48,30 +83,6 @@ private:
                              const ObDMLStmt &stmt,
                              bool &need_trans) override;
 // used for transform in expr to or exprs
-struct DistinctObjMeta
-{
-  ObObjType obj_type_;
-  ObCollationType coll_type_;
-  ObCollationLevel coll_level_;
-
-  DistinctObjMeta(ObObjType obj_type, ObCollationType coll_type, ObCollationLevel coll_level)
-    : obj_type_(obj_type), coll_type_(coll_type), coll_level_(coll_level)
-  {
-    if (!ObDatumFuncs::is_string_type(obj_type_)) {
-      coll_type_ = CS_TYPE_MAX;
-      coll_level_ = CS_LEVEL_INVALID;
-    }
-  }
-  DistinctObjMeta()
-    : obj_type_(common::ObMaxType), coll_type_(common::CS_TYPE_MAX) , coll_level_(CS_LEVEL_INVALID){}
-
-  bool operator==(const DistinctObjMeta &other) const
-  {
-    bool cs_level_equal = lib::is_oracle_mode() ? true : (coll_level_ == other.coll_level_);
-    return obj_type_ == other.obj_type_ && coll_type_ == other.coll_type_ && cs_level_equal;
-  }
-  TO_STRING_KV(K_(obj_type), K_(coll_type));
-};
 
   /*
    * following functions are used to add all rowkey columns
@@ -365,12 +376,20 @@ struct DistinctObjMeta
   int transform_exprs(ObDMLStmt *stmt, bool &trans_happened);
   int transform_for_nested_aggregate(ObDMLStmt *&stmt, bool &trans_happened);
   int generate_child_level_aggr_stmt(ObSelectStmt *stmt, ObSelectStmt *&sub_stmt);
+  int get_inner_aggr_exprs(ObSelectStmt *sub_stmt, common::ObIArray<ObAggFunRawExpr*>& inner_aggr_exprs);
   int get_first_level_output_exprs(ObSelectStmt *sub_stmt,
                                    common::ObIArray<ObRawExpr*>& inner_aggr_exprs);
   int generate_parent_level_aggr_stmt(ObSelectStmt *&stmt, ObSelectStmt *sub_stmt);
   int remove_nested_aggr_exprs(ObSelectStmt *stmt);
   int construct_column_items_from_exprs(const ObIArray<ObRawExpr*> &column_exprs,
                                         ObIArray<ColumnItem> &column_items);
+  int add_select_item_for_update(ObSelectStmt *view_stmt,
+                                 ObIArray<ObRawExpr*> &select_list);
+  int create_for_update_dml_info(ObSelectStmt *stmt, TableItem *view_table);
+  int pull_up_for_update_dml_info(ObSelectStmt *upper_stmt, TableItem *view_table);
+  int pull_up_part_exprs(ObDMLStmt *stmt, TableItem *table);
+  int clear_for_update_mark(TableItem *view_table);
+  int move_for_update_dml_info(ObSelectStmt *stmt, ObSelectStmt *hierarchical_stmt);
   /*
    * following functions are used to transform in_expr to or_expr
    */
@@ -434,16 +453,35 @@ struct DistinctObjMeta
   static int replace_cast_expr_align_date4cmp(ObRawExprFactory &expr_factory,
                                               const ObItemType &cmp_type,
                                               ObRawExpr *&expr);
+  static int replace_op_row_expr_align_date4cmp(ObRawExprFactory &expr_factory,
+                                                const ObItemType &cmp_type,
+                                                ObRawExpr *&left_row_expr,
+                                                ObRawExpr *&right_row_expr);
   static int check_and_transform_align_date4cmp(ObRawExprFactory &expr_factory,
                                                 ObRawExpr *&in_expr,
                                                 const ObItemType &cmp_type);
   static int replace_align_date4cmp_recursively(ObRawExprFactory &expr_factory,
                                                 ObRawExpr *&root_expr);
+  static int replace_inner_row_cmp_val_recursively(ObRawExprFactory &expr_factory,
+                                                   const ObSQLSessionInfo &session,
+                                                   ObRawExpr *&root_expr,
+                                                   bool &trans_happened);
+  static int check_and_transform_inner_row_cmp_val(ObRawExprFactory &expr_factory,
+                                                   const ObSQLSessionInfo &session,
+                                                   ObRawExpr *&row_cmp_expr,
+                                                   bool &trans_happened);
+  template<bool IS_LEFT>
+  static int transform_inner_op_row_cmp_for_decimal_int(ObRawExprFactory &expr_factory,
+                                                        const ObSQLSessionInfo &session,
+                                                        ObRawExpr *&row_cmp_expr,
+                                                        ObRawExpr *&row_expr,
+                                                        bool &trans_happened);
   int transformer_aggr_expr(ObDMLStmt *stmt, bool &trans_happened);
   int transform_rownum_as_limit_offset(const ObIArray<ObParentDMLStmt> &parent_stmts,
                                        ObDMLStmt *&stmt,
+                                       ObDMLStmt *&limit_stmt,
                                        bool &trans_happened);
-  int transform_common_rownum_as_limit(ObDMLStmt *&stmt, bool &trans_happened);
+  int transform_common_rownum_as_limit(ObDMLStmt *&stmt, ObDMLStmt *&limit_stmt, bool &trans_happened);
   int try_transform_common_rownum_as_limit_or_false(ObDMLStmt *stmt, ObRawExpr *&limit_expr, bool& is_valid);
   int transform_generated_rownum_as_limit(const ObIArray<ObParentDMLStmt> &parent_stmts,
                                           ObDMLStmt *stmt,
@@ -458,24 +496,10 @@ struct DistinctObjMeta
 
   int replace_group_id_in_stmt(ObSelectStmt *stmt);
   int replace_group_id_in_expr_recursive(ObRawExpr *&expr);
+  // transform json object with star
+  int transform_json_object_expr_with_star(const ObIArray<ObParentDMLStmt> &parent_stmts,
+                                           ObDMLStmt *stmt, bool &trans_happened);
   int transform_udt_columns(const common::ObIArray<ObParentDMLStmt> &parent_stmts, ObDMLStmt *stmt, bool &trans_happened);
-  int transform_udt_column_conv_function(ObDmlTableInfo &table_info,
-                                         ObIArray<ObRawExpr*> &column_conv_exprs,
-                                         ObColumnRefRawExpr &udt_col,
-                                         ObColumnRefRawExpr &hidd_col);
-  int transform_udt_column_value_expr_inner(ObDMLStmt *stmt, ObDmlTableInfo &table_info, ObRawExpr *&old_expr, ObRawExpr *hidd_expr = NULL);
-  int transform_xml_binary(ObRawExpr *hidden_blob_expr, ObRawExpr *&new_expr);
-  int transform_udt_column_value_expr(ObDMLStmt *stmt, ObDmlTableInfo &table_info, ObRawExpr *old_expr, ObRawExpr *&new_expr, ObRawExpr *hidd_expr = NULL);
-  int transform_udt_column_conv_param_expr(ObDmlTableInfo &table_info, ObRawExpr *old_expr, ObRawExpr *&new_expr);
-  int replace_udt_assignment_exprs(ObDMLStmt *stmt, ObDmlTableInfo &table_info, ObIArray<ObAssignment> &assignments, bool &trans_happened);
-  int set_hidd_col_not_null_attr(const ObColumnRefRawExpr &udt_col, ObIArray<ObColumnRefRawExpr *> &column_exprs);
-  int check_skip_child_select_view(const ObIArray<ObParentDMLStmt> &parent_stmts, ObDMLStmt *stmt, bool &skip_for_view_table);
-  int transform_query_udt_columns_exprs(const ObIArray<ObParentDMLStmt> &parent_stmts, ObDMLStmt *stmt, bool &trans_happened);
-  int transform_udt_columns_constraint_exprs(ObDMLStmt *stmt, bool &trans_happened);
-  int get_update_generated_udt_in_parent_stmt(const ObIArray<ObParentDMLStmt> &parent_stmts, const ObDMLStmt *stmt,
-                                              ObIArray<ObColumnRefRawExpr*> &col_exprs);
-  int get_dml_view_col_exprs(const ObDMLStmt *stmt, ObIArray<ObColumnRefRawExpr*> &assign_col_exprs);
-
    /*
    * following functions are used for transform rowid in subquery
    */
@@ -509,9 +533,14 @@ struct DistinctObjMeta
   int create_inner_view_stmt(ObDMLStmt *batch_stmt, ObSelectStmt*& inner_view_stmt);
 
   int transform_for_ins_batch_stmt(ObDMLStmt *batch_stmt, bool &trans_happened);
+
+  int transform_for_insertup_batch_stmt(ObDMLStmt *batch_stmt, bool &trans_happened);
+
   int transform_for_batch_stmt(ObDMLStmt *batch_stmt, bool &trans_happened);
 
   int check_insert_can_batch(ObInsertStmt *insert_stmt, bool &can_batch);
+
+  bool check_insertup_support_batch_opt(ObInsertStmt *insert_stmt, bool &can_batch);
 
   int formalize_batch_stmt(ObDMLStmt *batch_stmt,
                           ObSelectStmt* inner_view_stmt,
@@ -542,10 +571,10 @@ struct DistinctObjMeta
 
   int remove_shared_expr(ObDMLStmt *stmt,
                          JoinedTable *joined_table,
-                         hash::ObHashSet<uint64_t> &expr_set,
+                         hash::ObHashSet<uint64_t, hash::NoPthreadDefendMode> &expr_set,
                          bool is_nullside);
 
-  int do_remove_shared_expr(hash::ObHashSet<uint64_t> &expr_set,
+  int do_remove_shared_expr(hash::ObHashSet<uint64_t, hash::NoPthreadDefendMode> &expr_set,
                             ObIArray<ObRawExpr *> &padnull_exprs,
                             bool is_nullside,
                             ObRawExpr *&expr,
@@ -629,6 +658,46 @@ struct DistinctObjMeta
   int check_exec_param_correlated(const ObRawExpr *expr, bool &is_correlated);
   int check_is_correlated_cte(ObSelectStmt *stmt, ObIArray<ObSelectStmt *> &visited_cte, bool &is_correlated);
   int convert_join_preds_vector_to_scalar(JoinedTable &joined_table, bool &trans_happened);
+  int preserve_order_for_fulltext_search(ObDMLStmt *stmt, bool& trans_happened);
+
+  int flatten_conditions(ObDMLStmt *stmt, bool &trans_happened);
+  int recursive_flatten_join_conditions(ObDMLStmt *stmt, TableItem *table, bool &trans_happened);
+  int do_flatten_conditions(ObDMLStmt *stmt, ObIArray<ObRawExpr*> &conditions, bool &trans_happened);
+  int expand_materialized_view(ObDMLStmt *stmt, bool &trans_happened);
+  int preserve_order_for_pagination(ObDMLStmt *stmt,
+                                    bool &trans_happened);
+  int check_stmt_need_preserve_order(ObDMLStmt *stmt,
+                                     ObIArray<ObSelectStmt*> &preserve_order_stmts,
+                                     bool &is_valid);
+
+  int check_view_need_preserve_order(ObSelectStmt* stmt,
+                                     ObIArray<ObSelectStmt*> &preserve_order_stmts,
+                                     bool &need_preserve);
+
+  int check_set_stmt_need_preserve_order(ObSelectStmt* stmt,
+                                         ObIArray<ObSelectStmt*> &preserve_order_stmts,
+                                         bool &need_preserve);
+
+  int add_order_by_for_stmt(ObSelectStmt* stmt, bool &trans_happened);
+
+  int get_rowkey_for_single_table(ObSelectStmt* stmt,
+                                  ObIArray<ObRawExpr*> &unique_keys,
+                                  bool &is_valid);
+  int try_gen_straight_join_leading(ObDMLStmt *stmt, bool &trans_happened);
+  int get_flattened_tables_of_pure_straight_join(ObDMLStmt* stmt,
+                                                 ObIArray<TableItem*> &flattened_tables);
+  int check_pure_straight_join_table(TableItem* table_item, bool &is_pure_straight_join,
+                                     ObIArray<TableItem*> &flattened_tables);
+  int add_ordered_hint(ObDMLStmt* stmt, ObStmtHint &stmt_hint);
+  int add_leading_hint_by_flattened_tables(ObDMLStmt* stmt,
+                                           ObStmtHint &stmt_hint,
+                                           ObIArray<TableItem*> &flattened_tables);
+  int construct_leading_table(ObDMLStmt* stmt,
+                              ObIArray<TableItem*> &flattened_tables,
+                              ObLeadingTable &leading_table);
+  int construct_leaf_leading_table(ObDMLStmt *stmt, TableItem *table, ObLeadingTable *&leading_table);
+  int reset_view_base_item(ObDMLStmt *stmt);
+
 private:
   DISALLOW_COPY_AND_ASSIGN(ObTransformPreProcess);
 };

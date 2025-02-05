@@ -13,7 +13,8 @@
 
 #include "share/schema/ob_table_dml_param.h"
 #include "storage/access/ob_multiple_scan_merge.h"
-#include "storage/access/ob_store_row_iterator.h"
+#include "storage/direct_load/ob_direct_load_row_iterator.h"
+#include "storage/direct_load/ob_direct_load_struct.h"
 
 namespace oceanbase
 {
@@ -26,11 +27,17 @@ public:
   ObDirectLoadOriginTableCreateParam();
   ~ObDirectLoadOriginTableCreateParam();
   bool is_valid() const;
-  TO_STRING_KV(K_(table_id), K_(tablet_id), K_(ls_id));
+  TO_STRING_KV(K_(table_id),
+               K_(tablet_id),
+               K_(ls_id),
+               K_(tx_id),
+               K_(tx_seq));
 public:
   uint64_t table_id_;
   common::ObTabletID tablet_id_;
   share::ObLSID ls_id_;
+  transaction::ObTransID tx_id_;
+  transaction::ObTxSEQ tx_seq_;
 };
 
 struct ObDirectLoadOriginTableMeta
@@ -38,11 +45,17 @@ struct ObDirectLoadOriginTableMeta
 public:
   ObDirectLoadOriginTableMeta();
   ~ObDirectLoadOriginTableMeta();
-  TO_STRING_KV( K_(table_id), K_(tablet_id), K_(ls_id));
+  TO_STRING_KV(K_(table_id),
+               K_(tablet_id),
+               K_(ls_id),
+               K_(tx_id),
+               K_(tx_seq));
 public:
   uint64_t table_id_;
   common::ObTabletID tablet_id_;
   share::ObLSID ls_id_;
+  transaction::ObTransID tx_id_;
+  transaction::ObTxSEQ tx_seq_;
 };
 
 class ObDirectLoadOriginTable
@@ -51,7 +64,12 @@ public:
   ObDirectLoadOriginTable();
   virtual ~ObDirectLoadOriginTable();
   int init(const ObDirectLoadOriginTableCreateParam &param);
-  int scan(const blocksstable::ObDatumRange &key_range, common::ObIAllocator &allocator, ObIStoreRowIterator *&row_iter);
+  int scan(
+      const blocksstable::ObDatumRange &key_range,
+      common::ObIAllocator &allocator,
+      ObDirectLoadIStoreRowIterator *&row_iter,
+      bool skip_read_lob);
+  int rescan(const blocksstable::ObDatumRange &key_range, ObIStoreRowIterator *row_iter);
   bool is_valid() const { return is_inited_; }
   const ObDirectLoadOriginTableMeta &get_meta() const {return meta_; }
   const ObTabletHandle &get_tablet_handle() const { return tablet_handle_; }
@@ -71,20 +89,21 @@ private:
   bool is_inited_;
 };
 
-class ObDirectLoadOriginTableScanner : public ObIStoreRowIterator
+class ObDirectLoadOriginTableScanner : public ObDirectLoadIStoreRowIterator
 {
 public:
   ObDirectLoadOriginTableScanner();
   virtual ~ObDirectLoadOriginTableScanner();
-  int init(ObDirectLoadOriginTable *table,
-           const blocksstable::ObDatumRange &query_range);
+  int init(ObDirectLoadOriginTable *table, bool skip_read_lob);
+  int open(const blocksstable::ObDatumRange &query_range);
   int get_next_row(const blocksstable::ObDatumRow *&datum_row) override;
 private:
   int init_table_access_param();
-  int init_table_access_ctx();
+  int init_table_access_ctx(bool skip_read_lob);
   int init_get_table_param();
 private:
   common::ObArenaAllocator allocator_;
+  common::ObArenaAllocator stmt_allocator_;
   ObDirectLoadOriginTable *origin_table_;
   ObArray<int32_t> col_ids_;
   share::schema::ObTableSchemaParam schema_param_;

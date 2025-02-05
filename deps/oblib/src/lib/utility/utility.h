@@ -25,6 +25,7 @@
 #include "lib/utility/ob_backtrace.h"
 #include "lib/oblog/ob_trace_log.h"
 #include "lib/container/ob_iarray.h"
+#include "lib/allocator/ob_malloc.h"
 #include "common/ob_clock_generator.h"
 
 #define FALSE_IT(stmt) ({ (stmt); false; })
@@ -86,7 +87,8 @@ char *rtrim(char *str);
 const char *inet_ntoa_s(char *buffer, size_t n, const uint64_t ipport);
 const char *inet_ntoa_s(char *buffer, size_t n, const uint32_t ip);
 
-const char *time2str(const int64_t time_s, const char *format = DEFAULT_TIME_FORMAT);
+const char *time2str(const int64_t time_s, char *buf, const int64_t buf_len,
+                     const char *format = DEFAULT_TIME_FORMAT);
 int escape_range_string(char *buffer, const int64_t length, int64_t &pos, const ObString &in);
 int escape_enter_symbol(char *buffer, const int64_t length, int64_t &pos, const char *src);
 
@@ -176,13 +178,46 @@ inline double max(const double x, const double y)
 template <class T>
 void max(T, T) = delete;
 
-template<oceanbase::common::ObWaitEventIds::ObWaitEventIdEnum event_id = oceanbase::common::ObWaitEventIds::DEFAULT_SLEEP>
+template <oceanbase::common::ObWaitEventIds::ObWaitEventIdEnum event_id =
+              oceanbase::common::ObWaitEventIds::DEFAULT_SLEEP>
 inline void ob_usleep(const useconds_t v)
 {
-  oceanbase::common::ObSleepEventGuard wait_guard(event_id, 0, (int64_t)v);
+  oceanbase::common::ObSleepEventGuard<event_id> wait_guard((int64_t)v);
   ::usleep(v);
 }
 
+template <oceanbase::common::ObWaitEventIds::ObWaitEventIdEnum event_id =
+              oceanbase::common::ObWaitEventIds::DEFAULT_SLEEP>
+inline void ob_usleep(const useconds_t v, const bool is_idle_sleep)
+{
+  if (is_idle_sleep) {
+    ObBKGDSessInActiveGuard inactive_guard;
+    ob_usleep(v);
+  } else {
+    ob_usleep(v);
+  }
+
+}
+
+template <oceanbase::common::ObWaitEventIds::ObWaitEventIdEnum event_id =
+              oceanbase::common::ObWaitEventIds::DEFAULT_SLEEP>
+inline void ob_usleep(const useconds_t v, const int64_t p1, const int64_t p2, const int64_t p3)
+{
+  oceanbase::common::ObSleepEventGuard<event_id> wait_guard((int64_t)v, p1, p2, p3);
+  ::usleep(v);
+}
+
+template <oceanbase::common::ObWaitEventIds::ObWaitEventIdEnum event_id =
+              oceanbase::common::ObWaitEventIds::DEFAULT_SLEEP>
+inline void ob_usleep(const useconds_t v, const int64_t p1, const int64_t p2, const int64_t p3, const bool is_idle_sleep)
+{
+  if (is_idle_sleep) {
+    ObBKGDSessInActiveGuard inactive_guard;
+    ob_usleep(v, p1, p2, p3);
+  } else {
+    ob_usleep(v, p1, p2, p3);
+  }
+}
 int get_double_expand_size(int64_t &new_size, const int64_t limit_size);
 /**
  * allocate new memory that twice larger to store %oldp
@@ -498,12 +533,23 @@ inline int64_t get_cpu_id()
 // ethernet speed: byte / second.
 int get_ethernet_speed(const char *devname, int64_t &speed);
 int get_ethernet_speed(const ObString &devname, int64_t &speed);
+inline int64_t get_cgroup_memory_limit()
+{
+  int64_t cgroup_memory_limit = INT64_MAX;
+  FILE *file = fopen("/sys/fs/cgroup/memory/memory.limit_in_bytes", "r");
+  if (NULL != file) {
+    fscanf(file, "%ld", &cgroup_memory_limit);
+    fclose(file);
+  }
+  return cgroup_memory_limit;
+}
 
 inline int64_t get_phy_mem_size()
 {
   static int64_t page_size = sysconf(_SC_PAGE_SIZE);
   static int64_t phys_pages = sysconf(_SC_PHYS_PAGES);
-  return page_size * phys_pages;
+  static int64_t cgroup_memory_limit = get_cgroup_memory_limit();
+  return MIN(page_size * phys_pages, cgroup_memory_limit);
 }
 
 int64_t get_level1_dcache_size();
@@ -1057,15 +1103,23 @@ inline void set_member_allocator(T &dest, common::ObIAllocator *alloc)
 template <typename T>
 inline int construct_assign_wrap(T &dest, const T &src, TrueType)
 {
+  int ret = OB_SUCCESS;
   new(&dest) T();
-  return dest.assign(src);
+  if (OB_FAIL(dest.assign(src))) {
+    dest.~T();
+  }
+  return ret;
 }
 
 template <typename T>
 inline int construct_assign_wrap(T &dest, const T &src, FalseType)
 {
+  int ret = OB_SUCCESS;
   new(&dest) T(src);
-  return get_copy_assign_ret_wrap(dest, BoolType<HAS_MEMBER(T, get_copy_assign_ret)>());
+  if (OB_FAIL(get_copy_assign_ret_wrap(dest, BoolType<HAS_MEMBER(T, get_copy_assign_ret)>()))) {
+    dest.~T();
+  }
+  return ret;
 }
 
 // This function is used for copy assignment
@@ -1265,9 +1319,8 @@ private:
 
 void get_addr_by_proxy_sessid(const uint64_t session_id, ObAddr &addr);
 
-const char *replica_type_to_str(const ObReplicaType &type);
-
 int ob_atoll(const char *str, int64_t &res);
+int ob_atoull(const char *str, uint64_t &res);
 int ob_strtoll(const char *str, char *&endptr, int64_t &res);
 int ob_strtoull(const char *str, char *&endptr, uint64_t &res);
 
@@ -1310,6 +1363,17 @@ void call_dtor(T *&ptr)
 //      OB_IO_ERROR Error executing system call
 //      OB_SUCCESS successfully executed
 int is_dir_empty(const char *dirname, bool &is_empty);
+
+int extract_cert_expired_time(const char* cert, const int64_t cert_len, int64_t &expired_time);
+
+int64_t parse_config_capacity(const char *str, bool &valid, bool check_unit = true, bool use_byte = false);
+
+void get_glibc_version(int &major, int &minor);
+
+bool glibc_prereq(int major, int minor);
+
+const char *get_transparent_hugepage_status();
+int read_one_int(const char *file_name, int64_t &value);
 } // end namespace common
 } // end namespace oceanbase
 

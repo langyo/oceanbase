@@ -43,6 +43,7 @@ public:
                                           const ObBitSet<> &neg_param_index,
                                           const ObBitSet<> &not_param_index,
                                           const ObBitSet<> &must_be_positive_idx,
+                                          const ObBitSet<> &formalize_prec_idx,
                                           ParamStore *&ab_params);
   // for resolve array params after handler_parser
   static int resolve_params_for_values_clause(ObPlanCacheCtx &pc_ctx);
@@ -74,6 +75,8 @@ private:
                                  const int64_t param_cnt,
                                  const int64_t delta_length,
                                  const common::ObString &no_param_sql,
+                                 common::ObIArray<int64_t> &no_param_pos,
+                                 common::ObIArray<int64_t> &raw_sql_offset,
                                  common::ObString &new_raw_sql,
                                  int64_t &no_param_sql_pos,
                                  int64_t &new_raw_pos);

@@ -12,19 +12,9 @@
 
 #define USING_LOG_PREFIX RS
 
-#include "ob_disaster_recovery_task_executor.h"
 
-#include "share/ob_debug_sync.h"
-#include "share/ob_srv_rpc_proxy.h"
-#include "share/ob_rpc_struct.h"
-#include "share/ls/ob_ls_table_operator.h"
-#include "share/ob_cluster_version.h"
-#include "ob_rs_event_history_table_operator.h"
-#include "ob_disaster_recovery_task_mgr.h"
-#include "ob_disaster_recovery_task.h"
+#include "ob_disaster_recovery_task_executor.h"
 #include "observer/ob_server.h"
-#include "lib/utility/ob_tracepoint.h"
-#include "share/ob_all_server_tracer.h"
 
 namespace oceanbase
 {
@@ -49,6 +39,7 @@ int ObDRTaskExecutor::init(
   return ret;
 }
 
+ERRSIM_POINT_DEF(ERRSIM_DISASTER_RECOVERY_EXECUTE_TASK_ERROR);
 int ObDRTaskExecutor::execute(
     const ObDRTask &task,
     int &ret_code,
@@ -60,6 +51,9 @@ int ObDRTaskExecutor::execute(
   if (OB_UNLIKELY(!inited_)) {
     ret = OB_NOT_INIT;
     LOG_WARN("not init", KR(ret));
+  } else if (OB_UNLIKELY(ERRSIM_DISASTER_RECOVERY_EXECUTE_TASK_ERROR)) {
+    ret = ERRSIM_DISASTER_RECOVERY_EXECUTE_TASK_ERROR;
+    LOG_WARN("errsim disaster recovery clean task", KR(ret));
   } else if (OB_FAIL(SVR_TRACER.get_server_info(dst_server, server_info))) {
     LOG_WARN("fail to get server_info", KR(ret), K(dst_server));
   } else {

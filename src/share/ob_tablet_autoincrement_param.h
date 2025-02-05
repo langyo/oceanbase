@@ -106,8 +106,10 @@ public:
   TO_STRING_KV(K_(tablet_id), K_(start), K_(end), K_(cache_size), K_(next_value), K_(task_id));
   void set(uint64_t start, uint64_t end);
   int next_value(uint64_t &next_value);
+  int get_value(uint64_t &value);
   int fetch(uint64_t count, ObTabletCacheInterval &dest);
   uint64_t count() const { return end_ - start_ + 1; }
+  uint64_t remain_count() const { return end_ - next_value_ + 1; }
   bool operator <(const ObTabletCacheInterval &other) { return tablet_id_ < other.tablet_id_; }
 public:
   common::ObTabletID tablet_id_;
@@ -171,8 +173,8 @@ public:
   virtual int deep_copy(
       char *dst_buf,
       const int64_t buf_size,
-      storage::ObIStorageMetaObj *&value) const;
-  virtual int64_t get_deep_copy_size() const { return sizeof(ObTabletAutoincSeq) + sizeof(ObTabletAutoincInterval) * intervals_count_; }
+      storage::ObIStorageMetaObj *&value) const override;
+  virtual int64_t get_deep_copy_size() const override { return sizeof(ObTabletAutoincSeq) + sizeof(ObTabletAutoincInterval) * intervals_count_; }
   virtual void reset() override;
   virtual bool is_valid() const override;
   virtual inline int64_t get_data_size() const override { return get_deep_copy_size(); }
@@ -180,7 +182,7 @@ public:
   {
     return memtable::MultiSourceDataUnitType::TABLET_SEQ;
   }
-  int get_autoinc_seq_value(uint64_t &autoinc_seq);
+  int get_autoinc_seq_value(uint64_t &autoinc_seq) const;
   int set_autoinc_seq_value(
     common::ObArenaAllocator &allocator,
     const uint64_t autoinc_seq);

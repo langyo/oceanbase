@@ -11,11 +11,10 @@
  */
 
 #include "lib/alloc/alloc_failed_reason.h"
-#include <sys/sysinfo.h>
 #include <unistd.h>
-#include <stdio.h>
 #include "lib/allocator/ob_tc_malloc.h"
 #include "lib/allocator/ob_mod_define.h"
+#include "lib/alloc/memory_dump.h"
 
 namespace oceanbase
 {
@@ -98,14 +97,19 @@ char *alloc_failed_msg()
     }
   case PHYSICAL_MEMORY_EXHAUST: {
       int64_t process_hold = 0;
-      get_process_physical_hold(process_hold);
+      int64_t virtual_memory_used = common::get_virtual_memory_used(&process_hold);
       snprintf(msg, len,
-               "physical memory exhausted(os_total: %ld, os_available: %ld, server_hold: %ld, errno: %d, alloc_size: %ld)",
+               "physical memory exhausted(os_total: %ld, os_available: %ld, virtual_memory_used: %ld, server_hold: %ld, errno: %d, alloc_size: %ld)",
                sysconf(_SC_PHYS_PAGES) * sysconf(_SC_PAGESIZE),
                sysconf(_SC_AVPHYS_PAGES) * sysconf(_SC_PAGESIZE),
+               virtual_memory_used,
                process_hold,
                afc.errno_,
                afc.alloc_size_);
+      break;
+    }
+  case ERRSIM_INJECTION: {
+      snprintf(msg, len, "errsim injection");
       break;
     }
   default: {
@@ -114,6 +118,22 @@ char *alloc_failed_msg()
     }
   }
   return msg;
+}
+
+void print_alloc_failed_msg()
+{
+  if (TC_REACH_TIME_INTERVAL(1 * 1000 * 1000)) {
+#ifdef FATAL_ERROR_HANG
+    if (REACH_TIME_INTERVAL(60 * 1000 * 1000)) {
+      ObMemoryDump::get_instance().generate_mod_stat_task();
+      sleep(1);
+    }
+#endif
+    const char *msg = alloc_failed_msg();
+    LOG_DBA_WARN_V2(OB_LIB_ALLOCATE_MEMORY_FAIL, OB_ALLOCATE_MEMORY_FAILED, "[OOPS]: alloc failed reason is that ", msg);
+    // 49 is the user defined signal to dump memory
+    raise(49);
+  }
 }
 
 } // end of namespace lib

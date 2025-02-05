@@ -12,8 +12,6 @@
 
 #define USING_LOG_PREFIX SQL_RESV
 #include "sql/resolver/dcl/ob_grant_stmt.h"
-#include "share/schema/ob_schema_struct.h"
-#include "share/ob_errno.h"
 using namespace oceanbase::common;
 using namespace oceanbase::sql;
 using namespace oceanbase::share::schema;
@@ -40,11 +38,13 @@ ObGrantStmt::ObGrantStmt(ObIAllocator *name_pool)
       option_(0),
       sys_priv_array_(),
       obj_priv_array_(),
+      sel_col_ids_(),
       ins_col_ids_(),
       upd_col_ids_(),
       ref_col_ids_(),
       ref_query_(NULL),
-      is_grant_all_tab_priv_(false)
+      is_grant_all_tab_priv_(false),
+      table_schema_version_(0)
 {
 }
 
@@ -66,11 +66,13 @@ ObGrantStmt::ObGrantStmt()
       option_(0),
       sys_priv_array_(),
       obj_priv_array_(),
+      sel_col_ids_(),
       ins_col_ids_(),
       upd_col_ids_(),
       ref_col_ids_(),
       ref_query_(NULL),
-      is_grant_all_tab_priv_(false)
+      is_grant_all_tab_priv_(false),
+      table_schema_version_(0)
 {
 }
 

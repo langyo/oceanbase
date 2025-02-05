@@ -12,17 +12,10 @@
 
 #define USING_LOG_PREFIX SQL
 #include "test_sql_utils.h"
-#include "lib/stat/ob_session_stat.h"
-#include "share/ob_cluster_version.h"
 #include "observer/ob_server.h"
-#include "sql/ob_sql_utils.h"
-#include "sql/plan_cache/ob_sql_parameterization.h"
-#include "share/ob_tenant_mgr.h"
 #include "sql/engine/cmd/ob_partition_executor_utils.h"
-#include "sql/session/ob_sql_session_info.h"
-#include "optimizer/ob_mock_opt_stat_manager.h"
-#include "sql/plan_cache/ob_plan_cache.h"
 #include "sql/plan_cache/ob_ps_cache.h"
+#include "share/ob_simple_mem_limit_getter.h"
 #define CLUSTER_VERSION_2100 (oceanbase::common::cal_version(2, 1, 0, 0))
 #define CLUSTER_VERSION_2200 (oceanbase::common::cal_version(2, 2, 0, 0))
 using namespace oceanbase::observer;
@@ -172,7 +165,16 @@ TestSqlUtils::TestSqlUtils()
 {
     memset(schema_file_path_, '\0', 128);
     exec_ctx_.set_sql_ctx(&sql_ctx_);
-    (oceanbase::common::ObClusterVersion::get_instance().init(CLUSTER_VERSION_2200));
+
+    static ObTenantBase tenant_ctx(sys_tenant_id_);
+    ObTenantEnv::set_tenant(&tenant_ctx);
+
+    auto& cluster_version = ObClusterVersion::get_instance();
+    cluster_version.init(&common::ObServerConfig::get_instance(), &oceanbase::omt::ObTenantConfigMgr::get_instance());
+    oceanbase::omt::ObTenantConfigMgr::get_instance().add_tenant_config(sys_tenant_id_);
+    cluster_version.refresh_cluster_version("4.3.0.0");
+    ODV_MGR.init(true);
+
     ObServer &observer = ObServer::get_instance();
     int ret = OB_SUCCESS;
     if (OB_FAIL(observer.init_tz_info_mgr())) {
@@ -192,6 +194,16 @@ void TestSqlUtils::init()
   ObVirtualTenantManager::get_instance().init();
   ObVirtualTenantManager::get_instance().add_tenant(sys_tenant_id_);
   ObVirtualTenantManager::get_instance().set_tenant_mem_limit(sys_tenant_id_, 1024L * 1024L * 1024L, 1024L * 1024L * 1024L);
+
+  GCTX.schema_service_ = schema_service_;
+  oceanbase::transaction::ObBLService::get_instance().init();
+
+  const int64_t max_cache_size = 1024L * 1024L * 512;
+  static ObSimpleMemLimitGetter mem_limit_getter;
+  mem_limit_getter.add_tenant(OB_SYS_TENANT_ID, 0, max_cache_size);
+  mem_limit_getter.add_tenant(OB_SERVER_TENANT_ID, 0, INT64_MAX);
+  ObKVGlobalCache::get_instance().init(&mem_limit_getter);
+
   if (OB_SUCCESS != (ret = ObPreProcessSysVars::init_sys_var())) {
     _OB_LOG(WARN, "PreProcessing system value init failed, ret=%ld", ret);
     ASSERT_TRUE(0);
@@ -203,6 +215,7 @@ void TestSqlUtils::init()
     ASSERT_TRUE(0);
   } else {
     sql_schema_guard_.set_schema_guard(&schema_guard_);
+    sql_ctx_.schema_guard_ = &schema_guard_;
     ObString tenant("sql_test");
     ASSERT_TRUE(OB_SUCCESS == session_info_.init_tenant(tenant, sys_tenant_id_));
 
@@ -416,7 +429,7 @@ void TestSqlUtils::do_resolve(
   resolver_ctx.expr_factory_ = &expr_factory_;
   resolver_ctx.stmt_factory_ = &stmt_factory_;
   resolver_ctx.query_ctx_ = stmt_factory_.get_query_ctx();
-  resolver_ctx.query_ctx_->question_marks_count_ = param_store.count();
+  resolver_ctx.query_ctx_->set_questionmark_count(param_store.count());
   ObResolver resolver(resolver_ctx);
   ret = resolver.resolve(ObResolver::IS_NOT_PREPARED_STMT, *parse_result.result_tree_->children_[0], stmt);
   if (OB_SUCC(ret)) {
@@ -798,7 +811,7 @@ void TestSqlUtils::generate_index_column_schema(ObCreateIndexStmt &stmt,
     ObColumnSchemaV2 index_column;
     const ObColumnSchemaV2 *col = table_schema->get_column_schema(index_arg.index_columns_[i].column_name_);
     ASSERT_FALSE(NULL == col);
-    index_column = *col;
+    ASSERT_TRUE(OB_SUCCESS == index_column.assign(*col));
     ++index_rowkey_num;
     index_column.set_rowkey_position(index_rowkey_num);
     index_column.set_index_position(index_rowkey_num);
@@ -818,7 +831,7 @@ void TestSqlUtils::generate_index_column_schema(ObCreateIndexStmt &stmt,
       const ObColumnSchemaV2 *col = table_schema->get_column_schema(column_id);
       ASSERT_FALSE(NULL == col);
       ObColumnSchemaV2 index_column;
-      index_column = *col;
+      ASSERT_TRUE(OB_SUCCESS == index_column.assign(*col));
       index_column.set_rowkey_position(index_rowkey_num);
       if (col->get_column_id() > max_column_id) {
         max_column_id = col->get_column_id();
@@ -881,7 +894,8 @@ void TestSqlUtils::generate_index_schema(ObCreateIndexStmt &stmt)
   }else{
     _OB_LOG_RET(ERROR, OB_ERROR, "no data table found for tid=%lu", data_table_schema->get_table_id());
   }
-  _OB_LOG(DEBUG, "index_schema: %s", to_cstring(index_schema));
+  ObCStringHelper helper;
+  _OB_LOG(DEBUG, "index_schema: %s", helper.convert(index_schema));
 }
 
 int TestSqlUtils::get_hidden_column_value(

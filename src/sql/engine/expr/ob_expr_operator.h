@@ -26,6 +26,10 @@
 #include "share/datum/ob_datum_funcs.h"
 #include "common/expression/ob_expr_string_buf.h"
 #include "share/object/ob_obj_cast.h"
+#include "share/vector/ob_uniform_vector.h"
+#include "share/vector/ob_discrete_vector.h"
+#include "share/vector/ob_fixed_length_vector.h"
+#include "share/vector/ob_continuous_vector.h"
 #include "common/object/ob_obj_compare.h"
 #include "common/ob_accuracy.h"
 #include "rpc/obmysql/ob_mysql_global.h"
@@ -36,6 +40,8 @@
 #include "sql/engine/expr/ob_expr_extra_info_factory.h"
 #include "sql/engine/expr/ob_i_expr_extra_info.h"
 #include "lib/hash/ob_hashset.h"
+#include "lib/udt/ob_array_type.h"
+#include "sql/session/ob_local_session_var.h"
 
 
 #define GET_EXPR_CTX(ClassType, ctx, id) static_cast<ClassType *>((ctx).get_expr_op_ctx(id))
@@ -94,6 +100,67 @@ private:
   uint32_t flag_;
 };
 
+// Adaptive filter:
+// In every slide window with window_size_, we check the realtime filter rate of the filter,
+// if the realtime filter rate is too low, we disable it in the following slide window.
+//
+// 1.The slide window start to work once the filter is ready(see function 'start_to_work').
+// 2.When data is checked by the filter, we use 'update_slide_window_info' to update the statistic
+//   info and decide whether to disable it or not.
+// 3.If the filter is disabled in this window, we will enable it in the next window. However, if the
+//   filter rate is too low for several windows continuously, we will punish it with expanding
+//   window_size(by adding window_cnt_), the filter will be disabled for a more long time.
+class ObAdaptiveFilterSlideWindow
+{
+public:
+  explicit ObAdaptiveFilterSlideWindow(int64_t &total_count)
+      : next_check_start_pos_(0), window_cnt_(0), window_size_(4096), partial_filter_count_(0),
+        partial_total_count_(0), adptive_ratio_thresheld_(0.5), cur_pos_(total_count),
+        dynamic_disable_(false), ready_to_work_(false)
+  {}
+  ~ObAdaptiveFilterSlideWindow() = default;
+  inline bool dynamic_disable() { return dynamic_disable_; }
+  inline void start_to_work() {
+    next_check_start_pos_ = cur_pos_;
+    ready_to_work_ = true;
+  }
+  int update_slide_window_info(const int64_t filtered_rows_count, const int64_t total_rows_count);
+  inline void reset_for_rescan() {
+    dynamic_disable_ = false;
+    next_check_start_pos_ = 0;
+    window_cnt_ = 0;
+    partial_filter_count_ = 0;
+    partial_total_count_ = 0;
+    ready_to_work_ = false;
+  }
+
+  inline void set_window_size(int64_t window_size) { window_size_ = window_size; }
+  inline void set_adptive_ratio_thresheld(double thresheld) { adptive_ratio_thresheld_ = thresheld; }
+  TO_STRING_KV(K(next_check_start_pos_), K(window_cnt_), K(partial_filter_count_),
+               K(partial_total_count_), K(cur_pos_), K(dynamic_disable_), K(ready_to_work_));
+
+private:
+  // the start posistion of slide window we check next
+  int64_t next_check_start_pos_;
+  // if the filter rate is too low for several slide windows continuously, we punish it with expanding
+  // the window_size, window_cnt_ implicts the window size now we maintain
+  int64_t window_cnt_;
+  // the original window_size, we default value = 4096
+  int64_t window_size_;
+  // filtered data count in a slide window
+  int64_t partial_filter_count_;
+  // total data count in a slide window
+  int64_t partial_total_count_;
+  // if the realtime filter ratio is smaller than thresheld_, the filter will be disabled,
+  // default=0.5
+  double adptive_ratio_thresheld_;
+  // an reference of total_count, mark the real position now
+  int64_t &cur_pos_;
+  bool dynamic_disable_;
+  // when the filter msg are not ready, skip the update process
+  bool ready_to_work_;
+};
+
 class ObExprOperatorCtx
 {
 public:
@@ -107,6 +174,23 @@ public:
     UNUSED(buf_len);
     return 0;
   }
+  virtual inline bool dynamic_disable()
+  {
+    return false;
+  }
+  // This interface is used to collect the filter statistic info
+  // when runtime filter is pushdown as white filter in storage layer,
+  // override by ObExprJoinFilterContext and ObExprTopNFilterContext now.
+  virtual void collect_monitor_info(const int64_t filtered_rows_count,
+                                    const int64_t check_rows_count, const int64_t total_rows_count)
+  {}
+
+  virtual inline void collect_sample_info(const int64_t filter_count, const int64_t total_count)
+  {}
+
+  virtual inline bool need_reset_in_rescan() { return false; }
+  virtual inline bool is_data_version_updated(int64_t old_version) { return false; }
+
 };
 
 typedef common::ObIArray<common::ObNewRowIterator*> RowIterIArray;
@@ -204,6 +288,18 @@ protected:
   uint64_t expr_id_;
   ObExprOperatorType expr_type_;
 };
+
+#define DECLARE_SET_LOCAL_SESSION_VARS \
+  virtual int set_local_session_vars(ObRawExpr *raw_expr, \
+                                    const ObLocalSessionVar *local_session_vars, \
+                                    const ObBasicSessionInfo *session, \
+                                    ObLocalSessionVar &local_vars)
+
+#define DEF_SET_LOCAL_SESSION_VARS(TypeName, raw_expr) \
+  int TypeName::set_local_session_vars(ObRawExpr *raw_expr, \
+                                      const ObLocalSessionVar *local_session_vars, \
+                                      const ObBasicSessionInfo *session, \
+                                      ObLocalSessionVar &local_vars)
 
 class ObExprOperator : public common::ObDLinkBase<ObExprOperator>
 {
@@ -394,6 +490,7 @@ public:
   inline bool is_param_lazy_eval() const { return param_lazy_eval_; }
 
   inline static bool is_type_valid(const common::ObObjType &type);
+  inline static bool is_type_valid_regexp(const common::ObObjType &type);
   virtual bool need_charset_convert() const { return need_charset_convert_; }
   virtual int64_t to_string(char *buf, const int64_t buf_len) const
   {
@@ -409,6 +506,8 @@ public:
     J_OBJ_END();
     return pos;
   }
+  bool is_enum_set_with_subschema_arg(const int64_t arg_idx) const;
+  ObObjType get_enumset_calc_type(const ObObjType expected_type, const int64_t arg_idx) const;
 public:
   /*
     Aggregate arguments for comparison, e.g: a=b, a LIKE b, a RLIKE b
@@ -419,29 +518,36 @@ public:
     common::ObObjMeta &type,
     const common::ObObjMeta *types,
     int64_t param_num,
-    const common::ObCollationType conn_coll_type);
+    common::ObExprTypeCtx &type_ctx);
   static int aggregate_charsets_for_comparison(
     ObExprResType &type,
     const ObExprResType *types,
     int64_t param_num,
-    const common::ObCollationType conn_coll_type);
+    common::ObExprTypeCtx &type_ctx);
 
   /*
     Aggregate arguments for string result, e.g: CONCAT(a,b)
     - convert to @@character_set_connection if all arguments are numbers
     - allow DERIVATION_NONE
   */
+  static int enable_old_charset_aggregation(const ObBasicSessionInfo *session, uint32_t &flags);
   static int aggregate_charsets_for_string_result(
     common::ObObjMeta &type,
     const common::ObObjMeta *types,
     int64_t param_num,
-    const common::ObCollationType conn_coll_type);
+    common::ObExprTypeCtx &type_ctx);
   static int aggregate_charsets_for_string_result(
     ObExprResType &type,
     const ObExprResType *types,
     int64_t param_num,
-    const common::ObCollationType conn_coll_type);
-
+    common::ObExprTypeCtx &type_ctx);
+  static int aggregate_two_collation(const ObCollationLevel level1,
+                                    const ObCollationType type1,
+                                    const ObCollationLevel level2,
+                                    const ObCollationType type2,
+                                    ObCollationLevel &res_level,
+                                    ObCollationType &res_type,
+                                    uint32_t flags);
   static int aggregate_max_length_for_string_result(ObExprResType &type,
                                              const ObExprResType *types,
                                              int64_t param_num,
@@ -462,21 +568,19 @@ public:
     common::ObObjMeta &type,
     const common::ObObjMeta *types,
     int64_t param_num,
-    const common::ObCollationType conn_coll_type);
+    common::ObExprTypeCtx &type_ctx);
   static int aggregate_charsets_for_string_result_with_comparison(
     common::ObObjMeta &type,
     const ObExprResType *types,
     int64_t param_num,
-    const common::ObCollationType conn_coll_type);
+    common::ObExprTypeCtx &type_ctx);
   //skip_null for expr COALESCE
   static int aggregate_result_type_for_merge(
     ObExprResType &type,
     const ObExprResType *types,
     int64_t param_num,
-    const common::ObCollationType conn_coll_type,
     bool is_oracle_mode,
-    const common::ObLengthSemantics default_length_semantics,
-    const sql::ObSQLSessionInfo *session,
+    common::ObExprTypeCtx &type_ctx,
     bool need_merge_type = TRUE,
     bool skip_null = FALSE,
     bool is_called_in_sql = TRUE);
@@ -484,10 +588,8 @@ public:
     ObExprResType &type,
     const ObExprResType *types,
     int64_t param_num,
-    const common::ObCollationType conn_coll_type,
     bool is_oracle_mode,
-    const common::ObLengthSemantics default_length_semantics,
-    const sql::ObSQLSessionInfo *session,
+    common::ObExprTypeCtx &type_ctx,
     bool need_merge_type = TRUE,
     bool skip_null = FALSE,
     bool is_called_in_sql = TRUE);
@@ -533,7 +635,7 @@ public:
 
   static common::ObCollationType get_default_collation_type(
       common::ObObjType type,
-      const ObBasicSessionInfo &session_info
+      ObExprTypeCtx &type_ctx
       );
 
   static int is_same_kind_type_for_case(const ObExprResType &type1, const ObExprResType &type2, bool &match);
@@ -558,11 +660,16 @@ public:
       ObExprResType &type,
       const ObExprResType *types,
       int64_t param_num);
+  static int aggregate_collection_sql_type(
+      common::ObExprTypeCtx &type_ctx,
+      ObExprResType &type,
+      const ObExprResType *types,
+      int64_t param_num);
 
   int calc_cmp_type2(ObExprResType &type,
                     const ObExprResType &type1,
                     const ObExprResType &type2,
-                    const common::ObCollationType coll_type,
+                    common::ObExprTypeCtx &type_ctx,
                     const bool left_is_const = false,
                     const bool right_is_const = false) const;
 
@@ -570,7 +677,7 @@ public:
                      const ObExprResType &type1,
                      const ObExprResType &type2,
                      const ObExprResType &type3,
-                     const common::ObCollationType coll_type) const;
+                     common::ObExprTypeCtx &type_ctx) const;
   int calc_trig_function_result_type1(ObExprResType &type,
                                       ObExprResType &type1,
                                       common::ObExprTypeCtx &type_ctx) const;
@@ -582,6 +689,9 @@ public:
   virtual common::ObCastMode get_cast_mode() const;
   virtual int is_valid_for_generated_column(const ObRawExpr*expr, const common::ObIArray<ObRawExpr *> &exprs, bool &is_valid) const;
   static int check_first_param_not_time(const common::ObIArray<ObRawExpr *> &exprs, bool &not_time);
+  //Extract the info of sys vars which need to be used in resolving or excuting into local_sys_vars.
+  DECLARE_SET_LOCAL_SESSION_VARS;
+  static int add_local_var_to_expr(share::ObSysVarClassType var_type, const ObLocalSessionVar *local_session_var, const ObBasicSessionInfo *session, ObLocalSessionVar &local_vars);
 protected:
   ObExpr *get_rt_expr(const ObRawExpr &raw_expr) const;
 
@@ -598,10 +708,10 @@ protected:
                                        const ObExprResType *types,
                                        int64_t param_num);
   static common::ObObjType get_calc_cast_type(common::ObObjType param_type, common::ObObjType calc_type);
-  static common::ObObjType enumset_calc_types_[common::ObMaxTC];
 
   void disable_operand_auto_cast() { operand_auto_cast_ = false; }
 private:
+  static common::ObObjType enumset_calc_types_[2 /*use_subschema*/][common::ObMaxTC];
   /*
    * 计算框架本身提供了一个通用的数据类型转换方法，将参数转为input_types_中的类型。
    * 这可能并不是表达式期望的行为，如需要禁止此行为，需要在构造函数中显示调 disable_operand_auto_cast().
@@ -619,9 +729,6 @@ private:
   DISALLOW_COPY_AND_ASSIGN(ObExprOperator);
   // types and constants
 
-  static const uint32_t OB_COLL_DISALLOW_NONE = 1;
-  static const uint32_t OB_COLL_ALLOW_NUMERIC_CONV = 2;
-
 protected:
   static int aggregate_collations(
     common::ObObjMeta &type,
@@ -635,14 +742,14 @@ protected:
     const common::ObObjMeta *types,
     int64_t param_num,
     uint32_t flags,
-    const common::ObCollationType conn_coll_type);
+    common::ObExprTypeCtx &type_ctx);
 
   static int aggregate_charsets(
     common::ObObjMeta &type,
     const ObExprResType *types,
     int64_t param_num,
     uint32_t flags,
-    const common::ObCollationType conn_coll_type);
+    common::ObExprTypeCtx &type_ctx);
 
 
   // data members
@@ -792,7 +899,7 @@ inline int ObExprOperator::calc_result_typeN(ObExprResType &type,
   UNUSED(param_num);
   UNUSED(type_ctx);
   UNUSED(arg_arrs);
-  SQL_LOG_RET(ERROR, common::OB_NOT_IMPLEMENT, "not implement", K(type_), K(get_type_name(type_)));
+  SQL_LOG_RET(WARN, common::OB_NOT_IMPLEMENT, "not implement", K(type_), K(get_type_name(type_)));
   return common::OB_NOT_IMPLEMENT;
 }
 
@@ -927,6 +1034,11 @@ inline bool ObExprOperator::is_type_valid(const common::ObObjType &type)
 {
   common::ObObjTypeClass type_class = ob_obj_type_class(type);
   return (common::ob_is_castable_type_class(type_class) || common::ObUnknownTC == type_class);
+}
+
+inline bool ObExprOperator::is_type_valid_regexp(const common::ObObjType &type)
+{
+  return (is_type_valid(type) && type != ObRoaringBitmapType);
 }
 
 inline void ObExprOperator::calc_result_flag1(ObExprResType &type,
@@ -1129,7 +1241,7 @@ public:
                            ObExprResType *types,
                            const int64_t param_num,
                            const bool has_lower,
-                           const sql::ObSQLSessionInfo &my_session);
+                          common::ObExprTypeCtx &type_ctx);
 
   // vector comparison, e.g. (a,b,c) > (1,2,3)
   virtual int calc_result_typeN(ObExprResType &type,
@@ -1147,10 +1259,9 @@ public:
                            bool is_null_safe,
                            common::ObCmpOp cmp_op) const;
 
-  static int is_equivalent(const common::ObObjMeta &meta1,
-                           const common::ObObjMeta &meta2,
-                           const common::ObObjMeta &meta3,
-                           bool &result);
+  static int is_equal_transitive(const common::ObObjMeta &meta1,
+                                 const common::ObObjMeta &meta2,
+                                 bool &result);
   int assign(const ObExprOperator &other);
   int set_cmp_func(const common::ObObjType type1,
                    const common::ObObjType type2);
@@ -1165,7 +1276,8 @@ public:
                               const ObRawExpr &raw_expr,
                               const ObExprOperatorInputTypeArray &input_types,
                               ObExpr &rt_expr);
-   static int cg_datum_cmp_expr(const ObRawExpr &raw_expr,
+   static int cg_datum_cmp_expr(common::ObIAllocator &allocator,
+                                const ObRawExpr &raw_expr,
                                 const ObExprOperatorInputTypeArray &input_types,
                                 ObExpr &rt_expr);
 
@@ -1176,6 +1288,17 @@ public:
    // CAUTION: null safe equal row compare is not included.
    static int row_cmp(const ObExpr &expr, ObDatum &expr_datum,
                       ObExpr **l_row, ObEvalCtx &l_ctx, ObExpr **r_row, ObEvalCtx &r_ctx);
+
+   // for auto split local index query
+   static int min_max_row_eval(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &expr_datm);
+   static int min_max_row_cmp(const ObExpr &expr, ObDatum &expr_datum,
+                      ObExpr **l_row, ObEvalCtx &l_ctx, ObExpr **r_row, ObEvalCtx &r_ctx);
+   static int get_min_max_cmp_ret(const ObDatum *left, const ObDatum *right, int &cmp_ret);
+
+   template <bool IS_LEFT>
+   static int try_get_inner_row_cmp_ret(const int ret_code, int &cmp_ret);
+
+
 
   OB_INLINE static int get_comparator_operands(
                          const ObExpr &expr,
@@ -1217,6 +1340,11 @@ public:
 
   static int eval_pl_udt_compare(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &expr_datum);
 
+  // for auto split query
+  static int eval_min_max_compare(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &expr_datum);
+  static int eval_batch_min_max_compare(const ObExpr &expr, ObEvalCtx &ctx, const ObBitVector &skip, const int64_t batch_size);
+  static int eval_vector_min_max_compare(const ObExpr &expr, ObEvalCtx &ctx, const ObBitVector &skip, const EvalBound &bound);
+
   // get_const_cast_mode returns cast_mode for const/calculated params when compares with decimal type column
   // col is defined as number(10, 3)
   // 1. col >= 12.2341  <=> col >= 12.235
@@ -1229,10 +1357,10 @@ public:
   //    col < -12.2341  <=> col < -12.234
   // define 1 & 4 as up mode: val = val + 1 if val >= 0
   // define 2 & 3 as down mode: val = val - 1 if val < 0
-  static ObCastMode get_const_cast_mode(const ObExprOperatorType op_type,
+
+  static ObCastMode get_const_cast_mode(const common::ObCmpOp cmp_op,
                                         const bool right_const_param)
   {
-    ObCmpOp cmp_op = get_cmp_op(op_type);
     ObCastMode cm = CM_NONE;
     if (cmp_op >= CO_CMP) {
       // do nothing
@@ -1255,6 +1383,18 @@ public:
     }
     return cm;
   }
+  static ObCastMode get_const_cast_mode(const ObExprOperatorType op_type,
+                                        const bool right_const_param)
+  {
+    ObCmpOp cmp_op = get_cmp_op(op_type);
+    return get_const_cast_mode(cmp_op, right_const_param);
+  }
+
+  static int eval_compare_composite(CollectionPredRes &cmp_result,
+                                    const common::ObObj &obj1,
+                                    const common::ObObj &obj2,
+                                    ObExecContext &exec_ctx,
+                                    const ObCmpOp cmp_op);
 
   OB_INLINE static common::ObCmpOp get_cmp_op(const ObExprOperatorType type) {
     /*
@@ -1268,7 +1408,8 @@ public:
       case T_OP_EQ: // fall through
       case T_OP_NSEQ: // fall through
       case T_OP_SQ_EQ: // fall through
-      case T_OP_SQ_NSEQ: {
+      case T_OP_SQ_NSEQ:
+      case T_OP_IN: {
         cmp_op = common::CO_EQ;
         break;
       }
@@ -1599,6 +1740,7 @@ protected:
     return ret;
   }
 
+
   virtual int calc_result_type2(ObExprResType &type,
                                 ObExprResType &type1,
                                 ObExprResType &type2,
@@ -1801,6 +1943,11 @@ public:
                                       common::ObIAllocator *allocator);
   void calc_temporal_format_result_length(ObExprResType &type, const ObExprResType &format) const;
 protected:
+  static int extract_enum_set_collation_for_args(const ObExprResType &text,
+                                                 const ObExprResType &pattern,
+                                                 ObExprTypeCtx &type_ctx,
+                                                 ObObjMeta *real_types);
+protected:
   common::ObObjType get_result_type_mysql(int64_t char_length) const;
   static const int64_t MAX_CHAR_LENGTH_FOR_VARCAHR_RESULT = 512;
   static const int64_t MAX_CHAR_LENGTH_FOR_TEXT_RESULT = 65535;
@@ -1855,6 +2002,14 @@ public:
                                  ObDatum &res_datum);
   static int calc_result2_mysql(const ObExpr &expr, ObEvalCtx &ctx,
                                 ObDatum &res_datum);
+
+  static int calc_bitwise_result2_mysql_vector(VECTOR_EVAL_FUNC_ARG_DECL);
+  static int calc_bitwise_result2_oracle_vector(VECTOR_EVAL_FUNC_ARG_DECL);
+  DECLARE_SET_LOCAL_SESSION_VARS;
+
+private:
+  static void convert_tc_size(VecValueTypeClass vec_tc, int &len);
+
 protected:
   enum BitOperator
   {
@@ -1867,6 +2022,18 @@ protected:
     BIT_COUNT,
     BIT_MAX,
   };
+
+  static int dispatch_calc_vector(VECTOR_EVAL_FUNC_ARG_DECL, ObCastMode cast_mode);
+  template <typename RES_VEC, typename L_VEC, typename R_VEC>
+  static int inner_calc_vector(VECTOR_EVAL_FUNC_ARG_DECL, ObCastMode cast_mode);
+
+  // 从datum中获取int64/uint64, 针对number需要有round/trunc操作，针对int tc会直接获取
+  // int值
+  typedef int (*GetIntFunc)(const ObDatumMeta &, const common::ObDatum &, bool, int64_t &,
+                            common::ObCastMode &);
+  typedef int (*GetUIntFunc)(const ObDatumMeta &, const common::ObDatum &, bool, uint64_t &,
+                             common::ObCastMode &);
+
   int calc_(common::ObObj &res,
             const common::ObObj &obj1,
             const common::ObObj &obj2,
@@ -1885,12 +2052,7 @@ protected:
                             ObExpr &rt_expr, const BitOperator op);
   // 根据参数类型，从4个get_int/get_uint方法中选择合适的get_int64/get_uint64方法
   static int choose_get_int_func(const ObDatumMeta datum_meta, void *&out_func);
-  // 从datum中获取int64/uint64, 针对number需要有round/trunc操作，针对int tc会直接获取
-  // int值
-  typedef int (*GetIntFunc)(const ObDatumMeta &, const common::ObDatum &, bool,
-                            int64_t&, common::ObCastMode&);
-  typedef int (*GetUIntFunc)(const ObDatumMeta &, const common::ObDatum &, bool,
-                             uint64_t&, common::ObCastMode&);
+
   static int get_int64_from_int_tc(
       const ObDatumMeta &datum_meta, const common::ObDatum &datum, bool is_round,
       int64_t &out, const common::ObCastMode &cast_mode);
@@ -1959,8 +2121,7 @@ protected:
   int calc_result_meta_for_comparison(ObExprResType &type,
                                       ObExprResType *types,
                                       int64_t param_num,
-                                      const common::ObCollationType coll_type,
-                                      const common::ObLengthSemantics default_length_semantics,
+                                      common::ObExprTypeCtx &type_ctx,
                                       const bool enable_decimal_int) const;
 
 protected:
@@ -2115,10 +2276,14 @@ public:
   static int init();
   static int calc_hash(const char *p, int64_t len, uint64_t &hash);
   static int trunc_new_obtime(common::ObTime &ob_time,
-                              const common::ObString &fmt);
+                              const common::ObString &fmt,
+                              bool is_mysql_compat_dates);
   static int round_new_obtime(common::ObTime &ob_time,
                               const common::ObString &fmt);
   static int trunc_new_obtime_by_fmt_id(common::ObTime &ob_time,
+                                        int64_t fmt_id,
+                                        bool is_mysql_compat_dates);
+  static int trunc_obtime_by_fmt_id_for_mdatetime(ObTime &ob_time,
                                         int64_t fmt_id);
   static int round_new_obtime_by_fmt_id(common::ObTime &ob_time,
                                         int64_t fmt_id);
@@ -2301,5 +2466,19 @@ private:
 
 #define GET_EXEC_ALLOCATOR(expr_ctx) \
         ((nullptr == expr_ctx.exec_ctx_) ? nullptr : &(expr_ctx.exec_ctx_->get_allocator())); \
+
+#define SET_LOCAL_SYSVAR_CAPACITY(sz) \
+if (OB_SUCC(ret)) { \
+  if (OB_FAIL(local_vars.set_local_var_capacity(sz))) { \
+    LOG_WARN("reserve failed", K(ret)); \
+  } \
+}
+
+#define EXPR_ADD_LOCAL_SYSVAR(var_type) \
+if (OB_SUCC(ret)) { \
+  if (OB_FAIL(add_local_var_to_expr(var_type, local_session_vars, session, local_vars))) { \
+    LOG_WARN("fail to add local sys var", K(ret), K(var_type)); \
+  } \
+}
 
 #endif //OCEANBASE_SQL_OB_EXPR_OPERATOR_H_

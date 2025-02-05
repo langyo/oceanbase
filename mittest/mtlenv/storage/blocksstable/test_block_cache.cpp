@@ -10,13 +10,11 @@
  * See the Mulan PubL v2 for more details.
  */
 
-#include <gtest/gtest.h>
 #define private public
 #define protected public
 
-#include "storage/blocksstable/ob_micro_block_cache.h"
+#include "src/share/io/ob_io_manager.h"
 #include "ob_index_block_data_prepare.h"
-#include "storage/blocksstable/ob_shared_macro_block_manager.h"
 
 namespace oceanbase
 {
@@ -84,11 +82,12 @@ void TestObMicroBlockCache::TearDown()
 TEST_F(TestObMicroBlockCache, test_block_cache)
 {
   // cache key basic func
-  ObMicroBlockCacheKey key;
   MacroBlockId block_a(0, 2, 0);
-  ObMicroBlockCacheKey a(1, block_a, 0, 10);
+  ObMicroBlockCacheKey a;
+  a.set(1, block_a, 0, 10);
   MacroBlockId block_b(0, 3, 0);
-  ObMicroBlockCacheKey b(2, block_b, 0, 10);
+  ObMicroBlockCacheKey b;
+  b.set(2, block_b, 0, 10);
   ObMicroBlockCacheKey c(a);
   ASSERT_EQ(a, c);
   ASSERT_FALSE(a == b);
@@ -107,20 +106,16 @@ TEST_F(TestObMicroBlockCache, test_block_cache)
   // prefetch and get
   ObMicroBlockBufferHandle idx_buf_handle;
   ObMicroBlockBufferHandle data_buf_handle;
-  ObMacroBlockHandle idx_io_handle;
-  ObMacroBlockHandle data_io_handle;
-  ObMacroBlockHandle multi_io_handle;
+  ObStorageObjectHandle idx_io_handle;
+  ObStorageObjectHandle data_io_handle;
+  ObStorageObjectHandle multi_io_handle;
 
   ObIndexBlockRowScanner idx_row_scanner;
   ObMicroBlockData root_block;
   ObMicroIndexInfo micro_idx_info;
-  ObArray<int32_t> agg_projector;
-  ObArray<ObColumnSchemaV2> agg_column_schema;
   ObArray<ObMicroIndexInfo> micro_idx_infos;
   sstable_.get_index_tree_root(root_block);
   ASSERT_EQ(OB_SUCCESS, idx_row_scanner.init(
-      agg_projector,
-      agg_column_schema,
       tablet_handle_.get_obj()->get_rowkey_read_info().get_datum_utils(),
       allocator_,
       context_.query_flag_,
@@ -146,11 +141,9 @@ TEST_F(TestObMicroBlockCache, test_block_cache)
       idx_io_handle,
       &allocator_));
   ASSERT_EQ(OB_SUCCESS, idx_io_handle.wait());
+  ObMicroBlockCacheKey key1(MTL_ID(), micro_idx_info);
   ASSERT_EQ(OB_SUCCESS, index_block_cache_->get_cache_block(
-      MTL_ID(),
-      micro_idx_info.get_macro_id(),
-      micro_idx_info.get_block_offset(),
-      micro_idx_info.get_block_size(),
+      key1,
       idx_buf_handle));
   ObMicroBlockData idx_prefetch_data =
       reinterpret_cast<const ObMicroBlockCacheValue*>(idx_io_handle.get_buffer())->get_block_data();
@@ -191,11 +184,9 @@ TEST_F(TestObMicroBlockCache, test_block_cache)
       data_io_handle,
       &allocator_));
   ASSERT_EQ(OB_SUCCESS, data_io_handle.wait());
+  ObMicroBlockCacheKey key2(tenant_id_, data_idx_info);
   ASSERT_EQ(OB_SUCCESS, data_block_cache_->get_cache_block(
-      MTL_ID(),
-      data_idx_info.get_macro_id(),
-      data_idx_info.get_block_offset(),
-      data_idx_info.get_block_size(),
+      key2,
       data_buf_handle));
   ASSERT_TRUE(data_io_handle.is_valid());
   ASSERT_TRUE(data_buf_handle.is_valid());
@@ -212,30 +203,30 @@ TEST_F(TestObMicroBlockCache, test_block_cache)
 
 
   // multi block io
-  ObMultiBlockIOParam multi_io_param;
-  multi_io_param.micro_index_infos_ = &micro_idx_infos;
-  multi_io_param.start_index_ = 0;
-  multi_io_param.block_count_ = micro_idx_infos.count();
-  ASSERT_EQ(OB_SUCCESS, data_block_cache_->prefetch(
-      MTL_ID(),
-      data_idx_info.get_macro_id(),
-      multi_io_param,
-      context_.query_flag_.is_use_block_cache(),
-      multi_io_handle));
-  ASSERT_EQ(OB_SUCCESS, multi_io_handle.wait());
-  const ObMultiBlockIOResult *io_result
-      = reinterpret_cast<const ObMultiBlockIOResult *>(multi_io_handle.get_buffer());
-  ASSERT_NE(nullptr, io_result);
+  // ObMultiBlockIOParam multi_io_param;
+  // multi_io_param.micro_index_infos_ = &micro_idx_infos;
+  // multi_io_param.start_index_ = 0;
+  // multi_io_param.block_count_ = micro_idx_infos.count();
+  // ASSERT_EQ(OB_SUCCESS, data_block_cache_->prefetch(
+  //     MTL_ID(),
+  //     data_idx_info.get_macro_id(),
+  //     multi_io_param,
+  //     context_.query_flag_.is_use_block_cache(),
+  //     multi_io_handle));
+  // ASSERT_EQ(OB_SUCCESS, multi_io_handle.wait());
+  // const ObMultiBlockIOResult *io_result
+  //     = reinterpret_cast<const ObMultiBlockIOResult *>(multi_io_handle.get_buffer());
+  // ASSERT_NE(nullptr, io_result);
 
-  int64_t idx = 0;
-  ObMicroBlockData data_block_data;
-  while (idx != micro_idx_infos.count()) {
-    ASSERT_EQ(OB_SUCCESS, io_result->get_block_data(idx, data_block_data));
-    ASSERT_TRUE(data_block_data.is_valid());
-    ASSERT_EQ(ObMicroBlockData::DATA_BLOCK, data_block_data.type_);
-    ASSERT_EQ(data_block_data.get_micro_header()->row_count_, micro_idx_infos[idx].get_row_count());
-    ++idx;
-  }
+  // int64_t idx = 0;
+  // ObMicroBlockData data_block_data;
+  // while (idx != micro_idx_infos.count()) {
+  //   ASSERT_EQ(OB_SUCCESS, io_result->get_block_data(idx, data_block_data));
+  //   ASSERT_TRUE(data_block_data.is_valid());
+  //   ASSERT_EQ(ObMicroBlockData::DATA_BLOCK, data_block_data.type_);
+  //   ASSERT_EQ(data_block_data.get_micro_header()->row_count_, micro_idx_infos[idx].get_row_count());
+  //   ++idx;
+  // }
 
 
   // load data cache block
@@ -250,6 +241,8 @@ TEST_F(TestObMicroBlockCache, test_block_cache)
   ASSERT_EQ(OB_SUCCESS, data_block_cache_->load_block(
       micro_block_id,
       micro_des_meta,
+      data_idx_info.get_logic_micro_id(),
+      data_idx_info.get_data_checksum(),
       &macro_reader,
       loaded_micro_data,
       &allocator_));
@@ -274,6 +267,8 @@ TEST_F(TestObMicroBlockCache, test_block_cache)
   ASSERT_EQ(OB_SUCCESS, index_block_cache_->load_block(
       micro_block_id,
       micro_des_meta,
+      data_idx_info.get_logic_micro_id(),
+      data_idx_info.get_data_checksum(),
       nullptr,
       loaded_index_data,
       &allocator_));

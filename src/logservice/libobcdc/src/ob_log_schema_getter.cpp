@@ -16,13 +16,9 @@
 
 #include "ob_log_schema_getter.h"
 
-#include "lib/mysqlclient/ob_mysql_server_provider.h"     // ObMySQLServerProvider
-#include "share/config/ob_common_config.h"                // ObCommonConfig
-#include "share/ob_get_compat_mode.h"                     // ObCompatModeGetter
 #include "share/inner_table/ob_inner_table_schema.h"      // OB_CORE_SCHEMA_VERSION
 
 #include "ob_log_utils.h"                                 // is_mysql_client_errno
-#include "ob_log_common.h"                                // GET_SCHEMA_TIMEOUT_ON_START_UP
 #include "ob_log_config.h"                                // TCONF
 
 // NOTICE: retry will exist if func return error code OB_TENANT_HAS_BEEN_DROPPED
@@ -454,7 +450,6 @@ int ObLogSchemaGetter::init(common::ObMySQLProxy &mysql_proxy,
     // refresh Schema
     ObSchemaService::g_ignore_column_retrieve_error_ = true;
     ObSchemaService::g_liboblog_mode_ = true;
-    ObMultiVersionSchemaService::g_skip_resolve_materialized_view_definition_ = true;
     const uint64_t tenant_id = OB_INVALID_TENANT_ID; // to refresh schema of all tenants
     const int64_t timeout = GET_SCHEMA_TIMEOUT_ON_START_UP;
     bool is_init_succ = false;
@@ -745,7 +740,9 @@ int ObLogSchemaGetter::get_schema_guard_and_simple_table_schema_(
 // @retval OB_TENANT_HAS_BEEN_DROPPED   Tenant has been dropped
 // @retval OB_TIMEOUT                   Timeout
 // @retval Other error codes            Fail
-int ObLogSchemaGetter::refresh_to_expected_version_(const uint64_t tenant_id,
+int ObLogSchemaGetter::refresh_to_expected_version_(
+    const uint64_t tenant_id,
+    const bool specify_version_mode,
     const int64_t expected_version,
     const int64_t timeout,
     int64_t &latest_version)
@@ -770,23 +767,26 @@ int ObLogSchemaGetter::refresh_to_expected_version_(const uint64_t tenant_id,
     }
   }
 
-  if (OB_FAIL(ret)) {
-    // fail
-  } else if (OB_INVALID_VERSION == latest_version || latest_version < expected_version) {
+  if (OB_SUCC(ret)) {
     // If the tenant version is invalid, or if the desired schema version is not reached, then a refresh of the schema is requested
-    LOG_INFO("begin refresh schema to expected version", K(tenant_id), K(expected_version),
-        K(latest_version));
+    LOG_TRACE("[SCHEMA_GETTER] begin refresh schema to expected version", K(tenant_id), K(expected_version), K(latest_version));
+    bool need_refresh_schema = (OB_INVALID_VERSION == latest_version || latest_version < expected_version);
+    const static int64_t retry_print_interval = 10 * _SEC_;
 
-    RETRY_ON_FAIL_WITH_TENANT_ID(tenant_id, timeout, schema_service_, auto_switch_mode_and_refresh_schema, tenant_id,
-        expected_version);
+    while (need_refresh_schema) {
+      if (TC_REACH_TIME_INTERVAL(retry_print_interval)) {
+        LOG_INFO("[SCHEMA_GETTER] waiting for schema guard to be refreshed", K(tenant_id), K(expected_version), K(specify_version_mode),
+            K(latest_version), "delta", latest_version - expected_version);
+      }
 
-    if (OB_SUCC(ret)) {
+      RETRY_ON_FAIL_WITH_TENANT_ID(tenant_id, timeout, schema_service_, auto_switch_mode_and_refresh_schema, tenant_id, expected_version);
       // Get the latest schema version again
       RETRY_ON_FAIL_WITH_TENANT_ID(tenant_id, timeout, schema_service_, get_tenant_refreshed_schema_version, tenant_id, latest_version);
-    }
 
+      need_refresh_schema = (OB_SUCCESS == ret) && ((OB_INVALID_VERSION == latest_version) || (specify_version_mode && latest_version < expected_version));
+    }
     int64_t cost_time = get_timestamp() - start_time;
-    LOG_INFO("refresh schema to expected version", KR(ret), K(tenant_id),
+    LOG_TRACE("[SCHEMA_GETTER] refresh schema to expected version", KR(ret), K(tenant_id),
         K(latest_version), K(expected_version), "delta", latest_version - expected_version,
         "latest_version", TS_TO_STR(latest_version),
         "cost_time", TVAL_TO_STR(cost_time));
@@ -820,7 +820,7 @@ int ObLogSchemaGetter::get_schema_guard_(const uint64_t tenant_id,
   refreshed_version = OB_INVALID_VERSION;
 
   // First refresh the schema to ensure it is greater than or equal to expected_version
-  if (OB_FAIL(refresh_to_expected_version_(tenant_id, expected_version, timeout, refreshed_version))) {
+  if (OB_FAIL(refresh_to_expected_version_(tenant_id, specify_version_mode, expected_version, timeout, refreshed_version))) {
     if (OB_TENANT_HAS_BEEN_DROPPED != ret && OB_TIMEOUT != ret) {
       LOG_ERROR("refresh_to_expected_version_ fail", KR(ret), K(tenant_id), K(expected_version));
     }
@@ -925,6 +925,40 @@ int ObLogSchemaGetter::get_tenant_refreshed_schema_version(const uint64_t tenant
     ret = OB_TENANT_HAS_BEEN_DROPPED;
   } else {
     version = refreshed_version;
+  }
+
+  return ret;
+}
+
+int ObLogSchemaGetter::check_if_tenant_is_dropping_or_dropped(
+    const uint64_t tenant_id,
+    bool &is_tenant_dropping_or_dropped,
+    TenantSchemaInfo &tenant_schema_info)
+{
+  int ret = OB_SUCCESS;
+  ObSchemaGetterGuard guard;
+  is_tenant_dropping_or_dropped = false;
+  const ObTenantSchema *tenant_schema = nullptr;
+
+  if (OB_FAIL(schema_service_.get_tenant_schema_guard(OB_SYS_TENANT_ID, guard))) {
+    LOG_WARN("fail to get schema guard", KR(ret), K(tenant_id));
+  } else if (OB_FAIL(guard.get_tenant_info(tenant_id, tenant_schema))) {
+    LOG_WARN("get tenant info failed", KR(ret), K(tenant_id));
+  } else if (OB_ISNULL(tenant_schema)) {
+    // Double check the tenant status to avoid any potential problems in the schema module.
+    if (OB_FAIL(guard.check_if_tenant_has_been_dropped(tenant_id, is_tenant_dropping_or_dropped))) {
+      LOG_WARN("fail to check if tenant has been dropped", KR(ret), K(tenant_id));
+    } else {
+      LOG_INFO("tenant info is nullptr, check the tenant status",
+          K(tenant_id), K(is_tenant_dropping_or_dropped));
+    }
+  } else {
+    is_tenant_dropping_or_dropped = tenant_schema->is_dropping();
+    tenant_schema_info.reset(
+        tenant_id,
+        tenant_schema->get_schema_version(),
+        tenant_schema->get_tenant_name(),
+        tenant_schema->is_restore());
   }
 
   return ret;

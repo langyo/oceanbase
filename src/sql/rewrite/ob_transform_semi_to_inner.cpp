@@ -13,11 +13,10 @@
 #define USING_LOG_PREFIX SQL_REWRITE
 #include "sql/rewrite/ob_transform_semi_to_inner.h"
 #include "sql/rewrite/ob_transform_utils.h"
-#include "sql/optimizer/ob_optimizer_util.h"
 #include "sql/optimizer/ob_log_table_scan.h"
 #include "sql/optimizer/ob_log_join.h"
 #include "sql/optimizer/ob_log_function_table.h"
-#include "common/ob_smart_call.h"
+#include "sql/optimizer/ob_log_values_table_access.h"
 using namespace oceanbase::sql;
 using namespace oceanbase::common;
 
@@ -97,10 +96,10 @@ int ObTransformSemiToInner::transform_one_stmt(
                                           false,
                                           accepted, &ctx))) {
         LOG_WARN("failed to accept transform", K(ret));
+      } else if (OB_FAIL(try_trans_helper.finish(accepted, stmt->get_query_ctx(), ctx_))) {
+        LOG_WARN("failed to finish try trans helper", K(ret));
       } else if (!accepted) {
-        if (OB_FAIL(try_trans_helper.recover(stmt->get_query_ctx()))) {
-          LOG_WARN("failed to recover params", K(ret));
-        } else if (OB_FAIL(add_ignore_semi_info(semi_info->semi_id_))) {
+        if (OB_FAIL(add_ignore_semi_info(semi_info->semi_id_))) {
           LOG_WARN("failed to add ignore semi info", K(ret));
         } else {
           LOG_TRACE("semi join can not transform to inner join due to cost", K(*semi_info));
@@ -260,11 +259,16 @@ int ObTransformSemiToInner::gather_params_by_rewrite_form(ObDMLStmt* trans_stmt,
       LOG_WARN("failed to get param expr related to right table", K(ret));
     }
   } else if (trans_param.use_inner_gby()) {
-    ObSEArray<ObSEArray<ObRawExpr*, 4>, 4> column_groups;
+    ObSEArray<ObRawExpr*, 4> column_groups;
+    ObSqlBitSet<> empty_ignore_tables;
+    StmtUniqueKeyProvider unique_key_provider;
     if (OB_FAIL(ret)) {
       // do nothing
-    } else if (OB_FAIL(collect_unique_property_of_from_items(ctx_, trans_stmt, column_groups))) {
-      LOG_WARN("failed to find a unique column group on left tables", K(ret));
+    } else if (OB_FAIL(unique_key_provider.generate_unique_key(ctx_,
+                                                               trans_stmt,
+                                                               empty_ignore_tables,
+                                                               column_groups))) {
+      LOG_WARN("failed to generate unique column group for from items", K(ret));
     } else if (OB_FAIL(trans_param.unique_column_groups_.assign(column_groups))) {
       LOG_WARN("failed to assign column group", K(ret));
     }
@@ -294,11 +298,6 @@ int ObTransformSemiToInner::do_transform_by_rewrite_form(ObDMLStmt* stmt,
                              trans_param))) {
       LOG_WARN("failed to do transform (INNER)", K(ret));
       // Just in case different parameters hit same plan, we need add const param constraint
-    } else if (!trans_param.need_add_limit_constraint_) {
-      // do nothing
-    } else if (OB_FAIL(ObTransformUtils::add_const_param_constraints(
-                         stmt->get_limit_expr(), ctx_))) {
-      LOG_WARN("failed to add const param constriants", K(ret));
     }
   } else if (trans_param.use_aggr_inner()) {
     if (OB_FAIL(do_transform_with_aggr(*stmt, semi_info, ctx, trans_param))) {
@@ -327,39 +326,20 @@ int ObTransformSemiToInner::do_transform_by_rewrite_form(ObDMLStmt* stmt,
         TableItem *right_table = view_stmt->get_table_item_by_id(semi_info->right_table_id_);
         ObSelectStmt* right_stmt = NULL;
         if (OB_ISNULL(right_table)) {
+          ret = OB_ERR_UNEXPECTED;
           LOG_WARN("unexpected null", K(ret));
+        } else if (OB_FAIL(push_right_table_ids(right_table, ctx.view_table_id_))) {
+          LOG_WARN("fail to push back view table id", K(ret));
         } else if (right_table->is_generated_table()) {
-          if (OB_ISNULL(right_stmt = right_table->ref_query_)) {
-            ret = OB_ERR_UNEXPECTED;
-            LOG_WARN("unexpected null", K(ret));
-          } else if (OB_FAIL(ctx.view_table_id_.push_back(semi_info->right_table_id_))) {
-            LOG_WARN("fail to push back view table id", K(ret));
-          } else {
-            for (int64_t i = 0; OB_SUCC(ret) && i < right_stmt->get_table_items().count(); ++i) {
-              TableItem *inner_right_table = right_stmt->get_table_item(i);
-              if (OB_ISNULL(inner_right_table)) {
-                ret = OB_ERR_UNEXPECTED;
-                LOG_WARN("unexpect null table item", K(ret));
-              } else if (OB_FAIL(ctx.view_table_id_.push_back(inner_right_table->table_id_))) {
-                LOG_WARN("fail to push back view table id", K(ret));
-              }
-            }
-          }
-          if (OB_FAIL(ret)){
-          } else if (OB_FAIL(find_basic_table(right_table->ref_query_, ctx.table_id_))) {
+          if (OB_FAIL(find_basic_table(right_table->ref_query_, ctx.table_id_))) {
             LOG_WARN("failed to find basic table", K(ret));
           }
-        } else if (OB_FAIL(ctx.view_table_id_.push_back(semi_info->right_table_id_))) {
-          LOG_WARN("fail to push back view table id", K(ret));
         } else {
           ctx.table_id_ = semi_info->right_table_id_;
         }
         for (int64_t i = 0; OB_SUCC(ret) && i < trans_param.unique_column_groups_.count(); i++) {
-          ObIArray<ObRawExpr*> &unique_column_group = trans_param.unique_column_groups_.at(i);
-          for (int64_t j = 0; OB_SUCC(ret) && j < unique_column_group.count(); ++j) {
-            if (OB_FAIL(view_stmt->add_group_expr(unique_column_group.at(j)))) {
-              LOG_WARN("failed to add group by expr", K(ret));
-            }
+          if (OB_FAIL(view_stmt->add_group_expr(trans_param.unique_column_groups_.at(i)))) {
+            LOG_WARN("failed to add group by expr", K(ret));
           }
         }
       }
@@ -511,7 +491,6 @@ int ObTransformSemiToInner::check_basic_validity(ObDMLStmt *root_stmt,
   bool is_all_left_filter = false;
   bool is_one_row = false;
   bool is_non_sens_dup_vals = false;
-  bool is_multi_join_cond = false;
   TableItem *right_table = NULL;
   bool can_add_deduplication = false;
   ObIArray<uint64_t> & left_table_ids = semi_info.left_table_ids_;
@@ -520,17 +499,15 @@ int ObTransformSemiToInner::check_basic_validity(ObDMLStmt *root_stmt,
   ObSEArray<ObRawExpr*, 4> right_exprs;
   is_valid = false;
   need_check_cost = false;
-  bool need_add_limit_constraint = false;
   bool condition_match_index = ctx.hint_force_;
   int64_t cmp_join_conds_count = 0;
   int64_t invalid_conds_count = 0;
   int64_t other_conds_count = 0;
 
-  if (OB_ISNULL(root_stmt)) {
+  if (OB_ISNULL(root_stmt) || OB_ISNULL(ctx_)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("unexpected null", K(ret), K(root_stmt));
   }
-
   for (int64_t i = 0; OB_SUCC(ret) && i < left_table_ids.count(); i++) {
     TableItem* temp_table = NULL;
     if (OB_ISNULL(temp_table = stmt.get_table_item_by_id(left_table_ids.at(i)))) {
@@ -551,61 +528,72 @@ int ObTransformSemiToInner::check_basic_validity(ObDMLStmt *root_stmt,
                                                left_exprs,
                                                right_exprs,
                                                is_all_left_filter,
-                                               is_multi_join_cond,
+                                               ctx.is_multi_join_cond_,
                                                cmp_join_conds_count,
                                                invalid_conds_count,
                                                other_conds_count))) {
     LOG_WARN("failed to check semi join condition", K(ret));
-  } else if (OB_FAIL(check_right_table_output_one_row(*right_table, is_one_row))) {
-    LOG_WARN("failed to check right tables output one row", K(ret));
-  } else if (is_one_row) {
-    is_valid = true;
-    trans_param.set_transform_flag(TO_INNER);
-    OPT_TRACE("semi join right table output most one row, no need distinct");
-  } else if (OB_FAIL(ObTransformUtils::check_stmt_is_non_sens_dul_vals(ctx_, root_stmt, &stmt,
-                                                                  is_non_sens_dup_vals,
-                                                                  need_add_limit_constraint))) {
-    LOG_WARN("failed to check stmt is non sens dul vals", K(ret));
-  } else if (is_non_sens_dup_vals) {
-    is_valid = true;
-    trans_param.set_transform_flag(TO_INNER);
-    trans_param.need_add_limit_constraint_ = need_add_limit_constraint;
-    OPT_TRACE("stmt isn't sensitive to result of subquery has duplicated values");
-    LOG_TRACE("stmt isn't sensitive to result of subquery has duplicated values");
   } else if (OB_FAIL(check_right_exprs_unique(stmt, right_table, right_exprs, is_unique))) {
     LOG_WARN("failed to check exprs unique on table items", K(ret));
   } else if (is_unique) {
     is_valid = true;
     trans_param.set_transform_flag(TO_INNER);
-    LOG_TRACE("semi right table output is unique");
+    trans_param.need_add_distinct_ = false;
+    need_check_cost = false;
     OPT_TRACE("semi right table output is unique");
-  }  else if (is_all_left_filter && (NULL == right_table->ref_query_ ||
+    LOG_TRACE("semi right table output is unique");
+  } else if (OB_FAIL(check_right_table_output_one_row(*right_table, is_one_row))) {
+    LOG_WARN("failed to check right tables output one row", K(ret));
+  } else if (is_one_row) {
+    // constraint has already added in check_right_table_output_one_row()
+    is_valid = true;
+    trans_param.set_transform_flag(TO_INNER);
+    trans_param.need_add_distinct_ = false;
+    need_check_cost = false;
+    OPT_TRACE("semi join right table output most one row, no need distinct");
+    LOG_TRACE("semi join right table output most one row, no need distinct");
+  } else if (is_all_left_filter && (NULL == right_table->ref_query_ ||
                                     NULL == right_table->ref_query_->get_limit_percent_expr())) {
     is_valid = true;
-    trans_param.right_table_need_add_limit_ = true;
     trans_param.set_transform_flag(TO_INNER);
+    trans_param.need_add_distinct_ = false;
+    trans_param.right_table_need_add_limit_ = true;
+    need_check_cost = false;
     OPT_TRACE("semi conditions are all left filters, will not add distinct, will add limit 1");
+    LOG_TRACE("semi conditions are all left filters, will not add distinct, will add limit 1");
+  } else if (OB_FAIL(stmt.check_from_dup_insensitive(is_non_sens_dup_vals))) {
+    LOG_WARN("failed to check from scope duplicate insensitive", K(ret));
+  } else if (is_non_sens_dup_vals) {
+    if (OB_FAIL(non_sens_dul_vals_need_check_cost(stmt, semi_info, need_check_cost))) {
+      LOG_WARN("failed to check need check cost ", K(ret));
+    } else {
+      is_valid = true;
+      trans_param.set_transform_flag(TO_INNER);
+      trans_param.need_add_distinct_ = false;
+      ctx.is_non_sens_dul_vals_ = true;
+      OPT_TRACE("stmt is insensitive to result of subquery has duplicated values");
+      LOG_TRACE("stmt is insensitive to result of subquery has duplicated values");
+    }
   } else if (invalid_conds_count > 0) {
     // do nothing
   } else if (cmp_join_conds_count < 2 && OB_FAIL(check_can_add_deduplication(left_exprs, right_exprs, can_add_deduplication))) {
     LOG_WARN("failed to check can add deduplication on right", K(ret));
-  } else if (!is_multi_join_cond && !ctx.hint_force_ &&
+  } else if (!ctx.is_multi_join_cond_ && !ctx.hint_force_ &&
              OB_FAIL(check_join_condition_match_index(root_stmt,
                                                       stmt,
                                                       semi_info,
                                                       semi_info.semi_conditions_,
                                                       condition_match_index))) {
     LOG_WARN("failed to check join condition match index", K(ret));
-  } else if (!is_multi_join_cond && !condition_match_index) {
+  } else if (!ctx.is_multi_join_cond_ && !condition_match_index) {
     // do nothing
     OPT_TRACE("semi condition not match index and is not multi join , will not transform");
   } else if (cmp_join_conds_count == 0 && other_conds_count == 0 && can_add_deduplication) {
     // TO_INNER (distinct) : for cases when only standard equal join condition(s) exist
+    is_valid = true;
     trans_param.set_transform_flag(TO_INNER);
     trans_param.need_add_distinct_ = true;
-    ctx.is_multi_join_cond_ = is_multi_join_cond;
     need_check_cost = true;
-    is_valid = true;
     // when right table is from "dual", ban cost checking for adding distinct
     bool query_from_dual = false;
     ObSelectStmt *right_table_ref_query = NULL;
@@ -621,9 +609,9 @@ int ObTransformSemiToInner::check_basic_validity(ObDMLStmt *root_stmt,
     is_valid = true;
     trans_param.set_transform_flag(TO_AGGR_INNER);
     trans_param.need_add_gby_ = (left_exprs.count() != 0);
-    ctx.is_multi_join_cond_ = is_multi_join_cond;
     need_check_cost = true;
-  } else {
+  } else if (!stmt.has_for_update()) {
+    // If there is FOR UPDATE, can not use TO_INNER_GBY
     // TO_INNER_GBY : for following cases:
     // 1. there are more than one compare-join-conditions
     // 2. non-standard correlated condition(s) exist
@@ -631,21 +619,50 @@ int ObTransformSemiToInner::check_basic_validity(ObDMLStmt *root_stmt,
     bool can_find_unique_column_group = false;
     bool is_spj_stmt = (stmt.is_select_stmt() && static_cast<ObSelectStmt*>(&stmt)->is_spj());
     bool can_add_spj_view = !(stmt.is_set_stmt() || stmt.is_hierarchical_query() || !stmt.is_sel_del_upd());
-    if (OB_FAIL(check_from_item_unique_property(ctx_,
-                                                &stmt,
-                                                can_find_unique_column_group))) {
-      LOG_WARN("failed to find column group with 'unique' property for left tables", K(ret));
+    if (OB_FAIL(StmtUniqueKeyProvider::check_can_set_stmt_unique(&stmt, can_find_unique_column_group))) {
+      LOG_WARN("failed to find column group with 'unique' property for from tables", K(ret));
     } else if (!can_find_unique_column_group) {
       // do nothing
     } else if (!is_spj_stmt && !can_add_spj_view) {
       // do nothing
     } else {
       is_valid = true;
-      trans_param.need_spj_view_ = !is_spj_stmt;
       trans_param.set_transform_flag(TO_INNER_GBY);
+      trans_param.need_spj_view_ = !is_spj_stmt;
       need_check_cost = true;
-      ctx.is_multi_join_cond_ = is_multi_join_cond;
     }
+  }
+  if (OB_SUCC(ret) && is_valid && need_check_cost && ctx_->in_accept_transform_) {
+    is_valid = false;
+  }
+  return ret;
+}
+
+int ObTransformSemiToInner::non_sens_dul_vals_need_check_cost(ObDMLStmt &stmt,
+                                                              SemiInfo &semi_info,
+                                                              bool &need_check_cost) {
+  int ret = OB_SUCCESS;
+  double expansion_rate_threshold = 2;
+  double expansion_rate = -1;
+  need_check_cost = true;
+  const TableItem *right_table;
+  ObSEArray<uint64_t, 4> column_ids;
+  ObSEArray<uint64_t, 4> column_ids_no_dup;
+  if (OB_ISNULL(right_table = stmt.get_table_item_by_id(semi_info.right_table_id_))) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("semi right table is null", K(ret), K(right_table));
+  } else if (!right_table->is_basic_table()) {
+    need_check_cost = true;
+  } else if (OB_FAIL(ObOptimizerUtil::extract_column_ids(semi_info.semi_conditions_, right_table->table_id_, column_ids))) {
+    LOG_WARN("failed to extract column ids", K(ret), K(semi_info));
+  } else if (OB_FAIL(append_array_no_dup(column_ids_no_dup, column_ids))) {
+    LOG_WARN("failed to append array", K(ret));
+  } else if (OB_FAIL(ObTransformUtils::calc_column_repeat_rate(ctx_, right_table, column_ids_no_dup, expansion_rate))){
+    LOG_WARN("failed to calcuate column repeat rate", K(ret));
+  } else if (expansion_rate < 1) {
+    need_check_cost = true;
+  } else {
+    need_check_cost = expansion_rate <= expansion_rate_threshold;
   }
   return ret;
 }
@@ -674,6 +691,7 @@ int ObTransformSemiToInner::check_query_from_dual(ObSelectStmt *stmt, bool& quer
         // stmt referenced in temp table need to be checked
         ObSelectStmt *temp_stmt = NULL;
         if (OB_ISNULL(temp_stmt = table_item->ref_query_)) {
+          ret = OB_ERR_UNEXPECTED;
           LOG_WARN("unexpected null", K(ret), K(temp_stmt));
         } else if (temp_stmt->has_recursive_cte()) {
           temp_flag = false;
@@ -691,87 +709,6 @@ int ObTransformSemiToInner::check_query_from_dual(ObSelectStmt *stmt, bool& quer
       }
     }
     query_from_dual = temp_flag;
-  }
-  return ret;
-}
-
-
-/**
- * @brief collect_unique_property_of_from_items
- * try to construct a unique column group based on unique column of each from item
- */
-int ObTransformSemiToInner::collect_unique_property_of_from_items(ObTransformerCtx* ctx,
-                                                                   ObDMLStmt* stmt,
-                                                                   ObIArray<ObSEArray<ObRawExpr*, 4>>& unique_column_group)
-{
-  int ret = OB_SUCCESS;
-  if (OB_ISNULL(ctx) || OB_ISNULL(stmt)) {
-    ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("unexpect null", K(ret), K(ctx), K(stmt));
-  } else {
-    for (int64_t i = 0; OB_SUCC(ret) && i < stmt->get_from_item_size(); i++) {
-      TableItem* table = stmt->get_table_item(stmt->get_from_item(i));
-      ObSEArray<ObRawExpr*, 4> pkeys;
-      if (OB_ISNULL(table)) {
-        ret = OB_ERR_UNEXPECTED;
-        LOG_WARN("unexpect null table", K(ret), K(table));
-      } else if (OB_FAIL(ObTransformUtils::generate_unique_key(ctx, stmt, table, pkeys))) {
-        LOG_WARN("failed to generate unique key", K(ret));
-      } else if (pkeys.empty()) {
-        ret = OB_ERR_UNEXPECTED;
-        LOG_WARN("left table should have unique key", K(ret));
-      } else if (OB_FAIL(unique_column_group.push_back(pkeys))) {
-        LOG_WARN("failed to push back element", K(ret));
-      }
-    }
-  }
-  return ret;
-}
-
-/**
- * @brief check_from_item_unique_property
- * check if each left table has unique key
- */
-int ObTransformSemiToInner::check_from_item_unique_property(ObTransformerCtx* ctx,
-                                                            ObDMLStmt* stmt,
-                                                            bool& is_valid)
-{
-  int ret = OB_SUCCESS;
-  if (OB_ISNULL(ctx) || OB_ISNULL(stmt) || OB_ISNULL(ctx->schema_checker_) || OB_ISNULL(ctx->session_info_)) {
-    ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("unexpect null", K(ret), K(ctx), K(stmt));
-  } else {
-    bool temp = true;
-    const ObTableSchema *table_schema = NULL;
-    for (int64_t i = 0; OB_SUCC(ret) && temp && i < stmt->get_from_item_size(); i++) {
-      TableItem* table = stmt->get_table_item(stmt->get_from_item(i));
-      ObSEArray<ObRawExpr*, 4> pkeys;
-      if (OB_ISNULL(table)) {
-        ret = OB_ERR_UNEXPECTED;
-        LOG_WARN("unexpect null table", K(ret), K(table));
-      } else if (!table->is_basic_table()) {
-        temp = false;
-      } else if (OB_FAIL(ctx->schema_checker_->get_table_schema(ctx->session_info_->get_effective_tenant_id(), table->ref_id_, table_schema))) {
-        LOG_WARN("failed to get table schema", K(ret));
-      } else if (OB_ISNULL(table_schema)) {
-        ret = OB_ERR_UNEXPECTED;
-        LOG_WARN("table schema is null", K(ret), K(table_schema));
-        //new heap table not add partition key in rowkey and the tablet id is unique in partition,
-        //we need add partition key to ensure the output unique.
-      } else if (table_schema->is_heap_table() &&
-                OB_FAIL(ObTransformUtils::add_part_column_exprs_for_heap_table(stmt, table_schema,
-                                                                        table->table_id_, pkeys))) {
-        LOG_WARN("failed to add part column exprs for heap table", K(ret));
-      } else if (!pkeys.empty()) {
-        // valid, do nothing
-      } else {
-        const ObRowkeyInfo &rowkey_info = table_schema->get_rowkey_info();
-        temp = rowkey_info.get_size() > 0;
-      }
-    }
-    if (OB_SUCC(ret)) {
-      is_valid = temp;
-    }
   }
   return ret;
 }
@@ -1094,17 +1031,15 @@ int ObTransformSemiToInner::check_need_add_cast(const ObRawExpr *left_arg,
   if (OB_ISNULL(left_arg) || OB_ISNULL(right_arg)) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("left arg and right arg should not be NULL", K(ret), K(left_arg), K(right_arg));
-  } else if (OB_FAIL(ObRelationalExprOperator::is_equivalent(left_arg->get_result_type(),
-                                                             left_arg->get_result_type(),
-                                                             right_arg->get_result_type(),
-                                                             is_valid))) {
+  } else if (OB_FAIL(ObRelationalExprOperator::is_equal_transitive(left_arg->get_result_type(),
+                                                                   right_arg->get_result_type(),
+                                                                   is_valid))) {
     LOG_WARN("failed to check expr is equivalent", K(ret));
   } else if (!is_valid) {
     LOG_TRACE("can not use left expr type as the (left, right) compare type", K(is_valid));
-  } else if (OB_FAIL(ObRelationalExprOperator::is_equivalent(left_arg->get_result_type(),
-                                                             right_arg->get_result_type(),
-                                                             right_arg->get_result_type(),
-                                                             is_equal))) {
+  } else if (OB_FAIL(ObRelationalExprOperator::is_equal_transitive(left_arg->get_result_type(),
+                                                                   right_arg->get_result_type(),
+                                                                   is_equal))) {
     LOG_WARN("failed to check expr is equivalent", K(ret));
   } else if (!is_equal) {
     need_add_cast = true;
@@ -1173,7 +1108,19 @@ int ObTransformSemiToInner::do_transform(ObDMLStmt &stmt,
       LOG_WARN("failed to append semi conditions", K(ret));
     } else if (OB_FAIL(stmt.add_from_item(semi_info->right_table_id_, false))) {
       LOG_WARN("failed to add from items", K(ret));
-    } else if (!right_table_need_add_limit) {
+    } else if (OB_ISNULL(right_table = stmt.get_table_item_by_id(semi_info->right_table_id_))) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("right table item is null", K(ret));
+    } else if (OB_FAIL(push_right_table_ids(right_table, ctx.view_table_id_))) {
+      LOG_WARN("fail to push back view table id", K(ret));
+    } else if (right_table->is_generated_table()) {
+      if (OB_FAIL(find_basic_table(right_table->ref_query_, ctx.table_id_))) {
+        LOG_WARN("failed to find basic table", K(ret));
+      }
+    } else {
+      ctx.table_id_ = semi_info->right_table_id_;
+    }
+    if (OB_FAIL(ret) || !right_table_need_add_limit) {
       /* do nothing */
     } else if (OB_FAIL(ObTransformUtils::add_limit_to_semi_right_table(&stmt, ctx_, semi_info))) {
       LOG_WARN("failed to add limit to semi right table", K(ret), K(stmt));
@@ -1216,8 +1163,32 @@ int ObTransformSemiToInner::do_transform(ObDMLStmt &stmt,
     LOG_WARN("failed to add from items", K(ret));
   } else if (OB_FAIL(find_basic_table(ref_query, ctx.table_id_))) {
     LOG_WARN("failed to find basic table", K(ret));
-  } else if (OB_FAIL(ctx.view_table_id_.push_back(view_table->table_id_))) {
-    LOG_WARN("fail to push back view table id");
+  } else if (OB_FAIL(push_right_table_ids(view_table, ctx.view_table_id_))) {
+    LOG_WARN("fail to push back view table id", K(ret));
+  }
+  return ret;
+}
+
+int ObTransformSemiToInner::push_right_table_ids(TableItem* right_table,
+                                                 ObIArray<uint64_t>& view_table_ids)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(right_table)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpect null right table", K(ret));
+  } else if (OB_FAIL(view_table_ids.push_back(right_table->table_id_))) {
+    LOG_WARN("fail to push back view table id", K(ret));
+  } else if (right_table->is_generated_table()) {
+    ObSelectStmt* right_stmt = NULL;
+    if (OB_ISNULL(right_stmt = right_table->ref_query_)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("right stmt is null", K(ret));
+    }
+    for (int64_t i = 0; OB_SUCC(ret) && i < right_stmt->get_table_items().count(); ++i) {
+      if (OB_FAIL(push_right_table_ids(right_stmt->get_table_item(i), view_table_ids))) {
+        LOG_WARN("fail to push back view table id", K(ret), K(i));
+      }
+    }
   }
   return ret;
 }
@@ -1325,8 +1296,8 @@ int ObTransformSemiToInner::do_transform_with_aggr(ObDMLStmt& stmt,
   if (OB_FAIL(ret)) {
   } else if (OB_FAIL(find_basic_table(ref_query, ctx.table_id_))) {
     LOG_WARN("failed to find basic table", K(ret));
-  } else if (OB_FAIL(ctx.view_table_id_.push_back(view_table->table_id_))) {
-    LOG_WARN("fail to push back view table id");
+  } else if (OB_FAIL(push_right_table_ids(view_table, ctx.view_table_id_))) {
+    LOG_WARN("fail to push back view table id", K(ret));
   }
   return ret;
 }
@@ -1526,6 +1497,9 @@ int ObTransformSemiToInner::is_expected_plan(ObLogPlan *plan, void *check_ctx, b
     //do nothing
   } else if (ctx->is_multi_join_cond_) {
     is_valid = true;
+  } else if (ctx->is_non_sens_dul_vals_) {
+    // duplicate values insensitive will not add DISTINCT, can bypass expected plan check
+    is_valid = true;
   } else if (OB_FAIL(find_operator(plan->get_plan_root(), 
                                    parents,
                                    ctx->table_id_,
@@ -1576,6 +1550,11 @@ int ObTransformSemiToInner::find_operator(ObLogicalOperator* root,
     }
   } else if (log_op_def::LOG_FUNCTION_TABLE == root->get_type()) {
     ObLogFunctionTable *scan = static_cast<ObLogFunctionTable *>(root);
+    if (scan->get_table_id() == table_id) {
+      table_op = scan;
+    }
+  } else if (log_op_def::LOG_VALUES_TABLE_ACCESS == root->get_type()) {
+    ObLogValuesTableAccess *scan = static_cast<ObLogValuesTableAccess *>(root);
     if (scan->get_table_id() == table_id) {
       table_op = scan;
     }

@@ -13,9 +13,6 @@
 #define USING_LOG_PREFIX SQL_ENG
 
 #include "sql/engine/expr/ob_expr_tablet_autoinc_nextval.h"
-#include "sql/engine/ob_physical_plan_ctx.h"
-#include "sql/session/ob_sql_session_info.h"
-#include "sql/engine/ob_exec_context.h"
 
 namespace oceanbase
 {
@@ -24,7 +21,7 @@ using namespace share;
 namespace sql
 {
 ObExprTabletAutoincNextval::ObExprTabletAutoincNextval(ObIAllocator &alloc)
-    : ObFuncExprOperator(alloc, T_FUN_SYS_TABLET_AUTOINC_NEXTVAL, N_TABLET_AUTOINC_NEXTVAL, 0, NOT_VALID_FOR_GENERATED_COL, NOT_ROW_DIMENSION)
+    : ObFuncExprOperator(alloc, T_TABLET_AUTOINC_NEXTVAL, N_TABLET_AUTOINC_NEXTVAL, 0, NOT_VALID_FOR_GENERATED_COL, NOT_ROW_DIMENSION)
 {
    disable_operand_auto_cast();
 }

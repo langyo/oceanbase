@@ -12,15 +12,9 @@
 
 #define USING_LOG_PREFIX RS
 #include "ob_column_redefinition_task.h"
-#include "lib/rc/context.h"
-#include "share/schema/ob_multi_version_schema_service.h"
 #include "share/ob_ddl_error_message_table_operator.h"
-#include "share/ob_autoincrement_service.h"
-#include "share/ob_ddl_checksum.h" 
-#include "rootserver/ddl_task/ob_ddl_scheduler.h"
+#include "share/ob_ddl_sim_point.h"
 #include "rootserver/ob_root_service.h"
-#include "rootserver/ddl_task/ob_ddl_redefinition_task.h"
-#include "storage/tablelock/ob_table_lock_service.h"
 
 using namespace oceanbase::lib;
 using namespace oceanbase::common;
@@ -40,24 +34,24 @@ ObColumnRedefinitionTask::~ObColumnRedefinitionTask()
 
 int ObColumnRedefinitionTask::init(const uint64_t tenant_id, const int64_t task_id, const share::ObDDLType &ddl_type,
     const int64_t data_table_id, const int64_t dest_table_id, const int64_t schema_version, const int64_t parallelism, const int64_t consumer_group_id,
-    const obrpc::ObAlterTableArg &alter_table_arg, const int64_t task_status, const int64_t snapshot_version)
+    const int32_t sub_task_trace_id, const obrpc::ObAlterTableArg &alter_table_arg,
+    const uint64_t tenant_data_version, const int64_t task_status, const int64_t snapshot_version)
 {
   int ret = OB_SUCCESS;
-  uint64_t tenant_data_format_version = 0;
   if (OB_UNLIKELY(is_inited_)) {
     ret = OB_INIT_TWICE;
     LOG_WARN("ObColumnRedefinitionTask has already been inited", K(ret));
-  } else if (OB_UNLIKELY(OB_INVALID_ID == tenant_id || OB_INVALID_ID == data_table_id || OB_INVALID_ID == dest_table_id || schema_version <= 0 || task_status < ObDDLTaskStatus::PREPARE
+  } else if (OB_UNLIKELY(OB_INVALID_ID == tenant_id || OB_INVALID_ID == data_table_id || OB_INVALID_ID == dest_table_id || schema_version <= 0
+      || tenant_data_version <= 0 || task_status < ObDDLTaskStatus::PREPARE
       || task_status > ObDDLTaskStatus::SUCCESS || snapshot_version < 0 || (snapshot_version > 0 && task_status < ObDDLTaskStatus::WAIT_TRANS_END))) {
     ret = OB_INVALID_ARGUMENT;
-    LOG_WARN("invalid arguments", K(ret), K(tenant_id), K(task_id), K(data_table_id), K(dest_table_id), K(schema_version), K(task_status), K(snapshot_version));
+    LOG_WARN("invalid arguments", K(ret), K(tenant_id), K(task_id), K(data_table_id), K(dest_table_id), K(schema_version),
+      K(tenant_data_version), K(task_status), K(snapshot_version));
     LOG_WARN("fail to init task table operator", K(ret));
   } else if (OB_FAIL(deep_copy_table_arg(allocator_, alter_table_arg, alter_table_arg_))) {
     LOG_WARN("deep copy alter table arg failed", K(ret));
   } else if (OB_FAIL(set_ddl_stmt_str(alter_table_arg_.ddl_stmt_str_))) {
     LOG_WARN("set ddl stmt str failed", K(ret));
-  } else if (OB_FAIL(ObShareUtil::fetch_current_data_version(*GCTX.sql_proxy_, tenant_id, tenant_data_format_version))) {
-    LOG_WARN("get min data version failed", K(ret), K(tenant_id));
   } else {
     set_gmt_create(ObTimeUtility::current_time());
     task_type_ = ddl_type;
@@ -70,18 +64,21 @@ int ObColumnRedefinitionTask::init(const uint64_t tenant_id, const int64_t task_
     task_version_ = OB_COLUMN_REDEFINITION_TASK_VERSION;
     task_id_ = task_id;
     parallelism_ = parallelism;
+    sub_task_trace_id_ = sub_task_trace_id;
     consumer_group_id_ = consumer_group_id;
     execution_id_ = 1L;
     start_time_ = ObTimeUtility::current_time();
     if (OB_FAIL(init_ddl_task_monitor_info(target_object_id_))) {
       LOG_WARN("init ddl task monitor info failed", K(ret));
+    } else if (OB_FAIL(ObDDLUtil::get_no_logging_param(tenant_id_, is_no_logging_))) {
+      LOG_WARN("fail to get no logging param", K(ret), K(tenant_id_));
     } else {
       dst_tenant_id_ = tenant_id_;
       dst_schema_version_ = schema_version_;
       alter_table_arg_.alter_table_schema_.set_tenant_id(tenant_id_);
       alter_table_arg_.alter_table_schema_.set_schema_version(schema_version_);
       alter_table_arg_.exec_tenant_id_ = dst_tenant_id_;
-      data_format_version_ = tenant_data_format_version;
+      data_format_version_ = tenant_data_version;
       is_inited_ = true;
       ddl_tracing_.open();
     }
@@ -105,7 +102,7 @@ int ObColumnRedefinitionTask::init(const ObDDLTaskRecord &task_record)
   } else if (!task_record.is_valid()) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid arguments", K(ret));
-  } else if (OB_FAIL(deserlize_params_from_message(task_record.tenant_id_, task_record.message_.ptr(), task_record.message_.length(), pos))) {
+  } else if (OB_FAIL(deserialize_params_from_message(task_record.tenant_id_, task_record.message_.ptr(), task_record.message_.length(), pos))) {
     LOG_WARN("deserialize params from message failed", K(ret));
   } else if (OB_FAIL(set_ddl_stmt_str(task_record.ddl_stmt_str_))) {
     LOG_WARN("set ddl stmt str failed", K(ret));
@@ -150,6 +147,7 @@ int ObColumnRedefinitionTask::init(const ObDDLTaskRecord &task_record)
 
 // update sstable complement status for all leaders
 int ObColumnRedefinitionTask::update_complete_sstable_job_status(const common::ObTabletID &tablet_id,
+                                                                 const ObAddr &addr,
                                                                  const int64_t snapshot_version,
                                                                  const int64_t execution_id,
                                                                  const int ret_code,
@@ -159,18 +157,22 @@ int ObColumnRedefinitionTask::update_complete_sstable_job_status(const common::O
   if (OB_UNLIKELY(!is_inited_)) {
     ret = OB_NOT_INIT;
     LOG_WARN("ObColumnRedefinitionTask has not been inited", K(ret));
+  } else if (OB_FAIL(DDL_SIM(tenant_id_, task_id_, UPDATE_COMPLETE_SSTABLE_FAILED))) {
+    LOG_WARN("ddl sim failure", K(tenant_id_), K(task_id_));
   } else if (ObDDLTaskStatus::REDEFINITION != task_status_) {
     // by pass, may be network delay
   } else if (snapshot_version != snapshot_version_) {
     ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("snapshot version not match", K(ret), K(snapshot_version), K(snapshot_version_));
+    LOG_WARN("snapshot version not match", K(ret), K(addr), K(snapshot_version), K(snapshot_version_));
   } else if (execution_id < execution_id_) {
-    LOG_INFO("receive a mismatch execution result, ignore", K(ret_code), K(execution_id), K(execution_id_));
-  } else if (OB_FAIL(replica_builder_.set_partition_task_status(tablet_id,
-                                                                ret_code,
-                                                                addition_info.row_scanned_,
-                                                                addition_info.row_inserted_))) {
-    LOG_WARN("fail to set partition task status", K(ret));
+    LOG_INFO("receive a mismatch execution result, ignore", K(addr), K(ret_code), K(execution_id), K(execution_id_));
+  } else if (OB_FAIL(replica_builder_.update_build_progress(tablet_id,
+                                                            addr,
+                                                            ret_code,
+                                                            addition_info.row_scanned_,
+                                                            addition_info.row_inserted_,
+                                                            addition_info.physical_row_count_))) {
+    LOG_WARN("fail to set update replica build progress", K(ret), K(addr));
   }
   return ret;
 }
@@ -187,13 +189,15 @@ int ObColumnRedefinitionTask::copy_table_indexes()
   } else if (OB_ISNULL(root_service)) {
     ret = OB_ERR_SYS;
     LOG_WARN("error sys, root service must not be nullptr", K(ret));
+  } else if (OB_FAIL(DDL_SIM(tenant_id_, task_id_, REDEF_TASK_COPY_INDEX_FAILED))) {
+    LOG_WARN("ddl sim failure", K(tenant_id_), K(task_id_));
   } else {
     const int64_t MAX_ACTIVE_TASK_CNT = 1;
     int64_t active_task_cnt = 0;
     // check if has rebuild index
     if (has_rebuild_index_) {
-    } else if (OB_FAIL(ObDDLTaskRecordOperator::get_create_index_task_cnt(GCTX.root_service_->get_sql_proxy(), tenant_id_, target_object_id_, active_task_cnt))) {
-      LOG_WARN("failed to check index task cnt", K(ret));
+    } else if (OB_FAIL(ObDDLTaskRecordOperator::get_create_index_or_mlog_task_cnt(GCTX.root_service_->get_sql_proxy(), tenant_id_, target_object_id_, active_task_cnt))) {
+      LOG_WARN("failed to check index or mlog task cnt", K(ret));
     } else if (active_task_cnt >= MAX_ACTIVE_TASK_CNT) {
       ret = OB_EAGAIN;
     } else {
@@ -221,10 +225,11 @@ int ObColumnRedefinitionTask::copy_table_indexes()
           }
           LOG_INFO("indexes schema are already built", K(index_ids));
         } else {
-          // if there is no indexes in new tables, we need to rebuild indexes in new table
           int64_t rpc_timeout = 0;
           int64_t all_tablet_count = 0;
-          if (OB_FAIL(get_orig_all_index_tablet_count(schema_guard, all_tablet_count))) {
+          if (OB_FAIL(generate_rebuild_index_arg_list(tenant_id_, object_id_, schema_guard, alter_table_arg_))) { // for pre split index
+            LOG_WARN("fail to generate rebuild index arg list", K(ret), K(tenant_id_), K(object_id_));
+          } else if (OB_FAIL(get_orig_all_index_tablet_count(schema_guard, all_tablet_count))) {
             LOG_WARN("get all tablet count failed", K(ret));
           } else if (OB_FAIL(ObDDLUtil::get_ddl_rpc_timeout(all_tablet_count, rpc_timeout))) {
             LOG_WARN("get ddl rpc timeout failed", K(ret));
@@ -246,6 +251,9 @@ int ObColumnRedefinitionTask::copy_table_indexes()
           ObDDLTaskRecord task_record;
           bool need_rebuild_index = true;
           SMART_VAR(obrpc::ObCreateIndexArg, create_index_arg) {
+            ObTraceIdGuard trace_id_guard(get_trace_id());
+            ATOMIC_INC(&sub_task_trace_id_);
+            ObDDLEventInfo ddl_event_info(sub_task_trace_id_);
             // this create index arg is not valid, only has nls format
             create_index_arg.nls_date_format_ = alter_table_arg_.nls_formats_[0];
             create_index_arg.nls_timestamp_format_ = alter_table_arg_.nls_formats_[1];
@@ -264,7 +272,7 @@ int ObColumnRedefinitionTask::copy_table_indexes()
             } else {
               create_index_arg.index_type_ = index_schema->get_index_type();
               ObCreateDDLTaskParam param(tenant_id_,
-                                         ObDDLType::DDL_CREATE_INDEX,
+                                         get_create_index_type(data_format_version_, *index_schema),
                                          table_schema,
                                          index_schema,
                                          0/*object_id*/,
@@ -274,6 +282,8 @@ int ObColumnRedefinitionTask::copy_table_indexes()
                                          &allocator_,
                                          &create_index_arg,
                                          task_id_);
+              param.sub_task_trace_id_ = sub_task_trace_id_;
+              param.tenant_data_version_ = data_format_version_;
               if (OB_FAIL(GCTX.root_service_->get_ddl_task_scheduler().create_ddl_task(param,
                                                                                        *GCTX.sql_proxy_,
                                                                                        task_record))) {
@@ -288,7 +298,10 @@ int ObColumnRedefinitionTask::copy_table_indexes()
                 LOG_WARN("fail to schedule ddl task", K(ret), K(task_record));
               }
             }
-            if (OB_SUCC(ret) && need_rebuild_index) {
+            if (OB_FAIL(ret)) {
+              add_event_info("create column redefinition index fail");
+              LOG_WARN("add build index task failed", K(ret), K(ddl_event_info), K(task_record));
+            } else if (need_rebuild_index) {
               TCWLockGuard guard(lock_);
               const uint64_t task_key = index_ids.at(i);
               DependTaskStatus status;
@@ -300,7 +313,8 @@ int ObColumnRedefinitionTask::copy_table_indexes()
                   LOG_WARN("set dependent task map failed", K(ret), K(task_key));
                 }
               }
-              LOG_INFO("add build index task", K(ret), K(task_key), K(status));
+              add_event_info("create column redefinition index succ");
+              LOG_INFO("add build index task", K(ret), K(task_key), K(status), K(ddl_event_info));
             }
           }
         }
@@ -327,6 +341,8 @@ int ObColumnRedefinitionTask::copy_table_constraints()
   } else if (OB_ISNULL(root_service)) {
     ret = OB_ERR_SYS;
     LOG_WARN("error sys, root service must not be nullptr", K(ret));
+  } else if (OB_FAIL(DDL_SIM(tenant_id_, task_id_, REDEF_TASK_COPY_CONSTRAINT_FAILED))) {
+    LOG_WARN("ddl sim failure", K(tenant_id_), K(task_id_));
   } else {
     if (has_rebuild_constraint_) {
       // do nothing
@@ -379,6 +395,8 @@ int ObColumnRedefinitionTask::copy_table_foreign_keys()
   } else if (OB_ISNULL(root_service)) {
     ret = OB_ERR_SYS;
     LOG_WARN("error sys, root service must not be nullptr", K(ret));
+  } else if (OB_FAIL(DDL_SIM(tenant_id_, task_id_, REDEF_TASK_COPY_FOREIGN_KEY_FAILED))) {
+    LOG_WARN("ddl sim failure", K(tenant_id_), K(task_id_));
   } else {
     if (has_rebuild_foreign_key_) {
       // do nothing
@@ -427,15 +445,15 @@ int ObColumnRedefinitionTask::serialize_params_to_message(char *buf, const int64
   return ret;
 }
 
-int ObColumnRedefinitionTask::deserlize_params_from_message(const uint64_t tenant_id, const char *buf, const int64_t data_len, int64_t &pos)
+int ObColumnRedefinitionTask::deserialize_params_from_message(const uint64_t tenant_id, const char *buf, const int64_t data_len, int64_t &pos)
 {
   int ret = OB_SUCCESS;
   obrpc::ObAlterTableArg tmp_arg;
   if (OB_UNLIKELY(!is_valid_tenant_id(tenant_id) || nullptr == buf || data_len <= 0)) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid arguments", K(ret), KP(buf), K(tenant_id), K(data_len));
-  } else if (OB_FAIL(ObDDLTask::deserlize_params_from_message(tenant_id, buf, data_len, pos))) {
-    LOG_WARN("ObDDLTask deserlize failed", K(ret));
+  } else if (OB_FAIL(ObDDLTask::deserialize_params_from_message(tenant_id, buf, data_len, pos))) {
+    LOG_WARN("ObDDLTask deserialize failed", K(ret));
   } else if (OB_FAIL(tmp_arg.deserialize(buf, data_len, pos))) {
     LOG_WARN("serialize table failed", K(ret));
   } else if (OB_FAIL(ObDDLUtil::replace_user_tenant_id(task_type_, tenant_id, tmp_arg))) {
@@ -463,6 +481,8 @@ int ObColumnRedefinitionTask::copy_table_dependent_objects(const ObDDLTaskStatus
   } else if (OB_ISNULL(root_service)) {
     ret = OB_ERR_SYS;
     LOG_WARN("error sys, root service must not be nullptr", K(ret));
+  } else if (OB_FAIL(DDL_SIM(tenant_id_, task_id_, REDEF_TASK_COPY_DEPENDENT_OBJECTS_FAILED))) {
+    LOG_WARN("ddl sim failure", K(ret), K(tenant_id_), K(task_id_));
   } else if (!dependent_task_result_map_.created() && OB_FAIL(dependent_task_result_map_.create(MAX_DEPEND_OBJECT_COUNT, lib::ObLabel("DepTasMap")))) {
     LOG_WARN("create dependent task map failed", K(ret));
   } else {
@@ -547,6 +567,8 @@ int ObColumnRedefinitionTask::take_effect(const ObDDLTaskStatus next_task_status
   } else if (OB_ISNULL(root_service)) {
     ret = OB_ERR_SYS;
     LOG_WARN("error sys, root service must not be nullptr", K(ret));
+  } else if (OB_FAIL(DDL_SIM(tenant_id_, task_id_, DDL_TASK_TAKE_EFFECT_FAILED))) {
+    LOG_WARN("ddl sim failure", K(ret), K(tenant_id_), K(task_id_));
   } else if (OB_FAIL(ObMultiVersionSchemaService::get_instance().get_tenant_schema_guard(tenant_id_, schema_guard))) {
     LOG_WARN("get tenant schema guard failed", K(ret));
   } else if (OB_FAIL(schema_guard.get_table_schema(tenant_id_, target_object_id_, table_schema))) {
@@ -698,16 +720,32 @@ int ObColumnRedefinitionTask::collect_longops_stat(ObLongopsValue &value)
       break;
     }
     case ObDDLTaskStatus::REDEFINITION: {
-      int64_t row_scanned = 0;
       int64_t row_inserted = 0;
-      if (OB_FAIL(replica_builder_.get_progress(row_scanned, row_inserted))) {
+      int64_t physical_row_count_ = 0;
+      double percent = 0.0;
+      bool initializing = false;
+      {
+        TCRLockGuard guard(lock_);
+        initializing = !is_sstable_complete_task_submitted_;
+      }
+      if (initializing) {
+        if (OB_FAIL(databuff_printf(stat_info_.message_,
+                                    MAX_LONG_OPS_MESSAGE_LENGTH,
+                                    pos,
+                                    "STATUS: REPLICA BUILD, PARALLELISM: %ld, INITIALIZING",
+                                    ObDDLUtil::get_real_parallelism(parallelism_, false/*is mv refresh*/)))) {
+          LOG_WARN("failed to print", K(ret));
+        }
+      } else if (OB_FAIL(replica_builder_.get_progress(row_inserted, physical_row_count_, percent))) {
         LOG_WARN("failed to gather redefinition stats", K(ret));
       } else if (OB_FAIL(databuff_printf(stat_info_.message_,
                                   MAX_LONG_OPS_MESSAGE_LENGTH,
                                   pos,
-                                  "STATUS: REPLICA BUILD, ROW_SCANNED: %ld, ROW_INSERTED: %ld",
-                                  row_scanned,
-                                  row_inserted))) {
+                                  "STATUS: REPLICA BUILD, PARALLELISM: %ld, ESTIMATED_TOTAL_ROWS: %ld, ROW_PROCESSED: %ld, PROGRESS: %0.2lf%%",
+                                  ObDDLUtil::get_real_parallelism(parallelism_, false/*is mv refresh*/),
+                                  physical_row_count_,
+                                  row_inserted,
+                                  percent))) {
         LOG_WARN("failed to print", K(ret));
       }
       break;
@@ -766,57 +804,11 @@ int ObColumnRedefinitionTask::collect_longops_stat(ObLongopsValue &value)
       break;
   }
   if (OB_FAIL(ret)) {
+  } else if (OB_FAIL(DDL_SIM(tenant_id_, task_id_, DDL_TASK_COLLECT_LONGOPS_STAT_FAILED))) {
+    LOG_WARN("ddl sim failure", K(ret), K(tenant_id_), K(task_id_));
   } else if (OB_FAIL(copy_longops_stat(value))) {
     LOG_WARN("failed to collect common longops stat", K(ret));
   }
 
   return ret;
-}
-
-void ObColumnRedefinitionTask::flt_set_task_span_tag() const
-{
-  FLT_SET_TAG(ddl_task_id, task_id_, ddl_parent_task_id, parent_task_id_,
-              ddl_data_table_id, object_id_, ddl_schema_version, schema_version_,
-              ddl_snapshot_version, snapshot_version_, ddl_ret_code, ret_code_);
-}
-
-void ObColumnRedefinitionTask::flt_set_status_span_tag() const
-{
-  switch (task_status_) {
-  case ObDDLTaskStatus::PREPARE: {
-    FLT_SET_TAG(ddl_ret_code, ret_code_);
-    break;
-  }
-  case ObDDLTaskStatus::WAIT_TRANS_END: {
-    FLT_SET_TAG(ddl_data_table_id, object_id_, ddl_ret_code, ret_code_);
-    break;
-  }
-  case ObDDLTaskStatus::OBTAIN_SNAPSHOT: {
-    FLT_SET_TAG(ddl_ret_code, ret_code_);
-    break;
-  }
-  case ObDDLTaskStatus::REDEFINITION: {
-    FLT_SET_TAG(ddl_ret_code, ret_code_);
-    break;
-  }
-  case ObDDLTaskStatus::COPY_TABLE_DEPENDENT_OBJECTS: {
-    FLT_SET_TAG(ddl_ret_code, ret_code_);
-    break;
-  }
-  case ObDDLTaskStatus::TAKE_EFFECT: {
-    FLT_SET_TAG(ddl_ret_code, ret_code_);
-    break;
-  }
-  case ObDDLTaskStatus::FAIL: {
-    FLT_SET_TAG(ddl_ret_code, ret_code_);
-    break;
-  }
-  case ObDDLTaskStatus::SUCCESS: {
-    FLT_SET_TAG(ddl_ret_code, ret_code_);
-    break;
-  }
-  default: {
-    break;
-  }
-  }
 }

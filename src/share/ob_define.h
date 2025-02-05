@@ -63,7 +63,9 @@ using std::isnan;
 
 #define CK_0(a, b)                              \
   if (!(b)) {                                   \
-    ret = OB_ERR_UNEXPECTED;                    \
+    if (OB_SUCC(ret)) {                         \
+      ret = OB_ERR_UNEXPECTED;                  \
+    }                                           \
     LOG_WARN("invalid arguments", a, b);        \
   }
 
@@ -203,6 +205,16 @@ namespace common {
 const char *const OB_MYSQL_RECYCLE_PREFIX = "__recycle_$_";
 const char *const OB_ORACLE_RECYCLE_PREFIX = "RECYCLE_$_";
 
+OB_INLINE bool is_valid_log_compressor_type(common::ObCompressorType compressor_type)
+{
+   bool b_ret = false;
+   if (common::ObCompressorType::LZ4_COMPRESSOR == compressor_type
+   || common::ObCompressorType::ZSTD_COMPRESSOR == compressor_type
+   || common::ObCompressorType::ZSTD_1_3_8_COMPRESSOR == compressor_type) {
+    b_ret = true;
+   }
+   return b_ret;
+}
 //check whether transaction version is valid
 OB_INLINE bool is_valid_trans_version(const int64_t trans_version)
 {
@@ -261,6 +273,7 @@ inline bool is_schema_error(int err)
     case OB_SCHEMA_EAGAIN:
     case OB_SCHEMA_NOT_UPTODATE:
     case OB_ERR_PARALLEL_DDL_CONFLICT:
+    case OB_NO_PARTITION_FOR_GIVEN_VALUE_SCHEMA_ERROR:
       ret = true;
       break;
     default:
@@ -506,6 +519,9 @@ const int64_t OB_MAX_ENCRYPTION_MODE_LENGTH = 64;
 const int64_t OB_MAX_CORE_TALBE_NAME_LENGTH = 128;
 const int64_t OB_MAX_OUTLINE_NAME_LENGTH = 128;
 const int64_t OB_MAX_ROUTINE_NAME_LENGTH = 128;
+const int64_t OB_MAX_ROUTINE_NAME_BINARY_LENGTH = 2048; // Should be OB_MAX_ROUTINE_NAME_LENGTH * 4(max char bytes),
+                                                         // reserve some bytes thus OB_MAX_ROUTINE_NAME_LENGTH changes will probably not influence it
+                                                         // it is defined in primary key, and can not change randomly.
 const int64_t OB_MAX_PACKAGE_NAME_LENGTH = 128;
 const int64_t OB_MAX_KVCACHE_NAME_LENGTH = 128;
 const int64_t OB_MAX_SYNONYM_NAME_LENGTH = 128;
@@ -549,6 +565,8 @@ inline bool &get_replay_is_writing_throttling()
   return (&is_writing_throttling)->v_;
 }
 ///////////////////////////////////
+//max concurrency for log external upload
+const int64_t OB_MAX_LOG_UPLOAD_CONCURRENCY = 16;
 
 enum ObDmlEventType
 {
@@ -564,6 +582,7 @@ const char *const ARBITRATION_MODE_STR = "arbitration";
 const char *const FLASHBACK_VERIFY_MODE_STR = "physical_flashback_verify";
 const char *const DISABLED_CLUSTER_MODE_STR = "disabled_cluster";
 const char *const DISABLED_WITH_READONLY_CLUSTER_MODE_STR = "disabled_with_readonly_cluster";
+const char *const SHARED_STORAGE_MODE_STR = "shared_storage";
 
 static const int64_t MODIFY_GC_SNAPSHOT_INTERVAL = 2 * 1000 * 1000; //2s
 
@@ -577,6 +596,7 @@ const uint64_t OB_TABLE_PRIVILEGES_OLD_TID = 12002;  // not used anymore for "TA
 const uint64_t OB_USER_PRIVILEGES_OLD_TID = 12003;   // not used anymore for "USER_PRIVILEGES" has a new table id
 const uint64_t OB_SCHEMA_PRIVILEGES_OLD_TID = 12004; // not used anymore for "SCHEMA_PRIVILEGES" has a new table id
 const uint64_t OB_PARTITIONS_OLD_TID = 12007;        // not used anymore for "PARTITIONS" has a new table id
+const uint64_t OB_ALL_VIRTUAL_PROC_OLD_TID = 12030;              // not used anymore for "PROC" has a new table id
 //end of reserved table id for information schema
 
 ////////////////typedef

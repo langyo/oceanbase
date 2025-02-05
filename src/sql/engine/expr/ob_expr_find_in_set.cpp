@@ -12,8 +12,6 @@
 
 #define USING_LOG_PREFIX SQL_ENG
 #include "sql/engine/expr/ob_expr_find_in_set.h"
-#include "lib/charset/ob_charset.h"
-#include "sql/ob_sql_utils.h"
 #include "sql/engine/ob_exec_context.h"
 
 using namespace oceanbase::common;
@@ -47,14 +45,13 @@ int ObExprFindInSet::calc_result_type2(ObExprResType &type,
     ObObjMeta coll_types[2];
     coll_types[0] = type1.get_obj_meta();
     coll_types[1] = type2.get_obj_meta();
-    if (OB_FAIL(aggregate_charsets_for_comparison(type.get_calc_meta(),
-                 coll_types, 2, type_ctx.get_coll_type()))) {
+    if (OB_FAIL(aggregate_charsets_for_comparison(type.get_calc_meta(), coll_types, 2, type_ctx))) {
       LOG_WARN("failed to aggregate_charsets_for_comparison", K(ret));
     } else {
       type1.set_calc_type(ObVarcharType);
-      type1.set_calc_collation_type(type.get_calc_collation_type());
+      type1.set_calc_collation(type);
       type2.set_calc_type(ObVarcharType);
-      type2.set_calc_collation_type(type.get_calc_collation_type());
+      type2.set_calc_collation(type);
     }
 	} else {
 		ret = OB_ERR_INVALID_TYPE_FOR_OP;
@@ -291,6 +288,13 @@ int ObExprFindInSet::cg_expr(ObExprCGCtx &expr_cg_ctx, const ObRawExpr &raw_expr
   UNUSED(expr_cg_ctx);
   UNUSED(raw_expr);
   rt_expr.eval_func_ = calc_find_in_set_expr;
+  return ret;
+}
+
+DEF_SET_LOCAL_SESSION_VARS(ObExprFindInSet, raw_expr) {
+  int ret = OB_SUCCESS;
+  SET_LOCAL_SYSVAR_CAPACITY(1);
+  EXPR_ADD_LOCAL_SYSVAR(share::SYS_VAR_COLLATION_CONNECTION);
   return ret;
 }
 

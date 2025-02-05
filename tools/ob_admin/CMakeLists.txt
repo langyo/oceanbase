@@ -3,6 +3,13 @@ if(OB_BUILD_TDE_SECURITY)
   set(ob_admin_tde_files "${CMAKE_SOURCE_DIR}/close_modules/tde_security/tools/ob_admin/dump_key/ob_admin_dump_key_executor.cpp")
 endif()
 
+set(ob_admin_shared_storage_files "")
+if(OB_BUILD_SHARED_STORAGE)
+  set(ob_admin_shared_storage_files
+    "${CMAKE_SOURCE_DIR}/close_modules/shared_storage/tools/ob_admin/shared_storage_tool/ob_admin_shared_storage_tool_executor.cpp"
+  )
+endif()
+
 if (OB_BUILD_OPENSOURCE)
 add_executable(ob_admin
   #  clog_tool/cmd_args_parser.h
@@ -28,6 +35,8 @@ add_executable(ob_admin
   main.cpp
   ob_admin_executor.cpp
   ob_admin_executor.h
+  ob_admin_common_utils.cpp
+  ob_admin_common_utils.h
   server_tool/ob_admin_routine.cpp
   server_tool/ob_admin_routine.h
   server_tool/ob_admin_server_executor.cpp
@@ -37,8 +46,6 @@ add_executable(ob_admin
   slog_tool/ob_admin_slog_executor.h
   dump_enum_value/ob_admin_dump_enum_value_executor.cpp
   dump_enum_value/ob_admin_dump_enum_value_executor.h
-  dump_ckpt/ob_admin_dump_ckpt_executor.cpp
-  dump_ckpt/ob_admin_dump_ckpt_executor.h
 
   #  archive_tool/ob_fake_archive_log_file_store.h
   #  archive_tool/ob_fake_archive_log_file_store.cpp
@@ -54,6 +61,20 @@ add_executable(ob_admin
   backup_tool/ob_admin_dump_backup_data_executor.h
   backup_tool/ob_admin_dump_backup_data_executor.cpp
 
+  io_bench/task_executor.h
+  io_bench/task_executor.cpp
+  io_bench/ob_admin_io_adapter_bench.h
+  io_bench/ob_admin_io_adapter_bench.cpp
+
+  io_device/ob_admin_test_io_device_executor.h
+  io_device/ob_admin_test_io_device_executor.cpp
+  io_device/ob_admin_test_object_storage_interface.cpp
+
+  object_storage_driver_quality/ob_admin_object_storage_driver_quality.h
+  object_storage_driver_quality/ob_admin_object_storage_driver_quality.cpp
+  object_storage_driver_quality/ob_admin_object_storage_driver_quality_scene.cpp
+  object_storage_driver_quality/ob_admin_object_storage_driver_quality_task_handler.cpp
+
   #trx_tool/ob_admin_trx_executor.h
   #trx_tool/ob_admin_trx_executor.cpp
 
@@ -62,6 +83,7 @@ add_executable(ob_admin
   log_tool/parser/ob_admin_parser_group_entry.cpp
   log_tool/ob_admin_log_tool_executor.cpp
   ${ob_admin_tde_files}
+  ${ob_admin_shared_storage_files}
   )
 
 else()
@@ -89,6 +111,8 @@ add_executable(ob_admin
   main.cpp
   ob_admin_executor.cpp
   ob_admin_executor.h
+  ob_admin_common_utils.cpp
+  ob_admin_common_utils.h
   server_tool/ob_admin_routine.cpp
   server_tool/ob_admin_routine.h
   server_tool/ob_admin_server_executor.cpp
@@ -99,8 +123,6 @@ add_executable(ob_admin
 
   dump_enum_value/ob_admin_dump_enum_value_executor.cpp
   dump_enum_value/ob_admin_dump_enum_value_executor.h
-  dump_ckpt/ob_admin_dump_ckpt_executor.cpp
-  dump_ckpt/ob_admin_dump_ckpt_executor.h
 
   #  archive_tool/ob_fake_archive_log_file_store.h
   #  archive_tool/ob_fake_archive_log_file_store.cpp
@@ -116,6 +138,20 @@ add_executable(ob_admin
   backup_tool/ob_admin_dump_backup_data_executor.h
   backup_tool/ob_admin_dump_backup_data_executor.cpp
 
+  io_bench/task_executor.h
+  io_bench/task_executor.cpp
+  io_bench/ob_admin_io_adapter_bench.h
+  io_bench/ob_admin_io_adapter_bench.cpp
+
+  io_device/ob_admin_test_io_device_executor.h
+  io_device/ob_admin_test_io_device_executor.cpp
+  io_device/ob_admin_test_object_storage_interface.cpp
+
+  object_storage_driver_quality/ob_admin_object_storage_driver_quality.h
+  object_storage_driver_quality/ob_admin_object_storage_driver_quality.cpp
+  object_storage_driver_quality/ob_admin_object_storage_driver_quality_scene.cpp
+  object_storage_driver_quality/ob_admin_object_storage_driver_quality_task_handler.cpp
+
   #trx_tool/ob_admin_trx_executor.h
   #trx_tool/ob_admin_trx_executor.cpp
 
@@ -124,6 +160,7 @@ add_executable(ob_admin
   log_tool/parser/ob_admin_parser_group_entry.cpp
   log_tool/ob_admin_log_tool_executor.cpp
   ${ob_admin_tde_files}
+  ${ob_admin_shared_storage_files}
   )
 
 endif()
@@ -139,4 +176,9 @@ target_link_libraries(ob_admin
   ${ob_close_modules_static_name}
   -Wl,--end-group
   -static-libgcc
-  -static-libstdc++)
+  -static-libstdc++
+  malloc_hook)
+
+if(ENABLE_THIN_LTO AND USE_LTO_CACHE)
+  add_dependencies(ob_admin observer)
+endif()

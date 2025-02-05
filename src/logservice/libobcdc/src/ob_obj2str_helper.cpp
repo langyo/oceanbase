@@ -12,7 +12,6 @@
  * obj2str helper
  */
 
-#include <cstdlib>                                  // std::abs
 
 #include "ob_obj2str_helper.h"
 #include "ob_log_timezone_info_getter.h"
@@ -21,9 +20,9 @@
 #include "sql/engine/expr/ob_datum_cast.h"          // padding_char_for_cast
 #include "lib/alloc/ob_malloc_allocator.h"
 #include "lib/geo/ob_geo_utils.h"
-#ifdef OB_BUILD_ORACLE_XML
+#include "lib/roaringbitmap/ob_rb_utils.h"
 #include "lib/xml/ob_xml_util.h"
-#endif
+#include "lib/udt/ob_array_utils.h"
 #include "sql/engine/expr/ob_expr_uuid.h"
 #include "sql/engine/expr/ob_expr_operator.h"
 #include "sql/engine/expr/ob_expr_res_type_map.h"
@@ -93,6 +92,9 @@ int ObObj2strHelper::init_ob_charset_utils()
     OBLOG_LOG(ERROR, "failed to init ObNumberConstValue", KR(ret));
   } else if (OB_FAIL(sql::ARITH_RESULT_TYPE_ORACLE.init())) {
     OBLOG_LOG(ERROR, "failed to init ORACLE_ARITH_RESULT_TYPE", KR(ret));
+  } else if (OB_FAIL(ObCharset::init_charset())) {
+    SQL_LOG(ERROR, "fail to init charset", K(ret));
+  //pre-generate charset const str tab should be done after init_charset
   } else if (OB_FAIL(ObCharsetUtils::init(*allocator))) {
     OBLOG_LOG(ERROR, "fail to init ObCharsetUtils", KR(ret));
   } else if (OB_FAIL(wide::ObDecimalIntConstValue::init_const_values(*allocator, attr))) {
@@ -113,7 +115,7 @@ void ObObj2strHelper::destroy()
 }
 
 
-//extended_type_info used for enum/set
+//extended_type_info used for enum/set and collection type
 int ObObj2strHelper::obj2str(const uint64_t tenant_id,
     const uint64_t table_id,
     const uint64_t column_id,
@@ -165,6 +167,16 @@ int ObObj2strHelper::obj2str(const uint64_t tenant_id,
   } else if (ObGeometryType == obj_type) {
     if (OB_FAIL(convert_ob_geometry_to_ewkt_(obj, str, allocator))) {
       OBLOG_LOG(ERROR, "convert_ob_geometry_to_ewkt_ fail", KR(ret), K(table_id), K(column_id),
+          K(obj), K(obj_type), K(str));
+    }
+  } else if (ObRoaringBitmapType == obj_type) {
+    if (OB_FAIL(ObRbUtils::binary_format_convert(allocator, obj.get_string(), str))) {
+      OBLOG_LOG(ERROR, "binary_format_convert fail", KR(ret), K(table_id), K(column_id),
+          K(obj), K(obj_type), K(str));
+    }
+  } else if (ObCollectionSQLType == obj_type) {
+    if (OB_FAIL(convert_collection_to_text_(obj, str, extended_type_info, allocator))) {
+      OBLOG_LOG(ERROR, "convert_collection_to_text_ fail", KR(ret), K(table_id), K(column_id),
           K(obj), K(obj_type), K(str));
     }
   // This should be before is_string_type, because for char/nchar it is also ObStringTC, so is_string_type=true
@@ -226,19 +238,13 @@ int ObObj2strHelper::obj2str(const uint64_t tenant_id,
     if (OB_SUCC(ret)) {
       common::ObObj str_obj;
       common::ObObjType target_type = common::ObMaxType;
-      ObCDCTenantTimeZoneInfo *obcdc_tenant_tz_info = nullptr;
 
-      if (OB_ISNULL(timezone_info_getter_)) {
+      if (OB_ISNULL(tz_info_wrap)) {
         ret = OB_ERR_UNEXPECTED;
-        OBLOG_LOG(ERROR, "timezone_info_getter_ is null", K(timezone_info_getter_));
-      } else if (OB_FAIL(timezone_info_getter_->get_tenant_tz_info(tenant_id, obcdc_tenant_tz_info))) {
-        OBLOG_LOG(ERROR, "get_tenant_tz_wrap failed", KR(ret), K(tenant_id));
-      } else if (OB_ISNULL(obcdc_tenant_tz_info)) {
-        ret = OB_ERR_UNEXPECTED;
-        OBLOG_LOG(ERROR, "tenant_tz_info not valid", KR(ret), K(tenant_id));
+        OBLOG_LOG(ERROR, "tz_info_wrap is nullptr", K(tenant_id), K(table_id), K(tz_info_wrap));
       } else {
         // obcdc need use_standard_format
-        const common::ObTimeZoneInfo *tz_info = obcdc_tenant_tz_info->get_timezone_info();
+        const common::ObTimeZoneInfo *tz_info = tz_info_wrap->get_time_zone_info();
         const ObDataTypeCastParams dtc_params(tz_info);
         ObObjCastParams cast_param(&allocator, &dtc_params, CM_NONE, collation_type);
         cast_param.format_number_with_limit_ = false;//here need no limit format number for libobcdc
@@ -451,7 +457,7 @@ int ObObj2strHelper::convert_ob_geometry_to_ewkt_(const common::ObObj &obj,
     common::ObIAllocator &allocator) const
 {
   const ObString &wkb = obj.get_string();
-  return ObGeoTypeUtil::geo_to_ewkt(wkb, str, allocator, 0);
+  return ObGeoTypeUtil::geo_to_ewkt(wkb, str, allocator, -1 /*use default prec*/, true /*output_srid0*/);
 }
 
 int ObObj2strHelper::convert_xmltype_to_text_(
@@ -459,12 +465,18 @@ int ObObj2strHelper::convert_xmltype_to_text_(
     common::ObString &str,
     common::ObIAllocator &allocator) const
 {
-#ifdef OB_BUILD_ORACLE_XML
   const ObString &data = obj.get_string();
   return ObXmlUtil::xml_bin_to_text(allocator, data, str);
-#else
-  return OB_NOT_SUPPORTED;
-#endif
+}
+
+int ObObj2strHelper::convert_collection_to_text_(
+    const common::ObObj &obj,
+    common::ObString &str,
+    const common::ObIArray<common::ObString> &extended_type_info,
+    common::ObIAllocator &allocator) const
+{
+  const ObString &data = obj.get_string();
+  return ObArrayUtil::convert_collection_bin_to_string(data, extended_type_info, allocator, str);
 }
 
 bool ObObj2strHelper::need_padding_(const lib::Worker::CompatMode &compat_mode,

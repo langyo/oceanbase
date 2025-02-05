@@ -11,17 +11,10 @@
  */
 
 #define USING_LOG_PREFIX SQL_ENG
-#include "lib/container/ob_se_array.h"
-#include "share/ob_rpc_share.h"
-#include "share/schema/ob_part_mgr_util.h"
 #include "sql/dtl/ob_dtl_channel_group.h"
 #include "sql/engine/px/ob_dfo_scheduler.h"
-#include "sql/engine/px/ob_px_scheduler.h"
-#include "sql/engine/px/ob_px_util.h"
-#include "sql/engine/px/ob_px_dtl_msg.h"
 #include "sql/engine/px/ob_px_rpc_processor.h"
 #include "sql/engine/px/ob_px_sqc_async_proxy.h"
-#include "share/ob_server_blacklist.h"
 #include "share/detect/ob_detect_manager_utils.h"
 #include "ob_px_coord_op.h"
 
@@ -307,7 +300,7 @@ int ObSerialDfoScheduler::init_all_dfo_channel(ObExecContext &ctx) const
       } else if (parent->is_root_dfo() && !parent->is_thread_inited() &&
           OB_FAIL(ObPXServerAddrUtil::alloc_by_local_distribution(ctx, *parent))) {
         LOG_WARN("fail to alloc local distribution", K(ret));
-      } else if (!parent->is_root_dfo() &&
+      } else if (!parent->is_root_dfo() && !parent->is_thread_inited() &&
                  ObPQDistributeMethod::PARTITION_HASH == child->get_dist_method()) {
         if (OB_FAIL(ObPXServerAddrUtil::alloc_by_reference_child_distribution(
             coord_info_.pruning_table_location_,
@@ -584,6 +577,19 @@ int ObSerialDfoScheduler::do_schedule_dfo(ObExecContext &ctx, ObDfo &dfo) const
     }
   }
 
+  // 2. allocate branch_id for DML: replace, insert update, select for update
+  if (OB_SUCC(ret) && dfo.has_need_branch_id_op()) {
+    ARRAY_FOREACH_X(sqcs, idx, cnt, OB_SUCC(ret)) {
+      int16_t branch_id = 0;
+      const int64_t max_task_count = sqcs.at(idx)->get_max_task_count();
+      if (OB_FAIL(ObSqlTransControl::alloc_branch_id(ctx, max_task_count, branch_id))) {
+        LOG_WARN("alloc branch id fail", KR(ret), K(max_task_count));
+      } else {
+        sqcs.at(idx)->set_branch_id_base(branch_id);
+        LOG_TRACE("alloc branch id", K(max_task_count), K(branch_id), KPC(sqcs.at(idx)));
+      }
+    }
+  }
 
   if (OB_SUCC(ret)) {
     if (OB_FAIL(dispatch_sqcs(ctx, dfo, sqcs))) {
@@ -613,8 +619,14 @@ void ObSerialDfoScheduler::clean_dtl_interm_result(ObExecContext &exec_ctx)
 {
   int ret = OB_SUCCESS;
   const ObIArray<ObDfo *> &all_dfos = coord_info_.dfo_mgr_.get_all_dfos();
-  ObDfo *last_dfo = all_dfos.at(all_dfos.count() - 1);
-  if (OB_NOT_NULL(last_dfo) && last_dfo->is_scheduled() && OB_NOT_NULL(last_dfo->parent())
+  ObDfo *last_dfo = nullptr;
+  int clean_ret = OB_E(EventTable::EN_ENABLE_CLEAN_INTERM_RES) OB_SUCCESS;
+  if (clean_ret != OB_SUCCESS) {
+    // Fault injection: Do not clean up interm results.
+  } else if (all_dfos.empty()) {
+    // do nothing
+  } else if (FALSE_IT(last_dfo = all_dfos.at(all_dfos.count() - 1))) {
+  } else if (OB_NOT_NULL(last_dfo) && last_dfo->is_scheduled() && OB_NOT_NULL(last_dfo->parent())
       && last_dfo->parent()->is_root_dfo()) {
     // all dfo scheduled, do nothing.
     LOG_TRACE("all dfo scheduled.");
@@ -689,7 +701,6 @@ void ObSerialDfoScheduler::clean_dtl_interm_result(ObExecContext &exec_ctx)
 int ObParallelDfoScheduler::do_schedule_dfo(ObExecContext &exec_ctx, ObDfo &dfo) const
 {
   int ret = OB_SUCCESS;
-
   ObArray<ObPxSqcMeta *> sqcs;
   if (OB_FAIL(dfo.get_sqcs(sqcs))) {
     LOG_WARN("fail get qc-sqc channel for QC", K(ret));
@@ -752,6 +763,20 @@ int ObParallelDfoScheduler::do_schedule_dfo(ObExecContext &exec_ctx, ObDfo &dfo)
       sqc.set_sqc_count(sqcs.count());
       LOG_TRACE("link qc-sqc channel and registered to qc msg loop. ready to receive sqc ctrl msg",
                 K(idx), K(cnt), K(*ch), K(dfo), K(sqc));
+    }
+  }
+
+  // 2. allocate branch_id for DML: replace, insert update, select for update
+  if (OB_SUCC(ret) && dfo.has_need_branch_id_op()) {
+    ARRAY_FOREACH_X(sqcs, idx, cnt, OB_SUCC(ret)) {
+      int16_t branch_id = 0;
+      const int64_t max_task_count = sqcs.at(idx)->get_max_task_count();
+      if (OB_FAIL(ObSqlTransControl::alloc_branch_id(exec_ctx, max_task_count, branch_id))) {
+        LOG_WARN("alloc branch id fail", KR(ret), K(max_task_count));
+      } else {
+        sqcs.at(idx)->set_branch_id_base(branch_id);
+        LOG_TRACE("alloc branch id", K(max_task_count), K(branch_id), KPC(sqcs.at(idx)));
+      }
     }
   }
 
@@ -1187,15 +1212,11 @@ int ObParallelDfoScheduler::dispatch_sqc(ObExecContext &exec_ctx,
           LOG_WARN("[DM] fail to push back dtl channels", K(push_ret), K(sqc.get_sqc_addr()),
               K(dfo.get_px_detectable_ids().sqc_detectable_id_));
         }
-      } else if (!cb->is_processed()) {
+      } else {
         // if init_sqc_msg is not processed and the msg may be sent successfully, set server not alive.
         // then when qc waiting_all_dfo_exit, it will push sqc.access_table_locations into trans_result,
         // and the query can be retried.
-        bool msg_not_send_out = (cb->get_error() == EASY_TIMEOUT_NOT_SENT_OUT
-                                || cb->get_error() == EASY_DISCONNECT_NOT_SENT_OUT);
-        if (!msg_not_send_out) {
-          sqc.set_server_not_alive(true);
-        }
+        sqc.set_server_not_alive(true);
       }
     }
   };
@@ -1401,7 +1422,7 @@ int ObParallelDfoScheduler::schedule_pair(ObExecContext &exec_ctx,
                                                                          parent))) {
           LOG_WARN("fail alloc addr by data distribution", K(parent), K(ret));
         } else { /*do nohting.*/ }
-      } else if (parent.is_root_dfo()) {
+      } else if (parent.is_root_dfo() || parent.has_into_odps()) {
         // QC/local dfo，直接在本机本线程执行，无需计算执行位置
         if (OB_FAIL(ObPXServerAddrUtil::alloc_by_local_distribution(exec_ctx,
                                                                     parent))) {
@@ -1429,8 +1450,10 @@ int ObParallelDfoScheduler::schedule_pair(ObExecContext &exec_ctx,
           }
           LOG_TRACE("alloc_by_data_distribution", K(parent));
         } else if (parent.is_single()) {
-          // parent 可能是一个 scalar group by，会被标记为 is_local，此时
+          // 常见于PDML场景，如果parent没有tsc，则中间parent DFO需要把数据从child dfo先拉到QC本地，再shuffle到上面的DFO
+          // 比如parent 可能是一个 scalar group by，会被标记为 is_local，此时
           // 走 alloc_by_data_distribution，内部会分配一个 QC 本地线程来执行
+          // 或者嵌套PX场景
           if (OB_FAIL(ObPXServerAddrUtil::alloc_by_data_distribution(
             coord_info_.pruning_table_location_, exec_ctx, parent))) {
             LOG_WARN("fail alloc addr by data distribution", K(parent), K(ret));
@@ -1443,8 +1466,15 @@ int ObParallelDfoScheduler::schedule_pair(ObExecContext &exec_ctx,
                   child, parent))) {
             LOG_WARN("fail alloc addr by data distribution", K(parent), K(child), K(ret));
           }
+        } else if (child.is_slave_mapping()) {
+          if (OB_UNLIKELY(ObPQDistributeMethod::HASH != child.get_dist_method())) {
+            ret = OB_ERR_UNEXPECTED;
+            LOG_WARN("unexpected dist method for slave mapping", K(ret), K(parent), K(child));
+          } else if (OB_FAIL(ObPXServerAddrUtil::alloc_by_child_distribution(child, parent))) {
+            LOG_WARN("alloc by child distribution failed", K(ret));
+          }
         } else if (OB_FAIL(ObPXServerAddrUtil::alloc_by_random_distribution(exec_ctx, child, parent))) {
-          LOG_WARN("fail alloc addr by data distribution", K(parent), K(child), K(ret));
+          LOG_WARN("fail alloc addr by random distribution", K(parent), K(child), K(ret));
         }
         LOG_TRACE("alloc_by_child_distribution", K(child), K(parent));
       }

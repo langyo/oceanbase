@@ -14,18 +14,11 @@
 
 #include "ob_sync_cmd_driver.h"
 
-#include "lib/profile/ob_perf_event.h"
 #include "obsm_row.h"
 #include "sql/resolver/cmd/ob_variable_set_stmt.h"
 #include "observer/mysql/obmp_query.h"
 #include "rpc/obmysql/packet/ompk_row.h"
-#include "rpc/obmysql/packet/ompk_eof.h"
-#include "share/ob_lob_access_utils.h"
-#include "observer/mysql/obmp_stmt_prexecute.h"
-#include "src/pl/ob_pl_user_type.h"
-#ifdef OB_BUILD_ORACLE_XML
 #include "sql/engine/expr/ob_expr_xml_func_helper.h"
-#endif
 
 namespace oceanbase
 {
@@ -69,6 +62,7 @@ int ObSyncCmdDriver::seal_eof_packet(bool has_more_result, OMPKEOF& eofp)
   const ObWarningBuffer *warnings_buf = common::ob_get_tsi_warning_buffer();
   uint16_t warning_count = 0;
   if (OB_ISNULL(warnings_buf)) {
+    // ignore ret
     LOG_WARN("can not get thread warnings buffer", K(warnings_buf));
   } else {
     warning_count = static_cast<uint16_t>(warnings_buf->get_readable_warning_count());
@@ -154,7 +148,7 @@ int ObSyncCmdDriver::response_result(ObMySQLResultSet &result)
     if (!result.is_pl_stmt(result.get_stmt_type())) {
       ret = OB_ERR_UNEXPECTED;
       LOG_ERROR("Not SELECT, should not have any row!!!", K(ret));
-    } else if (!result.is_ps_protocol() && is_mysql_mode() && session_.client_non_standard()) {
+    } else if (is_mysql_mode() && session_.client_non_standard()) {
       // do nothing
     } else if (OB_FAIL(response_query_result(result))) {
       LOG_WARN("response query result fail", K(ret));
@@ -173,6 +167,11 @@ int ObSyncCmdDriver::response_result(ObMySQLResultSet &result)
   } else if (is_prexecute_) {
     if (OB_FAIL(response_query_header(result, false, false , // in prexecute , has_more_result and has_ps out is no matter, it will be recalc
                                       true))) {
+      // need close result set
+      int close_ret = OB_SUCCESS;
+      if (OB_SUCCESS != (close_ret = result.close())) {
+        LOG_WARN("close result failed", K(close_ret));
+      }
       LOG_WARN("prexecute response query head fail. ", K(ret));
     }
   }
@@ -187,7 +186,7 @@ int ObSyncCmdDriver::response_result(ObMySQLResultSet &result)
     } else if (!result.is_with_rows()
                 || (sender_.need_send_extra_ok_packet() && !result.has_more_result())
                 || is_prexecute_
-                || (!result.is_ps_protocol() && is_mysql_mode() && session_.client_non_standard())) {
+                || (is_mysql_mode() && session_.client_non_standard())) {
       process_ok = true;
       ObOKPParam ok_param;
       ok_param.message_ = const_cast<char*>(result.get_message());
@@ -195,6 +194,7 @@ int ObSyncCmdDriver::response_result(ObMySQLResultSet &result)
       ok_param.lii_ = result.get_last_insert_id_to_client();
       const ObWarningBuffer *warnings_buf = common::ob_get_tsi_warning_buffer();
       if (OB_ISNULL(warnings_buf)) {
+        // ignore ret
         LOG_WARN("can not get thread warnings buffer");
       } else {
         ok_param.warnings_count_ =
@@ -319,26 +319,37 @@ int ObSyncCmdDriver::response_query_result(ObMySQLResultSet &result)
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("session info is null", K(ret));
   } else {
+    ObCharsetType charset_type = CHARSET_INVALID;
+    ObCharsetType nchar = CHARSET_INVALID;
+
+    if (OB_SUCC(ret)) {
+      const ObSQLSessionInfo &my_session = result.get_session();
+      if (OB_FAIL(my_session.get_ncharacter_set_connection(nchar))) {
+        LOG_WARN("get ncharacter set connection failed", K(ret));
+      } else if (OB_FAIL(my_session.get_character_set_results(charset_type))) {
+        LOG_WARN("fail to get result charset", K(ret));
+      }
+    }
+
     ObNewRow *tmp_row = const_cast<ObNewRow*>(row);
     for (int64_t i = 0; OB_SUCC(ret) && i < tmp_row->get_count(); i++) {
       ObObj& value = tmp_row->get_cell(i);
       if (ob_is_string_tc(value.get_type()) && CS_TYPE_INVALID != value.get_collation_type()) {
-        OZ(convert_string_value_charset(value, result));
+        OZ(convert_string_value_charset(value, result, charset_type, nchar));
       } else if (value.is_clob_locator()
-                && OB_FAIL(convert_lob_value_charset(value, result))) {
+                && OB_FAIL(convert_lob_value_charset(value, result, charset_type, nchar))) {
         LOG_WARN("convert lob value charset failed", K(ret));
       } else if (ob_is_text_tc(value.get_type())
-                && OB_FAIL(convert_text_value_charset(value, result))) {
+                && OB_FAIL(convert_text_value_charset(value, result, charset_type, nchar))) {
         LOG_WARN("convert text value charset failed", K(ret));
       }
       if (OB_FAIL(ret)) {
-      } else if ((value.is_lob() || value.is_lob_locator() || value.is_json() || value.is_geometry())
+      } else if ((value.is_lob() || value.is_lob_locator() || value.is_json() || value.is_geometry() || value.is_roaringbitmap())
                   && OB_FAIL(process_lob_locator_results(value, result))) {
         LOG_WARN("convert lob locator to longtext failed", K(ret));
-#ifdef OB_BUILD_ORACLE_XML
-      } else if (value.is_user_defined_sql_type() && OB_FAIL(ObXMLExprHelper::process_sql_udt_results(value, result))) {
+      } else if ((value.is_user_defined_sql_type() || value.is_collection_sql_type() || value.is_geometry()) &&
+                 OB_FAIL(ObXMLExprHelper::process_sql_udt_results(value, result))) {
         LOG_WARN("convert udt to client format failed", K(ret), K(value.get_udt_subschema_id()));
-#endif
       }
     }
 

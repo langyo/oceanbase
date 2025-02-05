@@ -14,33 +14,10 @@
 
 #include "sql/engine/px/ob_px_scheduler.h"
 #include "sql/engine/px/ob_dfo_scheduler.h"
-#include "sql/engine/px/ob_dfo_mgr.h"
-#include "lib/random/ob_random.h"
-#include "share/ob_rpc_share.h"
-#include "share/schema/ob_part_mgr_util.h"
-#include "sql/ob_sql.h"
-#include "sql/engine/px/ob_px_util.h"
-#include "sql/dtl/ob_dtl_channel_group.h"
-#include "sql/dtl/ob_dtl_channel_loop.h"
-#include "sql/dtl/ob_dtl_msg_type.h"
-#include "sql/dtl/ob_dtl.h"
-#include "sql/dtl/ob_dtl_task.h"
-#include "sql/dtl/ob_op_metric.h"
-#include "sql/engine/ob_exec_context.h"
-#include "sql/engine/px/ob_px_dtl_msg.h"
-#include "sql/engine/px/ob_px_dtl_proc.h"
-#include "sql/engine/px/ob_px_util.h"
-#include "sql/engine/px/ob_px_interruption.h"
-#include "share/config/ob_server_config.h"
-#include "sql/engine/px/ob_px_sqc_async_proxy.h"
-#include "sql/engine/px/datahub/ob_dh_dtl_proc.h"
-#include "sql/engine/px/datahub/components/ob_dh_rollup_key.h"
 #include "sql/engine/px/datahub/components/ob_dh_winbuf.h"
-#include "sql/engine/px/datahub/components/ob_dh_sample.h"
-#include "sql/engine/px/ob_px_sqc_proxy.h"
-#include "storage/tx/ob_trans_service.h"
 #include "share/detect/ob_detect_manager_utils.h"
 #include "sql/engine/join/ob_join_filter_op.h"
+#include "src/sql/engine/px/datahub/components/ob_dh_join_filter_count_row.h"
 
 namespace oceanbase
 {
@@ -136,6 +113,7 @@ void ObPxMsgProc::clean_dtl_interm_result(ObExecContext &ctx)
 {
   int ret = OB_SUCCESS;
   if (OB_ISNULL(scheduler_)) {
+    // ignore ret
     LOG_WARN("dfo scheduler is null");
   } else {
     scheduler_->clean_dtl_interm_result(ctx);
@@ -173,7 +151,8 @@ int ObPxMsgProc::on_sqc_init_msg(ObExecContext &ctx, const ObPxInitSqcResultMsg 
   } else {
     if (OB_SUCCESS != pkt.rc_) {
       ret = pkt.rc_;
-      ObPxErrorUtil::update_qc_error_code(coord_info_.first_error_code_, pkt.rc_, pkt.err_msg_);
+      ObPxErrorUtil::update_qc_error_code(coord_info_.first_error_code_,
+          pkt.rc_, pkt.err_msg_, sqc->get_exec_addr());
       LOG_WARN("fail init sqc, please check remote server log for details",
                "remote_server", sqc->get_exec_addr(), K(pkt), KP(ret));
     } else if (pkt.task_count_ <= 0) {
@@ -279,6 +258,35 @@ int ObPxMsgProc::on_sqc_finish_msg(ObExecContext &ctx,
   int ret = OB_SUCCESS;
   ObDfo *edge = NULL;
   ObPxSqcMeta *sqc = NULL;
+  if (OB_FAIL(coord_info_.dfo_mgr_.find_dfo_edge(pkt.dfo_id_, edge))) {
+    LOG_WARN("fail find dfo", K(pkt), K(ret));
+  } else if (OB_ISNULL(edge)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("NULL ptr", K(pkt), K(ret));
+  } else if (OB_FAIL(edge->get_sqc(pkt.sqc_id_, sqc))) {
+    LOG_WARN("fail find sqc", K(pkt), K(ret));
+  } else if (OB_ISNULL(sqc)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("NULL ptr", K(pkt), K(ret));
+  } else if (sqc->is_thread_finish()) {
+    // For virtual tables, if both the mocked SQC finish message and the real SQC finish message are
+    // processed by the QC, we should skip the processing of the finish message that arrives later.
+  } else if (OB_FAIL(process_sqc_finish_msg_once(ctx, pkt, sqc, edge))) {
+    LOG_WARN("failed to process_sqc_finish_msg_once");
+  }
+  return ret;
+}
+
+void ObPxMsgProc::log_warn_sqc_fail(int ret, const ObPxFinishSqcResultMsg &pkt, ObPxSqcMeta *sqc)
+{
+  // Do not change the follow log about px_obdiag_sqc_addr, becacue it will use in obdiag tool
+  LOG_WARN("sqc fail, abort qc", K(pkt), K(ret), "px_obdiag_sqc_addr", sqc->get_exec_addr());
+}
+
+int ObPxMsgProc::process_sqc_finish_msg_once(ObExecContext &ctx, const ObPxFinishSqcResultMsg &pkt,
+                                        ObPxSqcMeta *sqc, ObDfo *edge)
+{
+  int ret = OB_SUCCESS;
   ObSQLSessionInfo *session = NULL;
   ObPhysicalPlanCtx *phy_plan_ctx = NULL;
   if (OB_ISNULL(session = ctx.get_my_session())) {
@@ -291,7 +299,7 @@ int ObPxMsgProc::on_sqc_finish_msg(ObExecContext &ctx,
     LOG_WARN("fail to merge feedback info", K(ret));
   } else if (OB_ISNULL(session->get_tx_desc())) {
   } else if (OB_FAIL(MTL(transaction::ObTransService*)
-                     ->add_tx_exec_result(*session->get_tx_desc(),
+                    ->add_tx_exec_result(*session->get_tx_desc(),
                                           pkt.get_trans_result()))) {
     LOG_WARN("fail merge result", K(ret),
              "packet_trans_result", pkt.get_trans_result(),
@@ -302,28 +310,24 @@ int ObPxMsgProc::on_sqc_finish_msg(ObExecContext &ctx,
               "tx_desc", *session->get_tx_desc());
   }
   if (OB_FAIL(ret)) {
-  } else if (OB_FAIL(coord_info_.dfo_mgr_.find_dfo_edge(pkt.dfo_id_, edge))) {
-    LOG_WARN("fail find dfo", K(pkt), K(ret));
-  } else if (OB_FAIL(edge->get_sqc(pkt.sqc_id_, sqc))) {
-    LOG_WARN("fail find sqc", K(pkt), K(ret));
-  } else if (OB_ISNULL(edge) || OB_ISNULL(sqc)) {
-    ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("NULL ptr", KP(edge), KP(sqc), K(ret));
-  } else if (FALSE_IT(sqc->set_need_report(false))) {
   } else if (common::OB_INVALID_ID != pkt.temp_table_id_) {
     if (OB_FAIL(ctx.add_temp_table_interm_result_ids(pkt.temp_table_id_,
                                                      sqc->get_exec_addr(),
                                                      pkt.interm_result_ids_))) {
       LOG_WARN("failed to add temp table interm result ids.", K(ret));
-    } else { /*do nothing.*/ }
-  } else { /*do nothing.*/ }
+    }
+  }
+
   if (OB_SUCC(ret)) {
+    sqc->set_need_report(false);
+    sqc->set_thread_finish(true);
+    // process for DM, mark sqc finished, then DM will not detect this sqc again.
     if (OB_NOT_NULL(edge->get_detect_cb())) {
 #ifdef ERRSIM
-      if (OB_FAIL(OB_E(EventTable::EN_PX_SLOW_PROCESS_SQC_FINISH_MSG) OB_SUCCESS)) {
+      int ecode = EventTable::EN_PX_SLOW_PROCESS_SQC_FINISH_MSG;
+      if (OB_SUCCESS != ecode && OB_SUCC(ret)) {
         LOG_WARN("qc slow process sqc finish msg by desgin", K(ret));
         usleep(100 * 1000L);
-        ret = OB_SUCCESS;
       }
 #endif
       int set_finish_ret = edge->get_detect_cb()->atomic_set_finished(sqc->get_sqc_addr());
@@ -331,7 +335,7 @@ int ObPxMsgProc::on_sqc_finish_msg(ObExecContext &ctx,
         LOG_WARN("[DM] failed to atomic_set_finished", K(set_finish_ret), K(sqc->get_sqc_addr()));
       }
     }
-    sqc->set_thread_finish(true);
+    // process for virtual table, mock eof buffer let px exit msg loop
     if (sqc->is_ignore_vtable_error() && OB_SUCCESS != pkt.rc_
         && ObVirtualTableErrorWhitelist::should_ignore_vtable_error(pkt.rc_)) {
        // 如果收到一个sqc finish消息, 如果该sqc涉及虚拟表, 需要忽略所有错误码
@@ -350,7 +354,7 @@ int ObPxMsgProc::on_sqc_finish_msg(ObExecContext &ctx,
     LOG_TRACE("on_sqc_finish_msg update feedback info",
         K(pkt.fb_info_), K(ctx.get_feedback_info()));
   }
-
+  // mark dfo finished if all sqcs in this dfo is finished
   if (OB_SUCC(ret)) {
     ObArray<ObPxSqcMeta *> sqcs;
     if (OB_FAIL(edge->get_sqcs(sqcs))) {
@@ -384,11 +388,12 @@ int ObPxMsgProc::on_sqc_finish_msg(ObExecContext &ctx,
    * 发送这个finish消息的sqc（包括它的worker）其实已经结束了，需要将它
    * 但是因为出错了，后续的调度流程不需要继续了，后面流程会进行错误处理。
    */
-  ObPxErrorUtil::update_qc_error_code(coord_info_.first_error_code_, pkt.rc_, pkt.err_msg_);
+  ObPxErrorUtil::update_qc_error_code(coord_info_.first_error_code_,
+      pkt.rc_, pkt.err_msg_, sqc->get_exec_addr());
   if (OB_SUCC(ret)) {
     if (OB_FAIL(pkt.rc_)) {
       DAS_CTX(ctx).get_location_router().save_cur_exec_status(pkt.rc_);
-      LOG_WARN("sqc fail, abort qc", K(pkt), K(ret), "sqc_addr", sqc->get_exec_addr());
+      log_warn_sqc_fail(ret, pkt, sqc);
     } else {
       // pkt rc_ == OB_SUCCESS
       // 处理 dml + px 框架下的affected row
@@ -399,10 +404,15 @@ int ObPxMsgProc::on_sqc_finish_msg(ObExecContext &ctx,
       } else  {
         ctx.get_physical_plan_ctx()->add_affected_rows(pkt.sqc_affected_rows_);
         ctx.get_physical_plan_ctx()->add_px_dml_row_info(pkt.dml_row_info_);
+        ctx.get_physical_plan_ctx()->add_total_memstore_read_row_count(
+          pkt.sqc_memstore_row_read_count_);
+        ctx.get_physical_plan_ctx()->add_total_ssstore_read_row_count(
+          pkt.sqc_ssstore_row_read_count_);
       }
     }
   }
 
+  // schedule_next_dfo if this dfo is finished.
   if (OB_SUCC(ret)) {
     if (edge->is_thread_finish()) {
       if (OB_NOT_NULL(ctx.get_physical_plan_ctx()->get_phy_plan()) &&
@@ -484,6 +494,24 @@ int ObPxMsgProc::on_piece_msg(
     const ObOptStatsGatherPieceMsg &pkt)
 {
   ObDhPieceMsgProc<ObOptStatsGatherPieceMsg> proc;
+  return proc.on_piece_msg(coord_info_, ctx, pkt);
+}
+
+int ObPxMsgProc::on_piece_msg(ObExecContext &ctx, const SPWinFuncPXPieceMsg &pkt)
+{
+  ObDhPieceMsgProc<SPWinFuncPXPieceMsg> proc;
+  return proc.on_piece_msg(coord_info_, ctx, pkt);
+}
+
+int ObPxMsgProc::on_piece_msg(ObExecContext &ctx, const RDWinFuncPXPieceMsg &pkt)
+{
+  ObDhPieceMsgProc<RDWinFuncPXPieceMsg> proc;
+  return proc.on_piece_msg(coord_info_, ctx, pkt);
+}
+
+int ObPxMsgProc::on_piece_msg(ObExecContext &ctx, const ObJoinFilterCountRowPieceMsg &pkt)
+{
+  ObDhPieceMsgProc<ObJoinFilterCountRowPieceMsg> proc;
   return proc.on_piece_msg(coord_info_, ctx, pkt);
 }
 
@@ -575,7 +603,8 @@ int ObPxTerminateMsgProc::on_sqc_init_msg(ObExecContext &ctx, const ObPxInitSqcR
     if (pkt.rc_ != OB_SUCCESS) {
       LOG_DEBUG("receive error code from sqc init msg", K(coord_info_.first_error_code_), K(pkt.rc_));
     }
-    ObPxErrorUtil::update_qc_error_code(coord_info_.first_error_code_, pkt.rc_, pkt.err_msg_);
+    ObPxErrorUtil::update_qc_error_code(coord_info_.first_error_code_,
+        pkt.rc_, pkt.err_msg_, sqc->get_exec_addr());
   }
 
   if (OB_SUCC(ret)) {
@@ -644,7 +673,8 @@ int ObPxTerminateMsgProc::on_sqc_finish_msg(ObExecContext &ctx, const ObPxFinish
     if (pkt.rc_ != OB_SUCCESS) {
       LOG_DEBUG("receive error code from sqc finish msg", K(coord_info_.first_error_code_), K(pkt.rc_));
     }
-    ObPxErrorUtil::update_qc_error_code(coord_info_.first_error_code_, pkt.rc_, pkt.err_msg_);
+    ObPxErrorUtil::update_qc_error_code(coord_info_.first_error_code_,
+        pkt.rc_, pkt.err_msg_, sqc->get_exec_addr());
 
     NG_TRACE_EXT(sqc_finish,
                  OB_ID(dfo_id), sqc->get_dfo_id(),

@@ -12,12 +12,6 @@
 
 #define USING_LOG_PREFIX SQL_OPT
 #include "ob_log_topk.h"
-#include "ob_log_group_by.h"
-#include "ob_log_operator_factory.h"
-#include "ob_log_sort.h"
-#include "ob_log_table_scan.h"
-#include "ob_optimizer_util.h"
-#include "ob_opt_est_cost.h"
 #include "sql/rewrite/ob_transform_utils.h"
 using namespace oceanbase::sql;
 using namespace oceanbase::common;
@@ -132,7 +126,7 @@ int ObLogTopk::est_cost()
     topk_card = std::min(topk_card, child->get_card());
     ObOptimizerContext &opt_ctx = get_plan()->get_optimizer_context();
     double op_cost = ObOptEstCost::cost_get_rows(topk_card / parallel,
-                                                 opt_ctx.get_cost_model_type());
+                                                 opt_ctx);
     set_card(topk_card);
     set_op_cost(op_cost);
     set_cost(child->get_cost() + op_cost);

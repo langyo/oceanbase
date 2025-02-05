@@ -13,10 +13,9 @@
 
 #define USING_LOG_PREFIX SQL_ENG
 #include "ob_expr_xml_attributes.h"
+#include "share/ob_json_access_utils.h"
 #include "sql/engine/expr/ob_expr_json_func_helper.h" // may need json for kv pairs
-#ifdef OB_BUILD_ORACLE_XML
-#include "sql/engine/expr/ob_expr_xml_func_helper.h"
-#endif
+#include "deps/oblib/src/lib/xml/ob_xml_parser.h"
 using namespace oceanbase::common;
 using namespace oceanbase::sql;
 
@@ -82,12 +81,13 @@ int ObExprXmlAttributes::calc_result_typeN(ObExprResType &type,
   return ret;
 }
 
-#ifdef OB_BUILD_ORACLE_XML
 int ObExprXmlAttributes::eval_xml_attributes(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &res)
 {
   INIT_SUCC(ret);
   ObEvalCtx::TempAllocGuard tmp_alloc_g(ctx);
-  common::ObArenaAllocator &tmp_allocator = tmp_alloc_g.get_allocator();
+  uint64_t tenant_id = ObMultiModeExprHelper::get_tenant_id(ctx.exec_ctx_.get_my_session());
+  MultimodeAlloctor tmp_allocator(tmp_alloc_g.get_allocator(), expr.type_, tenant_id, ret);
+  lib::ObMallocHookAttrGuard malloc_guard(lib::ObMemAttr(tenant_id, "XMLModule"));
   int attributes_escape = 1;
   int has_schema_check = 0;
   ObDatum *datum = NULL;
@@ -133,11 +133,12 @@ int ObExprXmlAttributes::eval_xml_attributes(const ObExpr &expr, ObEvalCtx &ctx,
     // set result(json bin)
     if (OB_SUCC(ret)) {
       ObString raw_bin;
-      if (OB_FAIL(j_base->get_raw_binary(raw_bin, &tmp_allocator))) {
+      if (OB_FAIL(ObJsonWrapper::get_raw_binary(j_base, raw_bin, &tmp_allocator))) {
         LOG_WARN("failed: get json raw binary", K(ret));
       } else {
         uint64_t length = raw_bin.length();
         char *buf = expr.get_str_res_mem(ctx, length);
+        OB_FALSE_IT(tmp_allocator.set_baseline_size(length));
         if (OB_ISNULL(buf)) {
           ret = OB_ALLOCATE_MEMORY_FAILED;
           LOG_WARN("failed: alloc memory for json array result", K(ret), K(length));
@@ -150,7 +151,6 @@ int ObExprXmlAttributes::eval_xml_attributes(const ObExpr &expr, ObEvalCtx &ctx,
   }
   return ret;
 }
-#endif
 
 int ObExprXmlAttributes::cg_expr(ObExprCGCtx &expr_cg_ctx, const ObRawExpr &raw_expr, ObExpr &rt_expr) const
 {

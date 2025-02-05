@@ -13,10 +13,12 @@
 #define OB_STORAGE_COLUMN_STORE_OB_CO_SSTABLE_ROWS_FILTER_H_
 #include "lib/container/ob_se_array.h"
 #include "sql/engine/basic/ob_pushdown_filter.h"
+#include "storage/access/ob_sample_filter.h"
 #include "storage/access/ob_table_access_param.h"
 #include "ob_i_cg_iterator.h"
 #include "ob_cg_iter_param_pool.h"
 #include "ob_cg_bitmap.h"
+#include "storage/access/ob_where_optimizer.h"
 
 namespace oceanbase
 {
@@ -29,7 +31,14 @@ class ObCOSSTableV2;
 class ObCOSSTableRowsFilter
 {
 public:
-  static const uint32_t MAX_NUM_OF_CG_ITER_TO_LOCATE_IN_ADVANCE = 2;
+  static constexpr uint32_t MAX_NUM_OF_CG_ITER_TO_LOCATE_IN_ADVANCE = 2;
+  static constexpr uint8_t filter_tree_merge_status[sql::ObCommonFilterTreeStatus::MAX_STATUS][sql::ObCommonFilterTreeStatus::MAX_STATUS] =
+  { {0, 0, 0, 0}, \
+    {0, 1, 0, 0}, \
+    {0, 0, 2, 3}, \
+    {0, 0, 3, 3}
+  };
+
 public:
   ObCOSSTableRowsFilter();
   ~ObCOSSTableRowsFilter();
@@ -47,18 +56,16 @@ public:
   int apply(const ObCSRange &range);
   int prepare_apply(const ObCSRange &range);
   const ObCGBitmap* get_result_bitmap();
-  static int filter_batch_rows(
-      sql::ObPushdownFilterExecutor *parent,
-      sql::ObPushdownFilterExecutor *filter,
-      const uint64_t row_count);
   static int switch_context_for_cg_iter(
       const bool is_projector,
       const bool project_single_row,
+      const bool without_filter,
       ObCOSSTableV2 *co_sstable,
       ObTableAccessContext &context,
       common::ObIArray<ObTableIterParam*> &cg_params,
       const bool col_cnt_changed,
       ObICGIterator *&cg_iter);
+  inline bool can_continuous_filter() const { return can_continuous_filter_; }
   TO_STRING_KV(K_(is_inited), K_(subtree_filter_iter_to_locate), K_(batch_size),
       KPC_(iter_param), KP_(access_ctx), KP_(co_sstable), K_(filter), K_(filter_iters),
       K_(iter_filter_node), K_(bitmap_buffer), K_(pd_filter_info));
@@ -78,7 +85,7 @@ private:
   int construct_cg_iter_params(
       const sql::ObPushdownFilterExecutor *filter,
       common::ObIArray<ObTableIterParam*> &iter_params);
-  int rewrite_filter();
+  int rewrite_filter(uint32 &depth);
   int judge_whether_use_common_cg_iter(
       sql::ObPushdownFilterExecutor *filter);
   int transform_filter_tree(
@@ -86,8 +93,8 @@ private:
   int find_common_sub_filter_tree(
       sql::ObPushdownFilterExecutor &filter,
       ObIArray<uint32_t> &filter_indexes,
-      common::ObIArray<uint32_t> *&common_col_group_ids,
-      common::ObIArray<sql::ObExpr *> *&common_col_exprs,
+      common::ObIArray<uint32_t> &common_cg_ids,
+      common::ObIArray<sql::ObExpr *> &common_cg_exprs,
       const int64_t base_filter_idx);
   int rewrite_filter_tree(
       sql::ObPushdownFilterExecutor *filter,
@@ -104,21 +111,23 @@ private:
       ObCGBitmap *&result);
   int init_bitmap_buffer(uint32_t bitmap_buffer_count);
   void adjust_batch_size();
-  void reuse_lob_locator();
   OB_INLINE ObCGBitmap* get_child_bitmap(uint32_t depth);
   static int assign_common_col_groups(
-      sql::ObPushdownFilterExecutor *filter,
-      common::ObIArray<uint32_t> *&common_col_group_ids,
-      common::ObIArray<sql::ObExpr *> *&common_cg_col_exprs,
+      const sql::ObPushdownFilterExecutor *filter,
+      const sql::ObCommonFilterTreeStatus prev_status,
+      common::ObIArray<uint32_t> &common_cg_ids,
+      common::ObIArray<sql::ObExpr *> &common_cg_exprs,
       bool &is_common);
   static sql::ObCommonFilterTreeStatus merge_common_filter_tree_status(
-      sql::ObCommonFilterTreeStatus status_one,
-      sql::ObCommonFilterTreeStatus status_two);
+      const sql::ObCommonFilterTreeStatus status_one,
+      const sql::ObCommonFilterTreeStatus status_two);
   static bool is_common_filter_tree_status(
-      sql::ObCommonFilterTreeStatus status_one,
-      sql::ObCommonFilterTreeStatus status_two);
+      const sql::ObCommonFilterTreeStatus status_one,
+      const sql::ObCommonFilterTreeStatus status_two);
   static void set_status_of_filter_tree(sql::ObPushdownFilterExecutor *filter);
   static void clear_filter_state(sql::ObPushdownFilterExecutor *filter);
+  int filter_tree_can_continuous_filter(sql::ObPushdownFilterExecutor *filter,
+                                        bool &can_continuous_filter) const;
 private:
   bool is_inited_;
   bool prepared_;
@@ -129,11 +138,14 @@ private:
   ObTableAccessContext* access_ctx_;
   ObCOSSTableV2* co_sstable_;
   common::ObIAllocator *allocator_;
+  ObSEArray<ObCGBitmap*, 4> bitmap_buffer_;
+  sql::PushdownFilterInfo pd_filter_info_;
+  bool can_continuous_filter_;
+public:
   sql::ObPushdownFilterExecutor *filter_;
   ObSEArray<ObICGIterator*, 4> filter_iters_;
   ObSEArray<sql::ObPushdownFilterExecutor*, 4> iter_filter_node_;
-  ObSEArray<ObCGBitmap*, 4> bitmap_buffer_;
-  sql::PushdownFilterInfo pd_filter_info_;
+  ObWhereOptimizer *where_optimizer_;
 };
 }
 }

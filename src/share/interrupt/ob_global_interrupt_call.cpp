@@ -12,11 +12,7 @@
 
 #define USING_LOG_PREFIX SERVER
 
-#include "lib/utility/ob_macro_utils.h"
-#include "lib/ob_running_mode.h"
-#include "lib/ob_running_mode.h"
 #include "share/interrupt/ob_global_interrupt_call.h"
-#include "share/interrupt/ob_interrupt_rpc_proxy.h"
 
 namespace oceanbase {
 namespace common {
@@ -140,6 +136,11 @@ int ObGlobalInterruptManager::register_checker(ObInterruptChecker *checker,
     } while (ret == OB_HASH_NOT_EXIST);
     if (OB_SUCC(ret)) {
       ATOMIC_INC(&(checker->ref_count_));
+    } else {
+      LOG_WARN("failed to register_checker");
+      if (OB_NOT_NULL(checker_node)) {
+        ob_delete(checker_node);
+      }
     }
   }
   return ret;
@@ -159,7 +160,7 @@ int ObGlobalInterruptManager::unregister_checker(ObInterruptChecker *checker,
     LIB_LOG(ERROR, "invaild checker pointer");
   } else {
     ObInterruptGetCheckerNodeCall get_node_call(checker);
-    if (OB_HASH_NOT_EXIST == map_.read_atomic(tid, get_node_call)) {
+    if (OB_HASH_NOT_EXIST == (ret = map_.read_atomic(tid, get_node_call))) {
       LIB_LOG(ERROR, "unregister checker failed", K(ret));
     } else if (!get_node_call.is_checker_exist()) {
       ret = OB_HASH_NOT_EXIST;

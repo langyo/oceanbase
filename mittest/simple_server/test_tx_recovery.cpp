@@ -1,3 +1,6 @@
+// owner: handora.qc
+// owner group: transaction
+
 /**
  * Copyright (c) 2021 OceanBase
  * OceanBase CE is licensed under Mulan PubL v2.
@@ -11,18 +14,13 @@
  */
 
 #include <gtest/gtest.h>
-#include <stdlib.h>
 #define USING_LOG_PREFIX STORAGE
 #define protected public
 #define private public
 
 #include "env/ob_simple_cluster_test_base.h"
 #include "env/ob_simple_server_restart_helper.h"
-#include "lib/mysqlclient/ob_mysql_result.h"
-#include "storage/access/ob_rows_info.h"
 #include "storage/tx_storage/ob_ls_service.h"
-#include "storage/tx/ob_trans_part_ctx.h"
-#include "storage/tx_storage/ob_ls_handle.h" //ObLSHandle
 
 #undef private
 #undef protected
@@ -112,7 +110,7 @@ public:
   void minor_freeze_data_memtable(ObLS *ls)
   {
     TRANS_LOG(INFO, "minor_freeze_data_memtable begin");
-    ASSERT_EQ(OB_SUCCESS, ls->ls_freezer_.logstream_freeze());
+    ASSERT_EQ(OB_SUCCESS, ls->ls_freezer_.logstream_freeze(0));
 
     // TODO(handora.qc): use more graceful wait
     usleep(10 * 1000 * 1000);
@@ -131,7 +129,7 @@ public:
           dynamic_cast<ObLSTxService *>(
             checkpoint_executor->handlers_[logservice::TRANS_SERVICE_LOG_BASE_TYPE])
           ->common_checkpoints_[ObCommonCheckpointType::TX_CTX_MEMTABLE_TYPE]);
-      ASSERT_EQ(OB_SUCCESS, tx_ctx_memtable->flush(share::SCN::max_scn()));
+      ASSERT_EQ(OB_SUCCESS, tx_ctx_memtable->flush(share::SCN::max_scn(), 0));
 
       // TODO(handora.qc): use more graceful wait
       usleep(10 * 1000 * 1000);

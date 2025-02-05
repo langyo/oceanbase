@@ -12,13 +12,9 @@
 
 #define USING_LOG_PREFIX SERVER
 
-#include "observer/report/ob_ls_table_updater.h"
+#include "ob_ls_table_updater.h"
 #include "observer/ob_service.h"
-#include "share/schema/ob_multi_version_schema_service.h"
 #include "share/ls/ob_ls_table_operator.h"
-#include "share/ob_define.h"
-#include "lib/ob_running_mode.h"
-
 
 namespace oceanbase
 {
@@ -107,13 +103,6 @@ bool ObLSTableUpdateTask::compare_without_version(
     const ObLSTableUpdateTask &other) const
 {
   return (*this == other);
-}
-
-int ObLSTableUpdateTask::assign_when_equal(
-    const ObLSTableUpdateTask &other)
-{
-  UNUSED(other);
-  return OB_NOT_SUPPORTED;
 }
 
 ObLSTableUpdateQueueSet::ObLSTableUpdateQueueSet(
@@ -303,7 +292,7 @@ int ObLSTableUpdater::batch_process_tasks(
   } else if (1 != tasks.count()) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("unexpected task count", KR(ret), "tasks count", tasks.count());
-	} else {
+  } else {
     const ObLSTableUpdateTask &task = tasks.at(0);
     const uint64_t tenant_id = task.get_tenant_id();
     const ObLSID &ls_id = task.get_ls_id();
@@ -422,7 +411,7 @@ void ObLSTableUpdater::throttle(
   }
   const static int64_t sleep_step_us = 20 * 1000; // 20ms
   for (; !stopped && sleep_us > 0; sleep_us -= sleep_step_us) {
-    ob_usleep(static_cast<int32_t>(std::min(sleep_step_us, sleep_us)));
+    ob_usleep(static_cast<int32_t>(std::min(sleep_step_us, sleep_us)), true /*is_idle_sleep*/);
   }
 }
 

@@ -12,9 +12,6 @@
 
 #define USING_LOG_PREFIX SQL_ENG
 #include "ob_pl_user_defined_agg_function.h"
-#include "sql/ob_spi.h"
-#include "pl/ob_pl.h"
-#include "pl/ob_pl_stmt.h"
 #include "pl/ob_pl_resolver.h"
 #include "sql/resolver/ob_resolver_utils.h"
 #include "sql/engine/expr/ob_datum_cast.h"
@@ -155,8 +152,9 @@ int ObPlAggUdfFunction::call_pl_engine_exectue_udf(ParamStore& udf_params,
                                  K(ret), K(udf_params.count()), K(routine_info->get_param_count()));
   } else if (OB_FAIL(pl_engine->execute(*exec_ctx_,
                                         exec_ctx_->get_allocator(),
-                                        -1,
-                                        routine_info->get_routine_id(),
+                                        share::schema::ObUDTObjectType::mask_object_id(routine_info->get_package_id()),
+                                        OB_INVALID_ID != routine_info->get_package_id() ? routine_info->get_subprogram_id()
+                                                                                        : routine_info->get_routine_id(),
                                         empty_subprogram_path,
                                         udf_params,
                                         empty_nocopy_params,
@@ -230,7 +228,7 @@ int ObPlAggUdfFunction::build_in_params_store(ObObjParam &pl_obj,
       LOG_WARN("failed to push back param", K(ret));
     } else if (obj_params != NULL &&
                OB_FAIL(ObExprUDF::process_in_params(obj_params, param_num, params_desc,
-                                                    params_type_, *udf_params, *allocator_))) {
+                                                    params_type, *udf_params, *allocator_))) {
       LOG_WARN("failed to process in params", K(ret));
     } else {
       LOG_TRACE("succeed to build in params store", K(pl_obj), K(obj_params), K(params_desc),
@@ -259,7 +257,7 @@ int ObPlAggUdfFunction::process_init_pl_agg_udf(ObObjParam &pl_obj)
     pl::ObPLDataType pl_type;
     pl_type.set_user_type_id(pl::PL_RECORD_TYPE, type_id_);
     pl_type.set_type_from(pl::PL_TYPE_UDT);
-    if (OB_FAIL(ns.init_complex_obj(*allocator_, pl_type, pl_obj, false))) {
+    if (OB_FAIL(ns.init_complex_obj(*allocator_, *allocator_, pl_type, pl_obj, false))) {
       LOG_WARN("failed to init complex obj", K(ret));
     } else if (OB_FAIL(build_in_params_store(pl_obj, true, NULL, 0, params_desc,
                                              params_type, udf_params))) {
@@ -541,7 +539,7 @@ int ObPlAggUdfFunction::process_get_pl_agg_udf_result(ObObjParam &pl_obj,
       if (OB_FAIL(ObSQLUtils::get_default_cast_mode(session_info_, cast_mode))) {
         LOG_WARN("failed to get default cast mode", K(ret));
       } else {
-        ObCastCtx cast_ctx(allocator_, NULL, cast_mode, ObCharset::get_system_collation(), NULL);
+        ObCastCtx cast_ctx(allocator_, NULL, cast_mode, result_type_.get_collation_type(), NULL);
         if (OB_FAIL(ObObjCaster::to_type(result_type_.get_type(), cast_ctx, src_obj, result))) {
           LOG_WARN("failed to cast type", K(ret));
         } else {

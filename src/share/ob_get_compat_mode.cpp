@@ -11,17 +11,10 @@
  */
 
 #define USING_LOG_PREFIX SHARE
+#include "ob_get_compat_mode.h"
 #include "lib/mysqlclient/ob_isql_connection_pool.h"
-#include "lib/mysqlclient/ob_mysql_connection.h"
 #include "lib/mysqlclient/ob_isql_connection_pool.h"
-#include "lib/mysqlclient/ob_mysql_proxy.h"
-#include "lib/mysqlclient/ob_mysql_result.h"
-#include "lib/string/ob_sql_string.h"
-#include "share/ob_get_compat_mode.h"
-#include "share/inner_table/ob_inner_table_schema_constants.h"
 #include "share/schema/ob_schema_service_sql_impl.h"
-#include "observer/ob_server_struct.h"
-#include "observer/omt/ob_multi_tenant.h"
 
 using namespace oceanbase::common;
 using namespace oceanbase::sql;
@@ -100,6 +93,7 @@ int ObCompatModeGetter::get_tablet_compat_mode(
 int ObCompatModeGetter::check_is_oracle_mode_with_tenant_id(const uint64_t tenant_id, bool &is_oracle_mode)
 {
   int ret = OB_SUCCESS;
+  is_oracle_mode = false;
   lib::Worker::CompatMode compat_mode = lib::Worker::CompatMode::INVALID;
 
   if (OB_FAIL(instance().get_tenant_compat_mode(tenant_id, compat_mode))) {
@@ -122,6 +116,7 @@ int ObCompatModeGetter::check_is_oracle_mode_with_table_id(
     bool &is_oracle_mode)
 {
   int ret = OB_SUCCESS;
+  is_oracle_mode = false;
   lib::Worker::CompatMode compat_mode = lib::Worker::CompatMode::INVALID;
   if (OB_FAIL(instance().get_table_compat_mode(tenant_id, table_id, compat_mode))) {
     LOG_WARN("fail to get tenant mode", KR(ret), K(tenant_id), K(table_id));
@@ -191,8 +186,6 @@ int ObCompatModeGetter::get_tenant_compat_mode(const uint64_t tenant_id, lib::Wo
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("tenant id is invalid", K(ret), K(tenant_id), K(lbt()));
   } else if (OB_SYS_TENANT_ID == tenant_id) {
-    mode = lib::Worker::CompatMode::MYSQL;
-  } else if (OB_GTS_TENANT_ID == tenant_id) {
     mode = lib::Worker::CompatMode::MYSQL;
   } else if (is_meta_tenant(tenant_id)) {
     mode = lib::Worker::CompatMode::MYSQL;

@@ -11,19 +11,12 @@
  */
 
 #include <gtest/gtest.h>
-#include <thread>
-#include <iostream>
 #define protected public
 #define private public
 
 #include "env/ob_simple_cluster_test_base.h"
-#include "storage/compaction/ob_compaction_diagnose.h"
 #include "storage/compaction/ob_schedule_dag_func.h"
-#include "storage/ls/ob_ls.h"
-#include "storage/tx_storage/ob_ls_handle.h"
 #include "storage/tx_storage/ob_ls_service.h"
-#include "storage/tx/ob_tx_data_functor.h"
-#include "storage/tablet/ob_tablet.h"
 
 enum EnumTestMode : uint32_t
 {
@@ -113,7 +106,7 @@ int ObMemtable::flush(share::ObLSID ls_id)
   int ret = OB_SUCCESS;
 
   int64_t cur_time = ObTimeUtility::current_time();
-  if (is_flushed_) {
+  if (get_is_flushed()) {
     ret = OB_NO_NEED_UPDATE;
   } else {
     if (mt_stat_.create_flush_dag_time_ == 0 &&
@@ -168,8 +161,8 @@ int LockForReadFunctor::operator()(const ObTxData &tx_data, ObTxCCCtx *tx_cc_ctx
   } else {
     for (int32_t i = 0; OB_ERR_SHARED_LOCK_CONFLICT == ret; i++) {
       if (OB_FAIL(inner_lock_for_read(tx_data, tx_cc_ctx))) {
-        if (OB_UNLIKELY(observer::SS_STOPPING == GCTX.status_) ||
-            OB_UNLIKELY(observer::SS_STOPPED == GCTX.status_)) {
+        if (OB_UNLIKELY(ObServiceStatus::SS_STOPPING == GCTX.status_) ||
+            OB_UNLIKELY(ObServiceStatus::SS_STOPPED == GCTX.status_)) {
           // rewrite ret
           ret = OB_SERVER_IS_STOPPING;
           TRANS_LOG(WARN, "observer is stopped", K(ret));
@@ -638,7 +631,7 @@ public:
     ASSERT_EQ(OB_SUCCESS, ((ObTxDataMemtableMgr *)(memtable_mgr))->freeze());
     share::SCN start_log_ts =  tx_data_memtable->get_start_scn();
     share::SCN end_log_ts =  tx_data_memtable->get_end_scn();
-    ASSERT_EQ(OB_SUCCESS, tx_data_memtable->flush());
+    ASSERT_EQ(OB_SUCCESS, tx_data_memtable->flush(0));
 
     wait_freeze_tx_table_finish(start_log_ts, end_log_ts);
 

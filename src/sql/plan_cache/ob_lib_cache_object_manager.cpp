@@ -11,10 +11,8 @@
  */
 
 #define USING_LOG_PREFIX SQL_PC
-#include "sql/plan_cache/ob_lib_cache_register.h"
-#include "sql/plan_cache/ob_lib_cache_object_manager.h"
+#include "ob_lib_cache_object_manager.h"
 #include "sql/plan_cache/ob_plan_cache.h"
-#include "observer/ob_req_time_service.h"
 
 namespace oceanbase
 {
@@ -132,7 +130,7 @@ void ObLCObjectManager::common_free(ObILibCacheObject *cache_obj,
   if (OB_ISNULL(cache_obj)) {
     // do nothing
   } else {
-    if (!cache_obj->added_lc()) {
+    if (ref_handle != PC_DIAG_HANDLE && !cache_obj->added_lc()) {
         cache_obj->set_logical_del_time(ObTimeUtility::current_monotonic_time());
         LOG_WARN("set logical del time", K(cache_obj->get_logical_del_time()),
                                          K(cache_obj->added_lc()),

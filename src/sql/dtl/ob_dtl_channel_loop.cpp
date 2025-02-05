@@ -12,11 +12,6 @@
 
 #define USING_LOG_PREFIX SQL_DTL
 #include "ob_dtl_channel_loop.h"
-#include "share/interrupt/ob_global_interrupt_call.h"
-#include "observer/omt/ob_tenant_config_mgr.h"
-#include "share/diagnosis/ob_sql_monitor_statname.h"
-#include "observer/omt/ob_th_worker.h"
-#include "share/ob_occam_time_guard.h"
 #include "sql/engine/px/ob_px_util.h"
 
 using namespace oceanbase::common;
@@ -36,10 +31,9 @@ ObDtlChannelLoop::ObDtlChannelLoop()
       ignore_interrupt_(false),
       tenant_id_(UINT64_MAX),
       timeout_(INT64_MAX),
-      proxy_first_buffer_cache_(nullptr),
       spin_lock_(common::ObLatchIds::DTL_CHANNEL_LIST_LOCK),
       mock_addr_(),
-      sentinel_node_(1, 0, mock_addr_),
+      sentinel_node_(1, 0, mock_addr_, ObDtlChannel::DtlChannelType::LOCAL_CHANNEL),
       n_first_no_data_(0),
       op_monitor_info_(default_op_monitor_info_),
       first_data_get_(false),
@@ -69,10 +63,9 @@ ObDtlChannelLoop::ObDtlChannelLoop(ObMonitorNode &op_monitor_info)
       ignore_interrupt_(false),
       tenant_id_(UINT64_MAX),
       timeout_(INT64_MAX),
-      proxy_first_buffer_cache_(nullptr),
       spin_lock_(common::ObLatchIds::DTL_CHANNEL_LIST_LOCK),
       mock_addr_(),
-      sentinel_node_(1, 0, mock_addr_),
+      sentinel_node_(1, 0, mock_addr_, ObDtlChannel::DtlChannelType::LOCAL_CHANNEL),
       n_first_no_data_(0),
       op_monitor_info_(op_monitor_info),
       first_data_get_(false),
@@ -96,32 +89,6 @@ void ObDtlChannelLoop::notify(ObDtlChannel &chan)
   UNUSED(chan);
   add_last_data_list(&chan);
   cond_.signal();
-}
-
-int ObDtlChannelLoop::has_first_buffer(uint64_t chan_id, bool &has_first_buffer)
-{
-  int ret = OB_SUCCESS;
-  has_first_buffer = false;
-  if (nullptr != proxy_first_buffer_cache_) {
-    if (OB_FAIL(proxy_first_buffer_cache_->has_first_buffer(chan_id, has_first_buffer))) {
-      LOG_WARN("failed to get first buffer", K(ret));
-    } else {
-      LOG_DEBUG("trace has first buffer", K(chan_id), KP(chan_id), K(has_first_buffer),
-        KP(proxy_first_buffer_cache_), K(proxy_first_buffer_cache_->get_first_buffer_key()));
-    }
-  }
-  return ret;
-}
-
-int ObDtlChannelLoop::set_first_buffer(uint64_t chan_id)
-{
-  int ret = OB_SUCCESS;
-  if (nullptr != proxy_first_buffer_cache_) {
-    if (OB_FAIL(proxy_first_buffer_cache_->set_first_buffer(chan_id))) {
-      LOG_WARN("failed to get first buffer", K(ret));
-    }
-  }
-  return ret;
 }
 
 int ObDtlChannelLoop::unregister_channel(ObDtlChannel &chan)
@@ -179,6 +146,7 @@ int ObDtlChannelLoop::ObDtlChannelLoopProc::process(
   const ObDtlLinkedBuffer &buffer, bool &transferred)
 {
   int ret = OB_SUCCESS;
+  DISABLE_SQL_MEMLEAK_GUARD;
   ObDtlMsgHeader header;
   if (buffer.is_data_msg()) {
     last_msg_type_ = static_cast<int16_t>(ObDtlMsgType::PX_NEW_ROW);
@@ -239,7 +207,7 @@ int ObDtlChannelLoop::process_base(ObIDltChannelLoopPred *pred, int64_t &hinted_
         hinted_channel = OB_INVALID_INDEX_INT64;
         if (OB_SUCC(chans_[next_idx_]->process1(&process_func_, 0, last_row_in_buffer))) {
           hinted_channel = next_idx_;
-        } else if (OB_EAGAIN == ret) {
+        } else if (OB_DTL_WAIT_EAGAIN == ret) {
           ret = process_channel(hinted_channel);
         }
       } else {
@@ -248,7 +216,7 @@ int ObDtlChannelLoop::process_base(ObIDltChannelLoopPred *pred, int64_t &hinted_
     }
     if (OB_SUCC(ret)) {
       // succ process one channel
-    } else if (OB_EAGAIN == ret) {
+    } else if (OB_DTL_WAIT_EAGAIN == ret) {
       begin_wait_time_counting();
       // 通过TPCH 100G Q1测试发现，轮询时间间隔会导致性能有差异，轮询时间间隔较短
       // 会占用大量CPU，导致CPU利用率不高，从而影响性能
@@ -277,8 +245,12 @@ int ObDtlChannelLoop::process_base(ObIDltChannelLoopPred *pred, int64_t &hinted_
       last_dump_channel_time_ = last_dump_channel_time_ < process_query_time_ ? process_query_time_ : last_dump_channel_time_;
       int64_t curr_time = ::oceanbase::common::ObTimeUtility::current_time();
       if (OB_UNLIKELY(curr_time - last_dump_channel_time_ >= static_cast<int64_t> (100_s))) {
+        if (0 != process_query_time_) {
+          LOG_INFO("dump channel loop info for query which active for more than 100 seconds",
+                  K(process_query_time_), K(curr_time),
+                  K(timeout), K(timeout_), K(query_timeout_ts_));
+        }
         last_dump_channel_time_ = curr_time;
-        LOG_WARN("dump channel loop info for query which active for more than 100 seconds", K(process_query_time_), K(curr_time), K(timeout), K(timeout_), K(query_timeout_ts_));
         int64_t idx = -1;
         int64_t last_in_msg_time = INT64_MAX;
         // Find a channel that has not received data for the longest time
@@ -293,9 +265,12 @@ int ObDtlChannelLoop::process_base(ObIDltChannelLoopPred *pred, int64_t &hinted_
         }
         if (-1 == idx) {
           LOG_WARN("no channel exists");
-        } else {
+        } else if (0 != process_query_time_) {
           ObDtlBasicChannel *channel = static_cast<ObDtlBasicChannel *> (chans_.at(idx));
-          LOG_WARN("dump channel info for query which active for more than 100 seconds", K(idx), K(channel->get_id()), K(channel->get_peer_id()), K(channel->get_peer()), K(channel->get_op_metric()));
+          LOG_INFO("dump channel info for query which active for more than 100 seconds",
+                   K(idx), K(channel->get_id()),
+                   K(channel->get_peer_id()), K(channel->get_peer()),
+                   K(channel->get_op_metric()));
         }
       }
     }
@@ -363,11 +338,11 @@ int ObDtlChannelLoop::process_one_if(ObIDltChannelLoopPred *pred, int64_t &ret_c
 
 int ObDtlChannelLoop::process_channels(ObIDltChannelLoopPred *pred, int64_t &nth_channel)
 {
-  int ret = OB_EAGAIN;
+  int ret = OB_DTL_WAIT_EAGAIN;
   ObDtlChannel *chan = nullptr;
   bool last_row_in_buffer = false;
   int64_t chan_cnt = chans_.count();
-  for (int64_t i = 0; i != chan_cnt && ret == OB_EAGAIN; ++i) {
+  for (int64_t i = 0; i != chan_cnt && ret == OB_DTL_WAIT_EAGAIN; ++i) {
     if (next_idx_ >= chan_cnt) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("unexpect next idx", K(next_idx_), K(chan_cnt), K(ret));
@@ -410,22 +385,19 @@ int ObDtlChannelLoop::process_channels(ObIDltChannelLoopPred *pred, int64_t &nth
 
 int ObDtlChannelLoop::process_channel(int64_t &nth_channel)
 {
-  int ret = OB_EAGAIN;
+  int ret = OB_DTL_WAIT_EAGAIN;
   int64_t n_times = 0;
   bool last_row_in_buffer = false;
-  if (ret == OB_EAGAIN && (OB_ISNULL(proxy_first_buffer_cache_) ||
-      use_interm_result_ ||
-      (0 < proxy_first_buffer_cache_->get_first_buffer_cnt() &&
-      n_first_no_data_ < chans_.count()))) {
+  if (ret == OB_DTL_WAIT_EAGAIN && use_interm_result_) {
     // less then chan_cnt, then probe first buffer
     ret = process_channels(nullptr, nth_channel);
   }
   ObDtlChannel *ch = sentinel_node_.next_link_;
-  while (OB_EAGAIN == ret && ch != &sentinel_node_) {
+  while (OB_DTL_WAIT_EAGAIN == ret && ch != &sentinel_node_) {
     if (OB_SUCC(ch->process1(&process_func_, 0, last_row_in_buffer))) {
       nth_channel = ch->get_loop_index();
       break;
-    } else if (OB_EAGAIN == ret) {
+    } else if (OB_DTL_WAIT_EAGAIN == ret) {
       remove_data_list(ch);
     }
     if (n_times > 100) {

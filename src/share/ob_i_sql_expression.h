@@ -143,12 +143,17 @@ class ObExprTypeCtx
 public:
   ObExprTypeCtx()
      : coll_type_(CS_TYPE_INVALID),
+     local_tz_wrap_(),
+     tz_info_map_(NULL),
+     dtc_params_(),
+     sql_mode_(),
      div_precision_increment_(OB_INVALID_COUNT),
      ob_max_allowed_packet_(OB_INVALID_COUNT),
      session_(NULL),
      udf_meta_(NULL),
      cast_mode_(CM_NONE),
-     raw_expr_(NULL)
+     raw_expr_(NULL),
+     enable_mysql_compatible_dates_(false)
   {}
 
   inline ObCollationType get_coll_type() const {
@@ -196,15 +201,47 @@ public:
   void set_raw_expr(sql::ObRawExpr *expr) { raw_expr_ = expr; }
   sql::ObRawExpr *get_raw_expr() { return raw_expr_; }
 
+  inline ObDataTypeCastParams& get_dtc_params() {
+    return dtc_params_;
+  }
+  inline void set_dtc_params(ObDataTypeCastParams& dtc_params) {
+    dtc_params_ = dtc_params;
+  }
+  inline ObSQLMode get_sql_mode() {
+    return sql_mode_;
+  }
+  inline void set_sql_mode(ObSQLMode sql_mode) {
+    sql_mode_ = sql_mode;
+  }
+  inline ObTimeZoneInfoWrap& get_local_tz_wrap() {
+    return local_tz_wrap_;
+  }
+  inline const ObTZInfoMap *get_tz_info_map() {
+    return tz_info_map_;
+  }
+  inline void set_tz_info_map(const ObTZInfoMap * map) {
+    tz_info_map_ = map;
+  }
+  inline bool enable_mysql_compatible_dates() const { return enable_mysql_compatible_dates_; }
+  inline void set_enable_mysql_compatible_dates(const bool enable_mysql_compatible_dates) {
+    enable_mysql_compatible_dates_ = enable_mysql_compatible_dates;
+  }
   TO_STRING_KV(K_(coll_type),
                K_(div_precision_increment),
                K_(ob_max_allowed_packet),
                KP_(session),
                KP_(udf_meta),
-               K_(cast_mode));
+               K_(cast_mode),
+               K_(sql_mode),
+               K_(enable_mysql_compatible_dates));
 private:
 //  const sql::ObSQLSessionInfo *my_session_;
    ObCollationType coll_type_;
+   //for local session var
+   ObTimeZoneInfoWrap local_tz_wrap_;
+   const ObTZInfoMap *tz_info_map_;
+   ObDataTypeCastParams dtc_params_;
+   ObSQLMode sql_mode_;
    int64_t div_precision_increment_;
    int64_t ob_max_allowed_packet_; // Carefull!!! mysql.h defined a macro call "max_allowed_packet"
    const sql::ObSQLSessionInfo *session_;
@@ -217,6 +254,7 @@ private:
    sql::ObRawExpr *raw_expr_;
    //used to switch params in subquery comparison operators
    int64_t cur_row_idx_;
+   bool enable_mysql_compatible_dates_;
 };
 
 class ObISqlExpression

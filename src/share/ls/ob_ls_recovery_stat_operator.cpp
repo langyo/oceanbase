@@ -12,17 +12,9 @@
 
 #define USING_LOG_PREFIX SHARE
 
-#include "ob_ls_recovery_stat_operator.h"
 
-#include "share/ob_errno.h"
-#include "share/config/ob_server_config.h"
-#include "share/inner_table/ob_inner_table_schema.h"
-#include "lib/string/ob_sql_string.h"//ObSqlString
-#include "lib/mysqlclient/ob_mysql_transaction.h"//ObMySQLTransaction
-#include "common/ob_timeout_ctx.h"
-#include "share/ob_share_util.h"
+#include "ob_ls_recovery_stat_operator.h"
 #include "share/ls/ob_ls_status_operator.h"
-#include "share/scn.h"
 
 using namespace oceanbase;
 using namespace oceanbase::common;
@@ -40,13 +32,15 @@ bool ObLSRecoveryStat::is_valid() const
     && sync_scn_ >= readable_scn_
     && create_scn_.is_valid()
     && drop_scn_.is_valid();
+    //config_version maybe invalid, no need check
 }
 int ObLSRecoveryStat::init(const uint64_t tenant_id,
            const ObLSID &id,
            const SCN &sync_scn,
            const SCN &readable_scn,
            const SCN &create_scn,
-           const SCN &drop_scn)
+           const SCN &drop_scn,
+           const palf::LogConfigVersion &config_version)
 {
   int ret = OB_SUCCESS;
   reset();
@@ -69,23 +63,26 @@ int ObLSRecoveryStat::init(const uint64_t tenant_id,
     readable_scn_ = readable_scn;
     create_scn_ = create_scn;
     drop_scn_ = drop_scn;
+    config_version_ = config_version;
   }
   return ret;
 
 }
 
 int ObLSRecoveryStat::init_only_recovery_stat(const uint64_t tenant_id, const ObLSID &id,
-                                              const SCN &sync_scn, const SCN &readable_scn)
+                                              const SCN &sync_scn, const SCN &readable_scn,
+                                              const palf::LogConfigVersion &config_version)
 {
   int ret = OB_SUCCESS;
   reset();
   if (OB_UNLIKELY(OB_INVALID_TENANT_ID == tenant_id
                   || !id.is_valid()
                   || !sync_scn.is_valid()
-                  || !readable_scn.is_valid())) {
+                  || !readable_scn.is_valid()
+                  || !config_version.is_valid())) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid argument", KR(ret), K(tenant_id), K(id),
-             K(sync_scn), K(readable_scn));
+             K(sync_scn), K(readable_scn), K(config_version));
   } else if (OB_UNLIKELY(sync_scn < readable_scn)) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("readable_scn > sync_scn, invalid argument", KR(ret), K(sync_scn), K(readable_scn),
@@ -97,6 +94,7 @@ int ObLSRecoveryStat::init_only_recovery_stat(const uint64_t tenant_id, const Ob
     readable_scn_ = readable_scn;
     drop_scn_ = SCN::base_scn();
     create_scn_ = SCN::base_scn();
+    config_version_ = config_version;
   }
   return ret;
 }
@@ -108,6 +106,7 @@ void ObLSRecoveryStat::reset()
   readable_scn_.reset();
   create_scn_.reset();
   drop_scn_.reset();
+  config_version_.reset();
 }
 
 int ObLSRecoveryStat::assign(const ObLSRecoveryStat &other)
@@ -120,6 +119,7 @@ int ObLSRecoveryStat::assign(const ObLSRecoveryStat &other)
     readable_scn_ = other.readable_scn_;
     create_scn_ = other.create_scn_;
     drop_scn_ = other.drop_scn_;
+    config_version_ = other.config_version_;
   }
   return ret;
 }
@@ -242,13 +242,21 @@ int ObLSRecoveryStatOperator::update_ls_recovery_stat_in_trans(
     const SCN &readable_scn = ls_recovery.get_readable_scn() > old_ls_recovery.get_readable_scn() ?
         ls_recovery.get_readable_scn() : old_ls_recovery.get_readable_scn();
     common::ObSqlString sql;
+    ObASHSetInnerSqlWaitGuard ash_inner_sql_guard(ObInnerSqlWaitTypeId::LOG_UPDATE_LS_RECOVERY_STAT);
     if (OB_FAIL(sql.assign_fmt("UPDATE %s SET sync_scn = %lu, readable_scn = "
                                "%lu where ls_id = %ld and tenant_id = %lu",
                                OB_ALL_LS_RECOVERY_STAT_TNAME, sync_scn.get_val_for_inner_table_field(),
                                readable_scn.get_val_for_inner_table_field(),
                                ls_recovery.get_ls_id().id(), ls_recovery.get_tenant_id()))) {
       LOG_WARN("failed to assign sql", KR(ret), K(sync_scn), K(readable_scn), K(sql));
-    } else if (OB_FAIL(exec_write(ls_recovery.get_tenant_id(), sql, this, trans, true))) {
+    } else if (old_ls_recovery.get_config_version().is_valid()) {
+      //if config version is valid in inner table, no need check compat_version
+      if (ls_recovery.get_config_version() != old_ls_recovery.get_config_version()) {
+        ret = OB_NEED_RETRY;
+        LOG_WARN("configversion not match, maybe leader change", KR(ret), K(ls_recovery), K(old_ls_recovery));
+      }
+    }
+    if (FAILEDx(exec_write(ls_recovery.get_tenant_id(), sql, this, trans, true))) {
       LOG_WARN("failed to exec write", KR(ret), K(ls_recovery), K(sql));
     }
   }
@@ -334,6 +342,7 @@ int ObLSRecoveryStatOperator::get_ls_recovery_stat(
   } else {
     common::ObSqlString sql;
     ObSEArray<ObLSRecoveryStat, 1> ls_recovery_array;
+    ObASHSetInnerSqlWaitGuard ash_inner_sql_guard(ObInnerSqlWaitTypeId::LOG_GET_LS_RECOVERY_STAT);
     if (OB_FAIL(sql.assign_fmt("select * from %s where ls_id = %ld and tenant_id = %lu",
                OB_ALL_LS_RECOVERY_STAT_TNAME, ls_id.id(), tenant_id))) {
       LOG_WARN("failed to assign sql", KR(ret), K(sql));
@@ -370,12 +379,16 @@ int ObLSRecoveryStatOperator::fill_cell(common::sqlclient::ObMySQLResult*result,
     int64_t readable_ts = OB_INVALID_SCN_VAL;
     int64_t create_ts = OB_INVALID_SCN_VAL;
     int64_t drop_ts = OB_INVALID_SCN_VAL;
+    ObString config_version_val;
+    palf::LogConfigVersion config_version;
     EXTRACT_INT_FIELD_MYSQL(*result, "tenant_id", tenant_id, uint64_t);
     EXTRACT_INT_FIELD_MYSQL(*result, "ls_id", id_value, int64_t);
     EXTRACT_UINT_FIELD_MYSQL(*result, "sync_scn", sync_ts, int64_t);
     EXTRACT_UINT_FIELD_MYSQL(*result, "readable_scn", readable_ts, int64_t);
     EXTRACT_UINT_FIELD_MYSQL(*result, "create_scn", create_ts, int64_t);
     EXTRACT_UINT_FIELD_MYSQL(*result, "drop_scn", drop_ts, int64_t);
+    EXTRACT_VARCHAR_FIELD_MYSQL_WITH_DEFAULT_VALUE(*result, "bconfig_version", config_version_val,
+                true /* skip_null_error */, true /* skip_column_error */, "");
     if (OB_FAIL(ret)) {
       LOG_WARN("failed to get result", KR(ret), K(id_value), K(tenant_id),
                K(sync_ts), K(readable_ts), K(create_ts), K(drop_ts));
@@ -394,11 +407,27 @@ int ObLSRecoveryStatOperator::fill_cell(common::sqlclient::ObMySQLResult*result,
         LOG_WARN("failed to convert_for_inner_table_field", KR(ret), K(tenant_id), K(id_value), K(create_ts));
       } else if (OB_FAIL(drop_scn.convert_for_inner_table_field(drop_ts))) {
         LOG_WARN("failed to convert_for_inner_table_field", KR(ret), K(tenant_id), K(id_value), K(drop_ts));
-      } else if (OB_FAIL(ls_recovery.init(tenant_id, ls_id, sync_scn, readable_scn, create_scn, drop_scn))) {
+      } else if (!config_version_val.empty() && OB_FAIL(hex_str_to_type(config_version_val, config_version))) {
+        LOG_WARN("failed to get config version from fix", KR(ret), K(config_version_val));
+      } else if (OB_FAIL(ls_recovery.init(tenant_id, ls_id, sync_scn, readable_scn,
+      create_scn, drop_scn, config_version))) {
         LOG_WARN("failed to init ls operation", KR(ret), K(tenant_id), K(sync_scn), K(readable_scn),
-                 K(ls_id), K(create_scn), K(drop_scn));
+                 K(ls_id), K(create_scn), K(drop_scn), K(config_version));
       }
     }
+  }
+  return ret;
+}
+
+
+int ObLSRecoveryStatOperator::construct_status_sql_(common::ObSqlString &sql)
+{
+  int ret = OB_SUCCESS;
+  sql.reset();
+  if (OB_FAIL(sql.assign_fmt("status not in ('%s', '%s', '%s')",
+          ls_status_to_str(OB_LS_CREATING), ls_status_to_str(OB_LS_CREATED),
+          ls_status_to_str(OB_LS_CREATE_ABORT)))) {
+    LOG_WARN("failed to assign fmt", KR(ret));
   }
   return ret;
 }
@@ -414,7 +443,9 @@ int ObLSRecoveryStatOperator::get_tenant_recovery_stat(const uint64_t tenant_id,
     LOG_WARN("invalid_argument", KR(ret), K(tenant_id));
   } else {
     common::ObSqlString sql;
+    common::ObSqlString status_sql;
     const uint64_t exec_tenant_id = get_exec_tenant_id(tenant_id);
+    ObASHSetInnerSqlWaitGuard ash_inner_sql_guard(ObInnerSqlWaitTypeId::LOG_GET_TENANT_RECOVERY_STAT);
     //The sync_scn and readable_scn at the tenant level need to be calculated separately, and the reference LS list is different.
     //The following statement collects sync_scn and readable_scn at the same time in one SQL.
     //
@@ -426,13 +457,20 @@ int ObLSRecoveryStatOperator::get_tenant_recovery_stat(const uint64_t tenant_id,
     //Specifically, two types of LS need to be referred to when calculating readable_scn:
     //  1) LS that has not entered the deletion state;
     //  2) LS that has entered the deletion state, but drop_scn > readable_scn, that is, the deletion site of the LS is greater than the readable site scenario
-    if (OB_FAIL(sql.assign_fmt(
+    if (OB_FAIL(construct_status_sql_(status_sql))) {
+      LOG_WARN("failed to get sync scn sql", KR(ret));
+    } else if (OB_FAIL(sql.assign_fmt(
             "select sync_scn, min_wrs from "
-            "(select min(greatest(create_scn, sync_scn)) as sync_scn from %s where drop_scn = %ld) p, "
-            "(select min(greatest(create_scn, readable_scn)) as min_wrs from %s where drop_scn = %ld or drop_scn > readable_scn) q",
-            OB_ALL_LS_RECOVERY_STAT_TNAME, SCN::base_scn().get_val_for_inner_table_field(),
-            OB_ALL_LS_RECOVERY_STAT_TNAME, SCN::base_scn().get_val_for_inner_table_field()))) {
-      LOG_WARN("failed to assign sql", KR(ret), K(sql), K(tenant_id));
+            "(select min(greatest(a.create_scn, a.sync_scn)) as sync_scn "
+              "from %s as a join %s as b on a.tenant_id = b.tenant_id and a.ls_id = b.ls_id "
+              "where a.drop_scn = %ld and b.%s) p, "
+            "(select min(greatest(c.create_scn, c.readable_scn)) as min_wrs "
+              "from %s as c join %s as d on c.tenant_id = d.tenant_id and c.ls_id = d.ls_id "
+              "where (c.drop_scn = %ld or c.drop_scn > c.readable_scn) and d.%s) q",
+            OB_ALL_LS_RECOVERY_STAT_TNAME, OB_ALL_LS_STATUS_TNAME,
+            SCN::base_scn().get_val_for_inner_table_field(), status_sql.ptr(),
+            OB_ALL_LS_RECOVERY_STAT_TNAME, OB_ALL_LS_STATUS_TNAME,
+            SCN::base_scn().get_val_for_inner_table_field(), status_sql.ptr()))) {
     } else if (OB_FAIL(get_all_ls_recovery_stat_(tenant_id, sql, client, sync_scn, min_wrs))) {
       LOG_WARN("failed to get tenant stat", KR(ret), K(tenant_id), K(sql));
     }
@@ -464,11 +502,69 @@ int ObLSRecoveryStatOperator::get_tenant_min_user_ls_create_scn(const uint64_t t
   return ret;
 }
 
+ERRSIM_POINT_DEF(EN_END_TRANSACTION_ERROR);
+int ObLSRecoveryStatOperator::update_ls_config_version(
+    const uint64_t tenant_id, const ObLSID &ls_id,
+    const palf::LogConfigVersion &config_version, ObMySQLProxy &client,
+    SCN &readable_scn)
+{
+  int ret = OB_SUCCESS;
+  if (OB_UNLIKELY(OB_INVALID_TENANT_ID == tenant_id
+      || !ls_id.is_valid() || !config_version.is_valid())) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid_argument", KR(ret), K(tenant_id), K(ls_id), K(config_version));
+  } else {
+    const uint64_t exec_tenant_id = get_exec_tenant_id(tenant_id);
+    ObLSRecoveryStat ls_recovery_stat;
+    START_TRANSACTION(&client, exec_tenant_id)
+    if (FAILEDx(get_ls_recovery_stat(tenant_id, ls_id, true,
+            ls_recovery_stat, trans))) {
+      LOG_WARN("failed to get ls recovery stat", KR(ret), K(tenant_id), K(ls_id));
+    } else if (ls_recovery_stat.get_config_version().is_valid()
+      && ls_recovery_stat.get_config_version() > config_version) {
+      ret = OB_NEED_RETRY;
+      LOG_WARN("config version can not fallback", KR(ret), K(ls_recovery_stat), K(config_version));
+    } else if (ls_recovery_stat.get_config_version() == config_version) {
+    } else {
+      //config_version inmaybe invalid or larger than inner table
+      common::ObSqlString sql;
+      ObString config_version_str;
+      ObArenaAllocator allocator("VersionStr");
+      const int64_t CONFIG_LEN = palf::LogConfigVersion::CONFIG_VERSION_LEN + 1;//128 + \0
+      char config_version_val[CONFIG_LEN] = {0};
+      if (OB_FAIL(type_to_hex_str(config_version, allocator,
+                                  config_version_str))) {
+        LOG_WARN("failed to type to hex", KR(ret), K(config_version));
+      } else if (0 > config_version.to_string(config_version_val, CONFIG_LEN)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("config_version to string failed", KR(ret), K(config_version));
+      } else if (OB_FAIL(sql.assign_fmt("UPDATE %s SET config_version = '%s', bconfig_version = '%.*s' "
+                               "WHERE ls_id = %ld and tenant_id = %lu",
+                               OB_ALL_LS_RECOVERY_STAT_TNAME,
+                               config_version_val,
+                               static_cast<int>(config_version_str.length()), config_version_str.ptr(),
+                               ls_id.id(), tenant_id))) {
+        LOG_WARN("failed to assign sql", KR(ret), K(ls_id), K(tenant_id), K(sql));
+      } else if (OB_FAIL(exec_write(tenant_id, sql, this, trans, true))) {
+        LOG_WARN("failed to exec write", KR(ret), K(tenant_id), K(sql));
+      }
+    }
+    if (OB_SUCC(ret)) {
+      readable_scn = ls_recovery_stat.get_readable_scn();
+    }
+    if (EN_END_TRANSACTION_ERROR) {
+      ret = EN_END_TRANSACTION_ERROR;
+      SHARE_LOG(ERROR, "set end transaction error", KR(ret));
+    }
+
+    END_TRANSACTION(trans)
+  }
+  return ret;
+}
+
 int ObLSRecoveryStatOperator::get_min_create_scn_(
-    const uint64_t tenant_id,
-    const common::ObSqlString &sql,
-    ObISQLClient &client,
-    SCN &min_create_scn)
+    const uint64_t tenant_id, const common::ObSqlString &sql,
+    ObISQLClient &client, SCN &min_create_scn)
 {
   int ret = OB_SUCCESS;
   min_create_scn = SCN::base_scn();
@@ -538,16 +634,29 @@ int ObLSRecoveryStatOperator::get_user_ls_sync_scn(const uint64_t tenant_id,
     LOG_WARN("invalid_argument", KR(ret), K(tenant_id));
   } else {
     common::ObSqlString sql;
-    SCN min_wrs_scn;
+    common::ObSqlString status_sql;
+    SCN min_wrs_scn;//no use, not valid
     const uint64_t exec_tenant_id = get_exec_tenant_id(tenant_id);
-    if (OB_FAIL(sql.assign_fmt(
-            "select min(greatest(create_scn, sync_scn)) as sync_scn, "
-            "min(greatest(create_scn, readable_scn)) as min_wrs from %s where "
-            "(drop_scn = %ld or drop_scn > sync_scn) and tenant_id = %lu and ls_id != %ld",
-            OB_ALL_LS_RECOVERY_STAT_TNAME, SCN::base_scn().get_val_for_inner_table_field(), tenant_id, SYS_LS.id()))) {
-      LOG_WARN("failed to assign sql", KR(ret), K(sql), K(tenant_id));
+    if (OB_FAIL(construct_status_sql_(status_sql))) {
+      LOG_WARN("failed to construct status sql", KR(ret));
+    } else if (OB_FAIL(sql.assign_fmt(
+            "select min(greatest(a.create_scn, a.sync_scn)) as sync_scn, "
+            "min(a.readable_scn) as min_wrs "
+            "from %s as a join %s as b on a.tenant_id = b.tenant_id and a.ls_id = b.ls_id "
+            "where (a.drop_scn = %ld or a.drop_scn > a.sync_scn) and a.tenant_id = %lu "
+            "and a.ls_id != %ld and b.%s",
+            OB_ALL_LS_RECOVERY_STAT_TNAME, OB_ALL_LS_STATUS_TNAME,
+            SCN::base_scn().get_val_for_inner_table_field(), tenant_id,
+            SYS_LS.id(), status_sql.ptr()))) {
+      LOG_WARN("failed to assign sql", KR(ret), K(sql), K(tenant_id), K(status_sql));
     } else if (OB_FAIL(get_all_ls_recovery_stat_(tenant_id, sql, client, sync_scn, min_wrs_scn))) {
-      LOG_WARN("failed to get tenant stat", KR(ret), K(tenant_id), K(sql));
+      if (OB_ERR_NULL_VALUE == ret) {
+        ret = OB_SUCCESS;
+        sync_scn.set_max();
+        LOG_INFO("no user ls, set sync scn max", K(tenant_id), K(sql));
+      } else {
+        LOG_WARN("failed to get tenant stat", KR(ret), K(tenant_id), K(sql));
+      }
     }
   }
   return ret;

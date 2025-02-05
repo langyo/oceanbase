@@ -10,19 +10,11 @@
  * See the Mulan PubL v2 for more details.
  */
 
-#include "storage/tx_table/ob_tx_data_memtable.h"
 
+#include "ob_tx_data_memtable.h"
 #include "storage/compaction/ob_schedule_dag_func.h"
-#include "storage/compaction/ob_tablet_merge_task.h"
 #include "storage/ls/ob_freezer.h"
 #include "storage/ls/ob_ls_tablet_service.h"
-#include "storage/tablet/ob_tablet.h"
-#include "storage/tx/ob_tx_data_functor.h"
-#include "storage/tx_table/ob_tx_data_memtable_mgr.h"
-#include "storage/tx_table/ob_tx_data_table.h"
-#include "storage/tx_table/ob_tx_table_iterator.h"
-#include "storage/tablet/ob_tablet.h"
-#include "storage/blocksstable/ob_storage_cache_suite.h"
 
 namespace oceanbase
 {
@@ -37,7 +29,6 @@ namespace storage
 int64_t ObTxDataMemtable::PERIODICAL_SELECT_INTERVAL_NS = 1000LL * 1000LL * 1000LL;
 
 int ObTxDataMemtable::init(const ObITable::TableKey &table_key,
-                           SliceAllocator *slice_allocator,
                            ObTxDataMemtableMgr *memtable_mgr,
                            storage::ObFreezer *freezer,
                            const int64_t buckets_cnt)
@@ -47,9 +38,9 @@ int ObTxDataMemtable::init(const ObITable::TableKey &table_key,
   if (IS_INIT) {
     ret = OB_INIT_TWICE;
     STORAGE_LOG(WARN, "init tx data memtable twice", KR(ret), K(table_key), KPC(memtable_mgr));
-  } else if (OB_ISNULL(slice_allocator) || OB_ISNULL(memtable_mgr)) {
+  } else if (OB_ISNULL(memtable_mgr)) {
     ret = OB_ERR_NULL_VALUE;
-    STORAGE_LOG(WARN, "the slice_allocator is nullptr", KR(ret), K(table_key), KPC(memtable_mgr));
+    STORAGE_LOG(WARN, "the tx_data_allocator is nullptr", KR(ret), K(table_key), KPC(memtable_mgr));
   } else if (OB_FAIL(ObITable::init(table_key))) {
     STORAGE_LOG(WARN, "ObITable::init fail", KR(ret), K(table_key), KPC(memtable_mgr));
   } else if (FALSE_IT(init_arena_allocator_())) {
@@ -78,7 +69,6 @@ int ObTxDataMemtable::init(const ObITable::TableKey &table_key,
     stat_change_ts_.reset();
     state_ = ObTxDataMemtable::State::ACTIVE;
     sort_list_head_.reset();
-    slice_allocator_ = slice_allocator;
     memtable_mgr_ = memtable_mgr;
     row_key_array_.reuse();
 
@@ -145,7 +135,6 @@ void ObTxDataMemtable::reset()
     arena_allocator_.free(tx_data_map_);
     tx_data_map_ = nullptr;
   }
-  slice_allocator_ = nullptr;
   memtable_mgr_ = nullptr;
   buf_.reset();
   arena_allocator_.reset();
@@ -155,6 +144,7 @@ void ObTxDataMemtable::reset()
   DEBUG_last_start_scn_ = SCN::min_scn();
   stat_change_ts_.reset();
   is_inited_ = false;
+  reset_trace_id();
 }
 
 int ObTxDataMemtable::insert(ObTxData *tx_data)
@@ -173,6 +163,10 @@ int ObTxDataMemtable::insert(ObTxData *tx_data)
   } else if (OB_ISNULL(tx_data)) {
     ret = OB_INVALID_ARGUMENT;
     STORAGE_LOG(WARN, "tx data is nullptr", KR(ret));
+  } else if (ObTxCommitData::COMMIT == tx_data->state_ &&
+             (tx_data->commit_version_.is_max() || !tx_data->commit_version_.is_valid())) {
+    ret = OB_ERR_UNEXPECTED;
+    STORAGE_LOG(ERROR, "invalid tx data", KR(ret), KPC(tx_data));
   } else if (OB_ISNULL(tx_data_map_)) {
     ret = OB_ERR_UNEXPECTED;
     STORAGE_LOG(ERROR, "unexpected null value of tx_data_map_", KR(ret));
@@ -184,15 +178,15 @@ int ObTxDataMemtable::insert(ObTxData *tx_data)
     max_tx_scn_.inc_update(tx_data->end_scn_);
     atomic_update_(tx_data);
     ATOMIC_INC(&inserted_cnt_);
-    if (OB_UNLIKELY(tx_data->undo_status_list_.undo_node_cnt_ >= 10)) {
-      if (tx_data->undo_status_list_.undo_node_cnt_ == 10 || tx_data->undo_status_list_.undo_node_cnt_ % 100 == 0) {
+    if (OB_UNLIKELY(tx_data->op_guard_.is_valid() && tx_data->op_guard_->get_undo_status_list().undo_node_cnt_ >= 10)) {
+      if (tx_data->op_guard_->get_undo_status_list().undo_node_cnt_ == 10 || tx_data->op_guard_->get_undo_status_list().undo_node_cnt_ % 100 == 0) {
         STORAGE_LOG(INFO,
                     "attention! this tx write too many rollback to savepoint log",
                     "ls_id", get_ls_id(),
                     "tx_id", tx_data->tx_id_,
                     "state", ObTxData::get_state_string(tx_data->state_),
-                    "undo_node_cnt", tx_data->undo_status_list_.undo_node_cnt_,
-                    "newest_undo_node", tx_data->undo_status_list_.head_,
+                    "undo_node_cnt", tx_data->op_guard_->get_undo_status_list().undo_node_cnt_,
+                    "newest_undo_node", tx_data->op_guard_->get_undo_status_list().head_,
                     K(tx_data->start_scn_),
                     K(tx_data->end_scn_));
       }
@@ -204,12 +198,24 @@ int ObTxDataMemtable::insert(ObTxData *tx_data)
 
 void ObTxDataMemtable::atomic_update_(ObTxData *tx_data)
 {
-  int64_t thread_idx = ::get_itid() & MAX_CONCURRENCY_MOD_MASK;
+  int64_t thread_idx = common::get_itid() & MAX_CONCURRENCY_MOD_MASK;
   min_tx_scn_[thread_idx].dec_update(tx_data->end_scn_);
   min_start_scn_[thread_idx].dec_update(tx_data->start_scn_);
-  int64_t tx_data_size = TX_DATA_SLICE_SIZE * (1LL + tx_data->undo_status_list_.undo_node_cnt_);
+  int64_t tx_data_size = 0;
+  int64_t count = 0;
+  if (tx_data->state_ == ObTxCommitData::RUNNING) {
+    tx_data_size = TX_DATA_SLICE_SIZE;
+  } else if (!tx_data->op_guard_.is_valid()) {
+    tx_data_size = TX_DATA_SLICE_SIZE;
+  } else {
+    count = tx_data->op_guard_->get_undo_status_list().undo_node_cnt_;
+    int64_t tx_op_size = tx_data->op_guard_->get_tx_op_size();
+    tx_data_size = TX_DATA_SLICE_SIZE + TX_DATA_SLICE_SIZE +
+                   count * TX_DATA_SLICE_SIZE + // undo status list
+                   tx_op_size; // tx_op
+  }
   ATOMIC_FAA(&occupied_size_[thread_idx], tx_data_size);
-  ATOMIC_FAA(&total_undo_node_cnt_[thread_idx], tx_data->undo_status_list_.undo_node_cnt_);
+  ATOMIC_FAA(&total_undo_node_cnt_[thread_idx], count);
 }
 
 int ObTxDataMemtable::get_tx_data(const ObTransID &tx_id, ObTxDataGuard &tx_data_guard)
@@ -241,7 +247,7 @@ int ObTxDataMemtable::pre_process_for_merge()
     // only do pre process for frozen tx data memtable
   } else if (pre_process_done_) {
     STORAGE_LOG(INFO, "call pre process more than once. skip pre process.");
-  } else if (OB_FAIL(memtable_mgr_->get_tx_data_table()->alloc_tx_data(fake_tx_data_guard))) {
+  } else if (OB_FAIL(memtable_mgr_->get_tx_data_table()->alloc_tx_data(fake_tx_data_guard, false /* enable_throttle */))) {
     STORAGE_LOG(WARN, "allocate tx data from tx data table failed.", KR(ret), KPC(this));
   } else if (OB_FAIL(prepare_tx_data_list())) {
     STORAGE_LOG(WARN, "prepare tx data list failed.", KR(ret), KPC(this));
@@ -332,7 +338,7 @@ int ObTxDataMemtable::pre_process_commit_version_row_(ObTxData *fake_tx_data)
   ObCommitVersionsArray past_commit_versions;
   ObCommitVersionsArray merged_commit_versions;
 
-  int64_t current_time = ObClockGenerator::getCurrentTime();
+  int64_t current_time = ObClockGenerator::getClock();
   int64_t prev_recycle_time = memtable_mgr_->get_mini_merge_recycle_commit_versions_ts();
   if (current_time - prev_recycle_time < MINI_RECYCLE_COMMIT_VERSIONS_INTERVAL_US) {
     // tx data mini merge do not recycle commit versions array every time
@@ -346,7 +352,8 @@ int ObTxDataMemtable::pre_process_commit_version_row_(ObTxData *fake_tx_data)
   if (OB_FAIL(fill_in_cur_commit_versions_(cur_commit_versions)/*step 1*/)) {
     STORAGE_LOG(WARN, "periodical select commit version failed.", KR(ret));
   } else if (OB_FAIL(get_past_commit_versions_(past_commit_versions)/*step 2*/)) {
-    STORAGE_LOG(WARN, "get past commit versions failed.", KR(ret));
+    STORAGE_LOG(WARN, "get past commit versions failed.", KR(ret), K(past_commit_versions));
+  } else if (FALSE_IT(clear_fake_node_if_exist_(past_commit_versions))) {
   } else if (do_recycle_ && OB_FAIL(memtable_mgr_->get_tx_data_table()->get_recycle_scn(recycle_scn) /*step 3*/)) {
     STORAGE_LOG(WARN, "get recycle ts failed.", KR(ret));
   } else if (OB_FAIL(merge_cur_and_past_commit_verisons_(recycle_scn, cur_commit_versions,/*step 4*/
@@ -379,7 +386,6 @@ int ObTxDataMemtable::pre_process_commit_version_row_(ObTxData *fake_tx_data)
       fake_tx_data->tx_id_ = INT64_MAX;
       fake_tx_data->commit_version_.convert_for_tx(serialize_size);
       fake_tx_data->start_scn_.convert_for_tx((int64_t)buf_.get_ptr());
-      fake_tx_data->undo_status_list_.head_ = nullptr;
     }
   }
 
@@ -441,6 +447,11 @@ int ObTxDataMemtable::periodical_get_next_commit_version_(ProcessCommitVersionDa
       cur_max_commit_version = tx_data->commit_version_;
     }
 
+    if (cur_max_commit_version.is_max()) {
+      ret = OB_ERR_UNEXPECTED;
+      STORAGE_LOG(ERROR, "unexpected max commit version", KR(ret), KPC(tx_data));
+    }
+
     // If this tx data is the first tx data in sorted list or its start_log_ts is 1_s larger than
     // the pre_start_scn, we use this start_log_ts to calculate upper_trans_version
     if (SCN::min_scn() == pre_start_scn ||
@@ -496,14 +507,27 @@ int ObTxDataMemtable::get_past_commit_versions_(ObCommitVersionsArray &past_comm
         ObCommitVersionsGetter getter(iter_param, tmp_sstable);
         if (OB_FAIL(getter.get_next_row(past_commit_versions))) {
           STORAGE_LOG(WARN, "get commit versions from tx data sstable failed.", KR(ret));
+        } else if (!past_commit_versions.is_valid()) {
+          ret = OB_ERR_UNEXPECTED;
+          STORAGE_LOG(ERROR, "invalid past commit versions array", KR(ret), K(past_commit_versions), KPC(sstable));
+        } else {
+          STORAGE_LOG(INFO, "finish get past commit versions", KR(ret), K(past_commit_versions), KPC(sstable));
         }
       }
     } else {
-      STORAGE_LOG(DEBUG, "There is no tx data sstable yet", KR(ret), KPC(sstable));
+      STORAGE_LOG(INFO, "There is no tx data sstable yet", KR(ret), K(past_commit_versions), KP(sstable));
     }
   }
 
   return ret;
+}
+
+void ObTxDataMemtable::clear_fake_node_if_exist_(ObCommitVersionsArray &past_commit_versions)
+{
+  if (1 == past_commit_versions.array_.count() && past_commit_versions.array_.at(0).commit_version_.is_max()) {
+    STORAGE_LOG(INFO, "clear fake commit version node", K(past_commit_versions));
+    past_commit_versions.reset();
+  }
 }
 
 int ObTxDataMemtable::merge_cur_and_past_commit_verisons_(const SCN recycle_scn,
@@ -596,7 +620,6 @@ int ObTxDataMemtable::merge_pre_process_node_(const int64_t step_len,
         STORAGE_LOG(WARN, "push back commit version node failed.", KR(ret), KPC(this));
       }
     }
-
   }
   return ret;
 }
@@ -650,13 +673,11 @@ int ObTxDataMemtable::estimate_phy_size(const ObStoreRowkey *start_key,
   return ret;
 }
 
-int ObTxDataMemtable::get_split_ranges(const ObStoreRowkey *start_key,
-                                       const ObStoreRowkey *end_key,
+int ObTxDataMemtable::get_split_ranges(const ObStoreRange &input_range,
                                        const int64_t part_cnt,
                                        common::ObIArray<common::ObStoreRange> &range_array)
 {
-  UNUSED(start_key);
-  UNUSED(end_key);
+  UNUSED(input_range);
   int ret = OB_SUCCESS;
 
   if (!pre_process_done_) {
@@ -683,7 +704,15 @@ int ObTxDataMemtable::get_split_ranges(const ObStoreRowkey *start_key,
     }
   }
 
-  STORAGE_LOG(INFO, "generate range bounds for parallel dump tx data memtable:", K(row_key_array_), K(tx_id_2_range_));
+  if (OB_ENTRY_NOT_EXIST == ret) {
+    // reset ret code and use input_range as output result
+    ret = OB_SUCCESS;
+    if (OB_FAIL(range_array.push_back(input_range))) {
+      STORAGE_LOG(WARN, "Failed to push back the merge range to array", KR(ret), K(input_range));
+    }
+  }
+
+  STORAGE_LOG(INFO, "generate range bounds for parallel dump tx data memtable:", K(ret), K(row_key_array_), K(tx_id_2_range_));
   return ret;
 }
 
@@ -914,7 +943,7 @@ bool ObTxDataMemtable::ready_for_flush()
   return bool_ret;
 }
 
-int ObTxDataMemtable::flush()
+int ObTxDataMemtable::flush(const int64_t trace_id)
 {
   int ret = OB_SUCCESS;
   compaction::ObTabletMergeDagParam param;
@@ -922,11 +951,14 @@ int ObTxDataMemtable::flush()
   param.tablet_id_ = key_.tablet_id_;
   param.merge_type_ = compaction::MINI_MERGE;
   param.merge_version_ = ObVersionRange::MIN_VERSION;
-  if (OB_FAIL(compaction::ObScheduleDagFunc::schedule_tx_table_merge_dag(param))) {
+  set_trace_id(trace_id);
+  if (OB_FAIL(compaction::ObScheduleDagFunc::schedule_tx_table_merge_dag(param, true /* is_emergency */))) {
     if (OB_EAGAIN != ret && OB_SIZE_OVERFLOW != ret) {
       STORAGE_LOG(WARN, "failed to schedule tablet merge dag", K(ret));
     }
   } else {
+    REPORT_CHECKPOINT_DIAGNOSE_INFO(update_schedule_dag_info, this, get_rec_scn(),
+        get_start_scn(), get_end_scn());
     stat_change_ts_.create_flush_dag_time_ = ObTimeUtil::fast_current_time();
     STORAGE_LOG(INFO,
                 "[TX DATA MERGE]schedule flush tx data memtable task done",
@@ -1080,28 +1112,43 @@ int ObTxDataMemtable::dump2text(const char *fname)
     ret = OB_IO_ERROR;
     STORAGE_LOG(WARN, "open file fail:", K(fname));
   } else {
-    auto ls_id = freezer_->get_ls_id().id();
-    auto tenant_id = MTL_ID();
+    int64_t ls_id = freezer_->get_ls_id().id();
+    int64_t tenant_id = MTL_ID();
     fprintf(fd, "tenant_id=%ld ls_id=%ld\n", tenant_id, ls_id);
-    fprintf(fd,
-        "memtable: key=%s is_inited=%d construct_list_done=%d pre_process_done=%d do_recycle_=%d min_tx_log_ts=%s max_tx_log_ts=%s "
-        "min_start_log_ts=%s inserted_cnt=%ld deleted_cnt=%ld write_ref=%ld occupied_size=%ld total_undo_node_cnt=%ld last_insert_ts=%ld "
-        "state=%d\n",
-        S(key_),
-        is_inited_,
-        construct_list_done_,
-        pre_process_done_,
-        do_recycle_,
-        to_cstring(get_min_tx_scn()),
-        to_cstring(max_tx_scn_),
-        to_cstring(get_min_start_scn()),
-        inserted_cnt_,
-        deleted_cnt_,
-        write_ref_,
-        get_occupied_size(),
-        get_total_undo_node_cnt(),
-        last_insert_ts_,
-        state_);
+    ObCStringHelper helper;
+    const char *key_ptr = NULL;
+    const char *min_tx_scn_ptr = NULL;
+    const char *max_tx_scn_ptr = NULL;
+    const char *min_start_scn_ptr = NULL;
+    if (OB_FAIL(helper.convert(key_, key_ptr))) {
+      STORAGE_LOG(WARN, "convert key fail", K_(key), K(ret));
+    } else if (OB_FAIL(helper.convert(get_min_tx_scn(), min_tx_scn_ptr))) {
+      STORAGE_LOG(WARN, "convert min_tx_scn fail", "min_tx_scn", get_min_tx_scn(), K(ret));
+    } else if (OB_FAIL(helper.convert(max_tx_scn_, max_tx_scn_ptr))) {
+      STORAGE_LOG(WARN, "convert max_tx_scn fail", K_(max_tx_scn), K(ret));
+    } else if (OB_FAIL(helper.convert(get_min_start_scn(), min_start_scn_ptr))) {
+      STORAGE_LOG(WARN, "convert min_start_scn fail", "min_start_scn", get_min_start_scn(), K(ret));
+    } else {
+      fprintf(fd,
+          "memtable: key=%s is_inited=%d construct_list_done=%d pre_process_done=%d do_recycle_=%d min_tx_log_ts=%s max_tx_log_ts=%s "
+          "min_start_log_ts=%s inserted_cnt=%ld deleted_cnt=%ld write_ref=%ld occupied_size=%ld total_undo_node_cnt=%ld last_insert_ts=%ld "
+          "state=%d\n",
+          key_ptr,
+          is_inited_,
+          construct_list_done_,
+          pre_process_done_,
+          do_recycle_,
+          min_tx_scn_ptr,
+          max_tx_scn_ptr,
+          min_start_scn_ptr,
+          inserted_cnt_,
+          deleted_cnt_,
+          write_ref_,
+          get_occupied_size(),
+          get_total_undo_node_cnt(),
+          last_insert_ts_,
+          state_);
+    }
     fprintf(fd, "tx_data_count=%ld \n", tx_data_map_->count());
     DumpTxDataMemtableFunctor fn(fd);
     // tx_data_map_->for_each(fn);
@@ -1208,22 +1255,23 @@ void ObTxDataMemtable::DEBUG_print_start_scn_list_(const char* fname)
     ret = OB_IO_ERROR;
     STORAGE_LOG(WARN, "open file fail:", K(real_fname));
   } else {
-    auto tenant_id = MTL_ID();
+    int64_t tenant_id = MTL_ID();
     fprintf(fd, "tenant_id=%ld \n", tenant_id);
     ObTxData *cur_node = get_sorted_list_head()->next_;
     while (OB_NOT_NULL(cur_node)) {
       ObTxData *tx_data = cur_node;
       cur_node = cur_node->sort_list_node_.next_;
 
+      ObCStringHelper helper;
       fprintf(fd,
               "ObTxData : tx_id=%-19ld state=%-8s start_scn=%-19s "
               "end_scn=%-19s "
               "commit_version=%-19s\n",
               tx_data->tx_id_.get_id(),
               ObTxData::get_state_string(tx_data->state_),
-              to_cstring(tx_data->start_scn_),
-              to_cstring(tx_data->end_scn_),
-              to_cstring(tx_data->commit_version_));
+              helper.convert(tx_data->start_scn_),
+              helper.convert(tx_data->end_scn_),
+              helper.convert(tx_data->commit_version_));
     }
   }
 
@@ -1240,7 +1288,7 @@ void ObTxDataMemtable::DEBUG_print_start_scn_list_(const char* fname)
 void ObTxDataMemtable::DEBUG_print_merged_commit_versions_(ObCommitVersionsArray &merged_commit_versions)
 {
   int ret = OB_SUCCESS;
-  const auto &array = merged_commit_versions.array_;
+  const ObIArray<ObCommitVersionsArray::Node> &array = merged_commit_versions.array_;
   const char *real_fname = "merge_commit_versions";
   FILE *fd = NULL;
 
@@ -1248,14 +1296,15 @@ void ObTxDataMemtable::DEBUG_print_merged_commit_versions_(ObCommitVersionsArray
     ret = OB_IO_ERROR;
     STORAGE_LOG(WARN, "open file fail:", K(real_fname));
   } else {
-    auto tenant_id = MTL_ID();
+    int64_t tenant_id = MTL_ID();
     fprintf(fd, "tenant_id=%ld \n", tenant_id);
     for (int i = 0; i < array.count(); i++) {
+      ObCStringHelper helper;
       fprintf(fd,
               "start_scn=%-19s "
               "commit_version=%-19s\n",
-              to_cstring(array.at(i).start_scn_),
-              to_cstring(array.at(i).commit_version_));
+              helper.convert(array.at(i).start_scn_),
+              helper.convert(array.at(i).commit_version_));
     }
   }
 

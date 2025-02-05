@@ -12,8 +12,6 @@
 
 #define USING_LOG_PREFIX SQL_ENG
 #include "sql/engine/expr/ob_expr_elt.h"
-#include "sql/session/ob_sql_session_info.h"
-#include "sql/engine/expr/ob_expr_equal.h"
 
 using namespace oceanbase::common;
 using namespace oceanbase::sql;
@@ -44,7 +42,7 @@ int ObExprElt::calc_result_typeN(
   } else {
     type.set_varchar();
     ret = aggregate_charsets_for_string_result(
-      type, types_stack + 1, param_num - 1, type_ctx.get_coll_type());
+      type, types_stack + 1, param_num - 1, type_ctx);
     if (OB_SUCC(ret)) {
       int32_t length = 0;
       for (int64_t i = 1; i < param_num; ++i) {
@@ -89,5 +87,12 @@ int ObExprElt::eval_elt(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &expr_datum)
   } else {
     expr_datum.set_datum(*d);
   }
+  return ret;
+}
+
+DEF_SET_LOCAL_SESSION_VARS(ObExprElt, raw_expr) {
+  int ret = OB_SUCCESS;
+  SET_LOCAL_SYSVAR_CAPACITY(1);
+  EXPR_ADD_LOCAL_SYSVAR(share::SYS_VAR_COLLATION_CONNECTION);
   return ret;
 }

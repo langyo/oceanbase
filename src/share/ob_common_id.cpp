@@ -14,11 +14,6 @@
 
 #include "ob_common_id.h"
 
-#include "lib/oblog/ob_log_module.h"        // LOG_*
-#include "lib/oblog/ob_log.h"               // LOG_*
-#include "lib/utility/ob_unify_serialize.h"
-#include "lib/utility/serialization.h"
-#include "share/ob_errno.h"
 
 namespace oceanbase
 {
@@ -59,7 +54,7 @@ int ObCommonID::deserialize(const char* buf, const int64_t data_len, int64_t& po
 int64_t ObCommonID::get_serialize_size() const
 {
   int64_t size = 0;
-  size += serialization::encoded_length_i64(id_);
+  size += serialization::encoded_length_vi64(id_);
   return size;
 }
 

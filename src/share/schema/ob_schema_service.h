@@ -116,6 +116,13 @@ enum ObSchemaOperationCategory
   ACT(OB_DDL_TRUNCATE_TABLE, = 59)                               \
   ACT(OB_DDL_RENAME_PARTITION, = 60)                             \
   ACT(OB_DDL_RENAME_SUB_PARTITION, = 61)                         \
+  ACT(OB_DDL_MODIFY_MATERIALIZED_VIEW_STATUS, = 62)              \
+  ACT(OB_DDL_ADD_COLUMN_GROUP, = 63)                             \
+  ACT(OB_DDL_DROP_COLUMN_GROUP, = 64)                            \
+  ACT(OB_DDL_EXCHANGE_PARTITION, = 65)                           \
+  ACT(OB_DDL_MODIFY_MVIEW_REFERENCE_TABLE_STATUS, = 66)          \
+  ACT(OB_DDL_MODIFY_INDEX_TYPE, = 67)                            \
+  ACT(OB_DDL_RECOVER_TABLE_END, = 68)                            \
   ACT(OB_DDL_TABLE_OPERATION_END, = 100)                         \
   ACT(OB_DDL_TENANT_OPERATION_BEGIN, = 101)                      \
   ACT(OB_DDL_ADD_TENANT,)                                        \
@@ -332,9 +339,18 @@ enum ObSchemaOperationCategory
   ACT(OB_DDL_DROP_RLS_CONTEXT, = 2053)                           \
   ACT(OB_DDL_RLS_CONTEXT_OPERATION_END, = 2060)                  \
   ACT(OB_DDL_ROUTINE_PRIV_OPERATION_BEGIN, = 2061)               \
-  ACT(OB_DDL_GRANT_REVOKE_ROUTINE_PRIV, = 2062)                  \
+  ACT(OB_DDL_GRANT_ROUTINE_PRIV, = 2062)                         \
   ACT(OB_DDL_DEL_ROUTINE_PRIV, = 2063)                           \
   ACT(OB_DDL_ROUTINE_PRIV_OPERATION_END, = 2070)                 \
+  ACT(OB_DDL_COLUMN_PRIV_OPERATION_BEGIN, = 2071)                \
+  ACT(OB_DDL_GRANT_COLUMN_PRIV, = 2072)                          \
+  ACT(OB_DDL_DEL_COLUMN_PRIV, = 2073)                            \
+  ACT(OB_DDL_COLUMN_PRIV_OPERATION_END, = 2080)                  \
+  ACT(OB_DDL_CATALOG_OPERATION_BEGIN, = 2081)                    \
+  ACT(OB_DDL_CREATE_CATALOG, = 2082)                             \
+  ACT(OB_DDL_ALTER_CATALOG, = 2083)                              \
+  ACT(OB_DDL_DROP_CATALOG, = 2084)                               \
+  ACT(OB_DDL_CATALOG_OPERATION_END, = 2090)                      \
   ACT(OB_DDL_MAX_OP,)
 
 DECLARE_ENUM(ObSchemaOperationType, op_type, OP_TYPE_DEF);
@@ -352,6 +368,8 @@ IS_DDL_TYPE(DATABASE, database)
 IS_DDL_TYPE(USER, user)
 IS_DDL_TYPE(DB_PRIV, db_priv)
 IS_DDL_TYPE(TABLE_PRIV, table_priv)
+IS_DDL_TYPE(ROUTINE_PRIV, routine_priv)
+IS_DDL_TYPE(COLUMN_PRIV, column_priv)
 IS_DDL_TYPE(OUTLINE, outline)
 IS_DDL_TYPE(ZONE, zone)
 IS_DDL_TYPE(SYNONYM, synonym)
@@ -392,10 +410,12 @@ public:
   union {
     uint64_t user_id_;
     uint64_t grantee_id_;
+    uint64_t client_user_id_;
   };
   union {
     uint64_t database_id_;
     uint64_t grantor_id_;
+    uint64_t proxy_user_id_;
   };
   common::ObString database_name_;
   uint64_t tablegroup_id_;
@@ -423,6 +443,8 @@ public:
     uint64_t rls_policy_id_;
     uint64_t rls_group_id_;
     uint64_t rls_context_id_;
+    uint64_t routine_type_;
+    uint64_t column_priv_id_;
   };
   union {
     common::ObString table_name_;
@@ -432,10 +454,10 @@ public:
     common::ObString tablespace_name_;
     common::ObString context_name_;
     common::ObString mock_fk_parent_table_name_;
+    common::ObString routine_name_;
   };
   ObSchemaOperationType op_type_;
   common::ObString ddl_stmt_str_;
-
   bool operator <(const ObSchemaOperation &rv) const { return schema_version_ < rv.schema_version_; }
   void reset();
   bool is_valid() const;
@@ -485,7 +507,8 @@ public:
       next_column_name_(),
       prev_column_name_(),
       is_first_(false),
-      column_group_name_()
+      column_group_name_(),
+      is_set_comment_(false)
   {}
 
   explicit AlterColumnSchema(common::ObIAllocator *allocator)
@@ -503,7 +526,8 @@ public:
       next_column_name_(),
       prev_column_name_(),
       is_first_(false),
-      column_group_name_()
+      column_group_name_(),
+      is_set_comment_(false)
   {}
   AlterColumnSchema &operator=(const AlterColumnSchema &alter_column_schema);
   int assign(const ObColumnSchemaV2 &other);
@@ -535,7 +559,7 @@ public:
   common::ObString prev_column_name_;
   bool is_first_;
   common::ObString column_group_name_;
-
+  bool is_set_comment_;
   DECLARE_VIRTUAL_TO_STRING;
 };
 
@@ -573,6 +597,7 @@ public:
       new_part_name_()
   {
   }
+  DISABLE_COPY_ASSIGN(AlterTableSchema);
   inline const common::ObString &get_origin_table_name() const { return origin_table_name_; }
   inline int set_origin_table_name(const common::ObString &origin_table_name);
   inline const common::ObString &get_database_name() const { return new_database_name_; }
@@ -591,7 +616,7 @@ public:
   }
   inline const common::ObString &get_new_part_name() const { return new_part_name_; }
   inline int set_new_part_name(const common::ObString &new_part_name);
-  int assign_subpartiton_key_info(const common::ObPartitionKeyInfo& src_info);
+  int assign_subpartition_key_info(const common::ObPartitionKeyInfo& src_info);
 
   int add_alter_column(const AlterColumnSchema &column, const bool need_allocate);
   void reset();
@@ -885,6 +910,8 @@ public:
   GET_ALL_SCHEMA_FUNC_DECLARE_PURE_VIRTUAL(tablegroup, ObSimpleTablegroupSchema);
   GET_ALL_SCHEMA_FUNC_DECLARE_PURE_VIRTUAL(db_priv, ObDBPriv);
   GET_ALL_SCHEMA_FUNC_DECLARE_PURE_VIRTUAL(table_priv, ObTablePriv);
+  GET_ALL_SCHEMA_FUNC_DECLARE_PURE_VIRTUAL(routine_priv, ObRoutinePriv);
+  GET_ALL_SCHEMA_FUNC_DECLARE_PURE_VIRTUAL(column_priv, ObColumnPriv);
   GET_ALL_SCHEMA_FUNC_DECLARE_PURE_VIRTUAL(outline, ObSimpleOutlineSchema);
   GET_ALL_SCHEMA_FUNC_DECLARE_PURE_VIRTUAL(routine, ObSimpleRoutineSchema);
   GET_ALL_SCHEMA_FUNC_DECLARE_PURE_VIRTUAL(synonym, ObSimpleSynonymSchema);
@@ -984,6 +1011,7 @@ public:
   virtual int fetch_new_rls_policy_id(const uint64_t tenant_id, uint64_t &new_rls_policy_id) = 0;
   virtual int fetch_new_rls_group_id(const uint64_t tenant_id, uint64_t &new_rls_group_id) = 0;
   virtual int fetch_new_rls_context_id(const uint64_t tenant_id, uint64_t &new_rls_context_id) = 0;
+  virtual int fetch_new_priv_id(const uint64_t tenant_id, uint64_t &new_priv_id) = 0;
 
 //------------------For managing privileges-----------------------------//
   #define GET_BATCH_SCHEMAS_WITH_ALLOCATOR_FUNC_DECLARE_PURE_VIRTUAL(SCHEMA, SCHEMA_TYPE)  \
@@ -1009,6 +1037,8 @@ public:
   GET_BATCH_SCHEMAS_WITH_ALLOCATOR_FUNC_DECLARE_PURE_VIRTUAL(table, ObSimpleTableSchemaV2);
   GET_BATCH_SCHEMAS_FUNC_DECLARE_PURE_VIRTUAL(db_priv, ObDBPriv);
   GET_BATCH_SCHEMAS_FUNC_DECLARE_PURE_VIRTUAL(table_priv, ObTablePriv);
+  GET_BATCH_SCHEMAS_FUNC_DECLARE_PURE_VIRTUAL(routine_priv, ObRoutinePriv);
+  GET_BATCH_SCHEMAS_FUNC_DECLARE_PURE_VIRTUAL(column_priv, ObColumnPriv);
   GET_BATCH_SCHEMAS_FUNC_DECLARE_PURE_VIRTUAL(outline, ObSimpleOutlineSchema);
   GET_BATCH_SCHEMAS_FUNC_DECLARE_PURE_VIRTUAL(routine, ObSimpleRoutineSchema);
   GET_BATCH_SCHEMAS_FUNC_DECLARE_PURE_VIRTUAL(synonym, ObSimpleSynonymSchema);
@@ -1302,6 +1332,18 @@ public:
               const common::ObIArray<uint64_t> &table_ids,
               common::ObIArray<ObSchemaIdVersion> &versions) = 0;
 
+  virtual int get_table_index_infos(
+              common::ObIAllocator &allocator,
+              common::ObISQLClient &sql_client,
+              const uint64_t tenant_id,
+              const uint64_t database_id,
+              const uint64_t data_table_id,
+              common::ObIArray<ObIndexSchemaInfo> &index_infos) = 0;
+  virtual bool schema_name_is_equal(
+               const ObString &src,
+               const ObString &dst,
+               const bool case_compare,
+               const bool compare_with_collation) = 0;
   /*----------- interfaces for latest schema end -------------*/
 
 };

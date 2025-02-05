@@ -12,10 +12,8 @@
 
 #define USING_LOG_PREFIX SQL_ENG
 
-#include "lib/ob_name_def.h"
 #include "sql/engine/expr/ob_expr_to_multi_byte.h"
 #include "sql/session/ob_sql_session_info.h"
-#include "sql/engine/expr/ob_expr_result_type_util.h"
 
 namespace oceanbase
 {
@@ -75,10 +73,12 @@ int calc_to_multi_byte_expr(const ObString &input, const ObCollationType cs_type
 {
   int ret = OB_SUCCESS;
   int64_t min_char_width = 0;
-
+  int64_t max_char_width = 0;
   if (OB_FAIL(ObCharset::get_mbminlen_by_coll(cs_type, min_char_width))) {
     LOG_WARN("fail to get mbminlen", K(ret));
-  } else if (min_char_width > 1) {
+  } else if (OB_FAIL(ObCharset::get_mbmaxlen_by_coll(cs_type, max_char_width))) {
+    LOG_WARN("fail to get mbminlen", K(ret));
+  } else if (min_char_width > 1 || max_char_width == 1) {
     ObDataBuffer allocator(buf, buf_len);
     ObString output;
 

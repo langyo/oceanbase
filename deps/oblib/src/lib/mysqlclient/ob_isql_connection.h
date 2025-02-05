@@ -100,7 +100,9 @@ public:
        last_set_sql_mode_cstr_buf_size_(0),
        last_set_client_charset_cstr_(NULL),
        last_set_connection_charset_cstr_(NULL),
-       last_set_results_charset_cstr_(NULL)
+       last_set_results_charset_cstr_(NULL),
+       next_conn_(NULL),
+       check_priv_(false)
   {}
   virtual ~ObISQLConnection() {
     allocator_.reset();
@@ -109,17 +111,15 @@ public:
     last_set_client_charset_cstr_ = NULL;
     last_set_connection_charset_cstr_ = NULL;
     last_set_results_charset_cstr_ = NULL;
+    next_conn_ = NULL;
   }
 
   // sql execute interface
-  virtual int execute_read(const uint64_t tenant_id, const char *sql,
+  virtual int execute_read(const uint64_t tenant_id, const ObString &sql,
       ObISQLClient::ReadResult &res, bool is_user_sql = false,
       const common::ObAddr *sql_exec_addr = nullptr) = 0;
   virtual int execute_read(const int64_t cluster_id, const uint64_t tenant_id, const ObString &sql,
       ObISQLClient::ReadResult &res, bool is_user_sql = false,
-      const common::ObAddr *sql_exec_addr = nullptr) = 0;
-  virtual int execute_write(const uint64_t tenant_id, const char *sql,
-      int64_t &affected_rows, bool is_user_sql = false,
       const common::ObAddr *sql_exec_addr = nullptr) = 0;
   virtual int execute_write(const uint64_t tenant_id, const ObString &sql,
       int64_t &affected_rows, bool is_user_sql = false,
@@ -131,8 +131,10 @@ public:
                         ObString &sql,
                         const share::schema::ObRoutineInfo &routine_info,
                         const common::ObIArray<const pl::ObUserDefinedType *> &udts,
-                        const ObTimeZoneInfo *tz_info) = 0;
-  virtual int prepare(const char *sql) {
+                        const ObTimeZoneInfo *tz_info,
+                        ObObj *result,
+                        bool is_sql) = 0;
+  virtual int prepare(const ObString &sql, int64_t param_count, ObIAllocator *allocator = NULL) {
     UNUSED(sql);
     return OB_NOT_SUPPORTED;
   }
@@ -140,9 +142,10 @@ public:
                                      void *param,
                                      int64_t param_size,
                                      int32_t datatype,
-                                     int32_t &indicator)
+                                     int32_t &indicator,
+                                     bool is_out_param)
   {
-    UNUSEDx(position, param, param_size, datatype);
+    UNUSEDx(position, param, param_size, datatype, indicator, is_out_param);
     return OB_NOT_SUPPORTED;
   }
   virtual int bind_array_type_by_pos(uint64_t position,
@@ -175,6 +178,7 @@ public:
   // session environment
   virtual int get_session_variable(const ObString &name, int64_t &val) = 0;
   virtual int set_session_variable(const ObString &name, int64_t val) = 0;
+  virtual int set_session_variable(const ObString &name, const ObString &val) = 0;
 
   virtual int execute(const uint64_t tenant_id, ObIExecutor &executor)
   {
@@ -202,6 +206,7 @@ public:
   virtual void set_is_load_data_exec(bool v) { UNUSED(v); }
   virtual void set_force_remote_exec(bool v) { UNUSED(v); }
   virtual void set_use_external_session(bool v) { UNUSED(v); }
+  virtual void set_ob_enable_pl_cache(bool v) { UNUSED(v); }
   virtual int64_t get_cluster_id() const { return common::OB_INVALID_ID; }
   void set_session_init_status(bool status) { is_inited_ = status;}
   virtual void set_user_timeout(int64_t user_timeout) { UNUSED(user_timeout); }
@@ -239,28 +244,38 @@ public:
     }
     if (param_ctx.set_client_charset_cstr_ != last_set_client_charset_cstr_ ||
         param_ctx.set_connection_charset_cstr_ != last_set_connection_charset_cstr_ ||
-        param_ctx.set_results_charset_cstr_ != last_set_results_charset_cstr_) {
+        param_ctx.set_results_charset_cstr_ != last_set_results_charset_cstr_ ||
+        param_ctx.set_transaction_isolation_cstr_ != last_set_transaction_isolation_cstr_) {
       is_inited = false;
       last_set_client_charset_cstr_ = param_ctx.set_client_charset_cstr_;
       last_set_connection_charset_cstr_ = param_ctx.set_connection_charset_cstr_;
       last_set_results_charset_cstr_ = param_ctx.set_results_charset_cstr_;
+      last_set_transaction_isolation_cstr_ = param_ctx.set_transaction_isolation_cstr_;
     }
     return ret;
   }
-  void set_group_id(const int64_t v) {consumer_group_id_ = v; }
-  int64_t get_group_id() const {return consumer_group_id_; }
+  void set_group_id(const uint64_t v) {consumer_group_id_ = v; }
+  uint64_t get_group_id() const {return consumer_group_id_; }
   void set_reverse_link_creadentials(bool flag) { has_reverse_link_credentials_ = flag; }
   bool get_reverse_link_creadentials() { return has_reverse_link_credentials_; }
   void set_usable(bool flag) { usable_ = flag; }
   bool usable() { return usable_; }
   virtual int ping() { return OB_SUCCESS; }
+  void dblink_rlock() { dblink_lock_.rlock()->lock(); }
+  void dblink_unrlock() { dblink_lock_.rlock()->unlock(); }
+  void dblink_wlock() { dblink_lock_.wlock()->lock(); }
+  void dblink_unwlock() { dblink_lock_.wlock()->unlock(); }
+  ObISQLConnection *get_next_conn() { return next_conn_; }
+  void set_next_conn(ObISQLConnection *conn) { next_conn_ = conn; }
+  void set_check_priv(bool on) { check_priv_ = on; }
+  bool is_check_priv() { return check_priv_; }
 protected:
   bool oracle_mode_;
   bool is_inited_; // for oracle dblink, we have to init remote env with some sql
   uint64_t dblink_id_; // for dblink, record dblink_id of a connection used by dblink
   DblinkDriverProto dblink_driver_proto_; //for dblink, record DblinkDriverProto of a connection used by dblink
   uint32_t sessid_;
-  int64_t consumer_group_id_; //for resource isolation
+  uint64_t consumer_group_id_; //for resource isolation
   bool has_reverse_link_credentials_; // for dblink, mark if this link has credentials set
   bool usable_;  // usable_ = false: connection is unusable, should not execute query again.
   char *last_set_sql_mode_cstr_; // for mysql dblink to set sql mode
@@ -268,7 +283,11 @@ protected:
   const char *last_set_client_charset_cstr_;
   const char *last_set_connection_charset_cstr_;
   const char *last_set_results_charset_cstr_;
+  const char *last_set_transaction_isolation_cstr_;
   common::ObArenaAllocator allocator_;
+  obsys::ObRWLock dblink_lock_;
+  ObISQLConnection *next_conn_; // used in dblink_conn_map_
+  bool check_priv_;
 };
 
 } // end namespace sqlclient

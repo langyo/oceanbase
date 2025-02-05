@@ -12,7 +12,6 @@
 
 #include "scn.h"
 #include "share/ob_table_range.h"
-#include "lib/utility/ob_macro_utils.h"         // OB_UNLIKELY
 #include "lib/json/ob_yson.h"
 namespace oceanbase
 {
@@ -465,7 +464,7 @@ int SCN::fixed_serialize(char* buf, const int64_t buf_len, int64_t& pos) const
 {
   int ret = OB_SUCCESS;
   int64_t new_pos = pos;
-  if (NULL == buf && buf_len <= 0) {
+  if (NULL == buf || buf_len <= 0) {
     ret = OB_INVALID_ARGUMENT;
     PALF_LOG(WARN, "invalid argument", K(buf), K(buf_len), K(ret));
   } else if (OB_FAIL(serialization::encode_i64(buf, buf_len, new_pos, val_))) {
@@ -485,7 +484,7 @@ int SCN::fixed_deserialize_without_transform(const char* buf, const int64_t data
 {
   int ret = OB_SUCCESS;
   int64_t new_pos = pos;
-  if (NULL == buf && data_len <= 0) {
+  if (NULL == buf || data_len <= 0) {
     ret = OB_INVALID_ARGUMENT;
     PALF_LOG(WARN, "invalid argument", K(buf), K(data_len), K(ret));
   } else if (OB_FAIL(serialization::decode_i64(buf, data_len, new_pos,
@@ -519,7 +518,7 @@ int SCN::serialize(char* buf, const int64_t buf_len, int64_t& pos) const
 {
   int ret = OB_SUCCESS;
   int64_t new_pos = pos;
-  if (NULL == buf && buf_len <= 0) {
+  if (NULL == buf || buf_len <= 0) {
     ret = OB_INVALID_ARGUMENT;
     PALF_LOG(WARN, "invalid argument", K(buf), K(buf_len), K(ret));
   } else if (OB_FAIL(serialization::encode(buf, buf_len, new_pos, val_))) {
@@ -534,7 +533,7 @@ int SCN::deserialize(const char* buf, const int64_t data_len, int64_t& pos)
 {
   int ret = OB_SUCCESS;
   int64_t new_pos = pos;
-  if (NULL == buf && data_len <= 0) {
+  if (NULL == buf || data_len <= 0) {
     ret = OB_INVALID_ARGUMENT;
     PALF_LOG(WARN, "invalid argument", K(buf), K(data_len), K(ret));
   } else if (OB_FAIL(serialization::decode(buf, data_len, new_pos, val_))) {

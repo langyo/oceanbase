@@ -19,9 +19,11 @@
 #include "lib/utility/ob_macro_utils.h"
 #include "lib/charset/ob_mysql_global.h"
 #include "lib/signal/ob_libunwind.h"
+#include "lib/ash/ob_active_session_guard.h"
 
 extern "C" {
 extern int ob_poll(struct pollfd *__fds, nfds_t __nfds, int __timeout);
+extern int64_t get_rel_offset_c(int64_t addr);
 };
 
 namespace oceanbase
@@ -141,7 +143,7 @@ void safe_current_datetime_str(char *buf, int64_t len, int64_t &pos)
   clock_gettime(CLOCK_REALTIME, &ts);
   struct tm tm;
   safe_secs_to_tm(ts.tv_sec, &tm);
-  int64_t count = safe_snprintf(buf, len, "%d%d%d%d%d%d",
+  int64_t count = lnprintf(buf, len, "%d%d%d%d%d%d",
                                 tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
                                 tm.tm_hour, tm.tm_min, tm.tm_sec);
   if (count >= 0 && count < len) {
@@ -156,7 +158,7 @@ void safe_current_datetime_str_v2(char *buf, int64_t len, int64_t &pos)
   clock_gettime(CLOCK_REALTIME, &ts);
   struct tm tm;
   safe_secs_to_tm(ts.tv_sec, &tm);
-  int64_t count = safe_snprintf(buf, len, "%d-%d-%d %d:%d:%d.%ld",
+  int64_t count = lnprintf(buf, len, "%d-%d-%d %d:%d:%d.%ld",
                                 tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
                                 tm.tm_hour, tm.tm_min, tm.tm_sec, (long)(ts.tv_nsec * 1e-3));
   if (count >= 0 && count < len) {
@@ -174,7 +176,12 @@ int wait_readable(int fd, int64_t timeout)
   bzero(&pfd, sizeof(pfd));
   pfd.fd = fd;
   pfd.events = POLLIN;
-  int n = ob_poll(&pfd, 1, timeout);
+
+  int n = 0;
+  {
+    common::ObBKGDSessInActiveGuard inactive_guard;
+    n = ob_poll(&pfd, 1, timeout);
+  }
   if (-1 == n) {
     ret = OB_ERR_SYS;
     DLOG(WARN, "poll failed, errno=%d", errno);
@@ -188,5 +195,36 @@ int wait_readable(int fd, int64_t timeout)
   return ret;
 }
 
+int64_t safe_parray(char *buf, int64_t len, int64_t *array, int size)
+{
+  int64_t pos = 0;
+  if (NULL != buf && len > 0 && NULL != array) {
+    int64_t count = 0;
+    for (int64_t i = 0; i < size; i++) {
+      int64_t addr = get_rel_offset_c(array[i]);
+      if (0 == i) {
+        count = lnprintf(buf + pos, len - pos, "0x%lx", addr);
+      } else {
+        count = lnprintf(buf + pos, len - pos, " 0x%lx", addr);
+      }
+      if (count >= 0 && pos + count < len) {
+        pos += count;
+      } else {
+        // buf not enough
+        break;
+      }
+    }
+    buf[pos] = 0;
+  }
+  return pos;
+}
+
 } // namespace common
 } // namespace oceanbase
+
+extern "C" {
+  int64_t safe_parray_c(char *buf, int64_t len, int64_t *array, int size)
+  {
+    return oceanbase::common::safe_parray(buf, len, array, size);
+  }
+}

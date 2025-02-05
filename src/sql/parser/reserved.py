@@ -1561,6 +1561,7 @@ class SqlKeywords:
          CURSOR_NAME
          DATA
          DATAFILE
+         DATA_DISK_SIZE
          DATE
          DATE_ADD
          DATE_SUB
@@ -1613,6 +1614,7 @@ class SqlKeywords:
          FAULTS
          FIELDS
          FILE
+         FILE_BLOCK_SIZE
          FILEX
          FINAL_COUNT
          FIRST

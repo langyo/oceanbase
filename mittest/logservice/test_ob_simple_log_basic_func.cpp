@@ -1,3 +1,6 @@
+// owner: zjf225077
+// owner group: log
+
 /**
  * Copyright (c) 2021 OceanBase
  * OceanBase CE is licensed under Mulan PubL v2.
@@ -10,21 +13,7 @@
  * See the Mulan PubL v2 for more details.
  */
 
-#include <gtest/gtest.h>
-#include "io/easy_connection.h"
-#include "lib/file/file_directory_utils.h"
-#include "lib/ob_errno.h"
-#include "lib/oblog/ob_log.h"
-#include "lib/utility/utility.h"
-#include <cstdio>
-#include <signal.h>
-#include "lib/utility/ob_defer.h"
-#include "share/ob_errno.h"
 #define private public
-#include "logservice/palf/log_define.h"
-#include "logservice/palf/lsn_allocator.h"
-#include "share/scn.h"
-#include "logservice/palf/log_rpc_processor.h"
 #include "env/ob_simple_log_cluster_env.h"
 
 #undef private
@@ -49,11 +38,12 @@ int64_t ObSimpleLogClusterTestBase::member_cnt_ = 3;
 int64_t ObSimpleLogClusterTestBase::node_cnt_ = 3;
 std::string ObSimpleLogClusterTestBase::test_name_ = TEST_NAME;
 bool ObSimpleLogClusterTestBase::need_add_arb_server_  = false;
+bool ObSimpleLogClusterTestBase::need_shared_storage_ = false;
 
 TEST_F(TestObSimpleLogClusterBasicFunc, submit_log)
 {
   SET_CASE_LOG_FILE(TEST_NAME, "submit_log");
-  //OB_LOGGER.set_log_level("TRACE");
+  OB_LOGGER.set_log_level("TRACE");
   const int64_t id = ATOMIC_AAF(&palf_id_, 1);
   const int64_t create_ts = 100;
   share::SCN create_scn;
@@ -80,7 +70,7 @@ TEST_F(TestObSimpleLogClusterBasicFunc, submit_log)
 // test_max_padding_size: 测试padding entry最长的场景(2M+16K+88+4K-1B).
 TEST_F(TestObSimpleLogClusterBasicFunc, test_max_padding_size)
 {
-  SET_CASE_LOG_FILE(TEST_NAME, "submit_log");
+  SET_CASE_LOG_FILE(TEST_NAME, "max_padding_size");
   //OB_LOGGER.set_log_level("TRACE");
   const int64_t id = ATOMIC_AAF(&palf_id_, 1);
   const int64_t create_ts = 100;
@@ -414,7 +404,6 @@ TEST_F(TestObSimpleLogClusterBasicFunc, io_reducer_basic)
   EXPECT_EQ(OB_SUCCESS, create_paxos_group(id, leader_idx, leader));
   LogIOWorker *iow = leader.palf_handle_impl_->log_engine_.log_io_worker_;
 
-  iow->batch_io_task_mgr_.has_batched_size_ = 0;
   iow->batch_io_task_mgr_.handle_count_ = 0;
   std::vector<PalfHandleImplGuard*> palf_list;
   EXPECT_EQ(OB_SUCCESS, get_cluster_palf_handle_guard(id, palf_list));
@@ -426,10 +415,8 @@ TEST_F(TestObSimpleLogClusterBasicFunc, io_reducer_basic)
   EXPECT_EQ(OB_SUCCESS, submit_log(leader, 10000, leader_idx, 120));
   const LSN max_lsn = leader.palf_handle_impl_->get_max_lsn();
   wait_lsn_until_flushed(max_lsn, leader);
-  const int64_t has_batched_size = iow->batch_io_task_mgr_.has_batched_size_;
   const int64_t handle_count = iow->batch_io_task_mgr_.handle_count_;
   const int64_t log_id = leader.palf_handle_impl_->sw_.get_max_log_id();
-  PALF_LOG_RET(ERROR, OB_ERR_UNEXPECTED, "batched_size", K(has_batched_size), K(log_id));
 
   unblock_net(leader_idx, lag_follower_idx);
   unblock_net(lag_follower_idx, leader_idx);
@@ -442,13 +429,10 @@ TEST_F(TestObSimpleLogClusterBasicFunc, io_reducer_basic)
     lag_follower_max_lsn = lag_follower.palf_handle_impl_->sw_.max_flushed_end_lsn_;
   }
   LogIOWorker *iow_follower = lag_follower.palf_handle_impl_->log_engine_.log_io_worker_;
-  const int64_t follower_has_batched_size = iow_follower->batch_io_task_mgr_.has_batched_size_;
   const int64_t follower_handle_count = iow_follower->batch_io_task_mgr_.handle_count_;
   EXPECT_EQ(OB_SUCCESS, revert_cluster_palf_handle_guard(palf_list));
 
   int64_t cost_ts = ObTimeUtility::current_time() - start_ts;
-  PALF_LOG_RET(ERROR, OB_SUCCESS, "runlin trace performance", K(cost_ts), K(log_id), K(max_lsn), K(has_batched_size), K(handle_count),
-      K(follower_has_batched_size), K(follower_handle_count));
 }
 
 TEST_F(TestObSimpleLogClusterBasicFunc, create_palf_via_middle_lsn)

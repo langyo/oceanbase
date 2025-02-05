@@ -58,9 +58,10 @@ class ObKVCache : public ObIKVCache<Key, Value>
 public:
   ObKVCache();
   virtual ~ObKVCache();
-  int init(const char *cache_name, const int64_t priority = 1);
+  int init(const char *cache_name, const int64_t priority = 1, const int64_t mem_limit_pct = 100);
   void destroy();
   int set_priority(const int64_t priority);
+  int set_mem_limit_pct(const int64_t mem_limit_pct);
   virtual int put(const Key &key, const Value &value, bool overwrite = true);
   virtual int put_and_fetch(
     const Key &key,
@@ -128,6 +129,7 @@ class ObKVGlobalCache : public lib::ObICacheWasher
 {
   friend class observer::ObServer;
 public:
+  static const int64_t DEFAULT_ONCE_BATCH_GET_BUCKET_NUM = 10000;
   static ObKVGlobalCache &get_instance();
   int init(ObITenantMemLimitGetter *mem_limit_getter,
            const int64_t bucket_num = DEFAULT_BUCKET_NUM,
@@ -158,10 +160,13 @@ public:
 
   // wash memblock from cache synchronously
   virtual int sync_wash_mbs(const uint64_t tenant_id, const int64_t wash_size,
-                            const bool wash_single_mb,
                             lib::ObICacheWasher::ObCacheMemBlock *&wash_blocks);
   int set_storage_leak_check_mod(const char *check_mod);
   int get_cache_name(const int64_t cache_id, char *cache_name);
+  int get_batch_data_block_cache_key(ObIArray<blocksstable::ObMicroBlockCacheKey> &keys) {
+    return map_.get_batch_data_block_cache_key(DEFAULT_ONCE_BATCH_GET_BUCKET_NUM, keys);
+  }
+  OB_INLINE int64_t get_bucket_num() const { return map_.get_bucket_num(); }
 private:
   template<class Key, class Value> friend class ObIKVCache;
   template<class Key, class Value> friend class ObKVCache;
@@ -169,11 +174,12 @@ private:
   friend class ObKVCacheHandle;
   ObKVGlobalCache();
   virtual ~ObKVGlobalCache();
-  int register_cache(const char *cache_name, const int64_t priority, int64_t &cache_id);
+  int register_cache(const char *cache_name, const int64_t priority, const int64_t mem_limit_pct, int64_t &cache_id);
   void deregister_cache(const int64_t cache_id);
   int create_working_set(const ObKVCacheInstKey &inst_key, ObWorkingSet *&working_set);
   int delete_working_set(ObWorkingSet *working_set);
   int set_priority(const int64_t cache_id, const int64_t priority);
+  int set_mem_limit_pct(const int64_t cache_id, const int64_t mem_limit_pct);
   int put(
     const int64_t cache_id,
     const ObIKVCacheKey &key,
@@ -239,6 +245,7 @@ private:
   static const int64_t MAP_ONCE_CLEAN_RATIO = 50;  // 50 * 0.2 = 10s
   static const int64_t MAP_ONCE_REPLACE_RATIO = 100;  // 100 * 0.2 = 20s
   static const int64_t MAX_MAP_ONCE_CLEAN_NUM = 200000;  // 200K
+  static const int64_t EXPAND_MAP_ONCE_CLEAN_RATIO = 10;
   static const int64_t MAX_MAP_ONCE_REPLACE_NUM = 100000;  // 100K
   static const int64_t TIMER_SCHEDULE_INTERVAL_US = 800 * 1000;
   static const int64_t WORKING_SET_LIMIT_PERCENTAGE = 5;
@@ -320,18 +327,9 @@ public:
   void reset();
   inline bool is_valid() const { return NULL != mb_handle_; }
   // simulate move obj, use must pay attention
-  inline void move_from(ObKVCacheHandle &other) {
-    reset();
-    mb_handle_ = other.mb_handle_;
-    if (mb_handle_ != nullptr) {
-#ifdef ENABLE_DEBUG_LOG
-      storage::ObStorageLeakChecker::get_instance().handle_hold(this, storage::ObStorageCheckID::ALL_CACHE);
-      storage::ObStorageLeakChecker::get_instance().handle_reset(&other, storage::ObStorageCheckID::ALL_CACHE);
-#endif
-    }
-    other.mb_handle_ = nullptr;
-    other.reset();
-  }
+  void move_from(ObKVCacheHandle &other);
+  inline ObKVMemBlockHandle* get_mb_handle() const { return mb_handle_; }
+  inline void set_mb_handle(ObKVMemBlockHandle *mb_handle) { mb_handle_ = mb_handle; }
   TO_STRING_KV(KP_(mb_handle));
 private:
   template<class Key, class Value> friend class ObIKVCache;
@@ -340,6 +338,7 @@ private:
   friend class ObKVCacheIterator;
   friend class storage::ObStorageLeakChecker;
   ObKVMemBlockHandle *mb_handle_;
+  bool is_traced_;
 };
 
 class ObKVCacheIterator
@@ -411,17 +410,17 @@ ObKVCache<Key, Value>::~ObKVCache()
 }
 
 template <class Key, class Value>
-int ObKVCache<Key, Value>::init(const char *cache_name, const int64_t priority)
+int ObKVCache<Key, Value>::init(const char *cache_name, const int64_t priority, const int64_t mem_limit_pct)
 {
   int ret = OB_SUCCESS;
   if (OB_UNLIKELY(inited_)) {
     ret = OB_INIT_TWICE;
     COMMON_LOG(WARN, "The ObKVCache has been inited, ", K(ret));
   } else if (OB_UNLIKELY(NULL == cache_name)
-      || OB_UNLIKELY(priority <= 0)) {
+      || OB_UNLIKELY(priority <= 0 || mem_limit_pct <= 0 || mem_limit_pct > 100)) {
     ret = OB_INVALID_ARGUMENT;
     COMMON_LOG(WARN, "Invalid argument, ", KP(cache_name), K(priority), K(ret));
-  } else if (OB_FAIL(ObKVGlobalCache::get_instance().register_cache(cache_name, priority, cache_id_))) {
+  } else if (OB_FAIL(ObKVGlobalCache::get_instance().register_cache(cache_name, priority, mem_limit_pct, cache_id_))) {
     COMMON_LOG(WARN, "Fail to register cache, ", K(ret));
   } else {
     COMMON_LOG(INFO, "Succ to register cache", K(cache_name), K(priority), K_(cache_id));
@@ -452,6 +451,24 @@ int ObKVCache<Key, Value>::set_priority(const int64_t priority)
   } else if (OB_FAIL(ObKVGlobalCache::get_instance().set_priority(cache_id_, priority))) {
     COMMON_LOG(WARN, "Fail to set priority, ", K(ret));
   }
+  return ret;
+}
+
+template <class Key, class Value>
+int ObKVCache<Key, Value>::set_mem_limit_pct(const int64_t mem_limit_pct)
+{
+  int ret = OB_SUCCESS;
+
+  if (OB_UNLIKELY(!inited_)) {
+    ret = OB_NOT_INIT;
+    COMMON_LOG(WARN, "The ObKVCache has not been inited, ", K(ret));
+  } else if (OB_UNLIKELY(mem_limit_pct <= 0 || mem_limit_pct > 100)) {
+    ret = OB_INVALID_ARGUMENT;
+    COMMON_LOG(WARN, "Invalid argument, ", K(mem_limit_pct), K(ret));
+  } else if (OB_FAIL(ObKVGlobalCache::get_instance().set_mem_limit_pct(cache_id_, mem_limit_pct))) {
+    COMMON_LOG(WARN, "Fail to set mem_limit_pct, ", K(ret));
+  }
+
   return ret;
 }
 
@@ -558,11 +575,6 @@ int ObKVCache<Key, Value>::put(const Key &key, const Value &value, bool overwrit
     if (OB_ENTRY_EXIST != ret) {
       COMMON_LOG(WARN, "Fail to put kv to ObKVGlobalCache, ", K_(cache_id), K(ret));
     }
-  } else {
-#ifdef ENABLE_DEBUG_LOG
-    storage::ObStorageLeakChecker::get_instance().handle_hold(&handle, storage::ObStorageCheckID::ALL_CACHE);
-#endif
-    handle.reset();
   }
   return ret;
 }
@@ -587,9 +599,7 @@ int ObKVCache<Key, Value>::put_and_fetch(
       COMMON_LOG(WARN, "Fail to put kv to ObKVGlobalCache, ", K_(cache_id), K(ret));
     }
   } else {
-#ifdef ENABLE_DEBUG_LOG
     storage::ObStorageLeakChecker::get_instance().handle_hold(&handle, storage::ObStorageCheckID::ALL_CACHE);
-#endif
   }
   return ret;
 }
@@ -610,9 +620,7 @@ int ObKVCache<Key, Value>::get(const Key &key, const Value *&pvalue, ObKVCacheHa
       }
     } else {
       pvalue = reinterpret_cast<const Value*> (value);
-#ifdef ENABLE_DEBUG_LOG
       storage::ObStorageLeakChecker::get_instance().handle_hold(&handle, storage::ObStorageCheckID::ALL_CACHE);
-#endif
     }
   }
   return ret;
@@ -650,9 +658,7 @@ int ObKVCache<Key, Value>::alloc(const uint64_t tenant_id, const int64_t key_siz
           inst_handle))) {
     COMMON_LOG(WARN, "failed to alloc", K(ret));
   } else {
-#ifdef ENABLE_DEBUG_LOG
     storage::ObStorageLeakChecker::get_instance().handle_hold(&handle, storage::ObStorageCheckID::ALL_CACHE);
-#endif
   }
 
   return ret;
@@ -717,9 +723,7 @@ int ObKVCacheIterator::get_next_kvpair(
     key = reinterpret_cast<const Key*>(node.key_);
     value = reinterpret_cast<const Value*>(node.value_);
     handle.mb_handle_ = node.mb_handle_;
-#ifdef ENABLE_DEBUG_LOG
     storage::ObStorageLeakChecker::get_instance().handle_hold(&handle, storage::ObStorageCheckID::ALL_CACHE);
-#endif
   }
   return ret;
 }

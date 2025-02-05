@@ -12,15 +12,7 @@
 
 #define USING_LOG_PREFIX SHARE_SCHEMA
 #include "ob_tablegroup_sql_service.h"
-#include "lib/oblog/ob_log.h"
-#include "lib/oblog/ob_log_module.h"
-#include "lib/mysqlclient/ob_mysql_proxy.h"
-#include "share/ob_dml_sql_splicer.h"
-#include "share/inner_table/ob_inner_table_schema_constants.h"
-#include "share/schema/ob_schema_struct.h"
 #include "share/schema/ob_partition_sql_helper.h"
-#include "observer/ob_server_struct.h"
-#include "rootserver/ob_root_service.h"
 
 namespace oceanbase
 {
@@ -98,7 +90,7 @@ int ObTablegroupSqlService::update_tablegroup(ObTablegroupSchema &new_schema,
   }
   // add tablegroup_history
   const bool only_history = true;
-  if (OB_FAIL(add_tablegroup(sql_client, new_schema, only_history))) {
+  if (FAILEDx(add_tablegroup(sql_client, new_schema, only_history))) {
     LOG_WARN("fail to add tablegroup history", K(ret));
   }
 

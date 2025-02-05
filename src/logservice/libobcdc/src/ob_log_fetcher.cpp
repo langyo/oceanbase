@@ -23,7 +23,6 @@
 #include "ob_log_sys_ls_task_handler.h"  // IObLogSysLsTaskHandler
 #include "ob_log_task_pool.h"         // ObLogTransTaskPool
 #include "ob_log_instance.h"          // IObLogErrHandler
-#include "logservice/restoreservice/ob_log_restore_net_driver.h"   // logfetcher::LogErrHandler
 
 using namespace oceanbase::common;
 
@@ -70,8 +69,11 @@ ObLogFetcher::ObLogFetcher() :
     stop_flag_(true),
     paused_(false),
     pause_time_(OB_INVALID_TIMESTAMP),
-    resume_time_(OB_INVALID_TIMESTAMP)
+    resume_time_(OB_INVALID_TIMESTAMP),
+    decompression_blk_mgr_(DECOMPRESSION_MEM_LIMIT_THRESHOLD),
+    decompression_alloc_(ObMemAttr(OB_SERVER_TENANT_ID, "decompress_buf"), common::OB_MALLOC_BIG_BLOCK_SIZE, decompression_blk_mgr_)
 {
+  decompression_alloc_.set_nway(DECOMPRESSION_MEM_LIMIT_THRESHOLD);
 }
 
 ObLogFetcher::~ObLogFetcher()
@@ -81,6 +83,7 @@ ObLogFetcher::~ObLogFetcher()
 
 int ObLogFetcher::init(
     const bool is_loading_data_dict_baseline_data,
+    const bool enable_direct_load_inc,
     const ClientFetchingMode fetching_mode,
     const ObBackupPathString &archive_dest,
     IObLogFetcherDispatcher *dispatcher,
@@ -132,7 +135,8 @@ int ObLogFetcher::init(
         cfg.blacklist_history_overdue_time_min,
         cfg.blacklist_history_clear_interval_min,
         is_tenant_mode,
-        TCTX.tenant_id_))) {
+        TCTX.tenant_id_,
+        OB_SERVER_TENANT_ID))) {
       LOG_ERROR("ObLogRouterService init failer", KR(ret), K(prefer_region), K(cluster_id));
     } else if (OB_FAIL(progress_controller_.init(cfg.ls_count_upper_limit))) {
       LOG_ERROR("init progress controller fail", KR(ret));
@@ -196,6 +200,7 @@ int ObLogFetcher::init(
       heartbeat_dispatch_tid_ = 0;
       last_timestamp_ = OB_INVALID_TIMESTAMP;
       is_loading_data_dict_baseline_data_ = is_loading_data_dict_baseline_data;
+      enable_direct_load_inc_ = enable_direct_load_inc;
       fetching_mode_ = fetching_mode;
       archive_dest_ = archive_dest;
       log_ext_handler_concurrency_ = cfg.cdc_read_archive_log_concurrency;
@@ -208,7 +213,7 @@ int ObLogFetcher::init(
       IObCDCPartTransResolver::test_checkpoint_mode_on = cfg.test_checkpoint_mode_on;
       IObCDCPartTransResolver::test_mode_ignore_log_type = static_cast<IObCDCPartTransResolver::IgnoreLogType>(cfg.test_mode_ignore_log_type.get());
 
-      LOG_INFO("init fetcher succ", K_(is_loading_data_dict_baseline_data),
+      LOG_INFO("init fetcher succ", K_(is_loading_data_dict_baseline_data), K(enable_direct_load_inc),
           "test_mode_on", IObCDCPartTransResolver::test_mode_on,
           "test_mode_ignore_log_type", IObCDCPartTransResolver::test_mode_ignore_log_type,
           "test_mode_ignore_redo_count", IObCDCPartTransResolver::test_mode_ignore_redo_count,
@@ -437,7 +442,7 @@ int ObLogFetcher::add_ls(
   }
   // Push LS into ObLogLSFetchMgr
   else if (OB_FAIL(ls_fetch_mgr_.add_ls(tls_id, start_parameters, is_loading_data_dict_baseline_data_,
-      fetching_mode_, archive_dest_))) {
+      enable_direct_load_inc_, fetching_mode_, archive_dest_))) {
     LOG_ERROR("add partition by part fetch mgr fail", KR(ret), K(tls_id), K(start_parameters),
         K(is_loading_data_dict_baseline_data_));
   } else if (OB_FAIL(ls_fetch_mgr_.get_ls_fetch_ctx(tls_id, ls_fetch_ctx))) {
@@ -836,6 +841,22 @@ void ObLogFetcher::print_fetcher_stat_()
         "fetcher_delay", TVAL_TO_STR(fetcher_delay));
   }
 }
+void *ObLogFetcher::alloc_decompression_buf(int64_t size)
+{
+  void *buf = NULL;
+  if (IS_INIT) {
+    buf = decompression_alloc_.alloc(size);
+  }
+  return buf;
+}
+
+void ObLogFetcher::free_decompression_buf(void *buf)
+{
+  if (NULL != buf) {
+    decompression_alloc_.free(buf);
+    buf = NULL;
+  }
+}
 
 ObLogFetcher::FetchCtxMapHBFunc::FetchCtxMapHBFunc() :
     data_progress_(OB_INVALID_TIMESTAMP),
@@ -903,8 +924,9 @@ bool ObLogFetcher::FetchCtxMapHBFunc::operator()(const logservice::TenantLSID &t
     part_count_++;
 
     if (g_print_ls_heartbeat_info) {
+      ObCStringHelper helper;
       _LOG_INFO("[STAT] [FETCHER] [HEARTBEAT] TLS=%s PROGRESS=%ld DISPATCH_LOG_LSN=%lu "
-          "DATA_PROGRESS=%ld DDL_PROGRESS=%ld DDL_DISPATCH_LOG_LSN=%lu", to_cstring(tls_id),
+          "DATA_PROGRESS=%ld DDL_PROGRESS=%ld DDL_DISPATCH_LOG_LSN=%lu", helper.convert(tls_id),
           progress, last_dispatch_log_lsn.val_, data_progress_, ddl_progress_, ddl_last_dispatch_log_lsn_.val_);
     }
   }
@@ -985,22 +1007,23 @@ int ObLogFetcher::next_heartbeat_timestamp_(int64_t &heartbeat_tstamp, const int
         min_progress_tls_id = logservice::TenantLSID(ddl_min_progress_tenant_id, share::SYS_LS);
       }
 
+      ObCStringHelper helper;
       _LOG_INFO("[STAT] [FETCHER] [HEARTBEAT] DELAY=[%.3lf, %.3lf](sec) LS_COUNT=%ld "
           "MIN_DELAY=%s(%ld) MAX_DELAY=%s(%ld) DATA_PROGRESS=%s(%ld) "
           "DDL_PROGRESS=%s(%ld) DDL_TENANT=%lu DDL_LOG_LSN=%s",
           get_delay_sec(max_progress),
           get_delay_sec(min_progress),
           hb_func.part_count_,
-          to_cstring(max_progress_tls_id),
+          helper.convert(max_progress_tls_id),
           max_progress,
-          to_cstring(min_progress_tls_id),
+          helper.convert(min_progress_tls_id),
           min_progress,
           NTS_TO_STR(data_progress),
           data_progress,
           NTS_TO_STR(ddl_handle_progress),
           ddl_handle_progress,
           ddl_min_progress_tenant_id,
-          to_cstring(ddl_handle_lsn));
+          helper.convert(ddl_handle_lsn));
     }
 
     if (OB_UNLIKELY(OB_INVALID_TIMESTAMP != heartbeat_tstamp && cdc_start_tstamp_ns -1 > heartbeat_tstamp)) {
@@ -1012,6 +1035,7 @@ int ObLogFetcher::next_heartbeat_timestamp_(int64_t &heartbeat_tstamp, const int
     }
     // Checks if the heartbeat timestamp is reverted
     else if (OB_INVALID_TIMESTAMP != last_timestamp && heartbeat_tstamp < last_timestamp) {
+      ObCStringHelper helper;
       LOG_ERROR("heartbeat timestamp is rollback, unexcepted error",
           "last_timestamp", NTS_TO_STR(last_timestamp),
           K(last_timestamp),
@@ -1022,8 +1046,8 @@ int ObLogFetcher::next_heartbeat_timestamp_(int64_t &heartbeat_tstamp, const int
           K(min_progress_tls_id), K(last_min_data_progress_ls),
           "ddl_handle_progress", NTS_TO_STR(ddl_handle_progress),
           "last_ddl_handle_progress", NTS_TO_STR(last_ddl_handle_progress),
-          "ddl_handle_lsn", to_cstring(ddl_handle_lsn),
-          "last_ddl_handle_lsn", to_cstring(last_ddl_handle_lsn),
+          "ddl_handle_lsn", helper.convert(ddl_handle_lsn),
+          "last_ddl_handle_lsn", helper.convert(last_ddl_handle_lsn),
           K(last_ls_progress_infos));
       ret = OB_ERR_UNEXPECTED;
     } else {

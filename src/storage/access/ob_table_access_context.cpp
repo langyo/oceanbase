@@ -12,9 +12,6 @@
 
 #define USING_LOG_PREFIX STORAGE
 #include "ob_table_access_context.h"
-#include "ob_dml_param.h"
-#include "share/ob_lob_access_utils.h"
-#include "ob_store_row_iterator.h"
 
 namespace oceanbase
 {
@@ -54,6 +51,7 @@ ObTableAccessContext::ObTableAccessContext()
   : is_inited_(false),
     use_fuse_row_cache_(false),
     need_scn_(false),
+    need_release_mview_scan_info_(true),
     timeout_(0),
     query_flag_(),
     sql_mode_(0),
@@ -72,11 +70,14 @@ ObTableAccessContext::ObTableAccessContext()
     merge_scn_(),
     lob_allocator_(ObModIds::OB_LOB_READER, OB_MALLOC_NORMAL_BLOCK_SIZE, MTL_ID()),
     lob_locator_helper_(nullptr),
-    iter_pool_(nullptr),
+    cached_iter_node_(nullptr),
+    stmt_iter_pool_(nullptr),
     cg_iter_pool_(nullptr),
     cg_param_pool_(nullptr),
     block_row_store_(nullptr),
-    trans_state_mgr_(nullptr)
+    sample_filter_(nullptr),
+    trans_state_mgr_(nullptr),
+    mview_scan_info_(nullptr)
 {
   merge_scn_.set_max();
 }
@@ -84,12 +85,13 @@ ObTableAccessContext::ObTableAccessContext()
 ObTableAccessContext::~ObTableAccessContext()
 {
   reset_lob_locator_helper();
-  if (nullptr != iter_pool_) {
-    iter_pool_->~ObStoreRowIterPool<ObStoreRowIterator>();
+  cached_iter_node_ = nullptr;
+  if (nullptr != stmt_iter_pool_) {
+    stmt_iter_pool_->~ObStoreRowIterPool<ObStoreRowIterator>();
     if (OB_NOT_NULL(stmt_allocator_)) {
-      stmt_allocator_->free(iter_pool_);
+      stmt_allocator_->free(stmt_iter_pool_);
     }
-    iter_pool_ = nullptr;
+    stmt_iter_pool_ = nullptr;
   }
   if (nullptr != cg_iter_pool_) {
     cg_iter_pool_->~ObStoreRowIterPool<ObICGIterator>();
@@ -97,6 +99,13 @@ ObTableAccessContext::~ObTableAccessContext()
       stmt_allocator_->free(cg_iter_pool_);
     }
     cg_iter_pool_ = nullptr;
+  }
+  ObRowSampleFilterFactory::destroy_sample_filter(sample_filter_);
+  if (need_release_mview_scan_info_) {
+    release_mview_scan_info(stmt_allocator_, mview_scan_info_);
+    need_release_mview_scan_info_ = false;
+  } else {
+    mview_scan_info_ = nullptr;
   }
 }
 
@@ -151,7 +160,8 @@ int ObTableAccessContext::build_lob_locator_helper(const ObStoreCtx &ctx,
     ret = OB_ALLOCATE_MEMORY_FAILED;
     STORAGE_LOG(WARN, "Failed to alloc memory for ObLobLocatorHelper", K(ret));
   } else if (FALSE_IT(lob_locator_helper_ = new (buf) ObLobLocatorHelper())) {
-  } else if (OB_FAIL(lob_locator_helper_->init(table_store_stat_,
+  } else if (OB_FAIL(lob_locator_helper_->init(tablet_id_.id(),
+                                               tablet_id_.id(),
                                                ctx,
                                                ls_id_,
                                                trans_version_range.snapshot_version_))) {
@@ -166,7 +176,8 @@ int ObTableAccessContext::build_lob_locator_helper(const ObStoreCtx &ctx,
 
 int ObTableAccessContext::init(ObTableScanParam &scan_param,
                                ObStoreCtx &ctx,
-                               const ObVersionRange &trans_version_range)
+                               const ObVersionRange &trans_version_range,
+                               CachedIteratorNode *cached_iter_node)
 {
   int ret = OB_SUCCESS;
   if (OB_UNLIKELY(is_inited_ && stmt_allocator_ != scan_param.allocator_)) {
@@ -177,6 +188,7 @@ int ObTableAccessContext::init(ObTableScanParam &scan_param,
     LOG_WARN("Failed to init scan allocator", K(ret));
   } else {
     stmt_allocator_ = scan_param.allocator_;
+    cached_iter_node_ = cached_iter_node;
     range_allocator_ = nullptr;
     ls_id_ = scan_param.ls_id_;
     tablet_id_ = scan_param.tablet_id_;
@@ -187,9 +199,6 @@ int ObTableAccessContext::init(ObTableScanParam &scan_param,
     table_scan_stat_ = &scan_param.main_table_scan_stat_;
     limit_param_ = scan_param.limit_param_.is_valid() ? &scan_param.limit_param_ : NULL;
     table_scan_stat_->reset();
-    table_store_stat_.ls_id_ = scan_param.ls_id_;
-    table_store_stat_.tablet_id_ = scan_param.tablet_id_;
-    table_store_stat_.table_id_ = scan_param.index_id_;
     trans_version_range_ = trans_version_range;
     need_scn_ = scan_param.need_scn_;
     range_array_pos_ = &scan_param.range_array_pos_;
@@ -206,6 +215,14 @@ int ObTableAccessContext::init(ObTableScanParam &scan_param,
                   table_store_stat_,
                   query_flag_))) {
       LOG_WARN("Fail to init micro block handle mgr", K(ret));
+    } else if (scan_param.sample_info_.is_row_sample()
+        && OB_FAIL(ObRowSampleFilterFactory::build_sample_filter(
+          scan_param.sample_info_,
+          sample_filter_,
+          scan_param.op_,
+          query_flag_.is_reverse_scan(),
+          scan_param.allocator_))) {
+      LOG_WARN("Failed to build sample filter", K(ret), K(scan_param));
     } else {
       is_inited_ = true;
     }
@@ -236,9 +253,6 @@ int ObTableAccessContext::init(const common::ObQueryFlag &query_flag,
     trans_version_range_ = trans_version_range;
     ls_id_ = ctx.ls_id_;
     tablet_id_ = ctx.tablet_id_;
-    table_store_stat_.ls_id_ = ctx.ls_id_;
-    table_store_stat_.tablet_id_ = ctx.tablet_id_;
-    table_store_stat_.table_id_ = ctx.tablet_id_.id(); // TODO  (yuanzhe) remove table_id in virtual table
     // handle lob types without ObTableScanParam:
     // 1. use lob locator instead of full lob data
     // 2. without rowkey, since need not send result to dbmslob/client
@@ -256,10 +270,12 @@ int ObTableAccessContext::init(const common::ObQueryFlag &query_flag,
   }
   return ret;
 }
+
 int ObTableAccessContext::init(const common::ObQueryFlag &query_flag,
                                ObStoreCtx &ctx,
                                common::ObIAllocator &allocator,
-                               const common::ObVersionRange &trans_version_range)
+                               const common::ObVersionRange &trans_version_range,
+                               CachedIteratorNode *cached_iter_node)
 {
   int ret = OB_SUCCESS;
   if (is_inited_) {
@@ -277,14 +293,52 @@ int ObTableAccessContext::init(const common::ObQueryFlag &query_flag,
     trans_version_range_ = trans_version_range;
     ls_id_ = ctx.ls_id_;
     tablet_id_ = ctx.tablet_id_;
-    table_store_stat_.ls_id_ = ctx.ls_id_;
-    table_store_stat_.tablet_id_ = ctx.tablet_id_;
-    table_store_stat_.table_id_ = ctx.tablet_id_.id(); // TODO  (yuanzhe) remove table_id in virtual table
     lob_locator_helper_ = nullptr;
+    cached_iter_node_ = cached_iter_node;
     if (!micro_block_handle_mgr_.is_valid()
         && OB_FAIL(micro_block_handle_mgr_.init(enable_limit, table_store_stat_, query_flag_))) {
       LOG_WARN("Fail to init micro block handle mgr", K(ret));
     } else {
+      is_inited_ = true;
+    }
+  }
+  return ret;
+}
+
+int ObTableAccessContext::init_for_mview(common::ObIAllocator *allocator, const ObTableAccessContext &access_ctx, ObStoreCtx &store_ctx)
+{
+  int ret = OB_SUCCESS;
+  if (is_inited_ && stmt_allocator_ != access_ctx.stmt_allocator_) {
+    ret = OB_INIT_TWICE;
+    LOG_WARN("cannot init twice", K(ret));
+  } else {
+    stmt_allocator_ = access_ctx.stmt_allocator_;
+    allocator_ = allocator;
+    cached_iter_node_ = nullptr;
+    range_allocator_ = nullptr;
+    ls_id_ = access_ctx.ls_id_;
+    tablet_id_ = access_ctx.tablet_id_;
+    query_flag_ = access_ctx.query_flag_;
+    sql_mode_ = access_ctx.sql_mode_;
+    timeout_ = access_ctx.timeout_;
+    store_ctx_ = &store_ctx;
+    table_scan_stat_ = nullptr;
+    limit_param_ = nullptr;
+    trans_version_range_.base_version_ = 0;
+    trans_version_range_.snapshot_version_ = access_ctx.trans_version_range_.base_version_;
+    need_scn_ = false;
+    range_array_pos_ = nullptr;
+    use_fuse_row_cache_ = true;
+    lob_locator_helper_ = nullptr;
+    if (!micro_block_handle_mgr_.is_valid() &&
+        OB_FAIL(micro_block_handle_mgr_.init(
+                false,
+                table_store_stat_,
+                query_flag_))) {
+      LOG_WARN("Failed to init micro block handle mgr", K(ret));
+    } else {
+      mview_scan_info_ = access_ctx.mview_scan_info_;
+      need_release_mview_scan_info_ = false;
       is_inited_ = true;
     }
   }
@@ -320,15 +374,36 @@ int ObTableAccessContext::init_scan_allocator(ObTableScanParam &scan_param)
   return ret;
 }
 
+int ObTableAccessContext::init_mview_scan_info(const int64_t multi_version_start, const sql::ObExprPtrIArray *op_filters, sql::ObEvalCtx &eval_ctx)
+{
+  int ret = OB_SUCCESS;
+  if (nullptr != mview_scan_info_) {
+  } else if (OB_FAIL(build_mview_scan_info_if_need(query_flag_, op_filters, eval_ctx, stmt_allocator_, mview_scan_info_))) {
+    LOG_WARN("Failed to build mview scan info", K(ret));
+  }
+  if (OB_FAIL(ret) || nullptr == mview_scan_info_) {
+  } else if (OB_FAIL(mview_scan_info_->check_and_update_version_range(multi_version_start, trans_version_range_))) {
+    LOG_WARN("Failed to check and update version range", K(ret), K(multi_version_start), K(trans_version_range_), KPC_(mview_scan_info));
+  }
+  return ret;
+}
+
 void ObTableAccessContext::reset()
 {
   reset_lob_locator_helper();
-  if (nullptr != iter_pool_) {
-    iter_pool_->~ObStoreRowIterPool();
+  if (need_release_mview_scan_info_) {
+    release_mview_scan_info(stmt_allocator_, mview_scan_info_);
+    need_release_mview_scan_info_ = false;
+  } else {
+    mview_scan_info_ = nullptr;
+  }
+  cached_iter_node_ = nullptr;
+  if (nullptr != stmt_iter_pool_) {
+    stmt_iter_pool_->~ObStoreRowIterPool<ObStoreRowIterator>();
     if (OB_NOT_NULL(stmt_allocator_)) {
-      stmt_allocator_->free(iter_pool_);
+      stmt_allocator_->free(stmt_iter_pool_);
     }
-    iter_pool_ = nullptr;
+    stmt_iter_pool_ = nullptr;
   }
   if (nullptr != cg_iter_pool_) {
     cg_iter_pool_->~ObStoreRowIterPool<ObICGIterator>();
@@ -361,6 +436,7 @@ void ObTableAccessContext::reset()
   range_array_pos_ = nullptr;
   cg_param_pool_ = nullptr;
   block_row_store_ = nullptr;
+  ObRowSampleFilterFactory::destroy_sample_filter(sample_filter_);
 }
 
 int ObTableAccessContext::rescan_reuse(ObTableScanParam &scan_param)
@@ -372,6 +448,9 @@ int ObTableAccessContext::rescan_reuse(ObTableScanParam &scan_param)
     out_cnt_ = 0;
     if (nullptr != table_scan_stat_) {
       table_scan_stat_->reset();
+    }
+    if (nullptr != sample_filter_) {
+      sample_filter_->reuse();
     }
   }
   return ret;
@@ -398,6 +477,9 @@ void ObTableAccessContext::reuse()
   range_array_pos_ = nullptr;
   cg_param_pool_ = nullptr;
   block_row_store_ = nullptr;
+  if (nullptr != sample_filter_) {
+    sample_filter_->reuse();
+  }
 }
 
 int ObTableAccessContext::alloc_iter_pool(const bool use_column_store)
@@ -406,13 +488,13 @@ int ObTableAccessContext::alloc_iter_pool(const bool use_column_store)
   if (IS_NOT_INIT) {
     ret = OB_NOT_INIT;
     STORAGE_LOG(WARN, "ObTableAccessContext not inited", K(ret), KPC(this));
-  } else if (nullptr == iter_pool_) {
+  } else if (nullptr == stmt_iter_pool_ && nullptr == cached_iter_node_) {
     void *buf = nullptr;
     if (OB_ISNULL(buf = stmt_allocator_->alloc(sizeof(ObStoreRowIterPool<ObStoreRowIterator>)))) {
       ret = common::OB_ALLOCATE_MEMORY_FAILED;
       LOG_WARN("Failed to alloc row iter pool", K(ret));
     } else {
-      iter_pool_ = new(buf) ObStoreRowIterPool<ObStoreRowIterator>(*stmt_allocator_);
+      stmt_iter_pool_ = new(buf) ObStoreRowIterPool<ObStoreRowIterator>(*stmt_allocator_);
     }
   }
   if (OB_FAIL(ret)) {

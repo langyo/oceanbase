@@ -15,6 +15,7 @@
 
 #include "observer/ob_inner_sql_rpc_proxy.h"
 #include "storage/tablelock/ob_table_lock_common.h"
+#include "storage/tablelock/ob_table_lock_rpc_struct.h"
 
 namespace oceanbase
 {
@@ -45,12 +46,12 @@ class ObLockTableRequest;
 class ObLockTabletRequest;
 class ObLockPartitionRequest;
 class ObLockAloneTabletRequest;
-using ObUnLockObjRequest = ObLockObjRequest;
-using ObUnLockObjsRequest = ObLockObjsRequest;
-using ObUnLockTableRequest = ObLockTableRequest;
-using ObUnLockPartitionRequest = ObLockPartitionRequest;
-using ObUnLockTabletRequest = ObLockTabletRequest;
-using ObUnLockAloneTabletRequest = ObLockAloneTabletRequest;
+class ObUnLockObjRequest;
+class ObUnLockObjsRequest;
+class ObUnLockTableRequest;
+class ObUnLockPartitionRequest;
+class ObUnLockTabletRequest;
+class ObUnLockAloneTabletRequest;
 
 class ObInnerConnectionLockUtil
 {
@@ -68,7 +69,9 @@ private:
       const obrpc::ObInnerSQLTransmitArg::InnerSQLOperationType operation_type,
       const obrpc::ObInnerSQLTransmitArg &arg,
       observer::ObInnerSQLConnection *conn);
-// --------------------- interface for inner connection client -----------------------
+  static int process_replace_lock_(const obrpc::ObInnerSQLTransmitArg &arg, observer::ObInnerSQLConnection *conn);
+  static int process_replace_all_locks_(const obrpc::ObInnerSQLTransmitArg &arg, observer::ObInnerSQLConnection *conn);
+  // --------------------- interface for inner connection client -----------------------
 public:
   static int lock_table(
       const uint64_t tenant_id,
@@ -146,13 +149,45 @@ public:
       const uint64_t tenant_id,
       const ObUnLockObjsRequest &arg,
       observer::ObInnerSQLConnection *conn);
+  static int replace_lock(
+      const uint64_t tenant_id,
+      const ObReplaceLockRequest &req,
+      observer::ObInnerSQLConnection *conn);
+  static int replace_lock(
+      const uint64_t tenant_id,
+      const ObReplaceAllLocksRequest &req,
+      observer::ObInnerSQLConnection *conn);
+  static int create_inner_conn(sql::ObSQLSessionInfo *session_info,
+                               common::ObMySQLProxy *sql_proxy,
+                               observer::ObInnerSQLConnection *&inner_conn);
+  static int execute_write_sql(observer::ObInnerSQLConnection *conn, const ObSqlString &sql, int64_t &affected_rows);
+  static int execute_read_sql(observer::ObInnerSQLConnection *conn,
+                              const ObSqlString &sql,
+                              ObISQLClient::ReadResult &res);
+  static int build_tx_param(sql::ObSQLSessionInfo *session_info, ObTxParam &tx_param, const bool *readonly = nullptr);
+
 private:
+  static int replace_lock_(
+      const uint64_t tenant_id,
+      const ObReplaceLockRequest &req,
+      observer::ObInnerSQLConnection *conn,
+      observer::ObInnerSQLResult &res);
+  static int replace_lock_(
+      const uint64_t tenant_id,
+      const ObReplaceAllLocksRequest &req,
+      observer::ObInnerSQLConnection *conn,
+      observer::ObInnerSQLResult &res);
   static int do_obj_lock_(
       const uint64_t tenant_id,
       const ObLockRequest &arg,
       const obrpc::ObInnerSQLTransmitArg::InnerSQLOperationType operation_type,
       observer::ObInnerSQLConnection *conn,
       observer::ObInnerSQLResult &res);
+  static int handle_request_by_operation_type_(
+    ObTxDesc &tx_desc,
+    const ObTxParam &tx_param,
+    const ObLockRequest &arg,
+    const obrpc::ObInnerSQLTransmitArg::InnerSQLOperationType operation_type);
   static int request_lock_(
       const uint64_t tenant_id,
       const uint64_t table_id,
@@ -166,6 +201,14 @@ private:
       const ObLockRequest &arg,
       const obrpc::ObInnerSQLTransmitArg::InnerSQLOperationType operation_type,
       observer::ObInnerSQLConnection *conn);
+  static bool is_unlock_operation(obrpc::ObInnerSQLTransmitArg::InnerSQLOperationType type);
+  static int get_org_cluster_id_(sql::ObSQLSessionInfo *session, int64_t &org_cluster_id);
+  static int set_to_mysql_compat_mode_(observer::ObInnerSQLConnection *conn,
+                                       bool &need_reset_sess_mode,
+                                       bool &need_reset_conn_mode);
+  static int reset_compat_mode_(observer::ObInnerSQLConnection *conn,
+                                const bool need_reset_sess_mode,
+                                const bool need_reset_conn_mode);
 };
 
 } // tablelock

@@ -41,7 +41,7 @@ public:
    * @param[in] tenant_id of restore job, maybe sys or user tenant
    * @param[in] sql client
    */
-  int init(common::ObISQLClient *sql_client, const uint64_t tenant_id);
+  int init(common::ObISQLClient *sql_client, const uint64_t tenant_id, const int32_t group_id);
   /*
    * description: insert into __all_restore_job
    * @param[in] restore job
@@ -119,12 +119,22 @@ public:
                            ObPhysicalRestoreJob &job_info);
 
   /*
-   * description: check all ls has restored to consistent_scn
+   * description: check all ls has restored to target_status
    * @param[out] return true while restore has finished.
    * @param[out] return success or failed while is finished.
    * */
-  int check_finish_restore_to_consistent_scn(
-    bool &is_finished, bool &is_success);
+  int check_finish_restore_to_target_status(
+      const ObLSRestoreStatus &sys_ls_target_status,
+      const ObLSRestoreStatus &user_ls_target_status,
+      bool &is_finished,
+      bool &is_success);
+
+    /*
+   * description: check all ls has finished quick restore
+   * @param[out] return true if has finished quick restore.
+   * */
+  int check_all_ls_finish_quick_restore(bool &is_finish);
+
 public:
   static const char* get_physical_restore_mod_str(PhysicalRestoreMod mod);
   static const char* get_restore_status_str(PhysicalRestoreStatus status);
@@ -160,6 +170,7 @@ private:
   bool inited_;
   common::ObISQLClient *sql_client_;
   uint64_t tenant_id_;
+  int32_t group_id_;
   DISALLOW_COPY_AND_ASSIGN(ObPhysicalRestoreTableOperator);
 };
 
@@ -188,7 +199,7 @@ int ObPhysicalRestoreTableOperator::update_restore_option(
       SHARE_LOG(WARN, "fail to add column", KR(ret), K(option_value));
     } else if (OB_FAIL(dml.splice_update_sql(OB_ALL_RESTORE_JOB_TNAME, sql))) {
       SHARE_LOG(WARN, "splice_insert_sql failed", KR(ret));
-    } else if (OB_FAIL(sql_client_->write(exec_tenant_id, sql.ptr(), affected_rows))) {
+    } else if (OB_FAIL(sql_client_->write(exec_tenant_id, sql.ptr(), group_id_, affected_rows))) {
       SHARE_LOG(WARN, "execute sql failed", K(sql), KR(ret), K(exec_tenant_id));
     } else if (affected_rows <= 0) {
       ret = OB_ERR_UNEXPECTED;

@@ -10,9 +10,9 @@
  * See the Mulan PubL v2 for more details.
  */
 
-#include "lib/mysqlclient/ob_mysql_result.h"
-#include "share/ob_thread_mgr.h"
 #include "ob_rl_mgr.h"
+#include "lib/ash/ob_active_session_guard.h"
+
 
 namespace oceanbase {
 namespace share {
@@ -559,7 +559,8 @@ void ObRatelimitMgr::calculate_s2r_max_bw(ObRegionBwStat *region_bw_stat)
   if (IS_NOT_INIT) {
     OB_LOG(ERROR, "ObRatelimitMgr not inited.");
   } else if (OB_ISNULL(region_bw_stat)) {
-    OB_LOG(ERROR, "invalid argument", KP(region_bw_stat));
+    ret = OB_INVALID_ARGUMENT;
+    OB_LOG(ERROR, "invalid argument", KP(region_bw_stat), K(ret));
   } else if (OB_FAIL(net_->get_easy_region_latest_bw(region_bw_stat->region_.ptr(),
                                     &(region_bw_stat->local_server_cur_bw_),
                                     &(region_bw_stat->local_server_max_bw_)))) {
@@ -700,7 +701,10 @@ void ObRatelimitMgr::do_work()
     }
   }
   bool ready = false;
-  ready = swc_.wait(stat_period_);
+  {
+    common::ObBKGDSessInActiveGuard inactive_guard;
+    ready = swc_.wait(stat_period_);
+  }
   OB_LOG(INFO, "swc wakeup.", K(stat_period_), K(ready));
 }
 

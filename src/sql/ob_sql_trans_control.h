@@ -168,7 +168,10 @@ class ObSqlTransControl
 {
 public:
   static int reset_session_tx_state(ObSQLSessionInfo *session, bool reuse_tx_desc = false, bool active_tx_end = true);
-  static int reset_session_tx_state(ObBasicSessionInfo *session, bool reuse_tx_desc = false, bool active_tx_end = true);
+  static int reset_session_tx_state(ObBasicSessionInfo *session,
+                                    bool reuse_tx_desc = false,
+                                    bool active_tx_end = true,
+                                    const uint64_t data_version = 0);
   static int create_stash_savepoint(ObExecContext &exec_ctx, const ObString &name);
   static int release_stash_savepoint(ObExecContext &exec_ctx, const ObString &name);
   static int explicit_start_trans(ObExecContext &exec_ctx, const bool read_only, const ObString hint = ObString());
@@ -190,6 +193,14 @@ public:
                            const int64_t expire_ts,
                            ObEndTransAsyncCallback *callback);
   static int start_stmt(ObExecContext &ctx);
+  static int get_ls_read_snapshot(ObSQLSessionInfo *session,
+                                  ObPhysicalPlanCtx *plan_ctx,
+                                  const share::ObLSID &local_ls_id,
+                                  transaction::ObTxReadSnapshot &snapshot);
+  static int get_read_snapshot(ObSQLSessionInfo *session,
+                               ObPhysicalPlanCtx *plan_ctx,
+                               transaction::ObTxReadSnapshot &snapshot);
+  static int dblink_xa_prepare(ObExecContext &exec_ctx);
   static int stmt_sanity_check_(ObSQLSessionInfo *session,
                                 const ObPhysicalPlan *plan,
                                 ObPhysicalPlanCtx *plan_ctx);
@@ -197,7 +208,12 @@ public:
                                   ObDASCtx &das_ctx,
                                   const ObPhysicalPlan *plan,
                                   const ObPhysicalPlanCtx *plan_ctx,
-                                  transaction::ObTransService *txs);
+                                  transaction::ObTransService *txs,
+                                  ObExecContext &exec_ctx);
+  static int can_do_plain_insert(ObSQLSessionInfo *session,
+                                 const ObPhysicalPlan *plan,
+                                 ObExecContext &exec_ctx,
+                                 bool &can_plain_insert);
   static int stmt_refresh_snapshot(ObExecContext &ctx);
   static int set_fk_check_snapshot(ObExecContext &exec_ctx);
   static int stmt_setup_savepoint_(ObSQLSessionInfo *session,
@@ -205,7 +221,8 @@ public:
                                    ObPhysicalPlanCtx *plan_ctx,
                                    transaction::ObTransService* txs,
                                    const int64_t nested_level);
-  static int end_stmt(ObExecContext &exec_ctx, const bool is_rollback);
+  static int end_stmt(ObExecContext &exec_ctx, const bool is_rollback, const bool will_retry);
+  static int alloc_branch_id(ObExecContext &exec_ctx, const int64_t count, int16_t &branch_id);
   static int kill_query_session(ObSQLSessionInfo &session, const ObSQLSessionState &status);
   static int kill_tx(ObSQLSessionInfo *session, int cause);
   static int kill_idle_timeout_tx(ObSQLSessionInfo *session);
@@ -246,6 +263,7 @@ public:
                                const common::ObAddr &addr,
                                const int64_t max_stale_time_us,
                                bool &can_read);
+  static uint32_t get_real_session_id(ObSQLSessionInfo &session);
 private:
   DISALLOW_COPY_AND_ASSIGN(ObSqlTransControl);
   static int get_trans_expire_ts(const ObSQLSessionInfo &session,
@@ -257,8 +275,7 @@ private:
   static int start_hook_if_need_(ObSQLSessionInfo &session,
                                  transaction::ObTransService *txs,
                                  bool &start_hook);
-  static uint32_t get_real_session_id(ObSQLSessionInfo &session);
-  static int get_first_lsid(const ObDASCtx &das_ctx, share::ObLSID &first_lsid);
+  static int get_first_lsid(const ObDASCtx &das_ctx, share::ObLSID &first_lsid, bool &is_single_tablet);
   static bool has_same_lsid(const ObDASCtx &das_ctx,
                             const transaction::ObTxReadSnapshot &snapshot,
                             share::ObLSID &first_lsid);
@@ -305,6 +322,12 @@ public:
   // called when response client to decide whether need allow free route and whether state need to be returned
   static int calc_txn_free_route(ObSQLSessionInfo &session, transaction::ObTxnFreeRouteCtx &txn_free_route_ctx);
   static int check_free_route_tx_alive(ObSQLSessionInfo &session, transaction::ObTxnFreeRouteCtx &txn_free_rotue_ctx);
+
+  // when lock conflict, stmt will do retry, we do not rollback current transaction
+  // but clean the transaction level snapshot it exist
+  static int reset_trans_for_autocommit_lock_conflict(ObExecContext &exec_ctx);
+  static transaction::ObTxCleanPolicy
+  decide_stmt_rollback_tx_clean_policy_(const int error_code, const bool will_retry);
 };
 
 inline int ObSqlTransControl::get_trans_expire_ts(const ObSQLSessionInfo &my_session,

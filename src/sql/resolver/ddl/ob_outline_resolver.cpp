@@ -13,14 +13,7 @@
 #define USING_LOG_PREFIX SQL_RESV
 #include "sql/resolver/ddl/ob_outline_resolver.h"
 
-#include "sql/ob_sql_utils.h"
 #include "sql/resolver/ob_resolver.h"
-#include "sql/resolver/ob_stmt_resolver.h"
-#include "sql/session/ob_sql_session_info.h"
-#include "sql/resolver/dml/ob_insert_resolver.h"
-#include "sql/resolver/dml/ob_update_resolver.h"
-#include "sql/resolver/dml/ob_delete_resolver.h"
-#include "sql/resolver/dml/ob_select_resolver.h"
 
 namespace oceanbase
 {
@@ -35,7 +28,8 @@ int ObOutlineResolver::resolve_outline_name(const ParseNode *node, ObString &db_
 
   if (OB_ISNULL(node)
       || OB_UNLIKELY(T_RELATION_FACTOR != node->type_)
-      || OB_UNLIKELY(RELATION_FACTOR_CHILD_COUNT > node->num_child_)) {
+      || OB_UNLIKELY(RELATION_FACTOR_CHILD_COUNT > node->num_child_)
+      || OB_ISNULL(allocator_)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("invalid parse tree", K(ret));
   } else if (OB_ISNULL(node->children_)) {
@@ -63,7 +57,7 @@ int ObOutlineResolver::resolve_outline_name(const ParseNode *node, ObString &db_
         true : (mode != OB_LOWERCASE_AND_INSENSITIVE);
     if (NULL == db_name_node) {
       if (session_info_->get_database_name().empty()) {
-        db_name = OB_OUTLINE_DEFAULT_DATABASE_NAME;
+        db_name = OB_MOCK_DEFAULT_DATABASE_NAME;
       } else {
         db_name = session_info_->get_database_name();
       }
@@ -76,7 +70,8 @@ int ObOutlineResolver::resolve_outline_name(const ParseNode *node, ObString &db_
         CK (OB_NOT_NULL(schema_checker_->get_schema_guard()));
         OZ (ObSQLUtils::cvt_db_name_to_org(*schema_checker_->get_schema_guard(),
                                            session_info_,
-                                           db_name));
+                                           db_name,
+                                           allocator_));
       }
     }
   }

@@ -10,12 +10,9 @@
  * See the Mulan PubL v2 for more details.
  */
 
-#include "lib/container/ob_se_array.h"
-#include "storage/ls/ob_ls.h"
+#include "ob_tx_retain_ctx_mgr.h"
 #include "storage/tx/ob_trans_part_ctx.h"
 #include "storage/tx/ob_trans_service.h"
-#include "storage/tx/ob_tx_retain_ctx_mgr.h"
-#include "storage/tx_storage/ob_ls_handle.h"
 #include "storage/tx_storage/ob_ls_service.h"
 
 namespace oceanbase
@@ -52,7 +49,11 @@ int ObAdvanceLSCkptTask::try_advance_ls_ckpt_ts()
       ret = OB_INVALID_ARGUMENT;
     }
     TRANS_LOG(WARN, "get ls faild", K(ret), K(MTL(ObLSService *)));
-  } else if (ls_handle.get_ls()->advance_checkpoint_by_flush(target_ckpt_ts_)) {
+  } else if (OB_FAIL(ls_handle.get_ls()->advance_checkpoint_by_flush(
+                       target_ckpt_ts_,
+                       INT64_MAX, /*timeout*/
+                       false,     /*is_tenant_freeze*/
+                       ObFreezeSourceFlag::GC_RETAIN_CTX))) {
     TRANS_LOG(WARN, "advance checkpoint ts failed", K(ret), K(ls_id_), K(target_ckpt_ts_));
   }
 
@@ -119,19 +120,17 @@ int ObIRetainCtxCheckFunctor::del_retain_ctx()
 
 int ObMDSRetainCtxFunctor::init(ObPartTransCtx *ctx,
                                 RetainCause cause,
-                                const SCN &final_log_ts,
-                                palf::LSN final_log_lsn)
+                                const SCN &final_log_ts)
 {
   int ret = OB_SUCCESS;
 
-  if (!final_log_ts.is_valid() || !final_log_lsn.is_valid()) {
+  if (!final_log_ts.is_valid()) {
     ret = OB_INVALID_ARGUMENT;
-    TRANS_LOG(WARN, "invalid argument", K(ret), K(final_log_ts), K(final_log_lsn));
+    TRANS_LOG(WARN, "invalid argument", K(ret), K(final_log_ts));
   } else if (OB_FAIL(ObIRetainCtxCheckFunctor::init(ctx, cause))) {
     TRANS_LOG(WARN, "init retain ctx check functor failed", K(ret));
   } else {
     final_log_ts_ = final_log_ts;
-    final_log_lsn_ = final_log_lsn;
   }
 
   return ret;
@@ -162,8 +161,7 @@ int ObMDSRetainCtxFunctor::operator()(ObLS *ls, ObTxRetainCtxMgr *retain_mgr)
 
 bool ObMDSRetainCtxFunctor::is_valid()
 {
-  return ObIRetainCtxCheckFunctor::is_valid() && final_log_ts_.is_valid()
-         && final_log_lsn_.is_valid();
+  return ObIRetainCtxCheckFunctor::is_valid() && final_log_ts_.is_valid();
 }
 
 void ObTxRetainCtxMgr::reset()

@@ -10,13 +10,8 @@
  * See the Mulan PubL v2 for more details.
  */
 
-#include "share/config/ob_config.h"
-#include <algorithm>
-#include <cstring>
-#include <ctype.h>
-#include "common/ob_smart_var.h"
-#include "share/ob_cluster_version.h"
-#include "share/ob_task_define.h"
+#include "ob_config.h"
+#include "observer/omt/ob_tenant_config_mgr.h"
 
 using namespace oceanbase::share;
 namespace oceanbase
@@ -103,6 +98,57 @@ ObConfigItem::~ObConfigItem()
   }
 }
 
+bool ObConfigItem::set_value_with_lock(const common::ObString &string)
+{
+  DRWLock::WRLockGuard guard(OTC_MGR.rwlock_);
+  return set_value_unsafe(string);
+}
+
+bool ObConfigItem::set_value_with_lock(const char *str)
+{
+  DRWLock::WRLockGuard guard(OTC_MGR.rwlock_);
+  return set_value_unsafe(str);
+}
+
+bool ObConfigItem::set_value_unsafe(const common::ObString &string)
+{
+  int64_t pos = 0;
+  int ret = OB_SUCCESS;
+  ObLatchWGuard wr_guard(lock_, ObLatchIds::CONFIG_LOCK);
+  const char *ptr = value_ptr();
+  if (nullptr == ptr) {
+    value_valid_ = false;
+  } else if (OB_FAIL(databuff_printf(const_cast<char *>(ptr), value_len(), pos,
+                                      "%.*s", string.length(), string.ptr()))) {
+    value_valid_ = false;
+  } else {
+    value_valid_ = set(ptr);
+    if (inited_ && value_valid_) {
+      value_updated_ = true;
+    }
+  }
+  return value_valid_;
+}
+
+bool ObConfigItem::set_value_unsafe(const char *str)
+{
+  int64_t pos = 0;
+  int ret = OB_SUCCESS;
+  ObLatchWGuard wr_guard(lock_, ObLatchIds::CONFIG_LOCK);
+  const char *ptr = value_ptr();
+  if (nullptr == ptr) {
+    value_valid_ = false;
+  } else if (OB_FAIL(databuff_printf(const_cast<char *>(ptr), value_len(), pos, "%s", str))) {
+    value_valid_ = false;
+  } else {
+    value_valid_ = set(str);
+    if (inited_ && value_valid_) {
+      value_updated_ = true;
+    }
+  }
+  return value_valid_;
+}
+
 void ObConfigItem::init(Scope::ScopeInfo scope_info,
                         const char *name,
                         const char *def,
@@ -113,7 +159,7 @@ void ObConfigItem::init(Scope::ScopeInfo scope_info,
     OB_LOG_RET(ERROR, common::OB_INVALID_ARGUMENT, "name or def or info is null", K(name), K(def), K(info));
   } else {
     set_name(name);
-    if (!set_value(def)) {
+    if (!set_value_unsafe(def)) {
       OB_LOG_RET(ERROR, common::OB_ERR_UNEXPECTED, "Set config item value failed", K(name), K(def));
     } else {
      set_info(info);
@@ -122,6 +168,78 @@ void ObConfigItem::init(Scope::ScopeInfo scope_info,
     }
   }
   inited_ = true;
+}
+
+const char *ObConfigItem::data_type() const
+{
+  const char *type_ptr = nullptr;
+  switch(get_config_item_type()) {
+    case ObConfigItemType::OB_CONF_ITEM_TYPE_BOOL: {
+      type_ptr = DATA_TYPE_BOOL;
+      break;
+    }
+    case ObConfigItemType::OB_CONF_ITEM_TYPE_INT: {
+      type_ptr = DATA_TYPE_INT;
+      break;
+    }
+    case ObConfigItemType::OB_CONF_ITEM_TYPE_DOUBLE: {
+      type_ptr = DATA_TYPE_DOUBLE;
+      break;
+    }
+    case ObConfigItemType::OB_CONF_ITEM_TYPE_STRING: {
+      type_ptr = DATA_TYPE_STRING;
+      break;
+    }
+    case ObConfigItemType::OB_CONF_ITEM_TYPE_INTEGRAL: {
+      type_ptr = DATA_TYPE_INTEGRAL;
+      break;
+    }
+    case ObConfigItemType::OB_CONF_ITEM_TYPE_STRLIST: {
+      type_ptr = DATA_TYPE_STRLIST;
+      break;
+    }
+    case ObConfigItemType::OB_CONF_ITEM_TYPE_INTLIST: {
+      type_ptr = DATA_TYPE_INTLIST;
+      break;
+    }
+    case ObConfigItemType::OB_CONF_ITEM_TYPE_TIME: {
+      type_ptr = DATA_TYPE_TIME;
+      break;
+    }
+    case ObConfigItemType::OB_CONF_ITEM_TYPE_MOMENT: {
+      type_ptr = DATA_TYPE_MOMENT;
+      break;
+    }
+    case ObConfigItemType::OB_CONF_ITEM_TYPE_CAPACITY: {
+      type_ptr = DATA_TYPE_CAPACITY;
+      break;
+    }
+    case ObConfigItemType::OB_CONF_ITEM_TYPE_LOGARCHIVEOPT: {
+      type_ptr = DATA_TYPE_LOGARCHIVEOPT;
+      break;
+    }
+    case ObConfigItemType::OB_CONF_ITEM_TYPE_VERSION: {
+      type_ptr = DATA_TYPE_VERSION;
+      break;
+    }
+    case ObConfigItemType::OB_CONF_ITEM_TYPE_MODE: {
+      type_ptr = DATA_TYPE_MODE;
+      break;
+    }
+    default: {
+      // default: ObConfigItemType::OB_CONF_ITEM_TYPE_UNKNOWN and
+      // other unexpected situations, return "UNKNOWN"
+      type_ptr = DATA_TYPE_UNKNOWN;
+      break;
+    }
+  }
+  return type_ptr;
+}
+bool ObConfigItem::is_default(const char *value_str_,
+                             const char *value_default_str_,
+                             int64_t size) const
+{
+  return 0 == strncasecmp(value_str_, value_default_str_, size);
 }
 
 // ObConfigIntListItem
@@ -700,7 +818,7 @@ ObConfigMomentItem::ObConfigMomentItem(ObConfigContainer *container,
                                        const char *def,
                                        const char *info,
                                        const ObParameterAttr attr)
-    :  value_()
+    : value_()
 {
   MEMSET(value_str_, 0, sizeof(value_str_));
   MEMSET(value_reboot_str_, 0, sizeof(value_reboot_str_));
@@ -1149,6 +1267,15 @@ bool ObConfigModeItem::set(const char *str)
   return valid;
 }
 
+int ObConfigModeItem::init_mode(ObIConfigMode &mode)
+{
+  int ret = OB_SUCCESS;
+  ObLatchRGuard r_guard(lock_, ObLatchIds::CONFIG_LOCK);
+  if (OB_FAIL(mode.set_value(*this))) {
+    OB_LOG(WARN, "set_value failed", KR(ret));
+  };
+  return ret;
+}
 ObConfigVersionItem::ObConfigVersionItem(ObConfigContainer *container,
                                          Scope::ScopeInfo scope_info,
                                          const char *name,

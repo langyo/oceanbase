@@ -14,12 +14,7 @@
 
 #include "sql/engine/expr/ob_expr_pl_seq_nextval.h"
 #include "sql/engine/ob_exec_context.h"
-#include "lib/mysqlclient/ob_mysql_result.h"
-#include "sql/engine/ob_physical_plan_ctx.h"
-#include "sql/engine/expr/ob_expr_util.h"
-#include "sql/session/ob_sql_session_info.h"
 #include "share/sequence/ob_sequence_cache.h"
-#include "share/schema/ob_schema_getter_guard.h"
 
 namespace oceanbase
 {
@@ -108,11 +103,21 @@ int ObExprPLSeqNextval::eval_pl_seq_next_val(
       LOG_WARN("fail get sequence schema", K(seq_id), K(ret));
     } else {
       ObSequenceValue seq_value;
-      if (OB_FAIL(seq_cache.nextval(*seq_schema,
-                                    alloc_guard.get_allocator(),
-                                    seq_value))) {
-        LOG_WARN("fail get nextval for seq", K(tenant_id), K(seq_id), K(ret));
-      } else if (OB_FAIL(session->set_sequence_value(tenant_id, seq_id, seq_value))) {
+      ObAutoincrementService &auto_service = ObAutoincrementService::get_instance();
+      if (seq_schema->get_order_flag()
+          && seq_schema->get_cache_order_mode() == NEW_ACTION) {
+        if (OB_FAIL(auto_service.get_handle(*seq_schema, seq_value))) {
+          LOG_WARN("fail get nextval from rpc for seq", K(tenant_id), K(seq_id), K(ret));
+        }
+      } else {
+        if (OB_FAIL(seq_cache.nextval(*seq_schema, alloc_guard.get_allocator(), seq_value))) {
+          LOG_WARN("fail get nextval for seq", K(tenant_id), K(seq_id), K(ret));
+        }
+      }
+
+      if (OB_FAIL(ret)) {
+        // do nothing
+      }else if (OB_FAIL(session->set_sequence_value(tenant_id, seq_id, seq_value))) {
         LOG_WARN("save seq_value to session as currval for later read fail",
                   K(tenant_id), K(seq_id), K(seq_value), K(ret));
       } else { /*do nothing*/ }

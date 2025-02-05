@@ -12,14 +12,7 @@
 
 #define USING_LOG_PREFIX SERVER
 #include "ob_virtual_sql_plan_monitor.h"
-#include "common/ob_smart_call.h"
-#include "share/schema/ob_multi_version_schema_service.h"
-#include "share/inner_table/ob_inner_table_schema_constants.h"
-#include "sql/monitor/ob_monitor_info_manager.h"
 #include "sql/monitor/ob_phy_plan_monitor_info.h"
-#include "share/diagnosis/ob_sql_plan_monitor_node_list.h"
-#include "observer/ob_server.h"
-#include <algorithm> // std::sort
 
 using namespace oceanbase::observer;
 using namespace oceanbase::common;
@@ -493,7 +486,7 @@ int ObVirtualSqlPlanMonitor::extract_tenant_ids()
       if (is_always_false) {
         tenant_id_array_.reset();
       } else {
-        std::sort(tenant_id_array_.begin(), tenant_id_array_.end());
+        lib::ob_sort(tenant_id_array_.begin(), tenant_id_array_.end());
         SERVER_LOG(DEBUG, "get tenant ids from req mgr map", K(tenant_id_array_));
       }
     }
@@ -563,7 +556,7 @@ int ObVirtualSqlPlanMonitor::extract_tenant_ids()
       if (is_always_false) {
         tenant_id_array_.reset();
       } else {
-        std::sort(tenant_id_array_.begin(), tenant_id_array_.end());
+        lib::ob_sort(tenant_id_array_.begin(), tenant_id_array_.end());
         SERVER_LOG(DEBUG, "get tenant ids from req mgr map", K(tenant_id_array_));
       }
     }
@@ -781,10 +774,10 @@ int ObVirtualSqlPlanMonitor::convert_node_to_row(ObMonitorNode &node, ObNewRow *
       CASE_OTHERSTAT(4);
       CASE_OTHERSTAT(5);
       CASE_OTHERSTAT(6);
-      CASE_OTHERSTAT_RESERVED(7);
-      CASE_OTHERSTAT_RESERVED(8);
-      CASE_OTHERSTAT_RESERVED(9);
-      CASE_OTHERSTAT_RESERVED(10);
+      CASE_OTHERSTAT(7);
+      CASE_OTHERSTAT(8);
+      CASE_OTHERSTAT(9);
+      CASE_OTHERSTAT(10);
       case THREAD_ID: {
         int64_t thread_id = node.get_thread_id();
         cells[cell_idx].set_int(thread_id);
@@ -825,6 +818,44 @@ int ObVirtualSqlPlanMonitor::convert_node_to_row(ObMonitorNode &node, ObNewRow *
       case SKIPPED_ROWS_COUNT: { // for batch
         int64_t int_value = node.skipped_rows_count_;
         cells[cell_idx].set_int(int_value);
+        break;
+      }
+      case WORKAREA_MEM: {
+        if(need_rt_node_) {
+          int64_t int_value = node.workarea_mem_;
+          cells[cell_idx].set_int(int_value);
+        } else {
+          cells[cell_idx].set_null();
+        }
+        break;
+      }
+      case WORKAREA_MAX_MEM: {
+        int64_t int_value = node.workarea_max_mem_;
+        cells[cell_idx].set_int(int_value);
+        break;
+      }
+      case WORKAREA_TEMPSEG: {
+        if (need_rt_node_) {
+          int64_t int_value = node.workarea_tempseg_;
+          cells[cell_idx].set_int(int_value);
+        } else {
+          cells[cell_idx].set_null();
+        }
+        break;
+      }
+      case WORKAREA_MAX_TEMPSEG: {
+        int64_t int_value = node.workarea_max_tempseg_;
+        cells[cell_idx].set_int(int_value);
+        break;
+      }
+      case SQL_ID: {
+        cells[cell_idx].set_varchar("");
+        cells[cell_idx].set_collation_type(ObCharset::get_default_collation(
+                                    ObCharset::get_default_charset()));
+        break;
+      }
+      case PLAN_HASH_VALUE: {
+        cells[cell_idx].set_uint64(0);
         break;
       }
       default: {

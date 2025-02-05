@@ -8,12 +8,7 @@
 // MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 // See the Mulan PubL v2 for more details.
 
-#include "logservice/ob_log_service.h"
-#include "observer/ob_server_struct.h"
-#include "share/rc/ob_tenant_base.h"
-#include "storage/tx/ob_dup_table_base.h"
-#include "storage/tx/ob_dup_table_ts_sync.h"
-#include "storage/tx/ob_dup_table_util.h"
+#include "ob_dup_table_ts_sync.h"
 #include "storage/tx/ob_trans_service.h"
 
 namespace oceanbase
@@ -92,9 +87,9 @@ int ObDupTableLSTsSyncMgr::validate_replay_ts(const common::ObAddr &dst,
     }
   }
 
-  if (replay_all_redo && OB_SUCC(ret)) {
-    DUP_TABLE_LOG(INFO, "replay all dup table redo", K(ls_id_), K(tx_id), K(dst), K(tmp_ts_info),
-                  K(target_replay_scn), K(replay_all_redo), K(max_read_version));
+  if (!replay_all_redo) {
+    DUP_TABLE_LOG(INFO, "the dst follower has not replay all redo", K(ls_id_), K(tx_id), K(dst),
+                  K(tmp_ts_info), K(target_replay_scn), K(replay_all_redo), K(max_read_version));
   }
 
   return ret;
@@ -321,7 +316,7 @@ int ObDupTableLSTsSyncMgr::get_ts_info_cache_(const common::ObAddr &addr, DupTab
   int ret = OB_SUCCESS;
 
   if (OB_FAIL(ts_info_cache_.get_refactored(addr, ts_info))) {
-    DUP_TABLE_LOG(WARN, "get ts info cache failed");
+    DUP_TABLE_LOG(WARN, "get ts info cache failed", K(addr), K(ts_info));
   }
 
   return ret;
@@ -355,13 +350,23 @@ int ObDupTableLSTsSyncMgr::get_local_ts_info(DupTableTsInfo &ts_info)
 int ObDupTableLSTsSyncMgr::get_cache_ts_info(const common::ObAddr &addr, DupTableTsInfo &ts_info)
 {
   int ret = OB_SUCCESS;
+  int tmp_ret = OB_SUCCESS;
 
-  SpinRLockGuard guard(ts_sync_lock_);
+  {
+    SpinRLockGuard guard(ts_sync_lock_);
 
-  if (OB_FAIL(get_ts_info_cache_(addr, ts_info))) {
-    DUP_TABLE_LOG(WARN, "get ts info cache failed", K(ret));
+    if (OB_FAIL(get_ts_info_cache_(addr, ts_info))) {
+      DUP_TABLE_LOG(WARN, "get ts info cache failed", K(ret));
+    }
+
+    DUP_TABLE_LOG(DEBUG, "get ts info cache", K(ret), K(ret), K(ts_info));
   }
-  DUP_TABLE_LOG(DEBUG, "get ts info cache", K(ret), K(ret), K(ts_info));
+
+  if (OB_HASH_NOT_EXIST == ret) {
+    if (OB_TMP_FAIL(request_ts_info(addr))) {
+      DUP_TABLE_LOG(WARN, "request ts info failed", K(tmp_ret), K(ts_info));
+    }
+  }
   return ret;
 }
 
@@ -404,17 +409,23 @@ int ObDupTableLSTsSyncMgr::DiagInfoGenerator::operator()(
     const common::hash::HashMapPair<common::ObAddr, DupTableTsInfo> &hash_pair)
 {
   int ret = OB_SUCCESS;
-
-  const char *addr_str = to_cstring(hash_pair.first);
-
-  ret = ::oceanbase::common::databuff_printf(
-      info_buf_, info_buf_len_, info_buf_pos_,
-      "%s[%sCached Ts Info] owner=%s, max_commit_version=%s, max_read_version=%s, "
-      "max_replayed_scn=%s\n",
-      DupTableDiagStd::DUP_DIAG_INDENT_SPACE, DupTableDiagStd::DUP_DIAG_COMMON_PREFIX, addr_str,
-      to_cstring(hash_pair.second.max_commit_version_),
-      to_cstring(hash_pair.second.max_read_version_),
-      to_cstring(hash_pair.second.max_replayed_scn_));
+  ret = databuff_printf(info_buf_, info_buf_len_, info_buf_pos_, "%s[%sCached Ts Info] owner=",
+      DupTableDiagStd::DUP_DIAG_INDENT_SPACE, DupTableDiagStd::DUP_DIAG_COMMON_PREFIX);
+  OB_SUCCESS != ret ? : ret = databuff_printf(
+      info_buf_, info_buf_len_, info_buf_pos_, hash_pair.first);
+  OB_SUCCESS != ret ? : ret = databuff_printf(
+      info_buf_, info_buf_len_, info_buf_pos_, ", max_commit_version=");
+  OB_SUCCESS != ret ? : ret = databuff_printf(
+      info_buf_, info_buf_len_, info_buf_pos_, hash_pair.second.max_commit_version_);
+  OB_SUCCESS != ret ? : ret = databuff_printf(
+      info_buf_, info_buf_len_, info_buf_pos_, ", max_read_version=");
+  OB_SUCCESS != ret ? : ret = databuff_printf(
+      info_buf_, info_buf_len_, info_buf_pos_, hash_pair.second.max_read_version_);
+  OB_SUCCESS != ret ? : ret = databuff_printf(
+      info_buf_, info_buf_len_, info_buf_pos_, ", max_replayed_scn=");
+  OB_SUCCESS != ret ? : ret = databuff_printf(
+      info_buf_, info_buf_len_, info_buf_pos_, hash_pair.second.max_replayed_scn_);
+  OB_SUCCESS != ret ? : ret = databuff_printf(info_buf_, info_buf_len_, info_buf_pos_, "\n");
 
   return ret;
 }

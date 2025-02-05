@@ -13,19 +13,11 @@
 #define USING_LOG_PREFIX SERVER_OMT
 
 #include "ob_worker_processor.h"
-#include "share/ob_define.h"
-#include "lib/utility/utility.h"
-#include "lib/oblog/ob_trace_log.h"
 #include "lib/profile/ob_perf_event.h"  // SET_PERF_EVENT
-#include "lib/profile/ob_trace_id_adaptor.h"
 #include "lib/oblog/ob_warning_buffer.h"
-#include "rpc/ob_request.h"
-#include "rpc/obrpc/ob_rpc_packet.h"
 #include "rpc/frame/ob_req_translator.h"
 #include "rpc/frame/ob_req_processor.h"
-#include "share/config/ob_server_config.h"
 #include "observer/omt/ob_th_worker.h"
-#include "lib/utility/ob_hang_fatal_error.h"
 
 using namespace oceanbase::common;
 using namespace oceanbase::omt;
@@ -59,8 +51,12 @@ OB_NOINLINE int ObWorkerProcessor::process_err_test()
 
 #ifdef ERRSIM
   ret = EN_WORKER_PROCESS_REQUEST;
-  LOG_DEBUG("process err_test", K(ret));
 #endif
+
+  if(OB_FAIL(ret))
+  {
+    LOG_WARN("process err_test", K(ret));
+  }
   return ret;
 }
 
@@ -99,7 +95,6 @@ int ObWorkerProcessor::process(rpc::ObRequest &req)
   }
   OB_ATOMIC_EVENT_RESET_RECORDER();
   PERF_RESET_RECORDER();
-  const bool enable_trace_log = lib::is_trace_log_enabled();
   const int64_t q_time = THIS_THWORKER.get_query_start_time() - req.get_receive_timestamp();
   NG_TRACE_EXT(process_begin,
                OB_ID(in_queue_time), q_time,
@@ -121,7 +116,7 @@ int ObWorkerProcessor::process(rpc::ObRequest &req)
     if (OB_LOGGER.is_info_as_wdiag()) {
       ObThreadLogLevelUtils::clear();
     } else {
-      if (enable_trace_log && OB_LOG_LEVEL_NONE != packet.get_log_level()) {
+      if (OB_LOG_LEVEL_NONE != packet.get_log_level()) {
         ObThreadLogLevelUtils::init(packet.get_log_level());
       }
     }
@@ -161,9 +156,7 @@ int ObWorkerProcessor::process(rpc::ObRequest &req)
 
   // cleanup
   ObCurTraceId::reset();
-  if (enable_trace_log) {
-    ObThreadLogLevelUtils::clear();
-  }
+  ObThreadLogLevelUtils::clear();
   PERF_GATHER_DATA();
   //LOG_INFO("yzf debug", "atomic_op", ATOMIC_EVENT_RECORDER);
   OB_ATOMIC_EVENT_GATHER_DATA();

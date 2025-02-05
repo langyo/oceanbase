@@ -12,10 +12,8 @@
 
 #define USING_LOG_PREFIX STORAGE
 #include "ob_vector_store.h"
-#include "sql/engine/ob_exec_context.h"
-#include "storage/ob_i_store.h"
-#include "storage/blocksstable/ob_micro_block_reader.h"
-#include "storage/blocksstable/encoding/ob_micro_block_decoder.h"
+#include "ob_aggregated_store_vec.h"
+#include "storage/blocksstable/ob_micro_block_row_scanner.h"
 #include "storage/access/ob_pushdown_aggregate.h"
 
 namespace oceanbase
@@ -27,7 +25,8 @@ namespace storage
 ObVectorStore::ObVectorStore(
     const int64_t batch_size,
     sql::ObEvalCtx &eval_ctx,
-    ObTableAccessContext &context)
+    ObTableAccessContext &context,
+    sql::ObBitVector *skip_bit)
     : ObBlockBatchedRowStore(batch_size, eval_ctx, context),
     count_(0),
     exprs_(*context_.stmt_allocator_),
@@ -36,8 +35,10 @@ ObVectorStore::ObVectorStore(
     col_params_(*context_.stmt_allocator_),
     group_idx_expr_(nullptr),
     default_row_(),
-    group_by_cell_(nullptr)
-  {}
+    group_by_cell_(nullptr),
+    iter_param_(nullptr),
+    skip_bit_(skip_bit)
+{}
 
 ObVectorStore::~ObVectorStore()
 {
@@ -53,19 +54,21 @@ void ObVectorStore::reset()
   datum_infos_.reset();
   col_params_.reset();
   group_idx_expr_ = nullptr;
+  iter_param_ = nullptr;
+  skip_bit_ = nullptr;
   default_row_.reset();
   if (nullptr != group_by_cell_) {
-    group_by_cell_->~ObGroupByCell();
+    group_by_cell_->~ObGroupByCellBase();
     context_.stmt_allocator_->free(group_by_cell_);
     group_by_cell_ = nullptr;
   }
 }
 
-int ObVectorStore::init(const ObTableAccessParam &param)
+int ObVectorStore::init(const ObTableAccessParam &param, common::hash::ObHashSet<int32_t> *agg_col_mask)
 {
   int ret = OB_SUCCESS;
   void *buf = nullptr;
-  if (IS_INIT) {
+  if (OB_UNLIKELY(is_inited_)) {
     ret = OB_INIT_TWICE;
     LOG_WARN("vector store init twice", K(ret), K(*this));
   } else if (OB_UNLIKELY(nullptr == param.output_exprs_ ||
@@ -82,6 +85,7 @@ int ObVectorStore::init(const ObTableAccessParam &param)
     const common::ObIArray<int32_t>& out_cols_projector = *param.iter_param_.out_cols_project_;
     const common::ObIArray<bool> *output_sel_mask = param.output_sel_mask_;
     const common::ObIArray<share::schema::ObColumnParam *> *out_cols_param = param.iter_param_.get_col_params();
+    const bool use_new_format = param.iter_param_.use_new_format();
     if (OB_FAIL(exprs_.init(expr_count))) {
       LOG_WARN("Failed to init exprs", K(ret));
     } else if (OB_FAIL(default_row_.init(*context_.stmt_allocator_, out_cols_param->count()))) {
@@ -92,16 +96,17 @@ int ObVectorStore::init(const ObTableAccessParam &param)
       LOG_WARN("Failed to init datum infos", K(ret), K(expr_count));
     } else if (OB_FAIL(col_params_.init(expr_count))) {
       LOG_WARN("Fail to init col params", K(ret));
-    } else if (OB_FAIL(row_buf_.init(*context_.stmt_allocator_, param.iter_param_.get_max_out_col_cnt()))) {
-      LOG_WARN("Fail to init datum ro types", K(ret));
     }
     for (int64_t i = 0; OB_SUCC(ret) && i < expr_count; i++) {
       common::ObDatum *datums = nullptr;
       sql::ObExpr *expr = nullptr;
+      bool is_agg_mask = false;
       if (param.iter_param_.need_fill_group_idx() &&
           T_PSEUDO_GROUP_ID == param.output_exprs_->at(i)->type_) {
         group_idx_expr_ = param.output_exprs_->at(i);
-      } else if (nullptr == output_sel_mask || output_sel_mask->at(i)) {
+      } else if (OB_FAIL(check_agg_mask(out_cols_projector.at(i), agg_col_mask, is_agg_mask))) {
+        LOG_WARN("fail to check if the column is masked", K(out_cols_projector.at(i)), K(agg_col_mask));
+      } else if ((nullptr == output_sel_mask || output_sel_mask->at(i)) && !is_agg_mask) {
         if (OB_FAIL(exprs_.push_back(param.output_exprs_->at(i)))) {
           LOG_WARN("fail to push back expr", K(ret));
         } else if (OB_FAIL(cols_projector_.push_back(out_cols_projector.at(i)))) {
@@ -111,13 +116,17 @@ int ObVectorStore::init(const ObTableAccessParam &param)
           STORAGE_LOG(WARN, "Unexpected null expr", K(ret), K(i), K(param.output_exprs_));
         } else if (OB_ISNULL(datums = expr->locate_batch_datums(eval_ctx_))) {
           ret = OB_ERR_UNEXPECTED;
-          STORAGE_LOG(WARN, "Unexpected null datums", K(ret), K(i), KPC(expr));
-        } else if (OB_UNLIKELY(!(expr->is_variable_res_buf())
-                   && datums->ptr_ != eval_ctx_.frames_[expr->frame_idx_] + expr->res_buf_off_)) {
+          LOG_WARN("Unexpected null datums", K(ret), K(i), KPC(expr));
+        } else if (OB_UNLIKELY(!use_new_format &&
+                               !(expr->is_variable_res_buf()) &&
+                               datums->ptr_ != eval_ctx_.frames_[expr->frame_idx_] + expr->res_buf_off_)) {
           ret = OB_ERR_SYS;
-          STORAGE_LOG(ERROR, "Unexpected sql expr datum buffer", K(ret), KP(datums->ptr_), K(eval_ctx_), KPC(expr));
-        } else if (OB_FAIL(datum_infos_.push_back(blocksstable::ObSqlDatumInfo(datums, param.output_exprs_->at(i)->obj_datum_map_)))) {
+          LOG_ERROR("Unexpected sql expr datum buffer", K(ret), KP(datums->ptr_), K(eval_ctx_), KPC(expr));
+        } else if (OB_FAIL(datum_infos_.push_back(blocksstable::ObSqlDatumInfo(datums, param.output_exprs_->at(i))))) {
           LOG_WARN("fail to push back datum", K(ret), K(datums));
+        }
+
+        if (OB_FAIL(ret)) {
         } else if (out_cols_projector.at(i) >= out_cols_param->count()) {
           ret = OB_ERR_UNEXPECTED;
           LOG_WARN("Unexpected column id", K(ret), K(out_cols_projector.at(i)), K(out_cols_param->count()));
@@ -145,18 +154,110 @@ int ObVectorStore::init(const ObTableAccessParam &param)
     }
     default_row_.count_ = col_params_.count();
   }
-  if (OB_SUCC(ret) && param.iter_param_.enable_pd_group_by()) {
-    void *buf = nullptr;
-    if (OB_ISNULL(buf = context_.stmt_allocator_->alloc(sizeof(ObGroupByCell)))) {
-      ret = common::OB_ALLOCATE_MEMORY_FAILED;
-      LOG_WARN("Failed to alloc datum buf", K(ret));
-    } else if (FALSE_IT(group_by_cell_ = new (buf) ObGroupByCell(batch_size_, *context_.stmt_allocator_))) {
-    } else if (OB_FAIL(group_by_cell_->init(param, eval_ctx_))) {
-      LOG_WARN("Failed to init group by cell", K(ret));
+  if (OB_SUCC(ret)) {
+    if (OB_FAIL(alloc_group_by_cell(param))) {
+      LOG_WARN("Failed to alloc group by cell", K(ret), K(param));
+    } else {
+      iter_param_ = &(param.iter_param_);
     }
   }
   if (OB_FAIL(ret)) {
     reset();
+  }
+  return ret;
+}
+
+int ObVectorStore::check_agg_mask(
+    const int32_t col_offset,
+    common::hash::ObHashSet<int32_t> *agg_col_mask,
+    bool &is_agg_mask) const
+{
+  int ret = OB_SUCCESS;
+  is_agg_mask = false;
+  if (nullptr != agg_col_mask) {
+    ret = agg_col_mask->exist_refactored(col_offset);
+    if (OB_HASH_EXIST == ret) {
+      is_agg_mask = true;
+      ret = OB_SUCCESS;
+    } else if (OB_HASH_NOT_EXIST == ret) {
+      is_agg_mask = false;
+      ret = OB_SUCCESS;
+    } else {
+      LOG_WARN("Failed to search in hashset", K(ret), K(col_offset));
+    }
+  }
+  return ret;
+}
+
+// TODO wenye: remove this func by disable group by in SQL layer or support first row in storage layer.
+int ObVectorStore::check_need_group_by(const ObTableAccessParam &param)
+{
+  int ret = OB_SUCCESS;
+  if (OB_UNLIKELY(nullptr == param.output_exprs_ ||
+                  nullptr == param.iter_param_.group_by_cols_project_ ||
+                  0 == param.iter_param_.group_by_cols_project_->count())) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("Invalid argument", K(ret), K(param));
+  } else {
+    ObMemAttr attr(MTL_ID(), common::ObModIds::OB_HASH_BUCKET);
+    common::hash::ObHashSet<int32_t> col_offset_set;
+    const int32_t group_by_col_offset = param.iter_param_.group_by_cols_project_->at(0);
+    const int32_t agg_expr_cnt = nullptr == param.aggregate_exprs_ ? 0 : param.aggregate_exprs_->count();
+    if (OB_FAIL(col_offset_set.create((agg_expr_cnt + 1) * 2, attr))) {
+      LOG_WARN("Failed to create column offset set", K(ret), K(agg_expr_cnt));
+    }
+    for (int64_t i = 0; OB_SUCC(ret) && i < agg_expr_cnt; ++i) {
+      int32_t col_offset = param.iter_param_.agg_cols_project_->at(i);
+      if (OB_FAIL(col_offset_set.set_refactored(col_offset))) {
+        LOG_WARN("Failed to add column offset", K(ret), K(i), K(col_offset));
+      }
+    }
+    for (int64_t i = 0; OB_SUCC(ret) && i < param.output_exprs_->count(); ++i) {
+      if (T_PSEUDO_GROUP_ID == param.output_exprs_->at(i)->type_) {
+      } else if (nullptr == param.output_sel_mask_ || param.output_sel_mask_->at(i)) {
+        int32_t col_offset = param.iter_param_.out_cols_project_->at(i);
+        if (group_by_col_offset != col_offset) {
+          ret = col_offset_set.exist_refactored(col_offset);
+          if (OB_HASH_EXIST == ret) {
+            ret = OB_SUCCESS;
+          } else if (OB_HASH_NOT_EXIST == ret) {
+            ret = OB_ERR_UNEXPECTED;
+            LOG_WARN("Invalid group by pushdown status", K(ret), K(i), K(col_offset));
+          } else {
+            LOG_WARN("Failed to search in hashset", K(ret), K(col_offset));
+          }
+        }
+      }
+    }
+  }
+  return ret;
+}
+
+int ObVectorStore::alloc_group_by_cell(const ObTableAccessParam &param)
+{
+  int ret = OB_SUCCESS;
+  if (param.iter_param_.enable_pd_group_by()) {
+    void *buf = nullptr;
+    if (param.iter_param_.use_new_format()) {
+      if (OB_ISNULL(buf = context_.stmt_allocator_->alloc(sizeof(ObGroupByCellVec)))) {
+        ret = common::OB_ALLOCATE_MEMORY_FAILED;
+        LOG_WARN("Failed to alloc datum buf", K(ret));
+      } else if (FALSE_IT(group_by_cell_ = new (buf) ObGroupByCellVec(batch_size_, eval_ctx_, skip_bit_, *context_.stmt_allocator_))) {
+      } else if (OB_FAIL(group_by_cell_->init(param, context_, eval_ctx_))) {
+        LOG_WARN("Failed to init group by cell", K(ret));
+      }
+    } else {
+      if (OB_ISNULL(buf = context_.stmt_allocator_->alloc(sizeof(ObGroupByCell)))) {
+        ret = common::OB_ALLOCATE_MEMORY_FAILED;
+        LOG_WARN("Failed to alloc datum buf", K(ret));
+      } else if (FALSE_IT(group_by_cell_ = new (buf) ObGroupByCell(batch_size_, *context_.stmt_allocator_))) {
+      } else if (OB_FAIL(group_by_cell_->init(param, context_, eval_ctx_))) {
+        LOG_WARN("Failed to init group by cell", K(ret));
+      }
+    }
+    if (OB_SUCC(ret) && OB_FAIL(check_need_group_by(param))) {
+      LOG_WARN("Failed to check need group by", K(ret), K(param));
+    }
   }
   return ret;
 }
@@ -166,10 +267,13 @@ int ObVectorStore::reuse_capacity(const int64_t capacity)
   int ret = OB_SUCCESS;
   if (OB_FAIL(ObBlockBatchedRowStore::reuse_capacity(capacity))) {
     LOG_WARN("Fail to reuse capacity", K(ret), K(capacity));
-  } else {
-    if (nullptr != group_by_cell_ && !group_by_cell_->is_processing()) {
+  } else if (nullptr != group_by_cell_) {
+    if (!group_by_cell_->is_processing()) {
       group_by_cell_->reuse();
     }
+    group_by_cell_->set_row_capacity(capacity);
+  }
+  if (OB_SUCC(ret)) {
     count_ = 0;
   }
   return ret;
@@ -189,10 +293,8 @@ int ObVectorStore::fill_row(blocksstable::ObDatumRow &row)
     if (count_ >= row_capacity_) {
       set_end();
     }
-    if (nullptr != group_by_cell_) {
-      if (OB_FAIL(group_by_cell_->copy_output_row(count_))) {
-        LOG_WARN("Failed to copy output row row", K(ret));
-      }
+    if (nullptr != group_by_cell_ && OB_FAIL(group_by_cell_->copy_output_row(count_, *iter_param_))) {
+      LOG_WARN("Failed to copy output rows", K(ret));
     }
   }
   return ret;
@@ -200,20 +302,22 @@ int ObVectorStore::fill_row(blocksstable::ObDatumRow &row)
 
 int ObVectorStore::fill_rows(
     const int64_t group_idx,
-    blocksstable::ObIMicroBlockReader *reader,
+    blocksstable::ObIMicroBlockRowScanner &scanner,
     int64_t &begin_index,
     const int64_t end_index,
     const ObFilterResult &res)
 {
   int ret = OB_SUCCESS;
   bool can_group_by = false;
+  blocksstable::ObIMicroBlockReader *reader = nullptr;
   if (IS_NOT_INIT) {
     ret = OB_NOT_INIT;
     LOG_WARN("vector store is not inited", K(ret));
-  } else if (0 != count_ && nullptr == group_by_cell_) {
+  } else if (OB_UNLIKELY(0 != count_ && nullptr == group_by_cell_)) {
     // defense code: data cross fuse and micro block is banned
     ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("Unexpected vector store count", K(ret), K(count_));
+    LOG_WARN("Unexpected vector store count", K(ret), K_(count), KP_(group_by_cell));
+  } else if (FALSE_IT(reader = scanner.get_reader())) {
   } else if (OB_FAIL(check_can_group_by(reader, begin_index, end_index, res, can_group_by))) {
     LOG_WARN("Failed to checkout pushdown group by", K(ret));
   } else if (can_group_by) {
@@ -222,14 +326,12 @@ int ObVectorStore::fill_rows(
         LOG_WARN("Failed to fill group by rows", K(ret));
       }
     }
-  } else if (OB_FAIL(fill_output_rows(group_idx, reader, begin_index, end_index, res))) {
+  } else if (OB_FAIL(fill_output_rows(group_idx, scanner, begin_index, end_index, res))) {
     if (OB_UNLIKELY(OB_ITER_END != ret)) {
       LOG_WARN("Failed to fill output rows", K(ret));
     }
-  } else if (nullptr != group_by_cell_) {
-    if (OB_FAIL(group_by_cell_->copy_output_rows(count_))) {
-      LOG_WARN("Failed to copy output rows", K(ret));
-    }
+  } else if (nullptr != group_by_cell_ && OB_FAIL(group_by_cell_->copy_output_rows(count_, *iter_param_))) {
+    LOG_WARN("Failed to copy output rows", K(ret));
   }
   return ret;
 }
@@ -237,10 +339,12 @@ int ObVectorStore::fill_rows(
 // shallow copy
 int ObVectorStore::fill_output_rows(
     const int64_t group_idx,
-    blocksstable::ObIMicroBlockReader *reader,
+    blocksstable::ObIMicroBlockRowScanner &scanner,
     int64_t &begin_index,
     const int64_t end_index,
-    const ObFilterResult &res)
+    const ObFilterResult &res,
+    const bool need_set_end,
+    const bool need_init_vector)
 {
   int ret = OB_SUCCESS;
   int64_t row_capacity = 0;
@@ -251,41 +355,55 @@ int ObVectorStore::fill_output_rows(
     // defense code: data cross fuse and micro block is banned
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("Unexpected vector store count", K(ret), K(count_));
-  } else if (OB_FAIL(get_row_ids(reader, begin_index, end_index, row_capacity, true, res))) {
+  } else if (OB_FAIL(get_row_ids(scanner.get_reader(), begin_index, end_index, row_capacity, true, res))) {
     if (OB_UNLIKELY(OB_ITER_END != ret)) {
       LOG_WARN("fail to get row ids", K(ret), K(begin_index), K(end_index));
     }
   } else if (0 == row_capacity) {
     // skip if no rows selected
-  } else if (blocksstable::ObIMicroBlockReader::Decoder == reader->get_type() ||
-      blocksstable::ObIMicroBlockReader::CSDecoder == reader->get_type()) {
-    blocksstable::ObIMicroBlockDecoder *block_decoder = static_cast<blocksstable::ObIMicroBlockDecoder*>(reader);
-    if (OB_FAIL(block_decoder->get_rows(cols_projector_, col_params_, row_ids_, cell_data_ptrs_, row_capacity, datum_infos_))) {
-      LOG_WARN("fail to copy rows", K(ret), K(cols_projector_), K(row_capacity),
-              "row_ids", common::ObArrayWrap<const int64_t>(row_ids_, row_capacity));
+  } else if (iter_param_->use_new_format()) {
+    if (OB_FAIL(scanner.get_rows_for_rich_format(cols_projector_,
+                                                  col_params_,
+                                                  row_ids_,
+                                                  row_capacity,
+                                                  0,
+                                                  cell_data_ptrs_,
+                                                  len_array_,
+                                                  exprs_,
+                                                  &default_row_,
+                                                  need_init_vector))) {
+      LOG_WARN("Failed to get rows for rich format", K(ret));
     }
-  } else {
-    blocksstable::ObMicroBlockReader *block_reader = static_cast<blocksstable::ObMicroBlockReader*>(reader);
-    if (OB_FAIL(block_reader->get_rows(cols_projector_, col_params_, &default_row_,
-                                       row_ids_, row_capacity, row_buf_, datum_infos_, 0, exprs_, eval_ctx_))) {
-      LOG_WARN("fail to copy rows", K(ret), K(cols_projector_), K(row_capacity),
-               "row_ids", common::ObArrayWrap<const int64_t>(row_ids_, row_capacity));
-    }
+  } else if (OB_FAIL(scanner.get_rows_for_old_format(cols_projector_,
+                                                      col_params_,
+                                                      row_ids_,
+                                                      row_capacity,
+                                                      0,
+                                                      cell_data_ptrs_,
+                                                      exprs_,
+                                                      datum_infos_,
+                                                      &default_row_))) {
+    LOG_WARN("Failed to get rows for old format", K(ret));
   }
   if (OB_SUCC(ret)) {
     count_ = row_capacity;
     eval_ctx_.set_batch_idx(count_);
     // todo: support data cross microblocks in vectorized
-    set_end();
-    fill_group_idx(group_idx);
-    if (OB_UNLIKELY(IterEndState::LIMIT_ITER_END == iter_end_flag_)) {
-      ret = OB_ITER_END;
+    if (need_set_end) {
+      set_end();
     }
-    EVENT_ADD(ObStatEventIds::SSSTORE_READ_ROW_COUNT, row_capacity);
+    if (OB_FAIL(fill_group_idx(group_idx))) {
+      LOG_WARN("Failed to fill group idx", K(ret));
+    } else {
+      if (OB_UNLIKELY(IterEndState::LIMIT_ITER_END == iter_end_flag_)) {
+        ret = OB_ITER_END;
+      }
+      EVENT_ADD(ObStatEventIds::SSSTORE_READ_ROW_COUNT, row_capacity);
+    }
   }
   LOG_TRACE("[Vectorized] vector store copy rows", K(ret),
             K(begin_index), K(end_index), K(row_capacity), K(res),
-            "row_ids", common::ObArrayWrap<const int64_t>(row_ids_, row_capacity),
+            "row_ids", common::ObArrayWrap<const int32_t>(row_ids_, row_capacity),
             KPC(this));
   return ret;
 }
@@ -299,6 +417,7 @@ int ObVectorStore::fill_group_by_rows(
 {
   int ret = OB_SUCCESS;
   int64_t output_cnt = 0;
+  bool already_init_header = false;
   if (!group_by_cell_->is_processing()) {
     if (OB_FAIL(do_group_by(group_idx, reader, begin_index, end_index, res))) {
       LOG_WARN("Failed to do group by", K(ret));
@@ -307,11 +426,12 @@ int ObVectorStore::fill_group_by_rows(
     } else {
       group_by_cell_->reset_projected_cnt();
       group_by_cell_->set_is_processing(true);
+      already_init_header = true;
     }
   }
   if (OB_FAIL(ret)) {
   } else if (group_by_cell_->is_processing()) {
-    if (OB_FAIL(group_by_cell_->output_extra_group_by_result(output_cnt))) {
+    if (OB_FAIL(group_by_cell_->output_extra_group_by_result(output_cnt, *iter_param_))) {
       if (OB_LIKELY(OB_ITER_END == ret)) {
         ret = OB_SUCCESS;
         group_by_cell_->set_is_processing(false);
@@ -320,15 +440,20 @@ int ObVectorStore::fill_group_by_rows(
       }
     }
   }
-  if (OB_SUCC(ret)) {
+  if (OB_FAIL(ret)) {
+  } else if (OB_FAIL(group_by_cell_->pad_column_in_group_by(output_cnt))) {
+    LOG_WARN("Failed to pad column in group by", K(ret), K(output_cnt));
+  } else {
     count_ = output_cnt;
     eval_ctx_.set_batch_idx(count_);
-    fill_group_idx(group_idx);
-    EVENT_ADD(ObStatEventIds::SSSTORE_READ_ROW_COUNT, count_);
-    set_end();
-    if (!group_by_cell_->is_processing()) {
-      begin_index = end_index;
-      ret = OB_ITER_END;
+    if (OB_FAIL(fill_group_idx(group_idx))) {
+      LOG_WARN("Failed to fill group idx", K(ret));
+    } else {
+      EVENT_ADD(ObStatEventIds::SSSTORE_READ_ROW_COUNT, count_);
+      set_end();
+      if (!group_by_cell_->is_processing()) {
+        begin_index = end_index;
+      }
     }
   }
   return ret;
@@ -402,7 +527,13 @@ int ObVectorStore::do_group_by(
       } else if (need_do_aggregate) {
         if (OB_FAIL(group_by_cell_->check_distinct_and_ref_valid())) {
           LOG_WARN("Failed to check valid", K(ret));
-        } else if (OB_FAIL(decoder->get_group_by_aggregate_result(row_ids_, cell_data_ptrs_, row_capacity, *group_by_cell_))) {
+        } else if (iter_param_->use_new_format()) {
+          if (OB_FAIL(decoder->get_group_by_aggregate_result(row_ids_, cell_data_ptrs_, row_capacity,
+                          0, len_array_, eval_ctx_, *static_cast<ObGroupByCellVec *>(group_by_cell_)))) {
+            LOG_WARN("Failed to get aggregate result", K(ret));
+          }
+        } else if (OB_FAIL(decoder->get_group_by_aggregate_result(row_ids_, cell_data_ptrs_, row_capacity,
+                               *static_cast<ObGroupByCell *>(group_by_cell_)))) {
           LOG_WARN("Failed to get aggregate result", K(ret));
         }
       }
@@ -410,7 +541,6 @@ int ObVectorStore::do_group_by(
     }
     if (OB_UNLIKELY(OB_ITER_END != ret)) {
       LOG_WARN("Unexpected ret, should be OB_ITER_END", K(ret));
-      ret = OB_ERR_UNEXPECTED;
     } else if (OB_FAIL(group_by_cell_->collect_result())) {
       LOG_WARN("Failed to collect result", K(ret));
     }
@@ -430,21 +560,30 @@ int ObVectorStore::fill_rows(const int64_t group_idx, const int64_t row_count)
   } else {
     count_ = row_count;
     eval_ctx_.set_batch_idx(count_);
-    fill_group_idx(group_idx);
-    set_end();
-    EVENT_ADD(ObStatEventIds::SSSTORE_READ_ROW_COUNT, row_count);
+    if (OB_FAIL(fill_group_idx(group_idx))) {
+      LOG_WARN("Failed to fill group idx", K(ret));
+    } else {
+      set_end();
+      EVENT_ADD(ObStatEventIds::SSSTORE_READ_ROW_COUNT, row_count);
+    }
   }
   return ret;
 }
 
-void ObVectorStore::fill_group_idx(const int64_t group_idx)
+int ObVectorStore::fill_group_idx(const int64_t group_idx)
 {
+  int ret = OB_SUCCESS;
   if (nullptr != group_idx_expr_) {
-    ObDatum *group_idx_datums = group_idx_expr_->locate_batch_datums(eval_ctx_);
-    for (int64_t i = 0; i < count_; ++i) {
-      group_idx_datums[i].set_int(group_idx);
+    if (iter_param_->op_->enable_rich_format_ && OB_FAIL(init_expr_vector_header(*group_idx_expr_, eval_ctx_, count_))) {
+      LOG_WARN("Failed to init expr", K(ret));
+    } else {
+      ObDatum *group_idx_datums = group_idx_expr_->locate_batch_datums(eval_ctx_);
+      for (int64_t i = 0; i < count_; ++i) {
+        group_idx_datums[i].set_int(group_idx);
+      }
     }
   }
+  return ret;
 }
 
 int64_t ObVectorStore::to_string(char *buf, const int64_t buf_len) const
@@ -459,10 +598,25 @@ int64_t ObVectorStore::to_string(char *buf, const int64_t buf_len) const
        K_(row_capacity),
        K_(iter_end_flag),
        K_(eval_ctx));
-  for (int64_t i = 0; i < datum_infos_.count(); i++) {
-    J_KV(K(i));
-    J_COLON();
-    J_KV(K(ObArrayWrap<ObDatum>(datum_infos_.at(i).datum_ptr_, count_)));
+  if (nullptr != iter_param_ && 0 < count_) {
+    if (iter_param_->use_new_format()) {
+      sql::EvalBound bound(count_, true);
+      for (int64_t i = 0; i < datum_infos_.count(); i++) {
+        J_KV(K(i));
+        J_COLON();
+        J_KV("new format datums",
+             sql::ToStrVectorHeader(*datum_infos_.at(i).expr_,
+                                    iter_param_->op_->get_eval_ctx(),
+                                    nullptr,
+                                    bound));
+      }
+    } else {
+      for (int64_t i = 0; i < datum_infos_.count(); i++) {
+        J_KV(K(i));
+        J_COLON();
+        J_KV("datums", (ObArrayWrap<ObDatum>(datum_infos_.at(i).datum_ptr_, count_)));
+      }
+    }
   }
   J_OBJ_END();
   return pos;

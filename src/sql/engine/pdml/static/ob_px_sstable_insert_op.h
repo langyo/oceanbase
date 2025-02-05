@@ -21,6 +21,9 @@ namespace oceanbase
 namespace storage
 {
 class ObSSTableInsertRowIterator;
+typedef std::pair<share::ObLSID, common::ObTabletID> LSTabletIDPair;
+struct ObInsertMonitor;
+struct ObTabletSliceParam;
 }
 
 namespace sql
@@ -52,6 +55,7 @@ public:
 public:
   ObExpr *flashback_query_expr_;
   bool regenerate_heap_table_pk_;
+  int64_t ddl_slice_id_idx_; // record idx of exprs for ddl slice id
   DISALLOW_COPY_AND_ASSIGN(ObPxMultiPartSSTableInsertSpec);
 };
 
@@ -63,12 +67,20 @@ public:
                                ObOpInput *input)
     : ObPxMultiPartInsertOp(exec_ctx, spec, input),
       allocator_("SSTABLE_INS"),
+      participants_(),
       tablet_store_map_(),
       tablet_seq_caches_(),
       curr_tablet_store_iter_(),
       curr_tablet_idx_(-1),
       count_rows_finish_(false),
-      curr_part_idx_(0)
+      is_all_partition_finished_(false),
+      curr_part_idx_(0),
+      snapshot_version_(0),
+      is_partitioned_table_(false),
+      table_all_slice_count_(0),
+      autoinc_range_interval_(0),
+      is_vec_data_complement_(false),
+      is_vec_gen_vid_(false)
   {}
   virtual ~ObPxMultiPartSSTableInsertOp() { destroy(); }
   const ObPxMultiPartSSTableInsertSpec &get_spec() const;
@@ -76,26 +88,54 @@ public:
   virtual int inner_get_next_row() override;
   virtual void destroy() override;
   int get_next_row_with_cache();
-  int get_tablet_id_from_row(const ObExprPtrIArray &row,
-                             const int64_t part_id_idx,
-                             common::ObTabletID &tablet_id);
+  int get_tablet_info_from_row(
+      const ObExprPtrIArray &row,
+      common::ObTabletID &tablet_id,
+      storage::ObTabletSliceParam *tablet_slice_param = nullptr);
+private:
+  struct ObLSTabletIDPairCmp final
+  {
+    public:
+      ObLSTabletIDPairCmp() { }
+      OB_INLINE bool operator() (const LSTabletIDPair &left, const LSTabletIDPair &right)
+      {
+        if (left.second == right.second) {
+          return left.first < right.first;
+        } else {
+          return left.second < right.second;
+        }
+      }
+  };
 private:
   int get_all_rows_and_count();
   int create_tablet_store(common::ObTabletID &tablet_id, ObChunkDatumStore *&tablet_store);
-  bool need_count_rows() const { return MY_SPEC.regenerate_heap_table_pk_ && !count_rows_finish_; }      
+  int build_table_slice_info();
+  int update_sqc_global_autoinc_value();
+  bool need_count_rows() const { return (MY_SPEC.regenerate_heap_table_pk_ || is_vec_gen_vid_) && !count_rows_finish_; }
   int get_next_tablet_id(common::ObTabletID &tablet_id);
 private:
   friend class storage::ObSSTableInsertRowIterator;
   static const uint64_t MAP_HASH_BUCKET_NUM = 1543L;
-  static const uint64_t TABLET_STORE_MEM_LIMIT = 2 * 1024 * 1024; // 2M
+  static const uint64_t TABLET_STORE_MEM_LIMIT = 16 * 1024; // 16 KB
   typedef common::hash::ObHashMap<common::ObTabletID, ObChunkDatumStore*, common::hash::NoPthreadDefendMode> TabletStoreMap;
   common::ObArenaAllocator allocator_;
+  common::ObArray<LSTabletIDPair> participants_;
   TabletStoreMap tablet_store_map_;
   ObArray<share::ObTabletCacheInterval> tablet_seq_caches_;
   ObChunkDatumStore::Iterator curr_tablet_store_iter_;
   int64_t curr_tablet_idx_;
   bool count_rows_finish_;
+  bool is_all_partition_finished_;
   int64_t curr_part_idx_;
+  int64_t snapshot_version_; // ddl snapshot version.
+  bool is_partitioned_table_;
+  int64_t table_all_slice_count_;
+  // record the count of slices before the current tablet
+  common::hash::ObHashMap<int64_t, int64_t> tablet_pre_slice_count_map_;
+  int64_t autoinc_range_interval_;
+  // vector index
+  bool is_vec_data_complement_;
+  bool is_vec_gen_vid_;
   DISALLOW_COPY_AND_ASSIGN(ObPxMultiPartSSTableInsertOp);
 };
 

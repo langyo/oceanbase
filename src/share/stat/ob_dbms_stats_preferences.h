@@ -214,6 +214,124 @@ class ObEstimateBlockPrefs : public ObStatPrefs
     virtual const char* get_stat_pref_default_value() const { return "TRUE"; }
 };
 
+class ObBlockSamplePrefs : public ObStatPrefs
+{
+  public:
+    ObBlockSamplePrefs() : ObStatPrefs() {}
+    ObBlockSamplePrefs(ObIAllocator *alloc,
+                       ObSQLSessionInfo *session_info,
+                       const ObString &pvalue) :
+    ObStatPrefs(alloc, session_info, pvalue) {}
+    virtual int check_pref_value_validity(ObTableStatParam *param = NULL) override;
+    virtual const char* get_stat_pref_name() const { return "BLOCK_SAMPLE"; }
+    virtual const char* get_stat_pref_default_value() const { return "FALSE"; }
+};
+
+class ObOnlineEstimatePercentPrefs : public ObStatPrefs
+{
+  public:
+    ObOnlineEstimatePercentPrefs() : ObStatPrefs() {}
+    ObOnlineEstimatePercentPrefs(ObIAllocator *alloc,
+                                 ObSQLSessionInfo *session_info,
+                                 const ObString &pvalue) :
+      ObStatPrefs(alloc, session_info, pvalue) {}
+    virtual int check_pref_value_validity(ObTableStatParam *param = NULL) override;
+    virtual const char* get_stat_pref_name() const { return "ONLINE_ESTIMATE_PERCENT"; }
+    virtual const char* get_stat_pref_default_value() const { return "1";}
+    const char* get_stat_pref_for_update() const { return "100"; }
+};
+
+class ObAsyncGatherStaleRatioPrefs : public ObStatPrefs
+{
+  public:
+    ObAsyncGatherStaleRatioPrefs() : ObStatPrefs() {}
+    ObAsyncGatherStaleRatioPrefs(ObIAllocator *alloc,
+                                 ObSQLSessionInfo *session_info,
+                                 const ObString &pvalue) :
+      ObStatPrefs(alloc, session_info, pvalue) {}
+    virtual int check_pref_value_validity(ObTableStatParam *param = NULL) override;
+    virtual const char* get_stat_pref_name() const { return "ASYNC_GATHER_STALE_RATIO"; }
+    virtual const char* get_stat_pref_default_value() const { return "10"; }
+};
+
+class ObAsyncGatherSampleSizePrefs : public ObStatPrefs
+{
+  public:
+    ObAsyncGatherSampleSizePrefs() : ObStatPrefs() {}
+    ObAsyncGatherSampleSizePrefs(ObIAllocator *alloc,
+                                  ObSQLSessionInfo *session_info,
+                                  const ObString &pvalue) :
+      ObStatPrefs(alloc, session_info, pvalue) {}
+    virtual int check_pref_value_validity(ObTableStatParam *param = NULL) override;
+    virtual const char* get_stat_pref_name() const { return "ASYNC_GATHER_SAMPLE_SIZE"; }
+    virtual const char* get_stat_pref_default_value() const { return "1000000"; }
+};
+
+class ObAsyncGatherFullTableSizePrefs : public ObStatPrefs
+{
+  public:
+    ObAsyncGatherFullTableSizePrefs() : ObStatPrefs() {}
+    ObAsyncGatherFullTableSizePrefs(ObIAllocator *alloc,
+                                    ObSQLSessionInfo *session_info,
+                                    const ObString &pvalue) :
+      ObStatPrefs(alloc, session_info, pvalue) {}
+    virtual int check_pref_value_validity(ObTableStatParam *param = NULL) override;
+    virtual const char* get_stat_pref_name() const { return "ASYNC_GATHER_FULL_TABLE_SIZE"; }
+    virtual const char* get_stat_pref_default_value() const { return "10000000"; }
+};
+
+class ObAsyncStaleMaxTableSizePrefs : public ObStatPrefs
+{
+  public:
+    ObAsyncStaleMaxTableSizePrefs() : ObStatPrefs() {}
+    ObAsyncStaleMaxTableSizePrefs(ObIAllocator *alloc,
+                                 ObSQLSessionInfo *session_info,
+                                 const ObString &pvalue) :
+      ObStatPrefs(alloc, session_info, pvalue) {}
+    virtual int check_pref_value_validity(ObTableStatParam *param = NULL) override;
+    virtual const char* get_stat_pref_name() const { return "ASYNC_STALE_MAX_TABLE_SIZE"; }
+    virtual const char* get_stat_pref_default_value() const { return "100000000"; }
+};
+
+class ObHistEstPercentPrefs : public ObStatPrefs
+{
+  public:
+    ObHistEstPercentPrefs() : ObStatPrefs() {}
+    ObHistEstPercentPrefs(ObIAllocator *alloc,
+                           ObSQLSessionInfo *session_info,
+                           const ObString &pvalue) :
+      ObStatPrefs(alloc, session_info, pvalue) {}
+    virtual int check_pref_value_validity(ObTableStatParam *param = NULL) override;
+    virtual const char* get_stat_pref_name() const { return "HIST_EST_PERCENT"; }
+    virtual const char* get_stat_pref_default_value() const { return "DBMS_STATS.AUTO_SAMPLE_SIZE";}
+};
+
+class ObHistBlockSamplePrefs : public ObStatPrefs
+{
+  public:
+    ObHistBlockSamplePrefs() : ObStatPrefs() {}
+    ObHistBlockSamplePrefs(ObIAllocator *alloc,
+                           ObSQLSessionInfo *session_info,
+                           const ObString &pvalue) :
+    ObStatPrefs(alloc, session_info, pvalue) {}
+    virtual int check_pref_value_validity(ObTableStatParam *param = NULL) override;
+    virtual const char* get_stat_pref_name() const { return "HIST_BLOCK_SAMPLE"; }
+    virtual const char* get_stat_pref_default_value() const { return "FALSE"; }
+};
+
+class ObAutoSampleRowCountPrefs : public ObStatPrefs
+{
+  public:
+    ObAutoSampleRowCountPrefs() : ObStatPrefs() {}
+    ObAutoSampleRowCountPrefs(ObIAllocator *alloc,
+                              ObSQLSessionInfo *session_info,
+                              const ObString &pvalue):
+      ObStatPrefs(alloc, session_info, pvalue) {}
+    virtual int check_pref_value_validity(ObTableStatParam *param = NULL) override;
+    virtual const char* get_stat_pref_name() const { return "AUTO_SAMPLE_ROW_COUNT"; }
+    virtual const char* get_stat_pref_default_value() const { return "5000000"; }
+};
+
 template <class T>
 static int new_stat_prefs(ObIAllocator &allocator, ObSQLSessionInfo *session_info,
                           const ObString &opt_value, T *&src)
@@ -236,8 +354,10 @@ public:
 
   static int reset_global_pref_defaults(ObExecContext &ctx);
 
-  static int get_prefs(ObExecContext &ctx,
-                       const ObTableStatParam &param,
+  static int get_prefs(ObMySQLProxy *mysql_proxy,
+                       ObIAllocator &allocator,
+                       const uint64_t tenant_id,
+                       const uint64_t table_id,
                        const ObString &opt_name,
                        ObObj &result);
 
@@ -258,9 +378,16 @@ public:
                                        bool is_reset_prefs = false,
                                        int64_t *expect_affected_rows = NULL);
 
+  static int get_online_estimate_percent_for_upgrade(ObSqlString &sql);
+
+  static int get_extra_stats_perfs_for_upgrade(ObSqlString &sql);
+
+  static int get_extra_stats_perfs_for_upgrade_425(ObSqlString &sql);
+
 private:
-  static int do_get_prefs(ObExecContext &ctx,
-                          ObIAllocator *allocator,
+  static int do_get_prefs(ObMySQLProxy *mysql_proxy,
+                          ObIAllocator &allocator,
+                          const uint64_t tenant_id,
                           const ObSqlString &raw_sql,
                           bool &get_result,
                           ObObj &result);

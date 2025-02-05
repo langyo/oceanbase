@@ -12,8 +12,6 @@
 
 #define USING_LOG_PREFIX RS
 #include "rootserver/parallel_ddl/ob_create_view_helper.h"
-#include "share/schema/ob_multi_version_schema_service.h"
-#include "share/ob_rpc_struct.h"
 using namespace oceanbase::lib;
 using namespace oceanbase::common;
 using namespace oceanbase::share;
@@ -75,6 +73,16 @@ int ObCreateViewHelper::lock_objects_()
 
 //TODO:(yanmu.ztl) to implement
 int ObCreateViewHelper::generate_schemas_()
+{
+  int ret = OB_SUCCESS;
+  if (OB_FAIL(check_inner_stat_())) {
+    LOG_WARN("fail to check inner stat", KR(ret));
+  }
+  return ret;
+}
+
+//TODO:(wenyu.ffz) to implement
+int ObCreateViewHelper::calc_schema_version_cnt_()
 {
   int ret = OB_SUCCESS;
   if (OB_FAIL(check_inner_stat_())) {

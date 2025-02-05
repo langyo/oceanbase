@@ -13,15 +13,9 @@
 #define USING_LOG_PREFIX RS
 
 #include "ob_recover_table_initiator.h"
-#include "lib/hash/ob_hashset.h"
-#include "lib/charset/ob_charset.h"
-#include "share/ob_rpc_struct.h"
 #include "share/backup/ob_backup_data_table_operator.h"
-#include "rootserver/ob_rs_event_history_table_operator.h"
 #include "ob_restore_util.h"
 #include "share/restore/ob_recover_table_persist_helper.h"
-#include "sql/parser/parse_node.h"
-#include "rootserver/ddl_task/ob_ddl_task.h"
 #include "share/restore/ob_import_table_persist_helper.h"
 
 using namespace oceanbase;
@@ -256,7 +250,7 @@ int ObRecoverTableInitiator::fill_recover_database(
     const share::ObImportArg &import_arg,
     share::ObImportTableArg &import_table_arg)
 {
-  //TODO(chongrong.th) move duplicate item checking logic to ObImportArg internal later.
+  //TODO(zeyong) move duplicate item checking logic to ObImportArg internal later.
   int ret = OB_SUCCESS;
   const share::ObImportDatabaseArray &db_array = import_arg.get_import_database_array();
   ARRAY_FOREACH(db_array.get_items(), i) {

@@ -10,14 +10,8 @@
  * See the Mulan PubL v2 for more details.
  */
 
-#include "share/ob_occam_time_guard.h"
 #include "election_acceptor.h"
-#include "common/ob_clock_generator.h"
 #include "election_impl.h"
-#include "lib/net/ob_addr.h"
-#include "logservice/palf/election/interface/election_priority.h"
-#include "logservice/palf/election/utils/election_common_define.h"
-#include "logservice/palf/election/utils/election_event_recorder.h"
 
 namespace oceanbase
 {
@@ -59,7 +53,7 @@ public:
     if (OB_UNLIKELY(msg.get_ballot_number() < p_acceptor->ballot_number_)) {
       using T = typename ResponseType<RequestMsg>::type;
       T reject_msg = create_reject_message_(p_acceptor->p_election_->get_self_addr(),
-                                            p_acceptor->p_election_->inner_priority_seed_,
+                                            p_acceptor->p_election_->generate_inner_priority_seed_(),
                                             p_acceptor->p_election_->get_membership_version_(),
                                             p_acceptor->p_election_->get_ls_biggest_min_cluster_version_ever_seen_(),
                                             msg);
@@ -132,8 +126,8 @@ int ElectionAcceptor::start()
     
     LockGuard lock_guard(p_election_->lock_);
     // 周期性打印选举的状态
-    if (ObClockGenerator::getCurrentTime() > last_dump_acceptor_info_ts_ + 3_s) {
-      last_dump_acceptor_info_ts_ = ObClockGenerator::getCurrentTime();
+    if (ObClockGenerator::getClock() > last_dump_acceptor_info_ts_ + 3_s) {
+      last_dump_acceptor_info_ts_ = ObClockGenerator::getClock();
       ELECT_LOG(INFO, "dump acceptor info", K(*this));
     }
     // 当acceptor的Lease有效状态发生变化时需要打印日志以及汇报事件
@@ -163,7 +157,7 @@ int ElectionAcceptor::start()
       if (last_record_lease_valid_state && !lease_valid_state) {// 这个定时任务可能是被延迟致lease到期时触发的，为了在lease到期的第一时间投票
         can_vote = true;
         LOG_ELECT_LEADER(INFO, "vote when lease expired");
-      } else if (ObClockGenerator::getCurrentTime() - last_time_window_open_ts_ >= CALCULATE_TIME_WINDOW_SPAN_TS()) {
+      } else if (ObClockGenerator::getClock() - last_time_window_open_ts_ >= CALCULATE_TIME_WINDOW_SPAN_TS()) {
         can_vote = true;
       } else {
         LOG_ELECT_LEADER(INFO, "can't vote now", K(last_record_lease_valid_state),
@@ -235,6 +229,7 @@ void ElectionAcceptor::on_prepare_request(const ElectionPrepareRequestMsg &prepa
     // 0. 收到leader prepare的时候无须比较优先级，直接返回投票结果
     if (prepare_req.get_role() == common::ObRole::LEADER) {
       if (prepare_req.get_ballot_number() <= ballot_number_) {
+        // ignore ret
         LOG_PHASE(WARN, phase, "leader prepare message's ballot number is smaller than self");
       } else {
         advance_ballot_number_and_reset_related_states_(prepare_req.get_ballot_number(), phase);
@@ -269,7 +264,7 @@ void ElectionAcceptor::on_prepare_request(const ElectionPrepareRequestMsg &prepa
           LOG_PHASE(ERROR, phase, "open time window failed");
         } else {
           is_time_window_opened_ = true;// 定时任务注册成功，打开时间窗口
-          last_time_window_open_ts_ = ObClockGenerator::getCurrentTime();
+          last_time_window_open_ts_ = ObClockGenerator::getClock();
           LOG_PHASE(INFO, phase, "open time window success", K(timewindow_span));
         }
       }
@@ -321,7 +316,7 @@ void ElectionAcceptor::on_accept_request(const ElectionAcceptRequestMsg &accept_
     *us_to_expired = lease_.get_lease_end_ts() - get_monotonic_ts();
     // 3. 构造accept ok消息
     ElectionAcceptResponseMsg accept_res_accept(p_election_->get_self_addr(),
-                                                p_election_->inner_priority_seed_,
+                                                p_election_->generate_inner_priority_seed_(),
                                                 p_election_->get_membership_version_(),
                                                 p_election_->get_ls_biggest_min_cluster_version_ever_seen_(),
                                                 accept_req);
@@ -343,17 +338,21 @@ int64_t ElectionAcceptor::to_string(char *buf, const int64_t buf_len) const
     common::databuff_printf(buf, buf_len, pos, "{p_election:NULL");
   } else {
     common::databuff_printf(buf, buf_len, pos, "{ls_id:{id:%ld}", p_election_->id_);
-    common::databuff_printf(buf, buf_len, pos, ", addr:%s", to_cstring(p_election_->get_self_addr()));
+    common::databuff_printf(buf, buf_len, pos, ", addr:");
+    common::databuff_printf(buf, buf_len, pos, p_election_->get_self_addr());
   }
   common::databuff_printf(buf, buf_len, pos, ", ballot_number:%ld", ballot_number_);
   common::databuff_printf(buf, buf_len, pos, ", ballot_of_time_window:%ld", ballot_of_time_window_);
-  common::databuff_printf(buf, buf_len, pos, ", lease:%s", to_cstring(lease_));
-  common::databuff_printf(buf, buf_len, pos, ", is_time_window_opened:%s", to_cstring(is_time_window_opened_));
-  common::databuff_printf(buf, buf_len, pos, ", vote_reason:%s", to_cstring(vote_reason_));
+  common::databuff_printf(buf, buf_len, pos, ", lease:");
+  common::databuff_printf(buf, buf_len, pos, lease_);
+  common::databuff_printf(buf, buf_len, pos, ", is_time_window_opened:");
+  common::databuff_printf(buf, buf_len, pos, is_time_window_opened_);
+  common::databuff_printf(buf, buf_len, pos, ", vote_reason:");
+  common::databuff_printf(buf, buf_len, pos, vote_reason_);
   common::databuff_printf(buf, buf_len, pos, ", last_time_window_open_ts:%s", ObTime2Str::ob_timestamp_str_range<YEAR, USECOND>(last_time_window_open_ts_));
   if (highest_priority_prepare_req_.is_valid()) {
-    common::databuff_printf(buf, buf_len, pos, ", highest_priority_prepare_req:%s",
-                                                  to_cstring(highest_priority_prepare_req_));
+    common::databuff_printf(buf, buf_len, pos, ", highest_priority_prepare_req:");
+    common::databuff_printf(buf, buf_len, pos, highest_priority_prepare_req_);
   }
   common::databuff_printf(buf, buf_len, pos, ", p_election:0x%lx}", (unsigned long)p_election_);
   return pos;

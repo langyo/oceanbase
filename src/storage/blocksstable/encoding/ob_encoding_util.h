@@ -71,23 +71,24 @@ enum ObObjTypeStoreClass
   ObLobSC,  //lob
   ObJsonSC, // json
   ObGeometrySC, // geometry
+  ObRoaringBitmapSC, // roaringbitmap
   ObMaxSC,
 };
 
 OB_INLINE bool is_string_encoding_valid(const ObObjTypeStoreClass sc)
 {
-  return (sc == ObStringSC || sc == ObTextSC || sc == ObJsonSC || sc == ObGeometrySC);
+  return (sc == ObStringSC || sc == ObTextSC || sc == ObJsonSC || sc == ObGeometrySC || sc == ObRoaringBitmapSC);
 }
 
 OB_INLINE bool store_class_might_contain_lob_locator(const ObObjTypeStoreClass sc)
 {
-  return (sc == ObTextSC || sc == ObLobSC || sc == ObJsonSC || sc == ObGeometrySC);
+  return (sc == ObTextSC || sc == ObLobSC || sc == ObJsonSC || sc == ObGeometrySC || sc == ObRoaringBitmapSC);
 }
 
 OB_INLINE bool is_var_length_type(const ObObjTypeStoreClass sc)
 {
   return (sc == ObNumberSC || sc == ObDecimalIntSC || sc == ObStringSC || sc == ObTextSC
-      || sc == ObLobSC || sc == ObJsonSC || sc == ObGeometrySC);
+      || sc == ObLobSC || sc == ObJsonSC || sc == ObGeometrySC || sc == ObRoaringBitmapSC);
 }
 
 OB_INLINE ObObjTypeStoreClass *get_store_class_map()
@@ -119,6 +120,10 @@ OB_INLINE ObObjTypeStoreClass *get_store_class_map()
     ObGeometrySC, //ObGeometryTC
     ObStringSC, // ObUserDefinedSQLTC， UDT null_bitmaps
     ObDecimalIntSC, // ObDecimalIntTC
+    ObTextSC, // ObCollectionSQLTC
+    ObIntSC,  // ObMySQLDateTC
+    ObIntSC,  // ObMySQLDateTimeTc
+    ObRoaringBitmapSC, // ObRoaringBitmapTC
     ObMaxSC // ObMaxTC
   };
   STATIC_ASSERT(ARRAYSIZEOF(store_class_map) == common::ObMaxTC + 1,
@@ -169,7 +174,7 @@ OB_INLINE int64_t *get_type_size_map()
     -1, //ObTimestampLTZType
     -1, //ObTimestampNanoType
     -1, //ObRawType
-    -1, //ObIntervalYMType
+    8, //ObIntervalYMType
     -1, //ObIntervalDSType
     -1, //ObNumberFloatType
     -1, //ObNVarchar2Type
@@ -180,6 +185,10 @@ OB_INLINE int64_t *get_type_size_map()
     -1, //Geometry
     -1, //ObUserDefinedSQLType
     -1, //ObDecimalIntType
+    -1, //ObCollectionSQLType
+    4, // ObMySQLDateType
+    8, // ObMySQLDateTimeType
+    -1, //RoaringBitmap
     -1 // ObMaxType
   };
   STATIC_ASSERT(ARRAYSIZEOF(type_size_map) == common::ObMaxType + 1,
@@ -242,12 +251,24 @@ OB_INLINE int64_t *get_estimate_base_store_size_map()
     9, // ObGeometryType
     8, // ObUserDefinedSQLType
     8, // ObDecimalIntType
+    8, // ObCollectionSQLType
+    8, // ObMySQLDateType
+    8, // ObMySQLDateTimeType
+    9, // ObRoaringBitmapType
     -1 // ObMaxType
   };
   STATIC_ASSERT(ARRAYSIZEOF(estimate_base_store_size_map) == common::ObMaxType + 1,
       "Base store size map count mismatch with type count");
   return estimate_base_store_size_map;
 }
+
+enum ObEncodingDecodeMetodType
+{
+  D_DEEP_COPY = 0,
+  D_SHALLOW_COPY = 1,
+  D_INTEGER = 2,
+  D_MAX_DECODE_METHOD_TYPE,
+};
 
 extern uint64_t INTEGER_MASK_TABLE[sizeof(int64_t) + 1];
 
@@ -437,7 +458,8 @@ inline static int batch_load_data_to_datum(
   case ObStringSC:
   case ObTextSC:
   case ObJsonSC:
-  case ObGeometrySC: {
+  case ObGeometrySC:
+  case ObRoaringBitmapSC: {
     for (int64_t i = 0; i < row_cap; ++i) {
       if (!datums[i].is_null()) {
         datums[i].ptr_ = cell_datas[i];
@@ -519,6 +541,7 @@ inline static int load_data_to_datum(
       case ObTextSC:
       case ObJsonSC:
       case ObGeometrySC:
+      case ObRoaringBitmapSC:
       {
         datum.pack_= static_cast<uint32_t>(cell_len);
         datum.ptr_ = cell_data;
@@ -548,62 +571,6 @@ OB_INLINE uint64_t get_uint64_from_buf_by_len(const char *buf, const int64_t len
   uint64_t result = 0;
   ENCODING_ADAPT_MEMCPY(&result, buf, len);
   return result;
-}
-
-enum ObFPIntCmpOpType
-{
-  FP_INT_OP_EQ = 0, // WHITE_OP_EQ
-  FP_INT_OP_LE, // WHITE_OP_LE
-  FP_INT_OP_LT, // WHITE_OP_LT
-  FP_INT_OP_GE, // WHITE_OP_GE
-  FP_INT_OP_GT, // WHITE_OP_GT
-  FP_INT_OP_NE, // WHITE_OP_NE
-  FP_INT_OP_MAX,
-};
-
-template <typename T>
-OB_INLINE bool fp_int_cmp(const T left, const T right, const ObFPIntCmpOpType cmp_op)
-{
-  // not check parameter for performance
-  bool res = false;
-  switch (cmp_op) {
-  case FP_INT_OP_EQ:
-    res = left == right;
-    break;
-  case FP_INT_OP_LE:
-    res = left <= right;
-    break;
-  case FP_INT_OP_LT:
-    res = left < right;
-    break;
-  case FP_INT_OP_GE:
-    res = left >= right;
-    break;
-  case FP_INT_OP_GT:
-    res = left > right;
-    break;
-  case FP_INT_OP_NE:
-    res = left != right;
-    break;
-  default:
-    STORAGE_LOG_RET(ERROR, common::OB_ERR_UNEXPECTED, "Not Supported compare operation type", K(cmp_op));
-  }
-  return res;
-}
-
-OB_INLINE ObFPIntCmpOpType *get_white_op_int_op_map()
-{
-  static ObFPIntCmpOpType white_op_int_op_map[] = {
-    FP_INT_OP_EQ, // WHITE_OP_EQ
-    FP_INT_OP_LE, // WHITE_OP_LE
-    FP_INT_OP_LT, // WHITE_OP_LT
-    FP_INT_OP_GE, // WHITE_OP_GE
-    FP_INT_OP_GT, // WHITE_OP_GT
-    FP_INT_OP_NE  // WHITE_OP_NE
-  };
-  STATIC_ASSERT(ARRAYSIZEOF(white_op_int_op_map) == FP_INT_OP_NE + 1,
-    "type size map count mismatch with type count");
-  return white_op_int_op_map;
 }
 
 inline static int compare_datum(
@@ -660,9 +627,27 @@ private:
   const static int64_t BLOCK_ITEM_CNT = BLOCK_SIZE / sizeof(T);
   const static int64_t MAX_BLOCK_CNT = (MAX_COUNT + BLOCK_ITEM_CNT - 1) / BLOCK_ITEM_CNT;
 public:
-  ObPodFix2dArray() : size_(0) { MEMSET(block_list_, 0, sizeof(T *) * MAX_BLOCK_CNT); }
+  explicit ObPodFix2dArray(ObIAllocator &allocator)
+    : allocator_(&allocator), size_(0)
+  {
+    MEMSET(block_list_, 0, sizeof(T *) * MAX_BLOCK_CNT);
+  }
   ~ObPodFix2dArray() { destroy(); }
 
+  OB_INLINE int64_t get_dimension_size() const { return BLOCK_ITEM_CNT; }
+  OB_INLINE int64_t get_continuous_array_count() const
+  {
+    return (size_ + BLOCK_ITEM_CNT - 1) / BLOCK_ITEM_CNT;
+  }
+  OB_INLINE void get_continuous_array(const int64_t idx, T *&arr, int64_t &arr_cnt) const
+  {
+    arr = nullptr;
+    arr_cnt = 0;
+    if (idx * BLOCK_ITEM_CNT < size_) {
+      arr = block_list_[idx];
+      arr_cnt = MIN(BLOCK_ITEM_CNT, size_ - idx * BLOCK_ITEM_CNT);
+    }
+  }
   OB_INLINE int64_t count() const { return size_; }
   OB_INLINE bool empty() const { return size_ <= 0; }
   OB_INLINE T &at(int64_t idx)
@@ -702,7 +687,7 @@ public:
       if (NULL == block_list_[i]) {
         break;
       } else {
-        common::ob_free(block_list_[i]);
+        allocator_->free(block_list_[i]);
         block_list_[i] = NULL;
       }
     }
@@ -739,11 +724,10 @@ private:
       ret = common::OB_SIZE_OVERFLOW;
       STORAGE_LOG(WARN, "size will overflow", K(ret), K_(size), K(block_cnt), K(cur_cnt));
     } else {
-      common::ObMemAttr ma(MTL_ID(), blocksstable::OB_ENCODING_LABEL_PIVOT);
       for (int64_t i = 0; i < block_cnt && OB_SUCC(ret); ++i) {
         if (NULL == block_list_[cur_cnt + i]) {
-          T *block = static_cast<T *>(common::ob_malloc(BLOCK_SIZE, ma));
-          if (NULL == block) {
+          T *block = static_cast<T *>(allocator_->alloc(BLOCK_SIZE));
+          if (OB_ISNULL(block)) {
             ret = common::OB_ALLOCATE_MEMORY_FAILED;
             STORAGE_LOG(WARN, "alloc block failed",
                 K(ret), "block_size", static_cast<int64_t>(BLOCK_SIZE));
@@ -756,12 +740,12 @@ private:
     return ret;
   }
 private:
+  ObIAllocator *allocator_;
   T *block_list_[MAX_BLOCK_CNT];
   int64_t size_;
 };
 
-typedef ObPodFix2dArray<common::ObObj, 64 << 10, common::OB_MALLOC_MIDDLE_BLOCK_SIZE> ObColValues;
-typedef ObPodFix2dArray<ObDatum, 1 << 20, common::OB_MALLOC_MIDDLE_BLOCK_SIZE> ObColDatums;
+typedef ObPodFix2dArray<ObDatum, 1 << 20, common::OB_MALLOC_NORMAL_BLOCK_SIZE> ObColDatums;
 
 class ObMapAttrOperator
 {

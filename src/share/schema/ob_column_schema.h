@@ -17,6 +17,7 @@
 #include "lib/container/ob_array.h"
 #include "lib/hash/ob_hashmap.h"
 #include "share/schema/ob_schema_struct.h"
+#include "share/schema/ob_schema_utils.h"
 #include "common/rowkey/ob_rowkey_info.h"
 
 namespace oceanbase
@@ -53,15 +54,14 @@ static common::ColumnType convert_str_to_column_type(const char *str);
 //constructor and destructor
 ObColumnSchemaV2();
 explicit ObColumnSchemaV2(common::ObIAllocator *allocator);
-ObColumnSchemaV2(const ObColumnSchemaV2 &src_schema);
+DISABLE_COPY_ASSIGN(ObColumnSchemaV2);
 virtual ~ObColumnSchemaV2();
 
 //operators
-ObColumnSchemaV2 &operator=(const ObColumnSchemaV2 &src_schema);
 bool operator==(const ObColumnSchemaV2 &r) const;
 bool operator!=(const ObColumnSchemaV2 &r) const;
 
-int assign(const ObColumnSchemaV2 &other);
+int assign(const ObColumnSchemaV2 &src_schema);
 
 //set methods
   inline void set_tenant_id(const uint64_t id) { tenant_id_ = id; }
@@ -72,6 +72,7 @@ int assign(const ObColumnSchemaV2 &other);
   inline void set_order_in_rowkey(const common::ObOrderType order_in_rowkey) { order_in_rowkey_ = order_in_rowkey; }
   inline void set_udt_set_id(const uint64_t id) { udt_set_id_ = id; }
   inline void set_sub_data_type(const uint64_t sub_type) { sub_type_ = sub_type; }
+  inline void set_lob_chunk_size(const int64_t chunk_size) { lob_chunk_size_ = chunk_size; }
 
   int set_part_key_pos(const int64_t part_key_pos);
   inline int64_t get_part_key_pos() const
@@ -128,7 +129,10 @@ int assign(const ObColumnSchemaV2 &other);
   inline void set_collation_type(const common::ObCollationType type) { meta_type_.set_collation_type(type); }
   inline int set_orig_default_value(const common::ObObj default_value) { return deep_copy_obj(default_value, orig_default_value_); }
   inline int set_orig_default_value_v2(const common::ObObj default_value) { return deep_copy_obj(default_value, orig_default_value_); }
-  inline int set_cur_default_value(const common::ObObj default_value) { return deep_copy_obj(default_value, cur_default_value_); }
+  inline int set_cur_default_value(const common::ObObj default_value, bool is_default_expr_v2) {
+    add_or_del_column_flag(DEFAULT_EXPR_V2_COLUMN_FLAG, is_default_expr_v2);
+    return deep_copy_obj(default_value, cur_default_value_);
+  }
   inline int set_cur_default_value_v2(const common::ObObj default_value) { return deep_copy_obj(default_value, cur_default_value_); }
   inline int set_column_name(const char *col_name) { return deep_copy_str(col_name, column_name_); }
   inline int set_column_name(const common::ObString &col_name) { return deep_copy_str(col_name, column_name_); }
@@ -159,6 +163,7 @@ int assign(const ObColumnSchemaV2 &other);
   inline uint64_t& get_column_id() { return column_id_; }
   inline uint64_t get_udt_set_id() const { return udt_set_id_; }
   inline uint64_t get_sub_data_type() const { return sub_type_; }
+  inline int64_t get_lob_chunk_size() const { return lob_chunk_size_; }
   inline int64_t get_schema_version() const { return schema_version_; }
   inline int64_t get_rowkey_position() const { return rowkey_position_; }
   inline int64_t get_index_position() const { return index_position_; }
@@ -190,6 +195,7 @@ int assign(const ObColumnSchemaV2 &other);
   inline bool is_string_type() const { return meta_type_.is_string_type(); }
   inline bool is_json() const { return meta_type_.is_json(); }
   inline bool is_geometry() const { return meta_type_.is_geometry(); }
+  inline bool is_roaringbitmap() const { return meta_type_.is_roaringbitmap(); }
   inline bool is_raw() const { return meta_type_.is_raw(); }
   inline bool is_decimal_int() const { return meta_type_.is_decimal_int(); }
 
@@ -197,9 +203,12 @@ int assign(const ObColumnSchemaV2 &other);
     return ((meta_type_.is_ext() || meta_type_.is_user_defined_sql_type()) && sub_type_ == T_OBJ_XML)
            || meta_type_.is_xml_sql_type();
   }
+
+  inline bool is_collection() const { return meta_type_.is_collection_sql_type(); }
   inline bool is_extend() const { return meta_type_.is_ext() || meta_type_.is_user_defined_sql_type(); }
   inline bool is_udt_hidden_column() const { return get_udt_set_id() > 0 && is_hidden(); }
-  inline bool is_udt_related_column() const { return is_extend() || is_udt_hidden_column(); }
+  inline bool is_udt_related_column(bool is_oracle_mode) const { return is_extend() || is_udt_hidden_column() ||
+                                                                        (is_oracle_mode && is_geometry()); }
   inline common::ObCharsetType get_charset_type() const { return charset_type_; }
   inline common::ObCollationType get_collation_type() const { return meta_type_.get_collation_type(); }
   inline const common::ObObj &get_orig_default_value()  const { return orig_default_value_; }
@@ -259,9 +268,31 @@ int assign(const ObColumnSchemaV2 &other);
     del_column_flag(DEFAULT_IDENTITY_COLUMN_FLAG);
     del_column_flag(DEFAULT_ON_NULL_IDENTITY_COLUMN_FLAG);
   }
-  inline bool is_fulltext_column() const { return column_flags_ & GENERATED_CTXCAT_CASCADE_FLAG; }
+  /* vector index */
+  inline bool is_vec_index_column() const { return ObSchemaUtils::is_vec_index_column(column_flags_); }
+  inline bool is_vec_ivf_center_id_column() const { return ObSchemaUtils::is_vec_ivf_center_id_column(column_flags_); }
+  inline bool is_vec_ivf_center_vector_column() const { return ObSchemaUtils::is_vec_ivf_center_vector_column(column_flags_); }
+  inline bool is_vec_ivf_data_vector_column() const { return ObSchemaUtils::is_vec_ivf_data_vector_column(column_flags_); }
+  inline bool is_vec_ivf_meta_id_column() const { return ObSchemaUtils::is_vec_ivf_meta_id_column(column_flags_); }
+  inline bool is_vec_ivf_meta_vector_column() const { return ObSchemaUtils::is_vec_ivf_meta_vector_column(column_flags_); }
+  inline bool is_vec_ivf_pq_center_id_column() const { return ObSchemaUtils::is_vec_ivf_pq_center_id_column(column_flags_); }
+  inline bool is_vec_ivf_pq_center_ids_column() const { return ObSchemaUtils::is_vec_ivf_pq_center_ids_column(column_flags_); }
+
+  inline bool is_vec_hnsw_vid_column() const { return ObSchemaUtils::is_vec_hnsw_vid_column(column_flags_); }
+  inline bool is_vec_hnsw_type_column() const { return ObSchemaUtils::is_vec_hnsw_type_column(column_flags_); }
+  inline bool is_vec_hnsw_vector_column() const { return ObSchemaUtils::is_vec_hnsw_vector_column(column_flags_); }
+  inline bool is_vec_hnsw_scn_column() const { return ObSchemaUtils::is_vec_hnsw_scn_column(column_flags_); }
+  inline bool is_vec_hnsw_key_column() const { return ObSchemaUtils::is_vec_hnsw_key_column(column_flags_); }
+  inline bool is_vec_hnsw_data_column() const { return ObSchemaUtils::is_vec_hnsw_data_column(column_flags_); }
+  inline bool is_fulltext_column() const { return ObSchemaUtils::is_fulltext_column(column_flags_); }
+  inline bool is_doc_id_column() const { return ObSchemaUtils::is_doc_id_column(column_flags_); }
+  inline bool is_word_segment_column() const { return ObSchemaUtils::is_word_segment_column(column_flags_); }
+  inline bool is_word_count_column() const { return ObSchemaUtils::is_word_count_column(column_flags_); }
+  inline bool is_doc_length_column() const { return ObSchemaUtils::is_doc_length_column(column_flags_); }
   inline bool is_spatial_generated_column() const { return column_flags_ & SPATIAL_INDEX_GENERATED_COLUMN_FLAG; }
   inline bool is_spatial_cellid_column() const { return is_spatial_generated_column() && get_data_type() == common::ObUInt64Type; }
+  inline bool is_multivalue_generated_column() const { return column_flags_ & MULTIVALUE_INDEX_GENERATED_COLUMN_FLAG; }
+  inline bool is_multivalue_generated_array_column() const { return column_flags_ & MULTIVALUE_INDEX_GENERATED_ARRAY_COLUMN_FLAG; }
   inline bool has_generated_column_deps() const { return column_flags_ & GENERATED_DEPS_CASCADE_FLAG; }
   inline bool is_primary_vp_column() const { return column_flags_ & PRIMARY_VP_COLUMN_FLAG; }
   inline bool is_aux_vp_column() const { return column_flags_ & AUX_VP_COLUMN_FLAG; }
@@ -291,11 +322,18 @@ int assign(const ObColumnSchemaV2 &other);
   inline void add_column_flag(int64_t flag) { column_flags_ |= flag; }
   inline void del_column_flag(int64_t flag) { column_flags_ &= ~flag; }
   inline void add_or_del_column_flag(int64_t flag, bool is_add);
-  inline bool is_shadow_column() const { return column_id_ > common::OB_MIN_SHADOW_COLUMN_ID; }
+  inline bool is_shadow_column() const { return (column_id_ > common::OB_MIN_SHADOW_COLUMN_ID)
+                                                && !is_mlog_special_column(column_id_); }
   inline bool is_on_update_current_timestamp() const { return on_update_current_timestamp_; }
   inline bool is_enum_or_set() const { return meta_type_.is_enum_or_set(); }
 
   inline static bool is_hidden_pk_column_id(const uint64_t column_id);
+  inline bool is_unused() const { return column_flags_ & UNUSED_COLUMN_FLAG; }
+  inline void set_unused()
+  {
+    set_is_hidden(true);
+    add_column_flag(UNUSED_COLUMN_FLAG);
+  }
 
   //other methods
   int64_t get_convert_size(void) const;
@@ -322,6 +360,10 @@ int assign(const ObColumnSchemaV2 &other);
     return ret;
   }
 
+  int get_each_column_group_name(ObString &cg_name) const;
+  inline sql::ObLocalSessionVar &get_local_session_var() { return local_session_vars_; }
+  inline const sql::ObLocalSessionVar &get_local_session_var() const { return local_session_vars_; }
+  int is_same_collection_column(const ObColumnSchemaV2 &other, bool &is_same) const;
   DECLARE_VIRTUAL_TO_STRING;
 private:
   int alloc_column_ref_set();
@@ -373,6 +415,8 @@ private:
   uint64_t udt_set_id_;
   uint64_t sub_type_;
   ObSkipIndexColumnAttr skip_index_attr_;
+  int64_t lob_chunk_size_;
+  sql::ObLocalSessionVar local_session_vars_;
 };
 
 inline int32_t ObColumnSchemaV2::get_data_length() const

@@ -11,11 +11,10 @@
  */
 
 #include "lib/lock/ob_latch.h"
-#include "lib/time/ob_time_utility.h"
-#include "lib/stat/ob_diagnose_info.h"
-#include "lib/utility/ob_print_utils.h"
-#include "lib/worker.h"
-
+#include "lib/stat/ob_diagnostic_info_guard.h"
+#include "lib/stat/ob_diagnostic_info_container.h"
+#include "share/rc/ob_tenant_base.h"
+#include "deps/oblib/src/lib/rc/context.h"
 
 namespace oceanbase
 {
@@ -85,7 +84,8 @@ int ObLatchMutex::try_lock(
 
 int ObLatchMutex::lock(
     const uint32_t latch_id,
-    const int64_t abs_timeout_us)
+    const int64_t abs_timeout_us,
+    const bool is_atomic)
 {
   int ret = OB_SUCCESS;
   uint64_t i = 0;
@@ -118,19 +118,29 @@ int ObLatchMutex::lock(
         //wait
         waited = true;
         // latch mutex wait is an atomic wait event
-        ObLatchWaitEventGuard wait_guard(
-            ObLatchDesc::wait_event_idx(latch_id),
-            abs_timeout_us / 1000,
-            reinterpret_cast<uint64_t>(this),
-            (uint32_t*)&lock_.val(),
-            0,
-            true /*is_atomic*/);
-        if (OB_FAIL(wait(abs_timeout_us, uid))) {
-          if (OB_TIMEOUT != ret) {
-            COMMON_LOG(WARN, "Fail to wait the latch, ", K(ret));
+        if (record_stat_) {
+          ObLatchWaitEventGuard wait_guard(
+              ObLatchDesc::wait_event_idx(latch_id),
+              (abs_timeout_us - ObTimeUtility::current_time()) / 1000,
+              reinterpret_cast<uint64_t>(this),
+              (uint32_t*)&lock_.val(),
+              0,
+              is_atomic);
+          if (OB_FAIL(wait(abs_timeout_us, uid))) {
+            if (OB_TIMEOUT != ret) {
+              COMMON_LOG(WARN, "Fail to wait the latch, ", K(ret));
+            }
+          } else {
+            break;
           }
         } else {
-          break;
+          if (OB_FAIL(wait(abs_timeout_us, uid))) {
+            if (OB_TIMEOUT != ret) {
+              COMMON_LOG(WARN, "Fail to wait the latch, ", K(ret));
+            }
+          } else {
+            break;
+          }
         }
       }
     }
@@ -146,7 +156,7 @@ int ObLatchMutex::wait(const int64_t abs_timeout_us, const uint32_t uid)
 {
   // performance critical, do not double check the parameters
   int ret = OB_SUCCESS;
-  ObDiagnoseSessionInfo *dsi = ObDiagnoseSessionInfo::get_local_diagnose_info();
+  ObDiagnosticInfo *dsi = (!record_stat_ ? NULL : ObLocalDiagnosticInfo::get());
   int64_t timeout = 0;
   int lock = 0;
 
@@ -243,7 +253,7 @@ int ObLatchWaitQueue::wait(
     int64_t timeout = 0;
     bool conflict = false;
     struct timespec ts;
-    ObDiagnoseSessionInfo *dsi = ObDiagnoseSessionInfo::get_local_diagnose_info();
+    ObDiagnosticInfo *dsi = ObLocalDiagnosticInfo::get();
 
     //check if need wait
     if (OB_FAIL(try_lock(bucket, proc, latch_id, uid, lock_func))) {
@@ -264,13 +274,14 @@ int ObLatchWaitQueue::wait(
         }
 
         {
-          ObLatchWaitEventGuard wait_guard(
-              ObWaitEventIds::LATCH_WAIT_QUEUE_LOCK_WAIT,
-              abs_timeout_us / 1000,
-              reinterpret_cast<uint64_t>(this),
-              (uint32_t*)&latch.lock_,
-              0,
-              true /*is_atomic*/);
+          // only record physical wait event from caller function
+          // ObLatchWaitEventGuard wait_guard(
+          //     ObWaitEventIds::LATCH_WAIT_QUEUE_LOCK_WAIT,
+          //     abs_timeout_us / 1000,
+          //     reinterpret_cast<uint64_t>(this),
+          //     (uint32_t*)&latch.lock_,
+          //     0,
+          //     true /*is_atomic*/);
           ts.tv_sec = timeout / 1000000;
           ts.tv_nsec = 1000 * (timeout % 1000000);
           // futex_wait is an atomic wait event
@@ -570,19 +581,6 @@ void ObLockDiagnose::print()
 }
 #endif
 
-ObLatch::ObLatch()
-  : lock_(0)
-    , record_stat_(true)
-{
-}
-
-ObLatch::~ObLatch()
-{
-  if (0 != lock_) {
-    COMMON_LOG(DEBUG, "invalid lock,", K(lock_), KCSTRING(lbt()));
-  }
-}
-
 int ObLatch::try_rdlock(const uint32_t latch_id)
 {
   int ret = OB_SUCCESS;
@@ -806,7 +804,7 @@ OB_INLINE int ObLatch::low_lock(
         waited = true;
         ObLatchWaitEventGuard wait_guard(
           ObLatchDesc::wait_event_idx(latch_id),
-          abs_timeout_us / 1000,
+          (abs_timeout_us - ObTimeUtility::current_time()) / 1000,
           reinterpret_cast<uint64_t>(this),
           (uint32_t*)&lock_,
           0);

@@ -11,16 +11,9 @@
  * This file contains implementation for geometry cast.
  */
 
-#include "lib/ob_errno.h"
 #define USING_LOG_PREFIX LIB
 
 #include "lib/geo/ob_geometry_cast.h"
-#include "lib/geo/ob_geo_func_register.h"
-#include "lib/geo/ob_geo_func_common.h"
-#include "lib/geo/ob_geo_to_tree_visitor.h"
-#include "lib/geo/ob_geo_wkb_visitor.h"
-#include "lib/geo/ob_geo_wkb_size_visitor.h"
-#include "lib/geo/ob_geo_utils.h"
 
 namespace oceanbase
 {
@@ -126,7 +119,7 @@ int ObGeometryTypeCastUtil::get_tree(ObIAllocator &allocator,
   int ret = OB_SUCCESS;
   ObGeometry *geo = NULL;
 
-  if (OB_FAIL(ObGeoTypeUtil::build_geometry(allocator, wkb, geo, srs, log_info, true, false))) {
+  if (OB_FAIL(ObGeoTypeUtil::build_geometry(allocator, wkb, geo, srs, log_info))) {
     LOG_WARN("fail to build geometry from wkb", K(ret));
   } else if (geo->is_tree()) {
     geo_tree = geo;
@@ -183,6 +176,26 @@ bool ObGeometryTypeCastUtil::is_line_can_ring(const L &line)
   typename L::const_iterator last = line.end() - 1;
 
   return is_point_equal(*begin, *last);
+}
+
+bool ObGeometryTypeCastUtil::is_sdo_geometry_varray_type(uint64_t udt_id)
+{
+  return udt_id == T_OBJ_SDO_ELEMINFO_ARRAY || udt_id == T_OBJ_SDO_ORDINATE_ARRAY;
+}
+
+bool ObGeometryTypeCastUtil::is_sdo_geometry_udt(uint64_t udt_id)
+{
+  return udt_id >= T_OBJ_SDO_POINT && udt_id <= T_OBJ_SDO_ORDINATE_ARRAY;
+}
+
+bool ObGeometryTypeCastUtil::is_sdo_geometry_type_compatible(uint64_t src_udt_id, uint64_t dst_udt_id)
+{
+  bool bret = true;
+  if (!is_sdo_geometry_varray_type(src_udt_id) || !is_sdo_geometry_varray_type(dst_udt_id)) {
+    // only allow varray (elem_info/ordiante_array) cast to each other
+    bret = false;
+  }
+  return bret;
 }
 
 int ObGeometryTypeCastFactory::alloc(ObIAllocator &alloc,
@@ -1007,7 +1020,7 @@ int ObGeomcollectionTypeCast::cast(const ObGeometry &src,
           } else {
             double x = iter->template get<0>();
             double y = iter->template get<1>();
-            P *point = new (buf) P (x, y, src.get_srid(), allocator);
+            P *point = new (buf) P (x, y, src.get_srid());
             if (OB_FAIL(res.push_back(*point))) {
               LOG_WARN("fail to push back point", K(ret));
             }

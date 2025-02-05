@@ -13,11 +13,7 @@
 #define USING_LOG_PREFIX PL
 
 #include "ob_pl_di_adt_service.h"
-#include "ob_pl_type.h"
-#include "ob_pl_stmt.h"
 #include "ob_pl_exception_handling.h"
-#include "ob_pl_user_type.h"
-#include "ob_pl.h"
 
 #define CREATE_MEMBER_TYPE(name, offset, line, type) \
   if (OB_FAIL(ret)) {                                                                   \
@@ -860,6 +856,7 @@ int ObPLDIADTService::get_seg_pointer_array(jit::ObLLVMDIType &type)
                                                   32, member_types, seg_pointer_array_))) {
       LOG_WARN("failed to create struct type", K(ret));
     } else if (OB_ISNULL(seg_pointer_array_.get_v())) {
+      ret = OB_ERR_UNEXPECTED;
       LOG_WARN("failed to create di seg pointer array", K(ret));
     }
   }

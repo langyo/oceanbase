@@ -24,6 +24,7 @@
 #include "share/schema/ob_schema_getter_guard.h"
 #include "storage/tx/ob_trans_define.h"
 #include "sql/engine/cmd/ob_load_data_parser.h"
+#include "share/diagnosis/ob_sql_plan_monitor_node_list.h"
 
 namespace oceanbase
 {
@@ -65,7 +66,13 @@ struct ObEstRowCountRecord
 struct SampleInfo
 {
   SampleInfo() { reset(); }
-  enum SampleMethod { NO_SAMPLE = 0, ROW_SAMPLE = 1, BLOCK_SAMPLE = 2 };
+  enum SampleMethod
+  {
+    NO_SAMPLE = 0,
+    ROW_SAMPLE = 1,
+    BLOCK_SAMPLE = 2,
+    HYBRID_SAMPLE = 3
+  };
   enum SampleScope
   {
     SAMPLE_ALL_DATA = 0,
@@ -86,6 +93,16 @@ struct SampleInfo
     force_block_ = false;
   }
 
+  bool same_as(const SampleInfo &oth) const {
+    return table_id_ == oth.table_id_
+           && method_ == oth.method_
+           && scope_ == oth.scope_
+           && percent_ == oth.percent_
+           && seed_ == oth.seed_
+           && force_block_ == oth.force_block_
+           && seed_ != -1;
+  }
+
   uint64_t table_id_;
   SampleMethod method_;
   SampleScope scope_;
@@ -94,6 +111,49 @@ struct SampleInfo
   bool force_block_;//force sample block
   TO_STRING_KV(K_(method), K_(percent), K_(seed), K_(table_id), K_(scope), K_(force_block));
   OB_UNIS_VERSION(1);
+};
+
+struct ObTableScanOption
+{
+  OB_UNIS_VERSION(1);
+public:
+  static const int64_t MAX_IO_READ_BATCH_SIZE = 16_MB;
+  static const int64_t MAX_STORAGE_ROWSETS_SIZE = (1 << 20);
+  ObTableScanOption() :
+      io_read_batch_size_(0),
+      io_read_gap_size_(0),
+      storage_rowsets_size_(1)
+  {}
+  bool is_io_valid() const
+  {
+    return (io_read_batch_size_ >= 0 && io_read_batch_size_ <= MAX_IO_READ_BATCH_SIZE &&
+            io_read_gap_size_ >= 0 && io_read_gap_size_ < io_read_batch_size_);
+  }
+  bool is_rowsets_valid() const
+  {
+    return storage_rowsets_size_ > 0 && storage_rowsets_size_ <= MAX_STORAGE_ROWSETS_SIZE;
+  }
+  void reset()
+  {
+    io_read_batch_size_ = 0;
+    io_read_gap_size_ = 0;
+    storage_rowsets_size_ = 1;
+  }
+  ObTableScanOption &operator=(const ObTableScanOption &opt)
+  {
+    if (this == &opt) {
+    } else {
+      io_read_batch_size_ = opt.io_read_batch_size_;
+      io_read_gap_size_ = opt.io_read_gap_size_;
+      storage_rowsets_size_ = opt.storage_rowsets_size_;
+    }
+    return *this;
+  }
+  TO_STRING_KV(K_(io_read_batch_size), K_(io_read_gap_size), K_(storage_rowsets_size));
+
+  int64_t io_read_batch_size_;
+  int64_t io_read_gap_size_;
+  int64_t storage_rowsets_size_;
 };
 
 struct ObLimitParam
@@ -105,6 +165,87 @@ struct ObLimitParam
   TO_STRING_KV("offset_", offset_,
                "limit_", limit_);
   OB_UNIS_VERSION(1);
+};
+
+struct ObTSCMonitorInfo
+{
+  int64_t* io_read_bytes_;
+  int64_t* ssstore_read_bytes_;
+  int64_t* ssstore_read_row_cnt_;
+  int64_t* memstore_read_row_cnt_;
+
+  ObTSCMonitorInfo()
+    : io_read_bytes_(nullptr),
+      ssstore_read_bytes_(nullptr),
+      ssstore_read_row_cnt_(nullptr),
+      memstore_read_row_cnt_(nullptr) {}
+
+  ObTSCMonitorInfo(int64_t* io_read_bytes,
+                    int64_t* ssstore_read_bytes,
+                    int64_t* ssstore_read_row_cnt,
+                    int64_t* memstore_read_row_cnt)
+    : io_read_bytes_(io_read_bytes),
+      ssstore_read_bytes_(ssstore_read_bytes),
+      ssstore_read_row_cnt_(ssstore_read_row_cnt),
+      memstore_read_row_cnt_(memstore_read_row_cnt) {}
+
+  void init(int64_t* io_read_bytes,
+            int64_t* ssstore_read_bytes,
+            int64_t* ssstore_read_row_cnt,
+            int64_t* memstore_read_row_cnt)
+  {
+    io_read_bytes_ = io_read_bytes;
+    ssstore_read_bytes_ = ssstore_read_bytes;
+    ssstore_read_row_cnt_ = ssstore_read_row_cnt;
+    memstore_read_row_cnt_ = memstore_read_row_cnt;
+  }
+
+  void add_io_read_bytes(int64_t io_read_bytes) {
+    if (OB_NOT_NULL(io_read_bytes_)) {
+      *io_read_bytes_ += io_read_bytes;
+    }
+  }
+
+  void add_ssstore_read_bytes(int64_t ssstore_read_bytes) {
+    if (OB_NOT_NULL(ssstore_read_bytes_)) {
+      *ssstore_read_bytes_ += ssstore_read_bytes;
+    }
+  }
+
+  void add_ssstore_read_row_cnt(int64_t ssstore_read_row_cnt) {
+    if (OB_NOT_NULL(ssstore_read_row_cnt_)) {
+      *ssstore_read_row_cnt_ += ssstore_read_row_cnt;
+    }
+  }
+
+  void add_memstore_read_row_cnt(int64_t memstore_read_row_cnt) {
+    if (OB_NOT_NULL(memstore_read_row_cnt_)) {
+      *memstore_read_row_cnt_ += memstore_read_row_cnt;
+    }
+  }
+
+  void reset_stat()
+  {
+    if (OB_NOT_NULL(io_read_bytes_)) {
+      *io_read_bytes_ = 0;
+    }
+    if (OB_NOT_NULL(ssstore_read_bytes_)) {
+      *ssstore_read_bytes_ = 0;
+    }
+    if (OB_NOT_NULL(ssstore_read_row_cnt_)) {
+      *ssstore_read_row_cnt_ = 0;
+    }
+    if (OB_NOT_NULL(memstore_read_row_cnt_)) {
+      *memstore_read_row_cnt_ = 0;
+    }
+  }
+
+  DEFINE_TO_STRING(
+    OB_ISNULL(io_read_bytes_) ? J_KV(K(io_read_bytes_)) : J_KV(K(*io_read_bytes_));
+    OB_ISNULL(ssstore_read_bytes_) ? J_KV(K(ssstore_read_bytes_)) : J_KV(K(*ssstore_read_bytes_));
+    OB_ISNULL(ssstore_read_row_cnt_) ? J_KV(K(ssstore_read_row_cnt_)) : J_KV(K(*ssstore_read_row_cnt_));
+    OB_ISNULL(memstore_read_row_cnt_) ? J_KV(K(memstore_read_row_cnt_)) : J_KV(K(*memstore_read_row_cnt_));
+  )
 };
 
 struct ObTableScanStatistic
@@ -123,6 +264,8 @@ struct ObTableScanStatistic
   int64_t block_cache_hit_cnt_;
   int64_t block_cache_miss_cnt_;
   int64_t rowkey_prefix_;
+  ObTSCMonitorInfo *tsc_monitor_info_;
+
   ObTableScanStatistic()
     : access_row_cnt_(0),
       out_row_cnt_(0),
@@ -135,8 +278,10 @@ struct ObTableScanStatistic
       row_cache_miss_cnt_(0),
       block_cache_hit_cnt_(0),
       block_cache_miss_cnt_(0),
-      rowkey_prefix_(0)
+      rowkey_prefix_(0),
+      tsc_monitor_info_(nullptr)
   {}
+
   OB_INLINE void reset()
   {
     access_row_cnt_ = 0;
@@ -152,6 +297,7 @@ struct ObTableScanStatistic
     block_cache_miss_cnt_ = 0;
     rowkey_prefix_ = 0;
   }
+
   OB_INLINE void reset_cache_stat()
   {
     bf_filter_cnt_ = 0;
@@ -163,6 +309,7 @@ struct ObTableScanStatistic
     block_cache_hit_cnt_ = 0;
     block_cache_miss_cnt_ = 0;
   }
+
   TO_STRING_KV(
       K_(access_row_cnt),
       K_(out_row_cnt),
@@ -173,7 +320,8 @@ struct ObTableScanStatistic
       K_(row_cache_miss_cnt),
       K_(fuse_row_cache_hit_cnt),
       K_(fuse_row_cache_miss_cnt),
-      K_(rowkey_prefix));
+      K_(rowkey_prefix),
+      KPC_(tsc_monitor_info));
 };
 
 static const int64_t OB_DEFAULT_FILTER_EXPR_COUNT = 4;
@@ -223,9 +371,14 @@ ObVTableScanParam() :
       pd_storage_filters_(nullptr),
       pd_storage_flag_(false),
       row2exprs_projector_(NULL),
+      table_scan_opt_(),
       ext_file_column_exprs_(NULL),
       ext_column_convert_exprs_(NULL),
-      schema_guard_(NULL)
+      schema_guard_(NULL),
+      auto_split_filter_type_(OB_INVALID_ID),
+      auto_split_filter_(NULL),
+      auto_split_params_(NULL),
+      is_tablet_spliting_(false)
   { }
 
   virtual ~ObVTableScanParam()
@@ -233,7 +386,7 @@ ObVTableScanParam() :
     destroy_schema_guard();
   }
 
-  void destroy()
+  virtual void destroy()
   {
     if (OB_UNLIKELY(column_ids_.get_capacity() > OB_PREALLOCATED_COL_ID_NUM)) {
       column_ids_.destroy();
@@ -297,6 +450,7 @@ ObVTableScanParam() :
   int32_t pd_storage_flag_;
   // project storage output row to %output_exprs_
   storage::ObRow2ExprsProjector *row2exprs_projector_;
+  ObTableScanOption table_scan_opt_;
 
   // external table
   const sql::ExprFixedArray *ext_file_column_exprs_;
@@ -342,6 +496,12 @@ private:
   // New schema, used throughout the life cycle of table_scan
   share::schema::ObSchemaGetterGuard *schema_guard_;
   char schema_guard_buf_[sizeof(share::schema::ObSchemaGetterGuard)];
+
+public:
+  uint64_t auto_split_filter_type_;
+  const sql::ObExpr *auto_split_filter_;
+  sql::ExprFixedArray *auto_split_params_;
+  bool is_tablet_spliting_;
 };
 
 class ObITabletScan
@@ -391,23 +551,25 @@ public:
 
   virtual int get_multi_ranges_cost(
       const share::ObLSID &ls_id,
-      const ObTabletID &tablet_id,
-      const ObIArray<ObStoreRange> &ranges,
+      const common::ObTabletID &tablet_id,
+      const int64_t timeout_us,
+      const common::ObIArray<ObStoreRange> &ranges,
       int64_t &total_size)
   {
-    UNUSEDx(ls_id, tablet_id, ranges, total_size);
+    UNUSEDx(ls_id, tablet_id, timeout_us, ranges, total_size);
     return OB_SUCCESS;
   }
 
   virtual int split_multi_ranges(
       const share::ObLSID &ls_id,
-      const ObTabletID &tablet_id,
-      const ObIArray<ObStoreRange> &ranges,
+      const common::ObTabletID &tablet_id,
+      const int64_t timeout_us,
+      const common::ObIArray<ObStoreRange> &ranges,
       const int64_t expected_task_count,
       ObIAllocator &allocator,
       ObArrayArray<ObStoreRange> &multi_range_split_array)
   {
-    UNUSEDx(ls_id, tablet_id, ranges, expected_task_count, allocator, multi_range_split_array);
+    UNUSEDx(ls_id, tablet_id, timeout_us, ranges, expected_task_count, allocator, multi_range_split_array);
     return OB_SUCCESS;
   }
 };

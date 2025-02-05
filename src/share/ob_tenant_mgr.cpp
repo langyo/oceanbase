@@ -10,14 +10,8 @@
  * See the Mulan PubL v2 for more details.
  */
 
-#include "lib/utility/ob_print_utils.h"
-#include "lib/resource/ob_resource_mgr.h"
-#include "lib/alloc/ob_malloc_allocator.h"
-#include "rpc/obrpc/ob_rpc_stat.h"             // RpcStatService
-#include "observer/omt/ob_multi_tenant.h"      // ObMultiTenant
 #include "observer/omt/ob_tenant.h"            // ObTenant
-#include "share/config/ob_server_config.h"     // GCONF
-#include "observer/ob_server_struct.h"         // GCTX
+#include "src/share/ob_server_struct.h"
 #include "share/ob_tenant_mgr.h"
 
 namespace oceanbase
@@ -355,7 +349,6 @@ int ObVirtualTenantManager::print_tenant_usage_(
     int64_t &pos)
 {
   int ret = OB_SUCCESS;
-  lib::ObMallocAllocator *mallocator = lib::ObMallocAllocator::get_instance();
   int64_t kv_cache_mem = 0;
   if (OB_FAIL(get_kv_cache_mem_(node.tenant_id_,
                                 kv_cache_mem))) {
@@ -371,10 +364,6 @@ int ObVirtualTenantManager::print_tenant_usage_(
                           get_tenant_memory_limit(node.tenant_id_),
                           get_tenant_memory_hold(node.tenant_id_),
                           kv_cache_mem);
-  }
-  if (!OB_ISNULL(mallocator)) {
-    mallocator->print_tenant_memory_usage(node.tenant_id_);
-    mallocator->print_tenant_ctx_memory_usage(node.tenant_id_);
   }
   return ret;
 }

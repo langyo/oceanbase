@@ -52,6 +52,7 @@ public:
   virtual int visit(ObPlQueryRefRawExpr &expr) override;
   virtual int visit(ObAliasRefRawExpr &expr) override;
   virtual int visit(ObPseudoColumnRawExpr &expr) override;
+  virtual int visit(ObMatchFunRawExpr &expr) override;
 
   virtual bool skip_child(ObRawExpr &expr) override;
   bool get_replace_happened() const { return replace_happened_; }
@@ -65,6 +66,9 @@ public:
                         const ObIArray<ObRawExpr *> &to_exprs);
   int add_replace_exprs(const ObIArray<std::pair<ObRawExpr *, ObRawExpr *>> &to_replace_exprs);
   int append_replace_exprs(const ObRawExprReplacer &other);
+  int check_need_replace(const ObRawExpr *old_expr, ObRawExpr *&new_expr, bool &need_replace);
+  bool is_existed(const ObRawExpr *target) const;
+  int add_skip_expr(const ObRawExpr *target);
 
 private:
   // types and constants
@@ -76,9 +80,6 @@ private:
                               const bool overwrite,
                               bool &is_existed);
   int check_skip_expr(const ObRawExpr &expr, bool &skip_expr);
-  int check_need_replace(const ObRawExpr *old_expr,
-                         ObRawExpr *&new_expr,
-                         bool &need_replace);
   // disallow copy
   DISALLOW_COPY_AND_ASSIGN(ObRawExprReplacer);
   // function members

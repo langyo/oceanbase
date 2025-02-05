@@ -10,11 +10,9 @@
  * See the Mulan PubL v2 for more details.
  */
 
-#include <gtest/gtest.h>
 #define private public
 #define protected public
 
-#include "storage/access/ob_index_tree_prefetcher.h"
 #include "storage/access/ob_sstable_row_multi_scanner.h"
 #include "ob_index_block_data_prepare.h"
 
@@ -149,7 +147,7 @@ void TestSSTableRowMultiScanner::test_one_case(
       //ASSERT_EQ(OB_SUCCESS, ret);
     //}
     //if (part_ranges.count() > 0) {
-      //ASSERT_EQ(OB_SUCCESS, scanner.inner_open(
+      //ASSERT_EQ(OB_SUCCESS, scanner.init(
               //iter_param_,
               //context_,
               //&sstable_,
@@ -184,8 +182,8 @@ void TestSSTableRowMultiScanner::test_one_case(
   for (int64_t i = 0; i < start_seeds.count(); ++i) {
     ASSERT_EQ(OB_SUCCESS, ranges.push_back(mscan_ranges[i]));
   }
-  ASSERT_EQ(OB_SUCCESS, scanner.inner_open(iter_param_, context_, &sstable_, &ranges));
-  ASSERT_EQ(OB_SUCCESS, kv_scanner.inner_open(iter_param_, context_, &ddl_kv_, &ranges));
+  ASSERT_EQ(OB_SUCCESS, scanner.init(iter_param_, context_, &sstable_, &ranges));
+  ASSERT_EQ(OB_SUCCESS, kv_scanner.init(iter_param_, context_, &ddl_kv_, &ranges));
   for (int64_t i = 0; i < start_seeds.count(); ++i) {
     for (int64_t j = 0; j < count_per_range; ++j) {
       const int64_t k = is_reverse_scan ? start_seeds.at(i) + count_per_range - j - 1 : start_seeds.at(i) + j;
@@ -206,12 +204,12 @@ void TestSSTableRowMultiScanner::test_one_case(
   kv_scanner.reuse();
 
   if (HIT_ALL == hit_mode) {
-    ASSERT_EQ(OB_SUCCESS, scanner.inner_open(
+    ASSERT_EQ(OB_SUCCESS, scanner.init(
             iter_param_,
             context_,
             &sstable_,
             &ranges));
-    ASSERT_EQ(OB_SUCCESS, kv_scanner.inner_open(
+    ASSERT_EQ(OB_SUCCESS, kv_scanner.init(
             iter_param_,
             context_,
             &ddl_kv_,
@@ -581,7 +579,7 @@ void TestSSTableRowMultiScanner::test_multi_scan_multi_scan_range(
 
   //invalid argument with 0 ranges
   /*
-     ASSERT_EQ(OB_SUCCESS, scanner.inner_open(
+     ASSERT_EQ(OB_SUCCESS, scanner.init(
      iter_param_,
      context_,
      &sstable_,
@@ -602,7 +600,7 @@ void TestSSTableRowMultiScanner::test_multi_scan_multi_scan_range(
   /*
      ranges.reuse();
      ASSERT_EQ(OB_SUCCESS, ranges.push_back(range));
-     ASSERT_EQ(OB_SUCCESS, scanner.inner_open(
+     ASSERT_EQ(OB_SUCCESS, scanner.init(
      iter_param_,
      context_,
      &sstable_,
@@ -730,12 +728,12 @@ void TestSSTableRowMultiScanner::test_multi_scan_multi_get_with_scan(
     ASSERT_EQ(OB_SUCCESS, ret);
   }
   STORAGE_LOG(INFO, "multi scan begin");
-  ASSERT_EQ(OB_SUCCESS, scanner.inner_open(
+  ASSERT_EQ(OB_SUCCESS, scanner.init(
           iter_param_,
           context_,
           &sstable_,
           &ranges));
-  ASSERT_EQ(OB_SUCCESS, kv_scanner.inner_open(
+  ASSERT_EQ(OB_SUCCESS, kv_scanner.init(
           iter_param_,
           context_,
           &ddl_kv_,
@@ -769,7 +767,6 @@ void TestSSTableRowMultiScanner::test_multi_scan_multi_get_with_scan(
 
   // first half multi scan, second half multi get
   ranges.reuse();
-  test_allocator.reuse();
   for (int64_t i = 0; i < TEST_MULTI_GET_CNT; ++i) {
     ObDatumRowkey tmp_rowkey;
     mget_ranges[i].border_flag_.set_inclusive_start();
@@ -782,12 +779,12 @@ void TestSSTableRowMultiScanner::test_multi_scan_multi_get_with_scan(
     ASSERT_EQ(OB_SUCCESS, tmp_rowkey.deep_copy(mget_ranges[i].end_key_, test_allocator));
     ASSERT_EQ(OB_SUCCESS, ranges.push_back(mget_ranges[i]));
   }
-  ASSERT_EQ(OB_SUCCESS, scanner.inner_open(
+  ASSERT_EQ(OB_SUCCESS, scanner.init(
           iter_param_,
           context_,
           &sstable_,
           &ranges));
-  ASSERT_EQ(OB_SUCCESS, kv_scanner.inner_open(
+  ASSERT_EQ(OB_SUCCESS, kv_scanner.init(
           iter_param_,
           context_,
           &ddl_kv_,
@@ -824,7 +821,6 @@ void TestSSTableRowMultiScanner::test_multi_scan_multi_get_with_scan(
 
   // first half multi get, second half multi scan
   ranges.reuse();
-  test_allocator.reuse();
   for (int64_t i = 0; i < TEST_MULTI_GET_CNT; ++i) {
     ObDatumRowkey tmp_rowkey;
     mget_ranges[i].border_flag_.set_inclusive_start();
@@ -838,12 +834,12 @@ void TestSSTableRowMultiScanner::test_multi_scan_multi_get_with_scan(
     ASSERT_EQ(OB_SUCCESS, tmp_rowkey.deep_copy(mget_ranges[i].end_key_, test_allocator));
     ASSERT_EQ(OB_SUCCESS, ranges.push_back(mget_ranges[i]));
   }
-  ASSERT_EQ(OB_SUCCESS, scanner.inner_open(
+  ASSERT_EQ(OB_SUCCESS, scanner.init(
           iter_param_,
           context_,
           &sstable_,
           &ranges));
-  ASSERT_EQ(OB_SUCCESS, kv_scanner.inner_open(
+  ASSERT_EQ(OB_SUCCESS, kv_scanner.init(
           iter_param_,
           context_,
           &ddl_kv_,
@@ -883,7 +879,6 @@ void TestSSTableRowMultiScanner::test_multi_scan_multi_get_with_scan(
 
   // first one multi get, others multi scan
   ranges.reuse();
-  test_allocator.reuse();
   for (int64_t i = 0; i < TEST_MULTI_GET_CNT; ++i) {
     ObDatumRowkey tmp_rowkey;
     mget_ranges[i].border_flag_.set_inclusive_start();
@@ -896,12 +891,12 @@ void TestSSTableRowMultiScanner::test_multi_scan_multi_get_with_scan(
     ASSERT_EQ(OB_SUCCESS, tmp_rowkey.deep_copy(mget_ranges[i].end_key_, test_allocator));
     ASSERT_EQ(OB_SUCCESS, ranges.push_back(mget_ranges[i]));
   }
-  ASSERT_EQ(OB_SUCCESS, scanner.inner_open(
+  ASSERT_EQ(OB_SUCCESS, scanner.init(
           iter_param_,
           context_,
           &sstable_,
           &ranges));
-  ASSERT_EQ(OB_SUCCESS, kv_scanner.inner_open(
+  ASSERT_EQ(OB_SUCCESS, kv_scanner.init(
           iter_param_,
           context_,
           &ddl_kv_,
@@ -938,7 +933,6 @@ void TestSSTableRowMultiScanner::test_multi_scan_multi_get_with_scan(
 
   // first one multi scan, others multi get
   ranges.reuse();
-  test_allocator.reuse();
   for (int64_t i = 0; i < TEST_MULTI_GET_CNT; ++i) {
     ObDatumRowkey tmp_rowkey;
     mget_ranges[i].border_flag_.set_inclusive_start();
@@ -951,12 +945,12 @@ void TestSSTableRowMultiScanner::test_multi_scan_multi_get_with_scan(
     ASSERT_EQ(OB_SUCCESS, tmp_rowkey.deep_copy(mget_ranges[i].end_key_, test_allocator));
     ASSERT_EQ(OB_SUCCESS, ranges.push_back(mget_ranges[i]));
   }
-  ASSERT_EQ(OB_SUCCESS, scanner.inner_open(
+  ASSERT_EQ(OB_SUCCESS, scanner.init(
           iter_param_,
           context_,
           &sstable_,
           &ranges));
-  ASSERT_EQ(OB_SUCCESS, kv_scanner.inner_open(
+  ASSERT_EQ(OB_SUCCESS, kv_scanner.init(
           iter_param_,
           context_,
           &ddl_kv_,
@@ -994,7 +988,6 @@ void TestSSTableRowMultiScanner::test_multi_scan_multi_get_with_scan(
   // multi scan not exist row
   STORAGE_LOG(DEBUG, "multi_scan_not_exist_row");
   ranges.reuse();
-  test_allocator.reuse();
   for (int64_t i = 0; i < TEST_MULTI_GET_CNT; ++i) {
     ObDatumRowkey tmp_rowkey;
     mget_ranges[i].border_flag_.set_inclusive_start();
@@ -1007,12 +1000,12 @@ void TestSSTableRowMultiScanner::test_multi_scan_multi_get_with_scan(
     ASSERT_EQ(OB_SUCCESS, tmp_rowkey.deep_copy(mget_ranges[i].end_key_, test_allocator));
     ASSERT_EQ(OB_SUCCESS, ranges.push_back(mget_ranges[i]));
   }
-  ASSERT_EQ(OB_SUCCESS, scanner.inner_open(
+  ASSERT_EQ(OB_SUCCESS, scanner.init(
           iter_param_,
           context_,
           &sstable_,
           &ranges));
-  ASSERT_EQ(OB_SUCCESS, kv_scanner.inner_open(
+  ASSERT_EQ(OB_SUCCESS, kv_scanner.init(
           iter_param_,
           context_,
           &ddl_kv_,

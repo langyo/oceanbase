@@ -13,12 +13,9 @@
 
 #define USING_LOG_PREFIX LIB
 
-#include "lib/geo/ob_geo_bin.h"
 #include "lib/geo/ob_geo_dispatcher.h"
 #include "lib/geo/ob_geo_func_envelope.h"
 #include "lib/geo/ob_geo_utils.h"
-#include "lib/oblog/ob_log_module.h"
-#include "lib/ob_errno.h"
 
 using namespace oceanbase::common;
 namespace oceanbase
@@ -79,7 +76,8 @@ private:
           sub_g->set_data(wkb_nosrid);
           sub_g->set_srid(g->get_srid());
         }
-        if (OB_FAIL(eval_envelope_collection(sub_g, context, tmp_result))) {
+        if (OB_FAIL(ret)) {
+        } else if (OB_FAIL(eval_envelope_collection(sub_g, context, tmp_result))) {
           LOG_WARN("failed to eval sub geo from collection", K(sub_type), K(ret));
         } else {
           if (result.is_empty() && !tmp_result.is_empty()) {

@@ -14,9 +14,6 @@
 
 #include "ob_integer_base_diff_decoder.h"
 #include "ob_encoding_query_util.h"
-#include "storage/blocksstable/ob_block_sstable_struct.h"
-#include "ob_bit_stream.h"
-#include "ob_integer_array.h"
 
 namespace oceanbase
 {
@@ -130,7 +127,7 @@ int ObIntegerBaseDiffDecoder::update_pointer(const char *old_block, const char *
 
 int ObIntegerBaseDiffDecoder::batch_get_bitpacked_values(
     const ObColumnDecoderCtx &ctx,
-    const int64_t *row_ids,
+    const int32_t *row_ids,
     const int64_t row_cap,
     const int64_t datum_len,
     const int64_t data_offset,
@@ -163,7 +160,7 @@ int ObIntegerBaseDiffDecoder::batch_get_bitpacked_values(
 int ObIntegerBaseDiffDecoder::batch_decode(
     const ObColumnDecoderCtx &ctx,
     const ObIRowIndex* row_index,
-    const int64_t *row_ids,
+    const int32_t *row_ids,
     const char **cell_datas,
     const int64_t row_cap,
     common::ObDatum *datums) const
@@ -212,6 +209,141 @@ int ObIntegerBaseDiffDecoder::batch_decode(
           value += base_;
           MEMCPY(const_cast<char *>(datums[i].ptr_), &value, datum_len);
           datums[i].pack_ = datum_len;
+        }
+      }
+    }
+  }
+  return ret;
+}
+
+int ObIntegerBaseDiffDecoder::decode_vector(
+    const ObColumnDecoderCtx &decoder_ctx,
+    const ObIRowIndex* row_index,
+    ObVectorDecodeCtx &vector_ctx) const
+{
+  UNUSED(row_index);
+  int ret = OB_SUCCESS;
+  if (OB_UNLIKELY(!is_inited())) {
+    ret = OB_NOT_INIT;
+    LOG_WARN("Not inited", K(ret));
+  } else {
+    #define FILL_VECTOR_FUNC(vector_type, has_null) \
+      if (has_null) { \
+        ret = inner_decode_vector<vector_type, true>(decoder_ctx, vector_ctx); \
+      } else { \
+        ret = inner_decode_vector<vector_type, false>(decoder_ctx, vector_ctx); \
+      }
+    if (VEC_UNIFORM == vector_ctx.get_format()) {
+      FILL_VECTOR_FUNC(ObUniformFormat<false>, decoder_ctx.has_extend_value());
+    } else if (VEC_FIXED == vector_ctx.get_format()) {
+      const ObObjMeta &obj_meta = decoder_ctx.obj_meta_;
+      const int16_t precision = obj_meta.is_decimal_int() ? obj_meta.get_stored_precision() : PRECISION_UNKNOWN_YET;
+      VecValueTypeClass vec_tc = common::get_vec_value_tc(obj_meta.get_type(), obj_meta.get_scale(), precision);
+      switch (vec_tc) {
+      case VEC_TC_YEAR: {
+        // uint8_t
+        FILL_VECTOR_FUNC(ObFixedLengthFormat<uint8_t>, decoder_ctx.has_extend_value());
+        break;
+      }
+      case VEC_TC_DATE:
+      case VEC_TC_MYSQL_DATE:
+      case VEC_TC_DEC_INT32: {
+        // int32_t
+        FILL_VECTOR_FUNC(ObFixedLengthFormat<int32_t>, decoder_ctx.has_extend_value());
+        break;
+      }
+      case VEC_TC_INTEGER:
+      case VEC_TC_DATETIME:
+      case VEC_TC_MYSQL_DATETIME:
+      case VEC_TC_TIME:
+      case VEC_TC_UNKNOWN:
+      case VEC_TC_INTERVAL_YM:
+      case VEC_TC_DEC_INT64: {
+        // int64_t
+        FILL_VECTOR_FUNC(ObFixedLengthFormat<int64_t>, decoder_ctx.has_extend_value());
+        break;
+      }
+      case VEC_TC_UINTEGER:
+      case VEC_TC_BIT:
+      case VEC_TC_ENUM_SET:
+      case VEC_TC_DOUBLE:
+      case VEC_TC_FIXED_DOUBLE: {
+        // uint64_t
+        FILL_VECTOR_FUNC(ObFixedLengthFormat<uint64_t>, decoder_ctx.has_extend_value());
+        break;
+      }
+      case VEC_TC_FLOAT: {
+        // float
+        FILL_VECTOR_FUNC(ObFixedLengthFormat<uint32_t>, decoder_ctx.has_extend_value());
+        break;
+      }
+      default: {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("unexpected vector type class for fixed format", K(ret), K(vec_tc));
+      }
+      }
+    } else {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("unnexpected vector format", K(ret), K(vector_ctx));
+    }
+    #undef FILL_VECTOR_FUNC
+  }
+  return ret;
+}
+
+template<typename VectorType, bool HAS_NULL>
+int ObIntegerBaseDiffDecoder::inner_decode_vector(
+    const ObColumnDecoderCtx &decoder_ctx,
+    ObVectorDecodeCtx &vector_ctx) const
+{
+  int ret = OB_SUCCESS;
+  int64_t data_offset = 0;
+  const unsigned char *col_data = reinterpret_cast<const unsigned char *>(header_)
+      + decoder_ctx.col_header_->length_;
+  const sql::ObBitVector *null_bitmap = nullptr;
+  uint32_t vec_data_len = 0;
+  if (OB_FAIL(get_uint_data_datum_len(
+      ObDatum::get_obj_datum_map_type(decoder_ctx.obj_meta_.get_type()), vec_data_len))) {
+    LOG_WARN("Failed to get vec data length", K(ret), K(decoder_ctx));
+  } else {
+    VectorType *vector = static_cast<VectorType *>(vector_ctx.get_vector());
+    if (decoder_ctx.has_extend_value()) {
+      null_bitmap = sql::to_bit_vector(col_data);
+      data_offset = decoder_ctx.micro_block_header_->row_count_ * decoder_ctx.micro_block_header_->extend_value_bit_;
+    }
+    if (decoder_ctx.is_bit_packing()) {
+      bitstream_unpack unpack_func = ObBitStream::get_unpack_func(header_->length_);
+      const int64_t bs_len = header_->length_ * decoder_ctx.micro_block_header_->row_count_;
+      for (int64_t i = 0; i < vector_ctx.row_cap_; ++i) {
+        const int64_t curr_vec_offset = vector_ctx.vec_offset_ + i;
+        const int64_t row_id = vector_ctx.row_ids_[i];
+        if (!HAS_NULL || !null_bitmap->contain(row_id)) {
+          int64_t unpacked_val = 0;
+          unpack_func(
+              col_data,
+              data_offset + row_id * header_->length_,
+              header_->length_,
+              bs_len,
+              unpacked_val);
+          unpacked_val += base_;
+          vector->set_payload(curr_vec_offset, &unpacked_val, vec_data_len);
+        } else {
+          vector->set_null(curr_vec_offset);
+        }
+      }
+    } else {
+      // fixed
+      data_offset = (data_offset + CHAR_BIT - 1) / CHAR_BIT;
+      for (int64_t i = 0; i < vector_ctx.row_cap_; ++i) {
+        const int64_t curr_vec_offset = vector_ctx.vec_offset_ + i;
+        const int64_t row_id = vector_ctx.row_ids_[i];
+        if (!HAS_NULL || !null_bitmap->contain(row_id)) {
+          int64_t unpacked_val = 0;
+          MEMCPY(&unpacked_val, col_data + data_offset + row_id * header_->length_, header_->length_);
+          unpacked_val += base_;
+          vector->set_payload(curr_vec_offset, &unpacked_val, vec_data_len);
+        } else {
+          vector->set_null(curr_vec_offset);
         }
       }
     }
@@ -268,13 +400,17 @@ int ObIntegerBaseDiffDecoder::pushdown_operator(
                   filter,
                   pd_filter_info,
                   result_bitmap))) {
-        LOG_WARN("Failed on EQ / NE operator", K(ret), K(col_ctx));
+        if (OB_UNLIKELY(OB_NOT_SUPPORTED != ret)) {
+          LOG_WARN("Failed on EQ / NE operator", K(ret), K(col_ctx));
+        }
       }
       break;
     }
     case sql::WHITE_OP_BT: {
       if (OB_FAIL(bt_operator(parent, col_ctx, col_data, filter, pd_filter_info, result_bitmap))) {
-        LOG_WARN("Failed on BT operator", K(ret), K(col_ctx));
+        if (OB_UNLIKELY(OB_NOT_SUPPORTED != ret)) {
+          LOG_WARN("Failed on BT operator", K(ret), K(col_ctx));
+        }
       }
       break;
     }
@@ -352,6 +488,7 @@ int ObIntegerBaseDiffDecoder::comparison_operator(
   int ret = OB_SUCCESS;
   uint64_t delta_value = 0;
   uint64_t param_delta_value = 0;
+  common::ObObjMeta filter_val_meta;
   if (OB_UNLIKELY(pd_filter_info.count_ != result_bitmap.size()
                           || NULL == col_data
                           || filter.get_datums().count() != 1)) {
@@ -363,6 +500,8 @@ int ObIntegerBaseDiffDecoder::comparison_operator(
     // Can't compare by uint directly, support this later with float point number compare later
     ret = OB_NOT_SUPPORTED;
     LOG_DEBUG("Double/Float with INT_DIFF encoding, back to retro path", K(col_ctx));
+  } else if (OB_FAIL(filter.get_filter_node().get_filter_val_meta(filter_val_meta))) {
+    LOG_WARN("Fail to find datum meta", K(ret), K(filter));
   } else {
     const ObDatum &ref_datum = filter.get_datums().at(0);
     ObStorageDatum base_datum;
@@ -381,9 +520,9 @@ int ObIntegerBaseDiffDecoder::comparison_operator(
     const sql::ObWhiteFilterOperatorType op_type = filter.get_op_type();
     ObGetFilterCmpRetFunc get_cmp_ret = get_filter_cmp_ret_func(op_type);
     int cmp_res = 0;
-    if (OB_FAIL(cmp_func(ref_datum, base_datum, cmp_res))) {
+    if (FAILEDx(cmp_func(base_datum, ref_datum, cmp_res))) {
       LOG_WARN("Failed to compare datum", K(ret), K(ref_datum), K(base_datum));
-    } else if (FALSE_IT(filter_obj_smaller_than_base = cmp_res < 0)){
+    } else if (FALSE_IT(filter_obj_smaller_than_base = cmp_res > 0)){
     } else if (filter_obj_smaller_than_base) {
       // Do not need to decode the data
       if (op_type == sql::WHITE_OP_GE || op_type == sql::WHITE_OP_GT || op_type == sql::WHITE_OP_NE) {
@@ -396,27 +535,22 @@ int ObIntegerBaseDiffDecoder::comparison_operator(
         result_bitmap.reuse();
       }
     } else {
-      auto uint_diff_cmp = [&] (const uint64_t &l, const uint64_t &r) -> int
-      {
-        return l == r
-            ? 0
-            : (l < r ? -1 : 1);
-      };
+      #define UINT_DIFF_CMP(l, r) ( l == r ? 0 : (l < r ? -1 : 1) )
       uint8_t cell_len = header_->length_;
       int64_t data_offset = 0;
       bool null_value_contained = result_bitmap.popcnt() > 0;
       bool exist_parent_filter = nullptr != parent;
-      const ObObjType &obj_type = col_ctx.obj_meta_.get_type();
+      const ObObjType &ref_obj_type = filter_val_meta.get_type();
       if (col_ctx.has_extend_value()) {
         data_offset = col_ctx.micro_block_header_->row_count_
             * col_ctx.micro_block_header_->extend_value_bit_;
       }
       if (ObIntSC == column_sc) {
-        if (OB_FAIL(get_delta<int64_t>(obj_type, ref_datum, param_delta_value))) {
+        if (OB_FAIL(get_delta<int64_t>(ref_obj_type, ref_datum, param_delta_value))) {
           LOG_WARN("Failed to get delta value", K(ret), K(ref_datum));
         }
       } else if (ObUIntSC == column_sc) {
-        if (OB_FAIL(get_delta<uint64_t>(obj_type, ref_datum, param_delta_value))) {
+        if (OB_FAIL(get_delta<uint64_t>(ref_obj_type, ref_datum, param_delta_value))) {
           LOG_WARN("Failed to get delta value", K(ret), K(ref_datum));
         }
       } else {
@@ -439,7 +573,7 @@ int ObIntegerBaseDiffDecoder::comparison_operator(
                 col_data, data_offset + row_id * cell_len, cell_len, delta_value))) {
               LOG_WARN("Failed to get bit packing value", K(ret), K_(header));
           } else {
-            if (get_cmp_ret(uint_diff_cmp(delta_value, param_delta_value))) {
+            if (get_cmp_ret(UINT_DIFF_CMP(delta_value, param_delta_value))) {
               if (OB_FAIL(result_bitmap.set(offset))) {
                 LOG_WARN("Failed to set result bitmap",
                     K(ret), K(offset), K(filter));
@@ -460,7 +594,7 @@ int ObIntegerBaseDiffDecoder::comparison_operator(
             }
           } else {
             MEMCPY(&delta_value, col_data + data_offset + row_id * cell_len, cell_len);
-            if (get_cmp_ret(uint_diff_cmp(delta_value, param_delta_value))) {
+            if (get_cmp_ret(UINT_DIFF_CMP(delta_value, param_delta_value))) {
               if (OB_FAIL(result_bitmap.set(offset))) {
                 LOG_WARN("Failed to set result bitmap",
                     K(ret), K(offset), K(filter));
@@ -469,6 +603,7 @@ int ObIntegerBaseDiffDecoder::comparison_operator(
           }
         }
       }
+      #undef UINT_DIFF_CMP
     }
   }
   return ret;
@@ -498,8 +633,7 @@ int ObIntegerBaseDiffDecoder::bt_operator(
         || ObIntSC == get_store_class_map()[col_ctx.obj_meta_.get_type_class()]) {
     if (OB_FAIL(traverse_all_data(parent, col_ctx, col_data,
                 filter, pd_filter_info, result_bitmap,
-                [](const ObObjMeta &obj_meta,
-                   const ObDatum &cur_datum,
+                [](const ObDatum &cur_datum,
                    const sql::ObWhiteFilterExecutor &filter,
                    bool &result) -> int {
                   int ret = OB_SUCCESS;
@@ -540,16 +674,12 @@ int ObIntegerBaseDiffDecoder::in_operator(
         K(ret), K(col_ctx), K(pd_filter_info), K(result_bitmap.size()), K(filter));
   } else if (OB_FAIL(traverse_all_data(parent, col_ctx, col_data,
                       filter, pd_filter_info, result_bitmap,
-                      [](const ObObjMeta &obj_meta,
-                         const ObDatum &cur_datum,
+                      [](const ObDatum &cur_datum,
                          const sql::ObWhiteFilterExecutor &filter,
                          bool &result) -> int {
                         int ret = OB_SUCCESS;
-                        ObObj cur_obj;
-                        if (OB_FAIL(cur_datum.to_obj(cur_obj, obj_meta))) {
-                          LOG_WARN("convert datum to obj failed", K(ret), K(cur_datum), K(obj_meta));
-                        } else if (OB_FAIL(filter.exist_in_obj_set(cur_obj, result))) {
-                          LOG_WARN("Failed to check object in hashset", K(ret), K(cur_obj));
+                        if (OB_FAIL(filter.exist_in_set(cur_datum, result))) {
+                          LOG_WARN("Failed to check datum in hashset", K(ret), K(cur_datum));
                         }
                         return ret;
                       }))) {
@@ -566,7 +696,6 @@ int ObIntegerBaseDiffDecoder::traverse_all_data(
     const sql::PushdownFilterInfo &pd_filter_info,
     ObBitmap &result_bitmap,
     int (*lambda)(
-        const ObObjMeta &obj_meta,
         const ObDatum &cur_datum,
         const sql::ObWhiteFilterExecutor &filter,
         bool &result)) const
@@ -616,7 +745,7 @@ int ObIntegerBaseDiffDecoder::traverse_all_data(
         cur_datum.ptr_ = reinterpret_cast<char *> (&cur_int);
         // use lambda here to filter and set result bitmap
         bool result = false;
-        if (OB_FAIL(lambda(col_ctx.obj_meta_, cur_datum, filter, result))) {
+        if (FAILEDx(lambda(cur_datum, filter, result))) {
           LOG_WARN("Failed on trying to filter the row", K(ret), K(row_id), K(cur_int));
         } else if (result) {
           if (OB_FAIL(result_bitmap.set(offset))) {
@@ -633,7 +762,7 @@ int ObIntegerBaseDiffDecoder::traverse_all_data(
 int ObIntegerBaseDiffDecoder::get_null_count(
     const ObColumnDecoderCtx &ctx,
     const ObIRowIndex *row_index,
-    const int64_t *row_ids,
+    const int32_t *row_ids,
     const int64_t row_cap,
     int64_t &null_count) const
 {

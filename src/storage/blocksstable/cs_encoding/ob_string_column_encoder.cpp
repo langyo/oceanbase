@@ -13,10 +13,7 @@
 #define USING_LOG_PREFIX STORAGE
 
 #include "ob_string_column_encoder.h"
-#include "storage/blocksstable/encoding/ob_encoding_hash_util.h"
-#include "ob_column_datum_iter.h"
-#include "ob_cs_encoding_util.h"
-#include "lib/codec/ob_codecs.h"
+#include "ob_dict_encoding_hash_table.h"
 
 namespace oceanbase
 {
@@ -127,7 +124,9 @@ int ObStringColumnEncoder::do_init_()
       ctx_->encoding_ctx_->compressor_type_,
       is_force_raw_, &ctx_->encoding_ctx_->cs_encoding_opt_,
       ctx_->encoding_ctx_->previous_cs_encoding_.get_column_encoding(column_index_),
-      int_stream_idx, ctx_->allocator_))) {
+      int_stream_idx,
+      ctx_->encoding_ctx_->major_working_cluster_version_,
+      ctx_->allocator_))) {
     LOG_WARN("fail to build_string_stream_encoder_info", K(ret));
   }
 

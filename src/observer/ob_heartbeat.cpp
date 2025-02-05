@@ -12,23 +12,12 @@
 
 #define USING_LOG_PREFIX SERVER
 
-#include "observer/ob_heartbeat.h"
 
-#include "lib/mysqlclient/ob_mysql_transaction.h"
-#include "share/ob_lease_struct.h"
-#include "share/config/ob_server_config.h"
-#include "share/config/ob_config_manager.h"
+#include "ob_heartbeat.h"
 #include "share/ob_version.h"
 #include "share/ob_zone_table_operation.h"
-#include "storage/blocksstable/ob_block_manager.h"
 #include "storage/ob_file_system_router.h"
-#include "observer/omt/ob_multi_tenant.h"
-#include "observer/omt/ob_tenant_node_balancer.h"
-#include "observer/ob_server_schema_updater.h"
 #include "observer/ob_server.h"
-#include "observer/omt/ob_tenant_config_mgr.h"
-#include "common/ob_timeout_ctx.h"
-#include "storage/slog/ob_storage_logger_manager.h"
 #ifdef OB_BUILD_TDE_SECURITY
 #include "share/ob_master_key_getter.h"
 #endif
@@ -119,7 +108,7 @@ int ObHeartBeatProcess::init_lease_request(ObLeaseRequest &lease_request)
 {
   int ret = OB_SUCCESS;
   common::ObArray<std::pair<uint64_t, uint64_t> > max_stored_versions;
-
+  lease_request.reset();
   if (OB_UNLIKELY(!inited_)) {
     ret = OB_NOT_INIT;
     LOG_WARN("not init", KR(ret), K(inited_));
@@ -135,13 +124,14 @@ int ObHeartBeatProcess::init_lease_request(ObLeaseRequest &lease_request)
     LOG_WARN("fail to set lease request max stored key versions",
              KR(ret), K(lease_request), K(max_stored_versions));
 #endif
+  } else if (OB_FAIL(get_package_and_svn(lease_request.build_version_, sizeof(lease_request.build_version_)))) {
+    LOG_WARN("fail to get build_version", KR(ret));
   } else {
     lease_request.request_lease_time_ = 0; // this is not a valid member
     lease_request.version_ = ObLeaseRequest::LEASE_VERSION;
     lease_request.zone_ = gctx_.config_->zone.str();
     lease_request.server_ = gctx_.self_addr();
     lease_request.sql_port_ = gctx_.config_->mysql_port;
-    get_package_and_svn(lease_request.build_version_, sizeof(lease_request.build_version_));
     OTC_MGR.get_lease_request(lease_request);
     lease_request.start_service_time_ = gctx_.start_service_time_;
     lease_request.ssl_key_expired_time_ = gctx_.ssl_key_expired_time_;
@@ -193,13 +183,13 @@ void ObHeartBeatProcess::check_and_update_server_id_(const uint64_t server_id)
     // in upgrade period 4.1 -> 4.2, we need to persist the server_id via heartbeat
     const int64_t delay = 0;
     const bool repeat = false;
-    if (0 == GCTX.server_id_) {
-      GCTX.server_id_ = server_id;
+    if (0 == GCTX.get_server_id()) {
+      (void) GCTX.set_server_id(server_id);
       LOG_INFO("receive new server id in GCTX", K(server_id));
-    } else if (server_id != GCTX.server_id_) {
+    } else if (server_id != GCTX.get_server_id()) {
       ret = OB_ERR_UNEXPECTED;
-      LOG_ERROR("GCTX.server_id_ is not the same as server_id in RS", KR(ret),
-          K(GCTX.server_id_), K(server_id));
+      LOG_ERROR("GCTX.get_server_id() is not the same as server_id in RS", KR(ret),
+          K(GCTX.get_server_id()), K(server_id));
     }
     if (OB_FAIL(ret)) {
     } else if (0 == GCONF.observer_id) {

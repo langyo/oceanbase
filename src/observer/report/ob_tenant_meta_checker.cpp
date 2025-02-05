@@ -13,17 +13,14 @@
 #define USING_LOG_PREFIX SERVER
 
 #include "observer/report/ob_tenant_meta_checker.h"
-#include "observer/ob_server_struct.h" // GCTX
-#include "share/ob_thread_define.h" // TenantLSMetaChecker, TenantTabletMetaChecker
-#include "share/ls/ob_ls_operator.h" // ObLSOperator
 #include "share/ls/ob_ls_table_iterator.h" // ObLSTableIterator
 #include "storage/tablet/ob_tablet_iterator.h" // ObLSTabletIterator
-#include "share/tablet/ob_tablet_table_operator.h" // ObTabletTableOperator
 #include "share/tablet/ob_tablet_table_iterator.h" // ObTenantTabletTableIterator
 #include "storage/tx_storage/ob_ls_service.h" // ObLSService, ObLSIterator
-#include "storage/tx_storage/ob_ls_handle.h" // ObLSHandle
 #include "share/ob_tablet_replica_checksum_operator.h" // ObTabletReplicaChecksumItem
-#include "storage/tablet/ob_tablet.h" // ObTablet
+#ifdef OB_BUILD_SHARED_STORAGE
+#include "share/compaction/ob_ss_meta_checker.h" // ObTenantSSMetaChecker
+#endif
 
 namespace oceanbase
 {
@@ -43,8 +40,8 @@ void ObTenantLSMetaTableCheckTask::runTimerTask()
   if (OB_FAIL(checker_.check_ls_table())) {
     LOG_WARN("fail to check ls meta table", KR(ret));
   }
-  // ignore ret
   if (OB_FAIL(checker_.schedule_ls_meta_check_task())) {
+    // overwrite ret
     LOG_WARN("fail to schedule ls meta check task", KR(ret));
   }
 }
@@ -58,11 +55,19 @@ ObTenantTabletMetaTableCheckTask::ObTenantTabletMetaTableCheckTask(
 void ObTenantTabletMetaTableCheckTask::runTimerTask()
 {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(checker_.check_tablet_table())) {
-    LOG_WARN("fail to check tablet meta table", KR(ret));
+  if (!GCTX.is_shared_storage_mode()) {
+    if (OB_FAIL(checker_.check_tablet_table())) {
+      LOG_WARN("fail to check tablet meta table", KR(ret));
+    }
+  } else {
+#ifdef OB_BUILD_SHARED_STORAGE
+    if (OB_FAIL(compaction::ObTenantSSMetaChecker::check_tablet_table())) {
+      LOG_WARN("fail to check tablet replica checksum table", KR(ret));
+    }
+#endif
   }
-  // ignore ret
   if (OB_FAIL(checker_.schedule_tablet_meta_check_task())) {
+    // overwrite ret
     LOG_WARN("fail to schedule tablet meta check task", KR(ret));
   }
 }
@@ -624,13 +629,16 @@ int ObTenantMetaChecker::check_report_replicas_(
   } else if (OB_ISNULL(GCTX.ob_service_)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("ob_service is null", KR(ret));
+  } else if (OB_UNLIKELY(GCTX.is_shared_storage_mode())) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("compaction should be local mode", KR(ret));
   } else if (OB_FAIL(MTL(ObLSService *)->get_ls_iter(
       ls_iter,
       ObLSGetMod::OBSERVER_MOD))) {
     LOG_WARN("failed to get ls iter", KR(ret));
   } else {
     ObLS *ls = NULL;
-    ObLSTabletIterator tablet_iter(ObMDSGetTabletMode::READ_READABLE_COMMITED);
+    ObLSTabletIterator tablet_iter(ObMDSGetTabletMode::READ_ALL_COMMITED);
     while(OB_SUCC(ret)) {
       if (OB_UNLIKELY(stopped_)) {
         ret = OB_CANCELED;
@@ -690,7 +698,11 @@ int ObTenantMetaChecker::check_report_replicas_(
               local_replica,
               tablet_checksum,
               need_checksum))) {
-            LOG_WARN("fail to fill tablet replica", KR(ret), K_(tenant_id), K(ls_id), K(tablet_id));
+            if (OB_EAGAIN == ret) {
+              ret = OB_SUCCESS; // do not affect report of other tablets
+            } else {
+              LOG_WARN("fail to fill tablet replica", KR(ret), K_(tenant_id), K(ls_id), K(tablet_id));
+            }
           } else if (table_replica.is_equal_for_report(local_replica)) {
             continue;
           } else { // not equal
@@ -714,6 +726,7 @@ int ObTenantMetaChecker::check_report_replicas_(
   }
   return ret;
 }
+
 
 } // end namespace observer
 } // end namespace oceanbase

@@ -12,10 +12,9 @@
 
 #define USING_LOG_PREFIX STORAGE
 
-#include "storage/direct_load/ob_direct_load_mem_context.h"
-#include "storage/direct_load/ob_direct_load_mem_loader.h"
+#include "ob_direct_load_mem_context.h"
+#include "src/storage/direct_load/ob_direct_load_mem_worker.h"
 #include "storage/direct_load/ob_direct_load_mem_dump.h"
-
 namespace oceanbase
 {
 namespace storage
@@ -95,8 +94,10 @@ void ObDirectLoadMemContext::reset()
   finish_compact_count_ = 0;
   mem_dump_task_count_ = 0;
   has_error_ = false;
+  all_trans_finished_ = false;
 
   ObArray<ObDirectLoadMemWorker *> loader_array;
+  loader_array.set_tenant_id(MTL_ID());
   mem_loader_queue_.pop_all(loader_array);
   for (int64_t i = 0; i < loader_array.count(); i ++) {
     ObDirectLoadMemWorker *tmp = loader_array.at(i);
@@ -106,6 +107,7 @@ void ObDirectLoadMemContext::reset()
   }
 
   ObArray<ObDirectLoadExternalMultiPartitionRowChunk *> chunk_array;
+  chunk_array.set_tenant_id(MTL_ID());
   mem_chunk_queue_.pop_all(chunk_array);
   for (int64_t i = 0; i < chunk_array.count(); i ++) {
     ObDirectLoadExternalMultiPartitionRowChunk *chunk = chunk_array.at(i);
@@ -144,7 +146,6 @@ ObDirectLoadMemContext::~ObDirectLoadMemContext()
 int ObDirectLoadMemContext::init()
 {
   int ret = OB_SUCCESS;
-  allocator_.set_tenant_id(MTL_ID());
   if (OB_FAIL(mem_dump_queue_.init(1024))) {
     STORAGE_LOG(WARN, "fail to init mem dump queue", KR(ret));
   }
@@ -156,6 +157,7 @@ int ObDirectLoadMemContext::add_tables_from_table_builder(ObIDirectLoadPartition
   int ret = OB_SUCCESS;
   lib::ObMutexGuard guard(mutex_);
   ObArray<ObIDirectLoadPartitionTable *> table_array;
+  table_array.set_tenant_id(MTL_ID());
   if (OB_SUCC(ret)) {
     if (OB_FAIL(builder.get_tables(table_array, allocator_))) {
       LOG_WARN("fail to get tables", KR(ret));

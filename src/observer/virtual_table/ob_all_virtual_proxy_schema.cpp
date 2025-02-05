@@ -14,18 +14,9 @@
 
 #include "observer/virtual_table/ob_all_virtual_proxy_schema.h"
 #include "observer/ob_sql_client_decorator.h" // ObSQLClientRetryWeak
-#include "observer/ob_server_struct.h" // GCTX
 #include "observer/ob_inner_sql_result.h"
-#include "share/ob_errno.h" // KR(ret)
-#include "share/schema/ob_part_mgr_util.h" // ObPartitionIterator
-#include "share/schema/ob_schema_mgr.h" // ObSimpleDatabaseSchema
-#include "share/inner_table/ob_inner_table_schema_constants.h" // OB_ALL_XXX_TNAME
-#include "share/location_cache/ob_location_service.h" // ObLocationService
-#include "lib/string/ob_sql_string.h" // ObSqlString
-#include "sql/session/ob_sql_session_info.h" // ObSqlSessionInfo
-#include "sql/parser/ob_parser.h" // ObParser
+#include "share/schema/ob_part_mgr_util.h"
 #include "sql/resolver/dml/ob_select_resolver.h" // ObSelectResolver
-#include "sql/resolver/ob_resolver_utils.h" // ObResolverUtils
 
 namespace oceanbase
 {
@@ -586,12 +577,12 @@ int ObAllVirtualProxySchema::init_data()
       bool is_oracle_mode = false;
       if (OB_FAIL(table_schema->check_if_oracle_compat_mode(is_oracle_mode))) {
         LOG_WARN("fail to check oracle mode", KR(ret), KPC(table_schema));
-      } else if (OB_FAIL(get_view_decoded_schema_(
-                                                  tenant_id,
+      } else if (OB_FAIL(get_view_decoded_schema_(tenant_id,
                                                   tenant_name,
                                                   view_definition,
                                                   is_oracle_mode,
-                                                  new_table_schema))) {
+                                                  new_table_schema,
+                                                  database_name))) {
         LOG_WARN("get_view_decoded_schema failed", KR(ret));
       } else if (OB_NOT_NULL(new_table_schema)) {
         table_schema = new_table_schema;
@@ -639,7 +630,8 @@ int ObAllVirtualProxySchema::get_view_decoded_schema_(
     const common::ObString &tenant_name,
     const common::ObString &view_definition,
     const bool is_oracle_mode,
-    const ObTableSchema *&new_table_schema)
+    const ObTableSchema *&new_table_schema,
+    const common::ObString &database_name)
 {
   int ret = OB_SUCCESS;
   SMART_VAR(sql::ObSQLSessionInfo, empty_session) {
@@ -657,13 +649,24 @@ int ObAllVirtualProxySchema::get_view_decoded_schema_(
                                          lib::Worker::CompatMode::MYSQL;
       empty_session.set_compatibility_mode(static_cast<ObCompatibilityMode>(compat_mode));
       empty_session.set_sql_mode(ob_compatibility_mode_to_sql_mode(static_cast<ObCompatibilityMode>(compat_mode)));
+      if (is_oracle_mode) {
+        uint64_t database_id = OB_INVALID_ID;
+        if (OB_FAIL(schema_guard_.get_database_id(tenant_id, database_name, database_id))) {
+          LOG_WARN("failed to get database id", K(ret));
+        } else if (OB_FAIL(empty_session.set_default_database(database_name))) {
+          LOG_WARN("failed to set default database name", K(ret));
+        } else {
+          empty_session.set_database_id(database_id);
+        }
+      }
       ParseResult parse_result;
       sql::ObParser parser(*allocator_, empty_session.get_sql_mode());
       sql::ObSchemaChecker schema_checker;
       lib::CompatModeGuard tmp_guard(compat_mode);
       //FIXME: Resolve view definition directly may failed when sys views are involved.
       //       Select sql is needed here like int ObTableColumns::resolve_view_definition().
-      if (OB_FAIL(parser.parse(view_definition, parse_result))) {
+      if (OB_FAIL(ret)) {
+      } else if (OB_FAIL(parser.parse(view_definition, parse_result))) {
         LOG_WARN("parse view definition failed", KR(ret), K(view_definition));
       } else if (OB_FAIL(schema_checker.init(schema_guard_))) {
         LOG_WARN("fail to init schema checker", KR(ret));
@@ -681,7 +684,7 @@ int ObAllVirtualProxySchema::get_view_decoded_schema_(
           LOG_WARN("create query context failed", KR(ret));
         } else {
           // set # of question marks
-          resolver_ctx.query_ctx_->question_marks_count_ = static_cast<int64_t> (parse_result.question_mark_ctx_.count_);
+          resolver_ctx.query_ctx_->set_questionmark_count(static_cast<int64_t> (parse_result.question_mark_ctx_.count_));
         }
         if (OB_SUCC(ret)
             && OB_NOT_NULL(parse_result.result_tree_)
@@ -846,8 +849,7 @@ int ObAllVirtualProxySchema::get_next_tablet_location_(
     }
   }
   if (OB_SUCC(ret)) { // dump each location
-    DupReplicaType dup_replica_type = ObDuplicateScope::DUPLICATE_SCOPE_CLUSTER
-                                      == table_schema->get_duplicate_scope() ?
+    DupReplicaType dup_replica_type = table_schema->is_duplicate_table() ?
                                       DupReplicaType::DUP_REPLICA :
                                       DupReplicaType::NON_DUP_REPLICA;
     const uint64_t table_id = table_schema->get_table_id();
@@ -919,6 +921,43 @@ int ObAllVirtualProxySchema::get_next_tenant_server_(
   return ret;
 }
 
+int ObAllVirtualProxySchema::get_replica_type_from_locality_(
+    const ZoneLocalityIArray &zone_locality_array,
+    const ObZone &zone,
+    ObReplicaType &replica_type)
+{
+  int ret = OB_SUCCESS;
+  replica_type = REPLICA_TYPE_FULL;
+  if (OB_UNLIKELY(zone_locality_array.empty() || zone.is_empty())) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid argument", KR(ret), K(zone_locality_array), K(zone));
+  } else {
+    bool zone_found = false;
+    FOREACH_CNT_X(zone_locality, zone_locality_array, !zone_found && OB_SUCCESS == ret) {
+      if (zone_locality->get_zone_set().at(0) == zone) {
+        zone_found = true;
+        if (zone_locality->get_readonly_replica_num() > 0) {
+          replica_type = REPLICA_TYPE_READONLY;
+        } else if (zone_locality->get_columnstore_replica_num() > 0) {
+          replica_type = REPLICA_TYPE_COLUMNSTORE;
+        } else if (zone_locality->get_full_replica_num() > 0) {
+          replica_type = REPLICA_TYPE_FULL;
+        } else {
+          // unrecognized replica_type
+          ret = OB_ERR_UNEXPECTED;
+          replica_type = REPLICA_TYPE_INVALID;
+          LOG_WARN("unrecognized replica type", KR(ret), KPC(zone_locality));
+        }
+      }
+    }
+    if (!zone_found) {
+      // tenant locality does not include this zone, regard as FULL
+      replica_type = REPLICA_TYPE_FULL;
+    }
+  }
+  return ret;
+}
+
 int ObAllVirtualProxySchema::fill_tenant_servers_(
     const uint64_t tenant_id,
     ObMySQLResult &result,
@@ -940,6 +979,17 @@ int ObAllVirtualProxySchema::fill_tenant_servers_(
   int64_t svr_idx = 0;
   first_idx_in_zone.reset();
   tenant_servers_.reset();
+  const ObTenantSchema *tenant_schema = NULL;
+  ObArray<share::ObZoneReplicaNumSet> zone_locality;
+
+  if (OB_FAIL(schema_guard_.get_tenant_info(tenant_id, tenant_schema))) {
+    LOG_WARN("fail to get tenant info", KR(ret), K(tenant_id));
+  } else if (OB_ISNULL(tenant_schema)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("tenant not exist", KR(ret), K(tenant_id));
+  } else if (OB_FAIL(tenant_schema->get_zone_replica_attr_array(zone_locality))) {
+    LOG_WARN("fail to get zone_locality_array");
+  }
 
   while (OB_SUCC(ret) && OB_SUCC(result.next())) {
     tenant_server.reset();
@@ -948,7 +998,9 @@ int ObAllVirtualProxySchema::fill_tenant_servers_(
     EXTRACT_VARCHAR_FIELD_MYSQL(result, "svr_ip", svr_ip);
     EXTRACT_INT_FIELD_MYSQL(result, "inner_port", sql_port, int64_t);
     EXTRACT_VARCHAR_FIELD_MYSQL(result, "zone", zone);
-    if (OB_UNLIKELY(!server.set_ip_addr(svr_ip, svr_port))) {
+    if (FAILEDx(get_replica_type_from_locality_(zone_locality, zone, replica_type))) {
+      LOG_WARN("failed to get replica_type", KR(ret), K(zone_locality), K(zone));
+    } else if (OB_UNLIKELY(!server.set_ip_addr(svr_ip, svr_port))) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("failed to set_ip_addr", KR(ret), K(svr_ip), K(svr_port));
     } else if (OB_FAIL(replica_location.init(

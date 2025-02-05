@@ -14,7 +14,6 @@
 
 #include "ob_expr_validate_password_strength.h"
 
-#include "sql/session/ob_sql_session_info.h"
 #include "sql/engine/ob_exec_context.h"
 
 using namespace oceanbase::common;
@@ -81,6 +80,7 @@ int ObExprValidatePasswordStrength::eval_password_strength(const ObExpr &expr,
 
   const ObBasicSessionInfo *session = ctx.exec_ctx_.get_my_session();
   if (OB_ISNULL(session)) {
+    ret = OB_ERR_UNEXPECTED;
     LOG_WARN("session is null", K(ret));
   } else if (OB_FAIL(expr.args_[0]->eval(ctx, pwd_param))) {
     LOG_WARN("eval arg failed", K(ret));

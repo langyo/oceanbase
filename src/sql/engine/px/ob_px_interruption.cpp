@@ -12,9 +12,8 @@
 
 #define USING_LOG_PREFIX SQL_ENG
 
-#include "sql/engine/px/ob_px_interruption.h"
+#include "ob_px_interruption.h"
 #include "sql/engine/px/ob_dfo.h"
-#include "lib/time/ob_time_utility.h"
 
 
 using namespace oceanbase::common;
@@ -25,12 +24,14 @@ OB_SERIALIZE_MEMBER(ObPxInterruptID, query_interrupt_id_, px_interrupt_id_);
 ObPxInterruptGuard::ObPxInterruptGuard(const ObInterruptibleTaskID &interrupt_id)
 {
   interrupt_id_ = interrupt_id;
-  SET_INTERRUPTABLE(interrupt_id_);
+  interrupt_reg_ret_ = SET_INTERRUPTABLE(interrupt_id_);
 }
 
 ObPxInterruptGuard::~ObPxInterruptGuard()
 {
-  UNSET_INTERRUPTABLE(interrupt_id_);
+  if (OB_SUCCESS == interrupt_reg_ret_) {
+    UNSET_INTERRUPTABLE(interrupt_id_);
+  }
 }
 
 int ObInterruptUtil::broadcast_px(ObIArray<ObDfo *> &dfos, int int_code)
@@ -123,19 +124,38 @@ void ObInterruptUtil::update_schema_error_code(ObExecContext *exec_ctx, int &cod
     uint64_t tenant_id = exec_ctx->get_my_session()->get_effective_tenant_id();
     ObSchemaGetterGuard schema_guard;
     int64_t local_schema_version = -1;
-    if (OB_FAIL(GCTX.schema_service_->get_tenant_schema_guard(tenant_id, schema_guard))) {
+    int64_t query_tenant_begin_schema_version =
+      exec_ctx->get_task_exec_ctx().get_query_tenant_begin_schema_version();
+    if (query_tenant_begin_schema_version == OB_INVALID_VERSION) {
+      code = OB_INVALID_ARGUMENT;
+      LOG_WARN("invalid tenant_schema_version", K(ret), K(query_tenant_begin_schema_version));
+    } else if (OB_FAIL(GCTX.schema_service_->get_tenant_schema_guard(tenant_id, schema_guard))) {
       LOG_WARN("get tenant schema guard failed", K(ret));
     } else if (OB_FAIL(schema_guard.get_schema_version(tenant_id, local_schema_version))) {
       LOG_WARN("get schema version failed", K(ret));
-    } else if (local_schema_version !=
-                exec_ctx->get_task_exec_ctx().get_query_tenant_begin_schema_version()) {
-      if (GSCHEMASERVICE.is_schema_error_need_retry(NULL, tenant_id)) {
-        code = OB_ERR_REMOTE_SCHEMA_NOT_FULL;
-      } else {
+    }
+
+    if ((OB_SUCC(ret) && local_schema_version != query_tenant_begin_schema_version)
+        || ret == OB_TENANT_NOT_EXIST || ret == OB_SCHEMA_ERROR || ret == OB_SCHEMA_EAGAIN) {
+      bool overwrite_error_code = true;
+      ObPhysicalPlanCtx *plan_ctx = exec_ctx->get_physical_plan_ctx();
+      if (OB_NOT_NULL(plan_ctx) && plan_ctx->get_is_direct_insert_plan()
+          && (OB_NO_PARTITION_FOR_GIVEN_VALUE_SCHEMA_ERROR == code)) {
+        // overwriting error code would cause retry for direct load
+        overwrite_error_code = false;
+      }
+      if (overwrite_error_code) {
         code = OB_ERR_WAIT_REMOTE_SCHEMA_REFRESH;
       }
     }
-    LOG_TRACE("update_schema_error_code, exec_ctx is not null", K(tenant_id), K(local_schema_version),
+
+    // overwrite to make sure sql will retry
+    if (OB_ERR_WAIT_REMOTE_SCHEMA_REFRESH == code
+        && GSCHEMASERVICE.is_schema_error_need_retry(NULL, tenant_id)) {
+      code = OB_ERR_REMOTE_SCHEMA_NOT_FULL;
+    }
+
+    LOG_TRACE("update_schema_error_code, exec_ctx is not null", K(ret), K(code), K(tenant_id), K(local_schema_version),
               K(exec_ctx->get_task_exec_ctx().get_query_tenant_begin_schema_version()), K(lbt()));
   } else {
     LOG_TRACE("update_schema_error_code, exec_ctx is null", K(lbt()));

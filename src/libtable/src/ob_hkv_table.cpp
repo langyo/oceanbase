@@ -12,8 +12,6 @@
 
 #define USING_LOG_PREFIX CLIENT
 #include "ob_hkv_table.h"
-#include "ob_table_service_client.h"
-#include "share/table/ob_table.h"
 using namespace oceanbase::common;
 using namespace oceanbase::table;
 
@@ -280,7 +278,7 @@ int ObHKVTable::get(const Key &key, Value &value)
       value = ObObj::make_nop_obj();
     } else if (OB_FAIL(result.get_entity(result_entity))) {
       LOG_WARN("failed to get entity", K(ret));
-    } else if (result_entity->get_property(VALUE_CNAME_STR, value)){
+    } else if (OB_FAIL(result_entity->get_property(VALUE_CNAME_STR, value))) {
       LOG_WARN("failed to get V value", K(ret));
     }
   }
@@ -331,7 +329,7 @@ int ObHKVTable::multi_get(const IKeys &keys, IValues &values)
             }
           } else if (OB_FAIL(batch_result.at(i).get_entity(result_entity))) {
             LOG_WARN("failed to get entity", K(ret));
-          } else if (result_entity->get_property(VALUE_CNAME_STR, value)){
+          } else if (OB_FAIL(result_entity->get_property(VALUE_CNAME_STR, value))) {
             LOG_WARN("failed to get V value", K(ret));
           } else if (OB_FAIL(values.push_back(value))) {
             LOG_WARN("failed to push value", K(ret));

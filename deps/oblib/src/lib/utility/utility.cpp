@@ -12,20 +12,13 @@
 
 #define USING_LOG_PREFIX LIB
 
+#include "utility.h"
 #include "dirent.h"
-#include <dlfcn.h>
-#include "lib/utility/utility.h"
-#include "lib/ob_define.h"
-#include "util/easy_inet.h"
-#include "common/rowkey/ob_rowkey.h"
-#include "lib/time/ob_time_utility.h"
+#include <gnu/libc-version.h>
 #include "lib/file/file_directory_utils.h"
-#include "common/ob_range.h"
+#include "deps/oblib/src/common/ob_string_buf.h"
 #include "lib/string/ob_sql_string.h"
-#include "lib/stat/ob_diagnose_info.h"
-#include "common/object/ob_object.h"
-#include "lib/net/ob_addr.h"
-#include "lib/json/ob_yson.h"
+#include "lib/stat/ob_diagnostic_info_guard.h"
 
 namespace oceanbase
 {
@@ -365,24 +358,26 @@ const char *inet_ntoa_s(char *buffer, size_t n, const uint32_t ip)
   return buffer;
 }
 
-const char *time2str(const int64_t time_us, const char *format)
+const char *time2str(const int64_t time_us, char *buf, const int64_t buf_len, const char *format)
 {
-  // FIXME: To Be Removed
-  static const int32_t BUFFER_SIZE = 256;
-  thread_local char buffer[4 * BUFFER_SIZE];
-  RLOCAL(uint64_t, i);
-  uint64_t cur = i++ % 4;
-  buffer[cur * BUFFER_SIZE] = '\0';
-  struct tm time_struct;
-  int64_t time_s = time_us / 1000000;
-  int64_t cur_second_time_us = time_us % 1000000;
-  if (NULL != localtime_r(&time_s, &time_struct)) {
-    int64_t pos = strftime(&buffer[cur * BUFFER_SIZE], BUFFER_SIZE, format, &time_struct);
-    if (pos < BUFFER_SIZE) {
-      IGNORE_RETURN snprintf(&buffer[cur * BUFFER_SIZE + pos], BUFFER_SIZE - pos, ".%ld %ld", cur_second_time_us, time_us);
+  if (nullptr != buf && buf_len > 0) {
+    struct tm time_struct;
+    int64_t time_s = time_us / 1000000;
+    int64_t cur_second_time_us = time_us % 1000000;
+    if (nullptr != localtime_r(&time_s, &time_struct)) {
+      int64_t pos = strftime(buf, buf_len, format, &time_struct);
+      // since libc 4.4.4, strftime returns 0 if failed
+      if (pos > 0) {
+        // 25 = 1(.) + 6(cur_second_time_u) + 1(' ') + 16(time_us) + 1('\0')
+        if (pos <= buf_len - 25) {
+          IGNORE_RETURN snprintf(buf + pos, buf_len - pos, ".%ld %ld", cur_second_time_us, time_us);
+        }
+      } else {
+        buf[0] = '\0';
+      }
     }
   }
-  return &buffer[cur * BUFFER_SIZE];
+  return buf;
 }
 
 void print_rowkey(FILE *fd, ObString &rowkey)
@@ -599,7 +594,7 @@ int deep_copy_obj(ObIAllocator &allocator, const ObObj &src, ObObj &dst)
     if (size > 0) {
       if (NULL == (buf = static_cast<char *>(allocator.alloc(size)))) {
         ret = OB_ALLOCATE_MEMORY_FAILED;
-        LOG_ERROR("Fail to allocate memory, ", K(size), K(ret));
+        LOG_WARN("Fail to allocate memory, ", K(size), K(ret));
       } else if (OB_FAIL(dst.deep_copy(src, buf, size, pos))){
         LOG_WARN("Fail to deep copy obj, ", K(ret));
       } else { }//do nothing
@@ -1418,8 +1413,9 @@ int ObBandwidthThrottle::limit_and_sleep(const int64_t bytes, const int64_t last
       const int64_t copy_KB = (total_bytes_ - last_printed_bytes_) / 1024;
       const int64_t speed_KB_per_s = copy_KB * 1000 / print_interval_ms;
       const int64_t sleep_ms_sum = total_sleep_ms_ - last_printed_sleep_ms_;
+      const int64_t rate_KB = rate_ / 1024;
       COMMON_LOG(INFO, "print band limit", KCSTRING_(comment), K(copy_KB), K(sleep_ms_sum), K(speed_KB_per_s),
-          K_(total_sleep_ms), K_(total_bytes), "rate_KB/s", rate_, K(print_interval_ms));
+          K_(total_sleep_ms), K_(total_bytes), "rate_KB/s", rate_KB, K(print_interval_ms));
       last_printed_bytes_ = total_bytes_;
       last_printed_sleep_ms_ = total_sleep_ms_;
       last_printed_ts_ = cur_time;
@@ -1657,33 +1653,6 @@ int long_to_str10(int64_t val,char *dst, const int64_t buf_len, const bool is_si
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-
-const char *replica_type_to_str(const ObReplicaType &type)
-{
-  const char *str = "";
-
-  switch (type) {
-  case REPLICA_TYPE_FULL:
-    str = "REPLICA_TYPE_FULL";
-    break;
-  case REPLICA_TYPE_BACKUP:
-    str = "REPLICA_TYPE_BACKUP";
-    break;
-  case REPLICA_TYPE_LOGONLY:
-    str = "REPLICA_TYPE_LOGONLY";
-    break;
-  case REPLICA_TYPE_READONLY:
-    str = "REPLICA_TYPE_READONLY";
-    break;
-  case REPLICA_TYPE_MEMONLY:
-    str = "REPLICA_TYPE_MEMONLY";
-    break;
-  default:
-    str = "REPLICA_TYPE_UNKNOWN";
-  }
-  return str;
-}
-
 bool ez2ob_addr(ObAddr &addr, easy_addr_t& ez)
 {
   bool ret = false;
@@ -1746,6 +1715,23 @@ int ob_atoll(const char *str, int64_t &res)
   if (OB_ISNULL(str)) {
     ret = OB_INVALID_ARGUMENT;
   } else if (OB_FAIL(ob_strtoll(str, endptr, val))) {
+    LIB_LOG(WARN, "failed to strtoll", K(ret), KCSTRING(str));
+  } else if (str == endptr || OB_ISNULL(endptr) || OB_UNLIKELY('\0' != *endptr)) {
+    ret = OB_INVALID_ARGUMENT;
+  } else {
+    res = val;
+  }
+  return ret;
+}
+
+int ob_atoull(const char *str, uint64_t &res)
+{
+  int ret = OB_SUCCESS;
+  char *endptr = NULL;
+  uint64_t val = 0;
+  if (OB_ISNULL(str)) {
+    ret = OB_INVALID_ARGUMENT;
+  } else if (OB_FAIL(ob_strtoull(str, endptr, val))) {
     LIB_LOG(WARN, "failed to strtoll", K(ret), KCSTRING(str));
   } else if (str == endptr || OB_ISNULL(endptr) || OB_UNLIKELY('\0' != *endptr)) {
     ret = OB_INVALID_ARGUMENT;
@@ -1902,6 +1888,159 @@ int64_t get_level3_cache_size()
   return l3_cache_size;
 }
 
+int extract_cert_expired_time(const char* cert, const int64_t cert_len, int64_t &expired_time)
+{
+  int ret = OB_SUCCESS;
+  STACK_OF(X509_INFO)  *chain = NULL;
+  BIO *cbio = NULL;
+  if (OB_ISNULL(cert)) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("public cert from kms is null!", K(ret));
+  } else if (OB_ISNULL(cbio = BIO_new_mem_buf((void*)cert, cert_len))) {
+    ret = OB_ALLOCATE_MEMORY_FAILED;
+    LOG_WARN("BIO_new_mem_buf failed", K(ret));
+  } else if (OB_ISNULL(chain = PEM_X509_INFO_read_bio(cbio, NULL, NULL, NULL))) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("PEM_X509_INFO_read_bio failed", K(ret));
+  } else {
+    ASN1_TIME *notAfter = NULL;
+    X509_INFO *x509_info = NULL;
+    if (OB_ISNULL(x509_info = sk_X509_INFO_value(chain, 0))) {
+      ret = OB_INVALID_ARGUMENT;
+      LOG_WARN("get app cert failed!", K(ret));
+    } else if (OB_ISNULL((notAfter = X509_get_notAfter(x509_info->x509)))) {
+      ret = OB_INVALID_ARGUMENT;
+      LOG_WARN("X509_get_notAfter failed",K(ret));
+    } else {
+      struct tm tm1;
+      memset (&tm1, 0, sizeof (tm1));
+      tm1.tm_year = (notAfter->data[ 0] - '0') * 10 + (notAfter->data[ 1] - '0') + 100;
+      tm1.tm_mon  = (notAfter->data[ 2] - '0') * 10 + (notAfter->data[ 3] - '0') - 1;
+      tm1.tm_mday = (notAfter->data[ 4] - '0') * 10 + (notAfter->data[ 5] - '0');
+      tm1.tm_hour = (notAfter->data[ 6] - '0') * 10 + (notAfter->data[ 7] - '0');
+      tm1.tm_min  = (notAfter->data[ 8] - '0') * 10 + (notAfter->data[ 9] - '0');
+      tm1.tm_sec  = (notAfter->data[10] - '0') * 10 + (notAfter->data[11] - '0');
+      time_t expired_time_t = mktime(&tm1);
+      expired_time_t += (int)(mktime(localtime(&expired_time_t)) - mktime(gmtime(&expired_time_t)));
+      expired_time = expired_time_t * 1000000;
+    }
+  }
+  if (NULL != cbio) {
+    BIO_free(cbio);
+  }
+  if (NULL != chain) {
+    sk_X509_INFO_pop_free(chain, X509_INFO_free);
+  }
+  return ret;
+}
+
+enum CAP_UNIT
+{
+  // shift bits between unit of byte and that
+  CAP_B = 0,
+  CAP_KB = 10,
+  CAP_MB = 20,
+  CAP_GB = 30,
+  CAP_TB = 40,
+  CAP_PB = 50,
+};
+
+int64_t parse_config_capacity(const char *str, bool &valid, bool check_unit /* = true */, bool use_byte /* = false*/)
+{
+  char *p_unit = NULL;
+  int64_t value = 0;
+
+  if (OB_ISNULL(str) || '\0' == str[0]) {
+    valid = false;
+  } else {
+    valid = true;
+    value = strtol(str, &p_unit, 0);
+
+    if (OB_ISNULL(p_unit)) {
+      valid = false;
+    } else if (value < 0) {
+      valid = false;
+    } else if ('\0' == *p_unit) {
+      if (check_unit) {
+        valid = false;
+      } else if (!use_byte) {
+        value <<= CAP_MB;
+      }
+    } else if (0 == STRCASECMP("b", p_unit) || 0 == STRCASECMP("byte", p_unit)) {
+      // do nothing
+    } else if (0 == STRCASECMP("kb", p_unit) || 0 == STRCASECMP("k", p_unit)) {
+      value <<= CAP_KB;
+    } else if (0 == STRCASECMP("mb", p_unit) || 0 == STRCASECMP("m", p_unit)) {
+      value <<= CAP_MB;
+    } else if (0 == STRCASECMP("gb", p_unit) || 0 == STRCASECMP("g", p_unit)) {
+      value <<= CAP_GB;
+    } else if (0 == STRCASECMP("tb", p_unit) || 0 == STRCASECMP("t", p_unit)) {
+      value <<= CAP_TB;
+    } else if (0 == STRCASECMP("pb", p_unit) || 0 == STRCASECMP("p", p_unit)) {
+      value <<= CAP_PB;
+    } else {
+      valid = false;
+      OB_LOG_RET(WARN, OB_ERR_UNEXPECTED, "get capacity error", K(str), K(p_unit));
+    }
+  }
+  return value;
+}
+
+void get_glibc_version(int &major, int &minor)
+{
+  major = 0;
+  minor = 0;
+  const char *glibc_version = gnu_get_libc_version();
+  if (NULL != glibc_version) {
+    sscanf(glibc_version, "%d.%d", &major, &minor);
+  }
+}
+
+bool glibc_prereq(int major, int minor)
+{
+  int cur_major = 0;
+  int cur_minor = 0;
+  get_glibc_version(cur_major, cur_minor);
+  return (cur_major > major) || (cur_major == major && cur_minor >= minor);
+}
+
+const char *get_transparent_hugepage_status()
+{
+  char buf[32];
+  const char *status = "unknown";
+  FILE *file = fopen("/sys/kernel/mm/transparent_hugepage/enabled", "r");
+  if (NULL != file) {
+    if (NULL != fgets(buf, sizeof(buf), file)) {
+      if (NULL != STRSTR(buf, "[never]")) {
+        status = "never";
+      } else if (NULL != STRSTR(buf, "[always]")) {
+        status = "always";
+      } else if (NULL != STRSTR(buf, "[madvise]")) {
+        status = "madvise";
+      }
+    }
+    fclose(file);
+  }
+
+  return status;
+}
+
+int read_one_int(const char *file_name, int64_t &value)
+{
+  int ret = OB_SUCCESS;
+  FILE *fp = fopen(file_name, "r");
+  if (fp != nullptr) {
+    if (1 != fscanf(fp, "%ld", &value)) {
+      ret = OB_IO_ERROR;
+      LOG_ERROR("Failed to read integer from file", K(ret));
+    }
+    fclose(fp);
+  } else {
+    ret = OB_FILE_NOT_EXIST;
+    LOG_WARN("File does not exist", K(ret));
+  }
+  return ret;
+}
 
 } // end namespace common
 } // end namespace oceanbase

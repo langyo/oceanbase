@@ -13,13 +13,6 @@
 #define USING_LOG_PREFIX SQL_ENG
 
 #include "ob_temp_table_transformation_op.h"
-#include "ob_temp_table_insert_op.h"
-#include "sql/engine/ob_operator_reg.h"
-#include "sql/dtl/ob_dtl_interm_result_manager.h"
-#include "sql/session/ob_sql_session_info.h"
-#include "sql/engine/px/ob_px_util.h"
-#include "sql/engine/ob_physical_plan.h"
-#include "sql/engine/ob_exec_context.h"
 
 namespace oceanbase
 {
@@ -175,12 +168,10 @@ int ObTempTableTransformationOp::destory_interm_results()
   }
 
 #ifdef ERRSIM
-  ObSQLSessionInfo *session = ctx_.get_my_session();
-  int64_t query_timeout = 0;
-  session->get_query_timeout(query_timeout);
-  if (OB_FAIL(OB_E(EventTable::EN_PX_TEMP_TABLE_NOT_DESTROY_REMOTE_INTERM_RESULT) OB_SUCCESS)) {
-    LOG_WARN("ObTempTableTransformationOp not destory_remote_interm_results by design", K(ret), K(query_timeout));
-    return OB_SUCCESS;
+  int ecode = EventTable::EN_PX_TEMP_TABLE_NOT_DESTROY_REMOTE_INTERM_RESULT;
+  if (OB_SUCCESS != ecode && OB_SUCC(ret)) {
+    LOG_WARN("ObTempTableTransformationOp not destory_remote_interm_results by design", K(ret));
+    return ret;
   }
 #endif
 

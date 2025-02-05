@@ -10,23 +10,14 @@
  * See the Mulan PubL v2 for more details.
  */
 
-#include <pthread.h>
-#include "lib/lock/ob_latch.h"
-#include "lib/lock/ob_mutex.h"
-#include "lib/lock/ob_spin_lock.h"
-#include "lib/lock/ob_spin_rwlock.h"
-#include "lib/random/ob_random.h"
-#include "lib/utility/ob_template_utils.h"
-#include "lib/thread/thread_pool.h"
 #include "gtest/gtest.h"
 #define private public
-#include "lib/worker.h"
+#include "deps/oblib/src/lib/rc/context.h"
 
 namespace oceanbase
 {
 namespace common
 {
-
 int k = 0;
 const int max_cnt = 1000;
 
@@ -343,6 +334,36 @@ TEST(ObLatch, diagnose)
 }
 #endif
 
+typedef lib::ObjectSetV2::Lock TestSpinLock;
+void *my_thread_func(void* arg)
+{
+  TestSpinLock *lock = (TestSpinLock*)arg;
+  lock->lock();
+  lock->unlock();
+  return NULL;
+}
+TEST(TestSpinLock, normal)
+{
+  const int thread_cnt = 128;
+  pthread_t pth[thread_cnt];
+  TestSpinLock lock;
+  for (int i = 0; i < 100; ++i) {
+    lock.lock();
+    ASSERT_EQ(0, lock.get_wait_cnt());
+    lock.unlock();
+  }
+  lock.lock();
+  for (int i = 0; i < thread_cnt; ++i) {
+    pthread_create(&pth[i], NULL, my_thread_func, (void*)&lock);
+  }
+  sleep(1);
+  ASSERT_EQ(thread_cnt, lock.get_wait_cnt());
+  lock.unlock();
+  for (int i = 0; i < thread_cnt; ++i) {
+    pthread_join(pth[i], NULL);
+  }
+  ASSERT_EQ(0, lock.get_wait_cnt());
+}
 }
 }
 

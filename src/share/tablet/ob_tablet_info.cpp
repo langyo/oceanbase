@@ -13,14 +13,30 @@
 #define USING_LOG_PREFIX SHARE
 
 #include "share/tablet/ob_tablet_info.h"
-#include "share/ob_errno.h" // KR(ret)
-#include "share/ob_ls_id.h" // ls_id
 #include "share/tablet/ob_tablet_filter.h" // ObTabletFilter
 
 namespace oceanbase
 {
 namespace share
 {
+
+const static char * ObDataChecksumTypeStr[] = {
+  "NORMAL",
+  "COLUMNSTORE",
+};
+
+const char *data_check_checksum_type_to_str(const ObDataChecksumType type)
+{
+  STATIC_ASSERT(static_cast<uint8_t>(ObDataChecksumType::DATA_CHECKSUM_MAX) == ARRAYSIZEOF(ObDataChecksumTypeStr), "checksum type len is mismatch");
+  const char *str = "";
+  if (is_valid_data_checksum_type(type)) {
+    str = ObDataChecksumTypeStr[static_cast<uint8_t>(type)];
+  } else {
+    str = "INVALI_DATACHECKSUM_TYPE";
+  }
+  return str;
+}
+
 ObTabletReplica::ObTabletReplica()
     : tenant_id_(OB_INVALID_TENANT_ID),
       tablet_id_(),
@@ -122,6 +138,16 @@ bool ObTabletReplica::is_equal_for_report(const ObTabletReplica &other) const
     is_equal = true;
   }
   return is_equal;
+}
+
+void ObTabletReplica::fake_for_diagnose(const uint64_t tenant_id,
+                                       const share::ObLSID &ls_id,
+                                       const common::ObTabletID &tablet_id)
+{
+  reset();
+  tenant_id_ = tenant_id;
+  ls_id_ = ls_id;
+  tablet_id_ = tablet_id;
 }
 
 ObTabletInfo::ObTabletInfo()

@@ -12,10 +12,6 @@
 
 #define USING_LOG_PREFIX SQL_RESV
 #include "sql/resolver/dml/ob_update_resolver.h"
-#include "sql/session/ob_sql_session_info.h"
-#include "sql/resolver/dml/ob_select_stmt.h"
-#include "sql/resolver/dml/ob_select_resolver.h"
-#include "sql/resolver/ob_resolver_utils.h"
 
 namespace oceanbase
 {
@@ -40,6 +36,7 @@ int ObUpdateResolver::resolve(const ParseNode &parse_tree)
   ObUpdateStmt *update_stmt = NULL;
   ObSEArray<ObTableAssignment, 2> tables_assign;
   bool has_tg = false;
+  bool disable_limit_offset = false;
   if (T_UPDATE != parse_tree.type_
       || 3 > parse_tree.num_child_
       || OB_ISNULL(parse_tree.children_)
@@ -50,6 +47,9 @@ int ObUpdateResolver::resolve(const ParseNode &parse_tree)
   } else if (OB_ISNULL(update_stmt = create_stmt<ObUpdateStmt>())) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
     LOG_ERROR("create update stmt failed");
+  } else if (OB_FAIL(session_info_->check_feature_enable(ObCompatFeatureType::UPD_LIMIT_OFFSET,
+                                                         disable_limit_offset))) {
+    LOG_WARN("failed to check feature enable", K(ret));
   } else {
     stmt_ = update_stmt;
     update_stmt->set_ignore(false);
@@ -106,9 +106,6 @@ int ObUpdateResolver::resolve(const ParseNode &parse_tree)
         if ((NULL != (*it)->view_base_item_ || has_tg) &&
             OB_FAIL(add_all_column_to_updatable_view(*update_stmt, *(*it), has_tg))) {
           LOG_WARN("add all column for updatable view failed", K(ret));
-        } else if (is_oracle_mode() &&
-                   OB_FAIL(add_default_sequence_id_to_stmt((*it)->table_id_))) {
-          LOG_WARN("add default sequence id to stmt failed", K(ret));
         }
       }
     }
@@ -153,16 +150,16 @@ int ObUpdateResolver::resolve(const ParseNode &parse_tree)
       LOG_WARN("failed to add remove const expr", K(ret));
     } else if (OB_FAIL(resolve_update_constraints())) {
       LOG_WARN("failed to resolve check exprs", K(ret));
+    } else if (OB_FAIL(resolve_hints(parse_tree.children_[HINT]))) {
+      LOG_WARN("resolve hints failed", K(ret));
     } else if (OB_FAIL(resolve_where_clause(parse_tree.children_[WHERE]))) {
       LOG_WARN("resolve where clause failed", K(ret));
     } else if (params_.is_batch_stmt_ && OB_FAIL(generate_batched_stmt_info())) {
       LOG_WARN("failed to generate batched stmt info", K(ret));
     } else if (OB_FAIL(resolve_order_clause(parse_tree.children_[ORDER_BY]))) {
       LOG_WARN("resolve order clause failed", K(ret));
-    } else if (OB_FAIL(resolve_limit_clause(parse_tree.children_[LIMIT]))) {
+    } else if (OB_FAIL(resolve_limit_clause(parse_tree.children_[LIMIT], disable_limit_offset))) {
       LOG_WARN("resolve limit clause failed", K(ret));
-    } else if (OB_FAIL(resolve_hints(parse_tree.children_[HINT]))) {
-      LOG_WARN("resolve hints failed", K(ret));
     } else if (OB_FAIL(resolve_returning(parse_tree.children_[RETURNING]))) {
       LOG_WARN("resolve returning failed", K(ret));
     } else if (OB_FAIL(try_expand_returning_exprs())) {
@@ -264,7 +261,9 @@ int ObUpdateResolver::check_update_assign_duplicated(const ObUpdateStmt *update_
         const ObAssignment &assign_item = table_info->assignments_.at(j);
         if (assign_item.is_duplicated_) {
           ret = OB_ERR_FIELD_SPECIFIED_TWICE;
-          LOG_USER_ERROR(OB_ERR_FIELD_SPECIFIED_TWICE, to_cstring(assign_item.column_expr_->get_column_name()));
+          ObCStringHelper helper;
+          LOG_USER_ERROR(OB_ERR_FIELD_SPECIFIED_TWICE,
+              helper.convert(assign_item.column_expr_->get_column_name()));
         }
       }
     }
@@ -443,20 +442,15 @@ int ObUpdateResolver::resolve_table_list(const ParseNode &parse_tree)
       LOG_WARN("table node is null");
     } else if (OB_FAIL(ObDMLResolver::resolve_table(*table_node, table_item))) {
       LOG_WARN("failed to resolve table", K(ret));
-    } else if (OB_FAIL(resolve_foreign_key_constraint(table_item))) {
-      LOG_WARN("failed to resolve foreign key constraint", K(ret), K(table_item->ref_id_));
     } else {/*do nothing*/}
     if (OB_SUCC(ret)) {
       if (OB_FAIL(column_namespace_checker_.add_reference_table(table_item))) {
         LOG_WARN("add reference table to namespace checker failed", K(ret));
       } else if (OB_FAIL(update_stmt->add_from_item(table_item->table_id_, table_item->is_joined_table()))) {
         LOG_WARN("failed to add from item", K(ret));
+      } else if (OB_FAIL(check_need_fired_trigger(table_item))) {
+        LOG_WARN("failed to check need fired trigger", K(ret));
       } else {
-        if (is_oracle_mode() && table_item->is_view_table_) {
-          bool has_tg = false;
-          OZ (has_need_fired_trigger_on_view(table_item, has_tg));
-          OX (update_stmt->set_has_instead_of_trigger(has_tg));
-        }
       /*
         In order to share the same logic with 'select' to generate access path costly, we
         add the table in the udpate stmt in the from_item list as well.
@@ -491,8 +485,8 @@ int ObUpdateResolver::generate_update_table_info(ObTableAssignment &table_assign
   const ObTableSchema *table_schema = NULL;
   const TableItem *table_item = NULL;
   ObUpdateTableInfo *table_info = NULL;
-  uint64_t index_tid[OB_MAX_INDEX_PER_TABLE];
-  int64_t gindex_cnt = OB_MAX_INDEX_PER_TABLE;
+  uint64_t index_tid[OB_MAX_AUX_TABLE_PER_MAIN_TABLE];
+  int64_t gindex_cnt = OB_MAX_AUX_TABLE_PER_MAIN_TABLE;
   int64_t binlog_row_image = ObBinlogRowImage::FULL;
   if (OB_ISNULL(schema_checker_) || OB_ISNULL(params_.session_info_) ||
       OB_ISNULL(allocator_) || OB_ISNULL(update_stmt)) {

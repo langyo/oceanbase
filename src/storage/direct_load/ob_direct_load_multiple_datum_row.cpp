@@ -13,7 +13,6 @@
 
 #include "storage/direct_load/ob_direct_load_multiple_datum_row.h"
 #include "observer/table_load/ob_table_load_stat.h"
-#include "share/rc/ob_tenant_base.h"
 
 namespace oceanbase
 {
@@ -24,7 +23,7 @@ using namespace blocksstable;
 using namespace table;
 
 ObDirectLoadMultipleDatumRow::ObDirectLoadMultipleDatumRow()
-  : allocator_("TLD_MultiRow"), buf_size_(0), buf_(nullptr)
+  : allocator_("TLD_MultiRow"), is_deleted_(false), buf_size_(0), buf_(nullptr)
 {
   allocator_.set_tenant_id(MTL_ID());
 }
@@ -37,6 +36,7 @@ void ObDirectLoadMultipleDatumRow::reset()
 {
   rowkey_.reset();
   seq_no_.reset();
+  is_deleted_ = false;
   buf_size_ = 0;
   buf_ = nullptr;
   allocator_.reset();
@@ -46,6 +46,7 @@ void ObDirectLoadMultipleDatumRow::reuse()
 {
   rowkey_.reuse();
   seq_no_.reset();
+  is_deleted_ = false;
   buf_size_ = 0;
   buf_ = nullptr;
   allocator_.reuse();
@@ -77,6 +78,7 @@ int ObDirectLoadMultipleDatumRow::deep_copy(const ObDirectLoadMultipleDatumRow &
     } else {
       buf_size_ = src.buf_size_;
       seq_no_ = src.seq_no_;
+      is_deleted_ = src.is_deleted_;
       buf_ = buf + pos;
       MEMCPY(buf + pos, src.buf_, buf_size_);
       pos += buf_size_;
@@ -86,7 +88,7 @@ int ObDirectLoadMultipleDatumRow::deep_copy(const ObDirectLoadMultipleDatumRow &
 }
 
 int ObDirectLoadMultipleDatumRow::from_datums(const ObTabletID &tablet_id, ObStorageDatum *datums,
-                                              int64_t column_count, int64_t rowkey_column_count, const ObTableLoadSequenceNo &seq_no)
+                                              int64_t column_count, int64_t rowkey_column_count, const ObTableLoadSequenceNo &seq_no, const bool is_deleted)
 {
   OB_TABLE_LOAD_STATISTICS_TIME_COST(DEBUG, transfer_external_row_time_us);
   int ret = OB_SUCCESS;
@@ -97,25 +99,36 @@ int ObDirectLoadMultipleDatumRow::from_datums(const ObTabletID &tablet_id, ObSto
              K(rowkey_column_count));
   } else {
     reuse();
+    seq_no_ = seq_no;
+    is_deleted_ = is_deleted;
     ObDirectLoadDatumArray serialize_datum_array;
     if (OB_FAIL(rowkey_.assign(tablet_id, datums, rowkey_column_count))) {
       LOG_WARN("fail to assign rowkey", KR(ret));
-    } else if (OB_FAIL(serialize_datum_array.assign(datums + rowkey_column_count,
-                                                    column_count - rowkey_column_count))) {
-      LOG_WARN("fail to assign datum array", KR(ret));
-    } else {
-      const int64_t buf_size = serialize_datum_array.get_serialize_size();
-      char *buf = nullptr;
-      int64_t pos = 0;
-      if (OB_ISNULL(buf = static_cast<char *>(allocator_.alloc(buf_size)))) {
-        ret = OB_ALLOCATE_MEMORY_FAILED;
-        LOG_WARN("fail to alloc memory", KR(ret), K(buf_size));
-      } else if (OB_FAIL(serialize_datum_array.serialize(buf, buf_size, pos))) {
-        LOG_WARN("fail to serialize datum array", KR(ret));
+    } else if (column_count > rowkey_column_count) {
+      // to deserialize datum array
+      if (OB_FAIL(serialize_datum_array.assign(datums + rowkey_column_count,
+                                                      column_count - rowkey_column_count))) {
+        LOG_WARN("fail to assign datum array", KR(ret));
       } else {
-        buf_ = buf;
-        buf_size_ = buf_size;
-        seq_no_ = seq_no;
+        const int64_t buf_size = serialize_datum_array.get_serialize_size();
+        char *buf = nullptr;
+        int64_t pos = 0;
+        if (OB_ISNULL(buf = static_cast<char *>(allocator_.alloc(buf_size)))) {
+          ret = OB_ALLOCATE_MEMORY_FAILED;
+          LOG_WARN("fail to alloc memory", KR(ret), K(buf_size));
+        } else if (OB_FAIL(serialize_datum_array.serialize(buf, buf_size, pos))) {
+          LOG_WARN("fail to serialize datum array", KR(ret));
+        } else {
+          if (OB_NOT_NULL(buf_)) {
+            allocator_.free(buf);
+            buf_ = nullptr;
+          }
+          buf_ = buf;
+          buf_size_ = buf_size;
+        }
+        if (OB_FAIL(ret) && OB_NOT_NULL(buf)) {
+          allocator_.free(buf);
+        }
       }
     }
   }
@@ -137,19 +150,21 @@ int ObDirectLoadMultipleDatumRow::to_datums(ObStorageDatum *datums, int64_t colu
     for (int64_t i = 0; i < rowkey_.datum_array_.count_; ++i) {
       datums[i] = rowkey_.datum_array_.datums_[i];
     }
-    // from deserialize datum array
-    ObDirectLoadDatumArray deserialize_datum_array;
-    int64_t pos = 0;
-    if (OB_FAIL(deserialize_datum_array.assign(datums + rowkey_.datum_array_.count_,
-                                               column_count - rowkey_.datum_array_.count_))) {
-      LOG_WARN("fail to assign datum array", KR(ret));
-    } else if (OB_FAIL(deserialize_datum_array.deserialize(buf_, buf_size_, pos))) {
-      LOG_WARN("fail to deserialize datum array", KR(ret));
-    } else if (OB_UNLIKELY(rowkey_.datum_array_.count_ + deserialize_datum_array.count_ !=
-                           column_count)) {
-      ret = OB_ERR_UNEXPECTED;
-      LOG_WARN("unexpected column count", KR(ret), K(rowkey_.datum_array_.count_),
-               K(deserialize_datum_array.count_), K(column_count));
+    if (column_count > rowkey_.datum_array_.count_) {
+      // from deserialize datum array
+      ObDirectLoadDatumArray deserialize_datum_array;
+      int64_t pos = 0;
+      if (OB_FAIL(deserialize_datum_array.assign(datums + rowkey_.datum_array_.count_,
+                                                 column_count - rowkey_.datum_array_.count_))) {
+        LOG_WARN("fail to assign datum array", KR(ret));
+      } else if (OB_FAIL(deserialize_datum_array.deserialize(buf_, buf_size_, pos))) {
+        LOG_WARN("fail to deserialize datum array", KR(ret));
+      } else if (OB_UNLIKELY(rowkey_.datum_array_.count_ + deserialize_datum_array.count_ !=
+                             column_count)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("unexpected column count", KR(ret), K(rowkey_.datum_array_.count_),
+                 K(deserialize_datum_array.count_), K(column_count));
+      }
     }
   }
   return ret;
@@ -159,7 +174,7 @@ OB_DEF_SERIALIZE_SIMPLE(ObDirectLoadMultipleDatumRow)
 {
   OB_TABLE_LOAD_STATISTICS_TIME_COST(DEBUG, external_row_serialize_time_us);
   int ret = OB_SUCCESS;
-  LST_DO_CODE(OB_UNIS_ENCODE, rowkey_, seq_no_, buf_size_);
+  LST_DO_CODE(OB_UNIS_ENCODE, rowkey_, seq_no_, is_deleted_, buf_size_);
   if (OB_SUCC(ret) && OB_NOT_NULL(buf_)) {
     MEMCPY(buf + pos, buf_, buf_size_);
     pos += buf_size_;
@@ -172,7 +187,7 @@ OB_DEF_DESERIALIZE_SIMPLE(ObDirectLoadMultipleDatumRow)
   OB_TABLE_LOAD_STATISTICS_TIME_COST(DEBUG, external_row_deserialize_time_us);
   int ret = OB_SUCCESS;
   reuse();
-  LST_DO_CODE(OB_UNIS_DECODE, rowkey_, seq_no_, buf_size_);
+  LST_DO_CODE(OB_UNIS_DECODE, rowkey_, seq_no_, is_deleted_, buf_size_);
   if (OB_SUCC(ret)) {
     buf_ = buf + pos;
     pos += buf_size_;
@@ -184,7 +199,7 @@ OB_DEF_SERIALIZE_SIZE_SIMPLE(ObDirectLoadMultipleDatumRow)
 {
   OB_TABLE_LOAD_STATISTICS_TIME_COST(DEBUG, external_row_serialize_time_us);
   int64_t len = 0;
-  LST_DO_CODE(OB_UNIS_ADD_LEN, rowkey_, seq_no_, buf_size_);
+  LST_DO_CODE(OB_UNIS_ADD_LEN, rowkey_, seq_no_, is_deleted_, buf_size_);
   len += buf_size_;
   return len;
 }

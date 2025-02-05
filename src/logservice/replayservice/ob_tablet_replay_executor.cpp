@@ -11,14 +11,14 @@
  */
 
 #include "logservice/replayservice/ob_tablet_replay_executor.h"
-#include "storage/ls/ob_ls.h"
-#include "storage/ls/ob_ls_get_mod.h"
 #include "storage/tx_storage/ob_ls_service.h"
 
 namespace oceanbase
 {
 namespace logservice
 {
+
+ERRSIM_POINT_DEF(EN_REPLAY_FATAL_ERROR);
 
 #ifdef CLOG_LOG_LIMIT
 #undef CLOG_LOG_LIMIT
@@ -111,6 +111,28 @@ int ObTabletReplayExecutor::execute(const share::SCN &scn, const share::ObLSID &
     }
   }
 
+#ifdef ERRSIM
+    if (OB_SUCC(ret)) {
+      const int64_t errsim_migration_ls_id = GCONF.errsim_migration_ls_id;
+      const ObLSID errsim_ls_id(errsim_migration_ls_id);
+      const ObString &errsim_migration_dest_server_addr = GCONF.errsim_migration_dest_server_addr.str();
+      common::ObAddr addr;
+      const ObAddr &my_addr = GCONF.self_addr_;
+
+      if (!errsim_migration_dest_server_addr.empty() && OB_FAIL(addr.parse_from_string(errsim_migration_dest_server_addr))) {
+        CLOG_LOG(WARN, "failed to parse from string to addr", K(ret), K(errsim_migration_dest_server_addr));
+      } else {
+        if (ls_id == errsim_ls_id && my_addr == addr) {
+          ret = EN_REPLAY_FATAL_ERROR ? : OB_SUCCESS;
+          if (OB_FAIL(ret)) {
+            STORAGE_LOG(ERROR, "fake EN_REPLAY_FATAL_ERROR", K(ret));
+          }
+        }
+      }
+
+    }
+#endif
+
   return ret;
 }
 
@@ -131,8 +153,13 @@ int ObTabletReplayExecutor::replay_get_tablet_(
     CLOG_LOG(WARN, "log stream should not be NULL", KR(ret), K(scn));
   } else {
     const share::ObLSID &ls_id = ls->get_ls_id();
-    if (is_replay_update_tablet_status_()) {
-      if (OB_FAIL(ls->replay_get_tablet_no_check(tablet_id, scn, tablet_handle))) {
+    if (is_replay_update_tablet_status_() || is_replay_ddl_control_log_()) {
+      const bool allow_tablet_not_exist = replay_allow_tablet_not_exist_();
+      if (!is_replay_update_tablet_status_() && is_replay_ddl_control_log_()) {
+        share::ObTaskController::get().allow_next_syslog();
+        CLOG_LOG(INFO, "force replay ddl control log", K(ls_id), K(tablet_id), K(scn), K(allow_tablet_not_exist));
+      }
+      if (OB_FAIL(ls->replay_get_tablet_no_check(tablet_id, scn, allow_tablet_not_exist, tablet_handle))) {
         CLOG_LOG(WARN, "replay get table failed", KR(ret), K(ls_id), K(tablet_id));
       }
     } else if (OB_FAIL(ls->replay_get_tablet(tablet_id, scn, is_update_mds_table, tablet_handle))) {

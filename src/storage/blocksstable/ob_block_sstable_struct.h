@@ -53,7 +53,8 @@ const int64_t LINKED_MACRO_BLOCK_HEADER_MAGIC = 1019;
 
 const int64_t MICRO_BLOCK_HEADER_VERSION_1 = 1;
 const int64_t MICRO_BLOCK_HEADER_VERSION_2 = 2;
-const int64_t MICRO_BLOCK_HEADER_VERSION = MICRO_BLOCK_HEADER_VERSION_2;
+const int64_t MICRO_BLOCK_HEADER_VERSION_3 = 3;
+const int64_t MICRO_BLOCK_HEADER_VERSION = MICRO_BLOCK_HEADER_VERSION_3;
 const int64_t LINKED_MACRO_BLOCK_HEADER_VERSION = 1;
 const int64_t BF_MACRO_BLOCK_HEADER_VERSION = 1;
 const int64_t BF_MICRO_BLOCK_HEADER_VERSION = 1;
@@ -222,6 +223,7 @@ struct ObColumnHeader
     HAS_EXTEND_VALUE = 0x2,
     BIT_PACKING = 0x4,
     LAST_VAR_FIELD = 0x8,
+    IS_TRANS_VERSION = 0x10,
     MAX_ATTRIBUTE,
   };
   static constexpr int8_t OB_COLUMN_HEADER_V1 = 0;
@@ -462,6 +464,7 @@ struct ObMicroBlockEncodingCtx
   common::ObRowStoreType row_store_type_;
   bool need_calc_column_chksum_;
   ObCompressorType compressor_type_;
+  uint64_t encoding_granularity_;
 
   ObMicroBlockEncodingCtx() : macro_block_size_(0), micro_block_size_(0),
     rowkey_column_cnt_(0), column_cnt_(0), col_descs_(nullptr),
@@ -470,7 +473,7 @@ struct ObMicroBlockEncodingCtx
     previous_encodings_(), previous_cs_encoding_(),
     column_encodings_(nullptr), major_working_cluster_version_(0),
     row_store_type_(ENCODING_ROW_STORE), need_calc_column_chksum_(false),
-    compressor_type_(INVALID_COMPRESSOR)
+    compressor_type_(INVALID_COMPRESSOR), encoding_granularity_(UINT64_MAX)
   {
     previous_encodings_.set_attr(ObMemAttr(MTL_ID(), "MicroEncodeCtx"));
   }
@@ -479,7 +482,7 @@ struct ObMicroBlockEncodingCtx
       K_(column_cnt), KP_(col_descs), K_(estimate_block_size), K_(real_block_size),
       K_(micro_block_cnt), K_(encoder_opt), K_(previous_encodings), KP_(column_encodings),
       K_(major_working_cluster_version), K_(row_store_type), K_(need_calc_column_chksum),
-      K_(compressor_type));
+      K_(compressor_type), K_(encoding_granularity));
 };
 
 template <typename T, int64_t MAX_COUNT, int64_t BLOCK_SIZE>
@@ -495,7 +498,7 @@ struct ObColumnEncodingCtx
   int64_t fix_data_size_;
   int64_t max_string_size_;
   int64_t extend_value_bit_;
-  const ObPodFix2dArray<ObDatum, 1 << 20, common::OB_MALLOC_MIDDLE_BLOCK_SIZE> *col_datums_;
+  const ObPodFix2dArray<ObDatum, 1 << 20, common::OB_MALLOC_NORMAL_BLOCK_SIZE> *col_datums_;
   ObEncodingHashTable *ht_;
   ObMultiPrefixTree *prefix_tree_;
   const ObMicroBlockEncodingCtx *encoding_ctx_;
@@ -744,7 +747,8 @@ public:
 
   OB_INLINE bool is_valid() const
   {
-    return column_cnt_ > 0 && rowkey_cnt_ >= 0;
+    return column_cnt_ > 0 && rowkey_cnt_ >= 0
+      && ObColClusterInfoMask::is_valid_offset_type((ObColClusterInfoMask::BYTES_LEN)offset_type_);
   }
 
   static const int64_t ROW_HEADER_VERSION_1 = 0;
@@ -970,8 +974,8 @@ public:
                K_(sweep_cost_time),
                KTIME_(start_time),
                KTIME_(last_end_time),
-               K_(mark_finished),
-               K_(hold_info));
+               K_(hold_info),
+               K_(mark_finished));
 public:
   int64_t total_block_count_;
   int64_t reserved_block_count_;
@@ -991,8 +995,8 @@ public:
   int64_t sweep_cost_time_;
   int64_t start_time_;
   int64_t last_end_time_;
-  bool mark_finished_;
   ObSimpleMacroBlockInfo hold_info_;
+  bool mark_finished_;
 };
 
 /****************************** following codes are inline functions ****************************/
@@ -1095,30 +1099,6 @@ public:
   int64_t master_key_id_;
   const char *encrypt_key_;
 };
-
-enum ObDDLMacroBlockType
-{
-  DDL_MB_INVALID_TYPE = 0,
-  DDL_MB_DATA_TYPE = 1,
-  DDL_MB_INDEX_TYPE = 2,
-};
-
-struct ObDDLMacroBlockRedoInfo final
-{
-  OB_UNIS_VERSION(1);
-public:
-  ObDDLMacroBlockRedoInfo();
-  ~ObDDLMacroBlockRedoInfo() = default;
-  bool is_valid() const;
-  TO_STRING_KV(K_(table_key),  K_(data_buffer), K_(block_type), K_(logic_id), K_(start_scn));
-public:
-  storage::ObITable::TableKey table_key_;
-  ObString data_buffer_;
-  ObDDLMacroBlockType block_type_;
-  ObLogicMacroBlockId logic_id_;
-  share::SCN start_scn_;
-};
-
 }//end namespace blocksstable
 }//end namespace oceanbase
 #endif

@@ -11,13 +11,8 @@
  */
 
 #define USING_LOG_PREFIX SHARE
-#include "share/backup/ob_archive_struct.h"
+#include "ob_archive_struct.h"
 #include "share/backup/ob_tenant_archive_mgr.h"
-#include "lib/ob_define.h"
-#include "lib/ob_errno.h"
-#include "lib/utility/ob_macro_utils.h"
-#include "lib/oblog/ob_log_module.h"
-#include "lib/hash_func/murmur_hash.h"
 
 using namespace oceanbase;
 using namespace share;
@@ -279,9 +274,10 @@ int ObTenantArchiveRoundAttr::generate_next_round(const int64_t incarnation,
   next_round.used_piece_id_ = used_piece_id_ + 1;
   next_round.piece_switch_interval_ = piece_switch_interval;
   next_round.path_ = path;
+  next_round.comment_.reset();
 
   next_round.frozen_input_bytes_ = 0;
-  next_round.frozen_input_bytes_ = 0;
+  next_round.frozen_output_bytes_ = 0;
   next_round.active_input_bytes_ = 0;
   next_round.active_output_bytes_ = 0;
 
@@ -571,6 +567,17 @@ int ObArchivePieceStatus::set_status(const char *status)
   return ret;
 }
 
+/**
+ * -----------------------------------ObPieceKey-----------------------------------
+ */
+uint64_t ObPieceKey::hash() const
+{
+  uint64_t hash_val = 0;
+  hash_val = murmurhash(&dest_id_, sizeof(dest_id_), hash_val);
+  hash_val = murmurhash(&round_id_, sizeof(round_id_), hash_val);
+  hash_val = murmurhash(&piece_id_, sizeof(piece_id_), hash_val);
+  return hash_val;
+}
 
 /**
  * ------------------------------ObTenantArchivePieceAttr::Key---------------------
@@ -602,6 +609,13 @@ int ObTenantArchivePieceAttr::Key::fill_pkey_dml(share::ObDMLSqlSplicer &dml) co
   return ret;
 }
 
+void ObTenantArchivePieceAttr::Key::reset()
+{
+  tenant_id_ = OB_INVALID_TENANT_ID;
+  dest_id_ = 0;
+  round_id_ = 0;
+  piece_id_ = 0;
+}
 
 
 /**
@@ -757,7 +771,25 @@ int ObTenantArchivePieceAttr::assign(const ObTenantArchivePieceAttr &other)
   return ret;
 }
 
-
+void ObTenantArchivePieceAttr::reset()
+{
+  key_.reset();
+  incarnation_ = OB_START_INCARNATION;
+  dest_no_ = -1;
+  file_count_ = 0;
+  input_bytes_ = 0;
+  output_bytes_ = 0;
+  cp_file_id_ = 0;
+  cp_file_offset_ = 0;
+  start_scn_ = share::SCN::min_scn();
+  checkpoint_scn_ = share::SCN::min_scn();
+  max_scn_ = share::SCN::min_scn();
+  end_scn_ = share::SCN::min_scn();
+  compatible_.version_ = ObArchiveCompatible::Compatible::NONE;
+  status_.status_ = ObArchivePieceStatus::Status::MAX_STATUS;
+  file_status_ = ObBackupFileStatus::STATUS::BACKUP_FILE_MAX;
+  path_.reset();
+}
 
 /**
  * ------------------------------ObLSArchivePersistInfo::Key---------------------

@@ -11,9 +11,11 @@
  */
 
 #define USING_LOG_PREFIX SQL_ENG
-#include "sql/engine/dml/ob_dml_ctx_define.h"
+#include "ob_dml_ctx_define.h"
 #include "sql/engine/dml/ob_fk_checker.h"
 #include "sql/das/ob_das_utils.h"
+#include "sql/engine/dml/ob_trigger_handler.h"
+#include "src/sql/engine/ob_exec_context.h"
 namespace oceanbase
 {
 namespace sql
@@ -701,17 +703,16 @@ OB_DEF_DESERIALIZE(ObReplaceCtDef)
   int ret = OB_SUCCESS;
   ObDMLCtDefAllocator<ObInsCtDef> ins_ctdef_allocator(alloc_);
   ins_ctdef_ = ins_ctdef_allocator.alloc();
-  if (OB_ISNULL(ins_ctdef_)) {
-    ret = OB_ALLOCATE_MEMORY_FAILED;
-    LOG_WARN("alloc ins_ctdef failed", K(ret));
-  }
-  OB_UNIS_DECODE(*ins_ctdef_);
   ObDMLCtDefAllocator<ObDelCtDef> del_ctdef_allocator(alloc_);
   del_ctdef_ = del_ctdef_allocator.alloc();
   if (OB_ISNULL(del_ctdef_)) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
     LOG_WARN("alloc del_ctdef_ failed", K(ret));
+  } else if (OB_ISNULL(ins_ctdef_)) {
+    ret = OB_ALLOCATE_MEMORY_FAILED;
+    LOG_WARN("alloc ins_ctdef failed", K(ret));
   }
+  OB_UNIS_DECODE(*ins_ctdef_);
   OB_UNIS_DECODE(*del_ctdef_);
   return ret;
 }
@@ -737,17 +738,16 @@ OB_DEF_DESERIALIZE(ObInsertUpCtDef)
   int ret = OB_SUCCESS;
   ObDMLCtDefAllocator<ObInsCtDef> ins_ctdef_allocator(alloc_);
   ins_ctdef_ = ins_ctdef_allocator.alloc();
-  if (OB_ISNULL(ins_ctdef_)) {
-    ret = OB_ALLOCATE_MEMORY_FAILED;
-    LOG_WARN("alloc ins_ctdef failed", K(ret));
-  }
-  OB_UNIS_DECODE(*ins_ctdef_);
   ObDMLCtDefAllocator<ObUpdCtDef> upd_ctdef_allocator(alloc_);
   upd_ctdef_ = upd_ctdef_allocator.alloc();
   if (OB_ISNULL(upd_ctdef_)) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
     LOG_WARN("alloc upd_ctdef failed", K(ret));
+  } else if (OB_ISNULL(ins_ctdef_)) {
+    ret = OB_ALLOCATE_MEMORY_FAILED;
+    LOG_WARN("alloc ins_ctdef failed", K(ret));
   }
+  OB_UNIS_DECODE(*ins_ctdef_);
   OB_UNIS_DECODE(*upd_ctdef_);
   return ret;
 }
@@ -770,6 +770,7 @@ ObDMLBaseRtDef::~ObDMLBaseRtDef()
     }
   }
   fk_checker_array_.release_array();
+  (void)TriggerHandle::free_trigger_param_memory(trig_rtdef_, false);
 }
 }  // namespace sql
 }  // namespace oceanbase

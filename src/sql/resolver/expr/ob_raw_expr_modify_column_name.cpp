@@ -13,7 +13,6 @@
 #define USING_LOG_PREFIX SQL_RESV
 
 #include "sql/resolver/expr/ob_raw_expr_modify_column_name.h"
-#include "lib/worker.h"
 
 namespace oceanbase
 {
@@ -77,6 +76,12 @@ int ObRawExprModifyColumnName::visit(ObCaseOpRawExpr &expr) {
 }
 
 int ObRawExprModifyColumnName::visit(ObAggFunRawExpr &expr) {
+  UNUSED (expr);
+  return common::OB_SUCCESS;
+}
+
+int ObRawExprModifyColumnName::visit(ObMatchFunRawExpr &expr)
+{
   UNUSED (expr);
   return common::OB_SUCCESS;
 }

@@ -12,12 +12,7 @@
 
 #define USING_LOG_PREFIX SQL_OPT
 #include "ob_log_update.h"
-#include "sql/optimizer/ob_del_upd_log_plan.h"
-#include "sql/optimizer/ob_log_plan.h"
-#include "sql/rewrite/ob_transform_utils.h"
-#include "sql/optimizer/ob_opt_est_cost.h"
 #include "sql/optimizer/ob_join_order.h"
-#include "common/ob_smart_call.h"
 
 using namespace oceanbase;
 using namespace sql;
@@ -75,6 +70,9 @@ int ObLogUpdate::get_plan_item_info(PlanText &plan_text,
       pos = pos - 2;
     }
     OZ(BUF_PRINTF(")"));
+    if (OB_SUCC(ret) && get_das_dop() > 0) {
+      ret = BUF_PRINTF(", das_dop=%ld", this->get_das_dop());
+    }
     END_BUF_PRINT(plan_item.special_predicates_,
                   plan_item. special_predicates_len_);
   }
@@ -106,6 +104,15 @@ int ObLogUpdate::get_op_exprs(ObIArray<ObRawExpr*> &all_exprs)
     LOG_WARN("get unexpected null", K(get_plan()), K(ret));
   } else if (OB_FAIL(ObLogDelUpd::inner_get_op_exprs(all_exprs, true))) {
     LOG_WARN("failed to add parent need expr", K(ret));
+  }
+  return ret;
+}
+
+int ObLogUpdate::is_my_fixed_expr(const ObRawExpr *expr, bool &is_fixed)
+{
+  int ret = OB_SUCCESS;
+  if (OB_FAIL(is_dml_fixed_expr(expr, get_index_dml_infos(), is_fixed))) {
+    LOG_WARN("failed to check is my fixed expr", K(ret));
   }
   return ret;
 }
@@ -167,7 +174,7 @@ int ObLogUpdate::inner_est_cost(double child_card, double &op_cost)
     ObOptimizerContext &opt_ctx = get_plan()->get_optimizer_context();
     cost_info.constraint_count_ = update_dml_info->ck_cst_exprs_.count();
     if (OB_FAIL(ObOptEstCost::cost_update(cost_info, op_cost,
-                                          opt_ctx.get_cost_model_type()))) {
+                                          opt_ctx))) {
       LOG_WARN("failed to get update cost", K(ret));
     }
   }
@@ -231,6 +238,22 @@ int ObLogUpdate::generate_multi_part_partition_id_expr()
     } else if (OB_FAIL(generate_update_new_calc_partid_expr(*get_index_dml_infos().at(i)))) {
       LOG_WARN("failed to generate new calc partid expr", K(ret));
     } else { /*do nothing*/ }
+  }
+  return ret;
+}
+
+int ObLogUpdate::op_is_update_pk_with_dop(bool &is_update)
+{
+  int ret = OB_SUCCESS;
+  is_update = false;
+  if (!index_dml_infos_.empty()) {
+    IndexDMLInfo *index_dml_info = index_dml_infos_.at(0);
+    if (OB_ISNULL(index_dml_info)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("unexpected nullptr", K(ret), K(index_dml_infos_));
+    } else if (index_dml_info->is_update_primary_key_ && (is_pdml() || get_das_dop() > 1)) {
+      is_update = true;
+    }
   }
   return ret;
 }

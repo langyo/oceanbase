@@ -60,11 +60,16 @@ public:
                    const ColumnsFieldArray *fields,
                    char *column_map,
                    int32_t stmt_id,
-                   bool first_time);
+                   bool first_time,
+                   bool is_packed,
+                   ObSchemaGetterGuard *schema_guard);
   int response_row(sql::ObSQLSessionInfo &session,
                    common::ObNewRow &row,
-                   const ColumnsFieldArray *fields) {
-    return ObMPBase::response_row(session, row, fields);
+                   const ColumnsFieldArray *fields,
+                   bool is_packed,
+                   sql::ObExecContext *exec_ctx = NULL,
+                   ObSchemaGetterGuard *schema_guard = NULL) {
+    return ObMPBase::response_row(session, row, fields, is_packed, exec_ctx, true, schema_guard);
   }
   bool need_close_cursor() { return need_close_cursor_; }
   void set_close_cursor() { need_close_cursor_ = true; }

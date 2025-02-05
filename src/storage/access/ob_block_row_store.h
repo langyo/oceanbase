@@ -15,8 +15,8 @@
 
 #include "common/object/ob_object.h"
 #include "lib/container/ob_bitmap.h"
-#include "storage/ob_table_store_stat_mgr.h"
 #include "sql/engine/basic/ob_pushdown_filter.h"
+#include "storage/access/ob_where_optimizer.h"
 
 namespace oceanbase
 {
@@ -32,6 +32,7 @@ struct ObTableAccessContext;
 struct ObTableAccessParam;
 struct ObTableIterParam;
 struct ObStoreRow;
+struct ObTableScanStoreStat;
 
 struct ObFilterResult
 {
@@ -57,30 +58,33 @@ public:
   virtual ~ObBlockRowStore();
   virtual void reset();
   virtual void reuse();
-  virtual int init(const ObTableAccessParam &param);
-  int open(const ObTableIterParam &iter_param);
+  virtual int init(const ObTableAccessParam &param, common::hash::ObHashSet<int32_t> *agg_col_mask = nullptr);
+  int open(ObTableIterParam &iter_param);
   OB_INLINE bool is_valid() const { return is_inited_; }
   OB_INLINE bool is_disabled() const { return disabled_; }
   OB_INLINE void disable() { disabled_ = true; }
+  OB_INLINE bool can_refresh() const { return !is_aggregated_in_prefetch_; }
+  OB_INLINE void set_aggregated_in_prefetch() { is_aggregated_in_prefetch_ = true; }
   // for blockscan
   OB_INLINE void reset_blockscan() { can_blockscan_ = false; filter_applied_ = false; }
   OB_INLINE bool can_blockscan() const { return can_blockscan_; }
   OB_INLINE bool filter_pushdown() const { return pd_filter_info_.is_pd_filter_; }
   OB_INLINE bool filter_applied() const { return filter_applied_; }
-  // For columnar store.
-  // TODO(hanling: it is used for compatible with row store and will be deprecated in the future)
-  OB_INLINE void set_filter_applied(const bool is_filter_applied) { filter_applied_ = is_filter_applied; }
   OB_INLINE bool filter_is_null() const { return pd_filter_info_.is_pd_filter_ && nullptr == pd_filter_info_.filter_; }
   int apply_blockscan(
       blocksstable::ObIMicroBlockRowScanner &micro_scanner,
       const bool can_pushdown,
-      ObTableStoreStat &table_store_stat);
+      ObTableScanStoreStat &table_store_stat);
   int get_filter_result(ObFilterResult &res);
   OB_INLINE sql::ObPushdownFilterExecutor *get_pd_filter()
   { return pd_filter_info_.filter_; }
+  OB_INLINE ObWhereOptimizer *get_where_optimizer()
+  { return where_optimizer_; }
   virtual bool is_end() const { return false; }
   virtual bool is_empty() const { return true; }
-  VIRTUAL_TO_STRING_KV(K_(is_inited),  K_(can_blockscan), K_(filter_applied), K_(disabled));
+  OB_INLINE bool is_vec2() const { return is_vec2_; } // need to remove after statistical info pushdown support vec 2.0
+  VIRTUAL_TO_STRING_KV(K_(is_inited),  K_(can_blockscan), K_(filter_applied),
+      K_(disabled), K_(is_aggregated_in_prefetch), K_(is_vec2));
 protected:
   int filter_micro_block(
       const int64_t row_count,
@@ -88,12 +92,16 @@ protected:
       sql::ObPushdownFilterExecutor *parent,
       sql::ObPushdownFilterExecutor *filter);
   bool is_inited_;
+  bool is_vec2_; // need to remove after statistical info pushdown support vec 2.0
   sql::PushdownFilterInfo pd_filter_info_;
   ObTableAccessContext &context_;
+  const ObTableIterParam *iter_param_;
 private:
   bool can_blockscan_;
   bool filter_applied_;
   bool disabled_;
+  bool is_aggregated_in_prefetch_;
+  ObWhereOptimizer *where_optimizer_;
 };
 
 }

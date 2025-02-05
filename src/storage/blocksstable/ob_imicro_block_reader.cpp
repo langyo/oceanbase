@@ -13,7 +13,6 @@
 #define USING_LOG_PREFIX STORAGE
 #include "ob_imicro_block_reader.h"
 #include "index_block/ob_index_block_row_struct.h"
-#include "sql/engine/basic/ob_pushdown_filter.h"
 
 namespace oceanbase
 {
@@ -128,7 +127,6 @@ int ObIMicroBlockReader::validate_filter_info(
 
 int ObIMicroBlockReader::filter_white_filter(
     const sql::ObWhiteFilterExecutor &filter,
-    const common::ObObjMeta &obj_meta,
     const common::ObDatum &datum,
     bool &filtered)
 {
@@ -199,11 +197,8 @@ int ObIMicroBlockReader::filter_white_filter(
       }
       case sql::WHITE_OP_IN: {
         bool is_existed = false;
-        ObObj cur_obj;
-        if (OB_FAIL(datum.to_obj(cur_obj, obj_meta))) {
-          LOG_WARN("convert datum to obj failed", K(ret), K(datum), K(obj_meta));
-        } else if (OB_FAIL(filter.exist_in_obj_set(cur_obj, is_existed))) {
-          LOG_WARN("Failed to check object in hashset", K(ret), K(cur_obj));
+        if (OB_FAIL(filter.exist_in_set(datum, is_existed))) {
+          LOG_WARN("Failed to check object in hashset", K(ret), K(datum));
         } else if (is_existed) {
           filtered = false;
         }

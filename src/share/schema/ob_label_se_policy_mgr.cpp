@@ -12,9 +12,6 @@
 
 #define USING_LOG_PREFIX SHARE_SCHEMA
 #include "share/schema/ob_label_se_policy_mgr.h"
-#include "lib/allocator/ob_mod_define.h"
-#include "lib/oblog/ob_log.h"
-#include "lib/oblog/ob_log_module.h"
 #include "share/schema/ob_schema_utils.h"
 
 namespace oceanbase
@@ -642,7 +639,7 @@ int ObLabelSeCompMgr::add_label_se_component(const ObLabelSeComponentSchema &sch
       }
     }
 
-    if (OB_FAIL(long_name_map_.set_refactored(new_long_name_key,
+    if (FAILEDx(long_name_map_.set_refactored(new_long_name_key,
                                               new_schema, over_write))) {
       LOG_WARN("update hash map failed", K(ret));
     } else if (OB_FAIL(short_name_map_.set_refactored(new_short_name_key,

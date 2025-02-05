@@ -39,18 +39,20 @@ public:
   {
   public:
     ServerResource() : max_cpu_(0), min_cpu_(0), memory_size_(0),
-                       log_disk_size_(0) {}
+                       log_disk_size_(0), data_disk_size_(0) {}
     ~ServerResource() {}
     void reset() {
       max_cpu_ = 0;
       min_cpu_ = 0;
       memory_size_ = 0;
       log_disk_size_ = 0;
+      data_disk_size_ = 0;
     }
     double max_cpu_;
     double min_cpu_;
     int64_t memory_size_;
     int64_t log_disk_size_;
+    int64_t data_disk_size_;
   };
 
 public:
@@ -59,6 +61,7 @@ public:
   int init(ObMultiTenant *omt, common::ObMySQLProxy &sql_proxy,
     const common::ObAddr &myaddr);
 
+  int handle_notify_unit_resource(const obrpc::TenantServerUnitConfig &arg);
   int notify_create_tenant(const obrpc::TenantServerUnitConfig &unit);
 
   int try_notify_drop_tenant(const int64_t tenant_id);
@@ -79,11 +82,14 @@ private:
   ~ObTenantNodeBalancer();
 
   int check_new_tenants(share::TenantUnits &units);
-  int check_new_tenant(const share::ObUnitInfoGetter::ObTenantConfig &unit, const int64_t abs_timeout_us = INT64_MAX);
+  int check_new_tenant(const share::ObUnitInfoGetter::ObTenantConfig &unit,
+                       const bool check_data_version,
+                       const int64_t abs_timeout_us = INT64_MAX);
   int check_del_tenants(const share::TenantUnits &local_units, share::TenantUnits &units);
   int refresh_hidden_sys_memory();
   void periodically_check_tenant();
   int fetch_effective_tenants(const share::TenantUnits &old_tenants, share::TenantUnits &new_tenants);
+  int check_tenant_resource_released(const uint64_t tenant_id, bool &is_released) const;
   int refresh_tenant(share::TenantUnits &units);
   DISALLOW_COPY_AND_ASSIGN(ObTenantNodeBalancer);
 

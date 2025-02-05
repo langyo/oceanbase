@@ -13,11 +13,7 @@
 #define USING_LOG_PREFIX STORAGE
 
 #include "ob_str_dict_column_encoder.h"
-#include "ob_cs_encoding_util.h"
 #include "ob_string_stream_encoder.h"
-#include "ob_column_datum_iter.h"
-#include "storage/blocksstable/ob_imicro_block_writer.h"
-#include "lib/codec/ob_codecs.h"
 
 namespace oceanbase
 {
@@ -37,7 +33,7 @@ int ObStrDictColumnEncoder::init(
     LOG_WARN("init base column encoder failed", K(ret), K(ctx), K(column_index), K(row_count));
   } else {
     column_header_.type_ = type_;
-    dict_encoding_meta_.distinct_val_cnt_ = ctx.ht_->size();
+    dict_encoding_meta_.distinct_val_cnt_ = ctx.ht_->distinct_val_cnt();
     dict_encoding_meta_.ref_row_cnt_ = row_count_;
     if (ctx_->null_cnt_ > 0) {
       dict_encoding_meta_.set_has_null();
@@ -81,7 +77,9 @@ int ObStrDictColumnEncoder::build_string_dict_encoder_ctx_()
         ctx_->encoding_ctx_->compressor_type_, is_force_raw_,
         &ctx_->encoding_ctx_->cs_encoding_opt_,
         ctx_->encoding_ctx_->previous_cs_encoding_.get_column_encoding(column_index_),
-        int_stream_idx, ctx_->allocator_))) {
+        int_stream_idx,
+        ctx_->encoding_ctx_->major_working_cluster_version_,
+        ctx_->allocator_))) {
       LOG_WARN("fail to build_string_stream_encoder_info", K(ret), KPC_(ctx));
     }
   }

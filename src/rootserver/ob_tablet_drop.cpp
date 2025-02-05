@@ -12,8 +12,6 @@
 
 #define USING_LOG_PREFIX RS
 #include "ob_tablet_drop.h"
-#include "ob_root_service.h"
-#include "share/ob_share_util.h"
 #include "share/tablet/ob_tablet_to_table_history_operator.h" // ObTabletToTableHistoryOperator
 #include "share/tablet/ob_tablet_to_ls_operator.h"
 #include "observer/ob_inner_sql_connection.h"
@@ -78,7 +76,9 @@ int ObTabletDrop::add_drop_tablets_of_table_arg(
       LOG_WARN("sys table cannot drop", K(table_schema), KR(ret));
     } else if (schemas.count() > 1) {
       int64_t data_table_id = OB_INVALID_ID;
-      if (table_schema.is_index_local_storage() || table_schema.is_aux_lob_table()) {
+      if (table_schema.is_index_local_storage()
+          || table_schema.is_aux_lob_table()
+          || table_schema.is_mlog_table()) {
         data_table_id = table_schema.get_data_table_id();
       } else {
         data_table_id = table_schema.get_table_id();
@@ -91,7 +91,9 @@ int ObTabletDrop::add_drop_tablets_of_table_arg(
         } else if (is_inner_table(aux_table_schema->get_table_id())) {
           ret = OB_INVALID_ARGUMENT;
           LOG_WARN("sys table cannot drop", KPC(aux_table_schema), KR(ret));
-        } else if (!aux_table_schema->is_index_local_storage() && !aux_table_schema->is_aux_lob_table()) {
+        } else if (!aux_table_schema->is_index_local_storage()
+            && !aux_table_schema->is_aux_lob_table()
+            && !aux_table_schema->is_mlog_table()) {
           ret = OB_INVALID_ARGUMENT;
           LOG_WARN("aux_table_schema must be local index or aux lob table", KR(ret), K(schemas), KPC(aux_table_schema));
         } else if (data_table_id != aux_table_schema->get_data_table_id()) {

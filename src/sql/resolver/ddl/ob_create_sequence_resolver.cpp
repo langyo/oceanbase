@@ -13,8 +13,7 @@
 #define USING_LOG_PREFIX SQL_RESV
 
 #include "sql/resolver/ddl/ob_create_sequence_resolver.h"
-#include "sql/resolver/ddl/ob_sequence_stmt.h"
-#include "sql/resolver/ddl/ob_sequence_resolver.h"
+#include "src/sql/resolver/ddl/ob_sequence_stmt.h"
 
 namespace oceanbase
 {
@@ -104,8 +103,6 @@ int ObCreateSequenceResolver::resolve(const ParseNode &parse_tree)
     }
   }
 
-  
-
   /* sequence options */
   if (OB_SUCC(ret) && NULL != parse_tree.children_[1]) {
     if (OB_UNLIKELY(T_SEQUENCE_OPTION_LIST != parse_tree.children_[1]->type_)) {
@@ -114,7 +111,8 @@ int ObCreateSequenceResolver::resolve(const ParseNode &parse_tree)
                 K(parse_tree.children_[1]->type_), K(ret));
     } else {
       ObSequenceResolver<ObCreateSequenceStmt> resolver;
-      if (OB_FAIL(resolver.resolve_sequence_options(mystmt, parse_tree.children_[1]))) {
+      if (OB_FAIL(resolver.resolve_sequence_options(session_info_->get_effective_tenant_id(),
+                                                    mystmt, parse_tree.children_[1]))) {
         LOG_WARN("resolve sequence options failed", K(ret));
       }
     }

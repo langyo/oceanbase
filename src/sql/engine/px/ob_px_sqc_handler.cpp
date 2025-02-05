@@ -13,13 +13,7 @@
 #define USING_LOG_PREFIX SQL_ENG
 #include "sql/engine/px/ob_px_sqc_handler.h"
 #include "sql/engine/px/ob_px_admission.h"
-#include "sql/engine/ob_physical_plan_ctx.h"
-#include "sql/engine/ob_exec_context.h"
-#include "sql/ob_sql.h"
 #include "sql/dtl/ob_dtl_channel_group.h"
-#include "sql/optimizer/ob_storage_estimator.h"
-#include "sql/ob_sql_trans_control.h"
-#include "storage/tx/ob_trans_service.h"
 #include "share/detect/ob_detect_manager_utils.h"
 using namespace oceanbase::sql;
 using namespace oceanbase::common;
@@ -207,6 +201,15 @@ int ObPxSqcHandler::init()
   } else {
     exec_ctx_->set_sqc_handler(this);
   }
+
+#ifdef ERRSIM
+  int errsim_code = EventTable::EN_PX_SQC_HANDLER_INIT_FAILED;
+  if (OB_SUCC(ret) && errsim_code != OB_SUCCESS) {
+    ret = errsim_code;
+    LOG_TRACE("Force sqc hanler init failed", K(ret));
+  }
+#endif
+
   return ret;
 }
 
@@ -218,6 +221,7 @@ void ObPxSqcHandler::reset()
   process_flags_ = 0;
   end_ret_ = OB_SUCCESS;
   reference_count_ = 1;
+  part_ranges_.reset();
   call_dtor(sub_coord_);
   call_dtor(sqc_init_args_);
   call_dtor(des_phy_plan_);
@@ -319,14 +323,13 @@ int ObPxSqcHandler::destroy_sqc(int &report_ret)
   int ret = OB_SUCCESS;
   int end_ret = OB_SUCCESS;
   report_ret = OB_SUCCESS;
-  sub_coord_->destroy_first_buffer_cache();
   // end_ret_记录的错误时SQC end process的时候发生的错误，该时刻语句已经执行完成，收尾工作发生了
   // 问题。相比起事务的错误码，收尾的错误码优先级更低。
   end_ret = end_ret_;
 
   // clean up ddl context if needed
   int tmp_ret = OB_SUCCESS;
-  if (OB_SUCCESS != (tmp_ret = sub_coord_->end_ddl(all_task_success()))) {
+  if (OB_SUCCESS != (tmp_ret = sub_coord_->end_ddl(false))) { //for ddl px, don't call close() again in close_direct_load()
     LOG_WARN("end ddl failed", K(tmp_ret));
     end_ret = OB_SUCCESS == end_ret ? tmp_ret : end_ret;
   }
@@ -432,6 +435,42 @@ int ObPxSqcHandler::thread_count_auto_scaling(int64_t &reserved_px_thread_count)
         LOG_WARN("failed to set expect worker count", K(ret), K(reserved_px_thread_count_));
       } else {
         sqc_init_args_->sqc_.set_task_count(reserved_px_thread_count);
+      }
+    }
+  }
+  return ret;
+}
+
+int ObPxSqcHandler::set_partition_ranges(const Ob2DArray<ObPxTabletRange> &part_ranges,
+                                        char *buf, int64_t size)
+{
+  int ret = OB_SUCCESS;
+  if (OB_UNLIKELY(part_ranges.count() <= 0)) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("part ranges is empty", K(ret), K(part_ranges.count()));
+  } else {
+    bool part_ranges_empty = false;
+    {
+      SpinRLockGuard rlock_guard(part_ranges_spin_lock_);
+      part_ranges_empty = part_ranges_.empty();
+    }
+    // If the worker thread has already set the part_ranges_;
+    // there is no need to repeat the setup.
+    if (part_ranges_empty) {
+      SpinWLockGuard wlock_guard(part_ranges_spin_lock_);
+      if (part_ranges_.empty()) {
+        int64_t pos = 0;
+        ObPxTabletRange tmp_range;
+        for (int64_t i = 0; OB_SUCC(ret) && i < part_ranges.count(); ++i) {
+          const ObPxTabletRange &cur_range = part_ranges.at(i);
+          if (0 == size && OB_FAIL(tmp_range.deep_copy_from<true>(cur_range, get_safe_allocator(), buf, size, pos))) {
+            LOG_WARN("deep copy partition range failed", K(ret), K(cur_range));
+          } else if (0 != size && OB_FAIL(tmp_range.deep_copy_from<false>(cur_range, get_safe_allocator(), buf, size, pos))) {
+            LOG_WARN("deep copy partition range failed", K(ret), K(cur_range));
+          } else if (OB_FAIL(part_ranges_.push_back(tmp_range))) {
+            LOG_WARN("push back partition range failed", K(ret), K(tmp_range));
+          }
+        }
       }
     }
   }

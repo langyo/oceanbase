@@ -12,9 +12,7 @@
 
 #define USING_LOG_PREFIX SQL_ENG
 #include "sql/engine/expr/ob_expr_arg_case.h"
-#include "sql/engine/expr/ob_expr_operator.h"
 #include "sql/engine/expr/ob_expr_equal.h"
-#include "sql/engine/expr/ob_expr_result_type_util.h"
 #include "sql/session/ob_sql_session_info.h"
 
 namespace oceanbase
@@ -130,15 +128,12 @@ int ObExprArgCase::calc_result_typeN(ObExprResType &type,
     int64_t cond_type_count = param_num / 2;
     int64_t val_type_count = param_num / 2;
     ObExprResType tmp_res_type;
-    const ObLengthSemantics default_length_semantics = (OB_NOT_NULL(type_ctx.get_session()) ? type_ctx.get_session()->get_actual_nls_length_semantics() : LS_BYTE);
     if (OB_FAIL(aggregate_result_type_for_case(
                   tmp_res_type,
                   types_stack,
                   cond_type_count,
-                  type_ctx.get_coll_type(),
                   lib::is_oracle_mode(),
-                  default_length_semantics,
-                  type_ctx.get_session(),
+                  type_ctx,
                   FALSE, FALSE,
                   is_called_in_sql_))) {
       LOG_WARN("failed to get result type for cmp", K(ret));
@@ -146,10 +141,8 @@ int ObExprArgCase::calc_result_typeN(ObExprResType &type,
                          type,
                          types_stack + cond_type_count,
                          val_type_count,
-                         type_ctx.get_coll_type(),
                          lib::is_oracle_mode(),
-                         default_length_semantics,
-                         type_ctx.get_session(),
+                         type_ctx,
                          true, false,
                          is_called_in_sql_))) {
       LOG_WARN("failed to get result type", K(ret));
@@ -317,6 +310,13 @@ int ObExprArgCase::cg_expr(ObExprCGCtx &, const ObRawExpr &, ObExpr &) const
 {
   int ret = OB_ERR_UNEXPECTED;
   LOG_WARN("this expr should be rewrote in new engine", K(ret));
+  return ret;
+}
+
+DEF_SET_LOCAL_SESSION_VARS(ObExprArgCase, raw_expr) {
+  int ret = OB_SUCCESS;
+  SET_LOCAL_SYSVAR_CAPACITY(1);
+  EXPR_ADD_LOCAL_SYSVAR(share::SYS_VAR_COLLATION_CONNECTION);
   return ret;
 }
 

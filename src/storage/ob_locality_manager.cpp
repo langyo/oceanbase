@@ -11,11 +11,8 @@
  */
 
 #include "storage/ob_locality_manager.h"
-#include "share/ob_locality_priority.h"
 #include "observer/ob_server_struct.h"
-#include "share/schema/ob_schema_getter_guard.h"
-#include "rpc/obmysql/obsm_struct.h"                // easy_connection_str
-#include "share/schema/ob_multi_version_schema_service.h"
+#include "deps/easy/src/io/easy_io.h"
 #ifdef OB_BUILD_ARBITRATION
 #include "share/arbitration_service/ob_arbitration_service_info.h"
 #endif
@@ -179,7 +176,7 @@ int ObLocalityManager::check_ssl_invited_nodes(easy_connection_t &c)
         char ip_buffer[MAX_IP_ADDR_LENGTH] = {};
         easy_addr_t tmp_addr = c.addr;
         tmp_addr.port = 0;//mark it invalied, not care it
-        char *clinet_ip = easy_inet_addr_to_str(&tmp_addr, ip_buffer, 32);
+        char *clinet_ip = easy_inet_addr_to_str(&tmp_addr, ip_buffer, sizeof(ip_buffer));
         if (NULL != strstr(ssl_invited_nodes.ptr(), clinet_ip)
             && self_.ip_to_string(ip_buffer, MAX_IP_ADDR_LENGTH)
             && NULL != strstr(ssl_invited_nodes.ptr(), ip_buffer))

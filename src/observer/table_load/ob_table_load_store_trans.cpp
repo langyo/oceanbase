@@ -13,10 +13,9 @@
 #define USING_LOG_PREFIX SERVER
 
 #include "observer/table_load/ob_table_load_store_trans.h"
-#include "observer/table_load/ob_table_load_store.h"
 #include "observer/table_load/ob_table_load_table_ctx.h"
 #include "observer/table_load/ob_table_load_trans_store.h"
-#include "sql/engine/cmd/ob_load_data_utils.h"
+#include "storage/direct_load/ob_direct_load_i_table.h"
 
 namespace oceanbase
 {
@@ -85,7 +84,7 @@ int ObTableLoadStoreTrans::advance_trans_status(ObTableLoadTransStatusType trans
     LOG_WARN("fail to advance trans status", KR(ret), K(trans_status));
   } else {
     table_load_trans_status_to_string(trans_status,
-                                      trans_ctx_->ctx_->job_stat_->store.trans_status_);
+                                      trans_ctx_->ctx_->job_stat_->store_.trans_status_);
   }
   return ret;
 }
@@ -97,7 +96,7 @@ int ObTableLoadStoreTrans::set_trans_status_error(int error_code)
     LOG_WARN("fail to set trans status error", KR(ret));
   } else {
     table_load_trans_status_to_string(ObTableLoadTransStatusType::ERROR,
-                                      trans_ctx_->ctx_->job_stat_->store.trans_status_);
+                                      trans_ctx_->ctx_->job_stat_->store_.trans_status_);
   }
   return ret;
 }
@@ -109,7 +108,7 @@ int ObTableLoadStoreTrans::set_trans_status_abort()
     LOG_WARN("fail to set trans status abort", KR(ret));
   } else {
     table_load_trans_status_to_string(ObTableLoadTransStatusType::ABORT,
-                                      trans_ctx_->ctx_->job_stat_->store.trans_status_);
+                                      trans_ctx_->ctx_->job_stat_->store_.trans_status_);
   }
   return ret;
 }

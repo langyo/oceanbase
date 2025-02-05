@@ -12,16 +12,9 @@
 
 #define USING_LOG_PREFIX SHARE_SCHEMA
 
-#include "ob_schema_mgr.h"
 
-#include "lib/oblog/ob_log.h"
-#include "share/schema/ob_schema_utils.h"
-#include "lib/utility/ob_hang_fatal_error.h"
-#include "share/schema/ob_schema_getter_guard.h"
-#include "share/ob_get_compat_mode.h"
-#include "observer/ob_server_struct.h"
-#include "rootserver/ob_root_utils.h"
-#include "sql/dblink/ob_dblink_utils.h"
+#include "ob_schema_mgr.h"
+#include "src/sql/resolver/expr/ob_raw_expr.h"
 
 namespace oceanbase
 {
@@ -480,7 +473,7 @@ ObSchemaMgr::ObSchemaMgr()
       lob_piece_infos_(0, NULL, SET_USE_500(ObModIds::OB_SCHEMA_LOB_PIECE_INFO_VEC, ObCtxIds::SCHEMA_SERVICE)),
       table_id_map_(SET_USE_500(ObModIds::OB_SCHEMA_TABLE_ID_MAP, ObCtxIds::SCHEMA_SERVICE)),
       table_name_map_(SET_USE_500(ObModIds::OB_SCHEMA_TABLE_NAME_MAP, ObCtxIds::SCHEMA_SERVICE)),
-      index_name_map_(SET_USE_500(ObModIds::OB_SCHEMA_INDEX_NAME_MAP, ObCtxIds::SCHEMA_SERVICE)),
+      normal_index_name_map_(SET_USE_500(ObModIds::OB_SCHEMA_INDEX_NAME_MAP, ObCtxIds::SCHEMA_SERVICE)),
       aux_vp_name_map_(SET_USE_500(ObModIds::OB_SCHEMA_AUX_VP_NAME_VEC, ObCtxIds::SCHEMA_SERVICE)),
       outline_mgr_(allocator_),
       routine_mgr_(allocator_),
@@ -504,6 +497,7 @@ ObSchemaMgr::ObSchemaMgr()
       keystore_mgr_(allocator_),
       tablespace_mgr_(allocator_),
       hidden_table_name_map_(SET_USE_500("HiddenTblNames", ObCtxIds::SCHEMA_SERVICE)),
+      built_in_index_name_map_(SET_USE_500("BuiltInIdxNames", ObCtxIds::SCHEMA_SERVICE)),
       dblink_mgr_(allocator_),
       directory_mgr_(allocator_),
       context_mgr_(allocator_),
@@ -512,7 +506,8 @@ ObSchemaMgr::ObSchemaMgr()
       rls_group_mgr_(allocator_),
       rls_context_mgr_(allocator_),
       timestamp_in_slot_(0),
-      allocator_idx_(OB_INVALID_INDEX)
+      allocator_idx_(OB_INVALID_INDEX),
+      mlog_infos_(0, NULL, SET_USE_500(ObModIds::OB_SCHEMA_MLOG_INFO_VEC, ObCtxIds::SCHEMA_SERVICE))
 {
 }
 
@@ -534,7 +529,7 @@ ObSchemaMgr::ObSchemaMgr(ObIAllocator &allocator)
       lob_piece_infos_(0, NULL, SET_USE_500(ObModIds::OB_SCHEMA_LOB_PIECE_INFO_VEC, ObCtxIds::SCHEMA_SERVICE)),
       table_id_map_(SET_USE_500(ObModIds::OB_SCHEMA_TABLE_ID_MAP, ObCtxIds::SCHEMA_SERVICE)),
       table_name_map_(SET_USE_500(ObModIds::OB_SCHEMA_TABLE_NAME_MAP, ObCtxIds::SCHEMA_SERVICE)),
-      index_name_map_(SET_USE_500(ObModIds::OB_SCHEMA_INDEX_NAME_MAP, ObCtxIds::SCHEMA_SERVICE)),
+      normal_index_name_map_(SET_USE_500(ObModIds::OB_SCHEMA_INDEX_NAME_MAP, ObCtxIds::SCHEMA_SERVICE)),
       aux_vp_name_map_(SET_USE_500(ObModIds::OB_SCHEMA_AUX_VP_NAME_VEC, ObCtxIds::SCHEMA_SERVICE)),
       outline_mgr_(allocator_),
       routine_mgr_(allocator_),
@@ -558,6 +553,7 @@ ObSchemaMgr::ObSchemaMgr(ObIAllocator &allocator)
       keystore_mgr_(allocator_),
       tablespace_mgr_(allocator_),
       hidden_table_name_map_(SET_USE_500("HiddenTblNames", ObCtxIds::SCHEMA_SERVICE)),
+      built_in_index_name_map_(SET_USE_500("BuiltInIdxNames", ObCtxIds::SCHEMA_SERVICE)),
       dblink_mgr_(allocator_),
       directory_mgr_(allocator_),
       context_mgr_(allocator_),
@@ -566,7 +562,8 @@ ObSchemaMgr::ObSchemaMgr(ObIAllocator &allocator)
       rls_group_mgr_(allocator_),
       rls_context_mgr_(allocator_),
       timestamp_in_slot_(0),
-      allocator_idx_(OB_INVALID_INDEX)
+      allocator_idx_(OB_INVALID_INDEX),
+      mlog_infos_(0, NULL, SET_USE_500(ObModIds::OB_SCHEMA_MLOG_INFO_VEC, ObCtxIds::SCHEMA_SERVICE))
 {
 }
 
@@ -583,7 +580,7 @@ int ObSchemaMgr::init(const uint64_t tenant_id)
     LOG_WARN("init table id map failed", K(ret));
   } else if (OB_FAIL(table_name_map_.init())) {
     LOG_WARN("init table name map failed", K(ret));
-  } else if (OB_FAIL(index_name_map_.init())) {
+  } else if (OB_FAIL(normal_index_name_map_.init())) {
     LOG_WARN("init index name map failed", K(ret));
   } else if (OB_FAIL(aux_vp_name_map_.init())) {
     LOG_WARN("init index name map failed", K(ret));
@@ -639,6 +636,8 @@ int ObSchemaMgr::init(const uint64_t tenant_id)
     LOG_WARN("init rls_context mgr failed", K(ret));
   } else if (OB_FAIL(hidden_table_name_map_.init())) {
     LOG_WARN("init hidden table name map failed", K(ret));
+  } else if (OB_FAIL(built_in_index_name_map_.init())) {
+    LOG_WARN("init built in index name map failed", K(ret));
   } else if (OB_FAIL(context_mgr_.init())) {
     LOG_WARN("init context mgr failed", K(ret));
   } else if (OB_FAIL(mock_fk_parent_table_mgr_.init())) {
@@ -677,7 +676,7 @@ void ObSchemaMgr::reset()
     database_name_map_.clear();
     table_id_map_.clear();
     table_name_map_.clear();
-    index_name_map_.clear();
+    normal_index_name_map_.clear();
     aux_vp_name_map_.clear();
     foreign_key_name_map_.clear();
     constraint_name_map_.clear();
@@ -706,8 +705,10 @@ void ObSchemaMgr::reset()
     rls_context_mgr_.reset();
     tenant_id_ = OB_INVALID_TENANT_ID;
     hidden_table_name_map_.clear();
+    built_in_index_name_map_.clear();
     context_mgr_.reset();
     mock_fk_parent_table_mgr_.reset();
+    mlog_infos_.clear();
   }
 }
 
@@ -764,11 +765,13 @@ int ObSchemaMgr::assign(const ObSchemaMgr &other)
     ASSIGN_FIELD(drop_tenant_infos_);
     ASSIGN_FIELD(table_id_map_);
     ASSIGN_FIELD(table_name_map_);
-    ASSIGN_FIELD(index_name_map_);
+    ASSIGN_FIELD(normal_index_name_map_);
     ASSIGN_FIELD(aux_vp_name_map_);
     ASSIGN_FIELD(foreign_key_name_map_);
     ASSIGN_FIELD(constraint_name_map_);
     ASSIGN_FIELD(hidden_table_name_map_);
+    ASSIGN_FIELD(mlog_infos_);
+    ASSIGN_FIELD(built_in_index_name_map_);
     #undef ASSIGN_FIELD
     if (OB_SUCC(ret)) {
       if (OB_FAIL(outline_mgr_.assign(other.outline_mgr_))) {
@@ -2391,6 +2394,7 @@ int ObSchemaMgr::reserved_mem_for_tables_(
   int64_t lob_meta_cnt = 0;
   int64_t lob_piece_cnt = 0;
   int64_t hidden_table_cnt = 0;
+  int64_t mlog_cnt = 0;
   int64_t other_table_cnt = 0;
   int64_t fk_cnt = 0;
   int64_t cst_cnt = 0;
@@ -2409,7 +2413,7 @@ int ObSchemaMgr::reserved_mem_for_tables_(
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("table is null", KR(ret), K(i));
       } else {
-        if (table->is_index_table() || table->is_materialized_view()) {
+        if (table->is_index_table()) {
           index_cnt++;
         } else if (table->is_aux_vp_table()) {
           vp_cnt++;
@@ -2419,6 +2423,8 @@ int ObSchemaMgr::reserved_mem_for_tables_(
           lob_piece_cnt++;
         } else if (table->is_user_hidden_table()) {
           hidden_table_cnt++;
+        } else if (table->is_mlog_table()) {
+          mlog_cnt++;
         } else {
           other_table_cnt++;
         }
@@ -2464,6 +2470,12 @@ int ObSchemaMgr::reserved_mem_for_tables_(
       }
     }
 
+    if (OB_SUCC(ret) && mlog_cnt > 0) {
+      if (OB_FAIL(mlog_infos_.reserve(mlog_cnt))) {
+        LOG_WARN("fail to reserved array", KR(ret), K(mlog_cnt));
+      }
+    }
+
     if (OB_SUCC(ret) && other_table_cnt > 0) {
       //(void) table_name_map_.set_sub_map_mem_size(other_table_cnt * OBJECT_SIZE);
     }
@@ -2480,8 +2492,8 @@ int ObSchemaMgr::reserved_mem_for_tables_(
   FLOG_INFO("reserve mem", KR(ret),
             K(table_cnt), K(index_cnt), K(vp_cnt),
             K(lob_meta_cnt), K(lob_piece_cnt),
-            K(hidden_table_cnt), K(other_table_cnt),
-            K(fk_cnt), K(cst_cnt),
+            K(hidden_table_cnt), K(mlog_cnt),
+            K(other_table_cnt), K(fk_cnt), K(cst_cnt),
             "cost", ObTimeUtility::current_time() - start_time);
   return ret;
 }
@@ -2574,7 +2586,7 @@ int ObSchemaMgr::add_table(
                                           equal_table,
                                           replaced_table))) {
     LOG_WARN("failed to add table schema", K(ret));
-  } else if (new_table_schema->is_index_table() || new_table_schema->is_materialized_view()) {
+  } else if (new_table_schema->is_index_table()) {
     ObSimpleTableSchemaV2 *replaced_index_table = NULL;
     if (OB_FAIL(index_infos_.replace(new_table_schema,
                                      iter,
@@ -2609,6 +2621,15 @@ int ObSchemaMgr::add_table(
                                          equal_table,
                                          replaced_lob_piece_table))) {
       LOG_WARN("failed to add lob piece schema", K(ret));
+    }
+  } else if (new_table_schema->is_mlog_table()) {
+    ObSimpleTableSchemaV2 *replaced_mlog_table = NULL;
+    if (OB_FAIL(mlog_infos_.replace(new_table_schema,
+                                    iter,
+                                    compare_aux_table,
+                                    equal_table,
+                                    replaced_mlog_table))) {
+      LOG_WARN("failed to add mlog schema", KR(ret));
     }
   }
   if (OB_NOT_NULL(cost_array) && idx < cost_array->count()) {
@@ -2663,15 +2684,17 @@ int ObSchemaMgr::add_table(
                    "table_name", new_table_schema->get_table_name());
         }
       } else if (new_table_schema->is_index_table()) { // index is in recyclebin
+        const bool is_built_in_index = new_table_schema->is_built_in_index();
+        IndexNameMap &index_name_map = get_index_name_map_(is_built_in_index);
         if (new_table_schema->is_in_recyclebin()) {
           ObIndexSchemaHashWrapper index_name_wrapper(new_table_schema->get_tenant_id(),
                                                       new_table_schema->get_database_id(),
                                                       common::OB_INVALID_ID,
                                                       new_table_schema->get_table_name_str());
-          hash_ret = index_name_map_.set_refactored(index_name_wrapper, new_table_schema, over_write);
+          hash_ret = index_name_map.set_refactored(index_name_wrapper, new_table_schema, over_write);
           if (OB_SUCCESS != hash_ret && OB_HASH_EXIST != hash_ret) {
             ret = OB_ERR_UNEXPECTED;
-            LOG_WARN("build index name hashmap failed", K(ret), K(hash_ret),
+            LOG_WARN("build index name hashmap failed", K(ret), K(hash_ret), K(is_built_in_index),
                      "table_id", new_table_schema->get_table_id(),
                      "index_name", new_table_schema->get_table_name());
           }
@@ -2683,10 +2706,10 @@ int ObSchemaMgr::add_table(
                                                                new_table_schema->get_database_id(),
                                                                is_oracle_mode ? common::OB_INVALID_ID : new_table_schema->get_data_table_id(),
                                                                new_table_schema->get_origin_index_name_str());
-            hash_ret = index_name_map_.set_refactored(cutted_index_name_wrapper, new_table_schema, over_write);
+            hash_ret = index_name_map.set_refactored(cutted_index_name_wrapper, new_table_schema, over_write);
             if (OB_SUCCESS != hash_ret && OB_HASH_EXIST != hash_ret) {
               ret = OB_ERR_UNEXPECTED;
-              LOG_WARN("build index name hashmap failed", K(ret), K(hash_ret),
+              LOG_WARN("build index name hashmap failed", K(ret), K(hash_ret), K(is_built_in_index),
                        K(new_table_schema->get_table_id()),
                        K(new_table_schema->get_data_table_id()),
                        K(new_table_schema->get_origin_index_name_str()));
@@ -3204,22 +3227,24 @@ bool ObSchemaMgr::check_schema_meta_consistent()
   if (table_infos_.count() != table_id_map_.item_count()
       || table_id_map_.item_count() !=
         (table_name_map_.item_count() +
-         index_name_map_.item_count() +
+         normal_index_name_map_.item_count() +
          aux_vp_name_map_.item_count() +
          lob_meta_infos_.count() +
          lob_piece_infos_.count() +
-         hidden_table_name_map_.item_count())) {
+         hidden_table_name_map_.item_count() +
+         built_in_index_name_map_.item_count())) {
     is_consistent_ = false;
     LOG_WARN_RET(OB_ERR_UNEXPECTED, "schema meta is not consistent, need rebuild",
              "schema_mgr version", get_schema_version(),
              "table_infos_count", table_infos_.count(),
              "table_id_map_item_count", table_id_map_.item_count(),
              "table_name_map_item_count", table_name_map_.item_count(),
-             "index_name_map_item_count", index_name_map_.item_count(),
+             "index_name_map_item_count", normal_index_name_map_.item_count(),
              "aux_vp_name_map_item_count", aux_vp_name_map_.item_count(),
              "lob_meta_infos_count", lob_meta_infos_.count(),
              "lob_piece_infos_count", lob_piece_infos_.count(),
-             "hidden_table_map count", hidden_table_name_map_.item_count());
+             "hidden_table_map count", hidden_table_name_map_.item_count(),
+             "built_in_index_map count", built_in_index_name_map_.item_count());
   }
 
   return is_consistent_;
@@ -3262,9 +3287,10 @@ int ObSchemaMgr::rebuild_schema_meta_if_not_consistent()
                     "msg", "duplicate table/database/foreign key/constraint exist", K_(tenant_id),
                     "db_cnt", database_infos_.count(), "db_name_cnt", database_name_map_.item_count(),
                     "table_cnt", table_infos_.count(), "table_id_cnt", table_id_map_.item_count(),
-                    "table_name_cnt", table_name_map_.item_count(), "index_name_cnt", index_name_map_.item_count(),
+                    "table_name_cnt", table_name_map_.item_count(), "index_name_cnt", normal_index_name_map_.item_count(),
                     "aux_vp_name_cnt", aux_vp_name_map_.item_count(), "lob_meta_cnt", lob_meta_infos_.count(),
                     "log_piece_cnt", lob_piece_infos_.count(), "hidden_table_cnt", hidden_table_name_map_.item_count(),
+                    "built_in_index_cnt", built_in_index_name_map_.item_count(),
                     "fk_cnt", fk_cnt, "fk_name_cnt", foreign_key_name_map_.item_count(),
                     "cst_cnt", cst_cnt, "cst_name_cnt", constraint_name_map_.item_count());
       right_to_die_or_duty_to_live();
@@ -3336,7 +3362,7 @@ int ObSchemaMgr::del_table(const ObTenantTableId table)
              table.table_id_,
              K(ret));
   } else {
-    if (schema_to_del->is_index_table() || schema_to_del->is_materialized_view()) {
+    if (schema_to_del->is_index_table()) {
       if (OB_FAIL(remove_aux_table(*schema_to_del))) {
         LOG_WARN("failed to remove aux table schema", K(ret), K(*schema_to_del));
       }
@@ -3351,6 +3377,10 @@ int ObSchemaMgr::del_table(const ObTenantTableId table)
     } else if (schema_to_del->is_aux_lob_piece_table()) {
       if (OB_FAIL(remove_aux_table(*schema_to_del))) {
         LOG_WARN("failed to remove aux table schema", K(ret), K(*schema_to_del));
+      }
+    } else if (schema_to_del->is_mlog_table()) {
+      if (OB_FAIL(remove_aux_table(*schema_to_del))) {
+        LOG_WARN("failed to remove mlog table schema", KR(ret), K(*schema_to_del));
       }
     }
   }
@@ -3392,16 +3422,19 @@ int ObSchemaMgr::del_table(const ObTenantTableId table)
           ret = OB_HASH_NOT_EXIST != hash_ret ? hash_ret : ret;
         }
       } else if (schema_to_del->is_index_table()) {
+        const bool is_built_in_index = schema_to_del->is_built_in_index();
+        IndexNameMap &index_name_map = get_index_name_map_(is_built_in_index);
         if (schema_to_del->is_in_recyclebin()) { // index is in recyclebin
           ObIndexSchemaHashWrapper index_schema_wrapper(schema_to_del->get_tenant_id(),
                                                         schema_to_del->get_database_id(),
                                                         common::OB_INVALID_ID,
                                                         schema_to_del->get_table_name_str());
-          int hash_ret = index_name_map_.erase_refactored(index_schema_wrapper);
+          int hash_ret = index_name_map.erase_refactored(index_schema_wrapper);
           if (OB_SUCCESS != hash_ret) {
             LOG_WARN("failed delete index from index name hashmap, ",
                      K(ret),
                      K(hash_ret),
+                     K(is_built_in_index),
                      "index_name", schema_to_del->get_table_name());
             // 增加增量schema刷新的容错处理，此时不报错，靠rebuild逻辑解
             ret = OB_HASH_NOT_EXIST != hash_ret ? hash_ret : ret;
@@ -3415,11 +3448,12 @@ int ObSchemaMgr::del_table(const ObTenantTableId table)
                                                                schema_to_del->get_database_id(),
                                                                is_oracle_mode ? common::OB_INVALID_ID : schema_to_del->get_data_table_id(),
                                                                schema_to_del->get_origin_index_name_str());
-            hash_ret = index_name_map_.erase_refactored(cutted_index_name_wrapper);
+            hash_ret = index_name_map.erase_refactored(cutted_index_name_wrapper);
             if (OB_SUCCESS != hash_ret) {
               LOG_WARN("failed delete index from index name hashmap, ",
                        K(ret),
                        K(hash_ret),
+                       K(is_built_in_index),
                        K(schema_to_del->get_tenant_id()),
                        K(schema_to_del->get_database_id()),
                        K(schema_to_del->get_data_table_id()),
@@ -3481,11 +3515,12 @@ int ObSchemaMgr::del_table(const ObTenantTableId table)
   if (table_infos_.count() != table_id_map_.item_count()
       || table_id_map_.item_count() !=
          (table_name_map_.item_count() +
-          index_name_map_.item_count() +
+          normal_index_name_map_.item_count() +
           aux_vp_name_map_.item_count() +
           lob_meta_infos_.count() +
           lob_piece_infos_.count() +
-          hidden_table_name_map_.item_count())) {
+          hidden_table_name_map_.item_count() +
+          built_in_index_name_map_.item_count())) {
     LOG_WARN("table info is non-consistent",
              "table_infos_count",
              table_infos_.count(),
@@ -3494,7 +3529,7 @@ int ObSchemaMgr::del_table(const ObTenantTableId table)
              "table_name_map_item_count",
              table_name_map_.item_count(),
              "index_name_map_item_count",
-             index_name_map_.item_count(),
+             normal_index_name_map_.item_count(),
              "aux_vp_name_map_item_count",
              aux_vp_name_map_.item_count(),
              "lob_meta_infos_count",
@@ -3506,7 +3541,9 @@ int ObSchemaMgr::del_table(const ObTenantTableId table)
              "table_id",
              table.table_id_,
              "hidden_table_map_item_count",
-             hidden_table_name_map_.item_count());
+             hidden_table_name_map_.item_count(),
+             "built_in_index_map_item_count",
+             built_in_index_name_map_.item_count());
   }
 
   return ret;
@@ -3521,7 +3558,7 @@ int ObSchemaMgr::remove_aux_table(const ObSimpleTableSchemaV2 &schema_to_del)
   ObTenantTableId tenant_data_table_id(schema_to_del.get_tenant_id(),
                                        schema_to_del.get_data_table_id());
   TableInfos *infos = nullptr;
-  if (schema_to_del.is_index_table() || schema_to_del.is_materialized_view()) {
+  if (schema_to_del.is_index_table()) {
     infos = &index_infos_;
   } else if (schema_to_del.is_aux_vp_table()) {
     infos = &aux_vp_infos_;
@@ -3529,6 +3566,8 @@ int ObSchemaMgr::remove_aux_table(const ObSimpleTableSchemaV2 &schema_to_del)
     infos = &lob_meta_infos_;
   } else if (schema_to_del.is_aux_lob_piece_table()) {
     infos = &lob_piece_infos_;
+  } else if (schema_to_del.is_mlog_table()) {
+    infos = &mlog_infos_;
   } else {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("Invalid table type.", K(ret), K(schema_to_del.get_table_type()));
@@ -3745,11 +3784,14 @@ int ObSchemaMgr::get_hidden_table_schema(
   return ret;
 }
 
+ERRSIM_POINT_DEF(ERRSIM_INVALID_INDEX_NAME);
+
 int ObSchemaMgr::get_index_schema(
   const uint64_t tenant_id,
   const uint64_t database_id,
   const ObString &table_name,
-  const ObSimpleTableSchemaV2 *&table_schema) const
+  const ObSimpleTableSchemaV2 *&table_schema,
+  const bool is_built_in/* = false*/) const
 {
   int ret = OB_SUCCESS;
   table_schema = NULL;
@@ -3769,16 +3811,17 @@ int ObSchemaMgr::get_index_schema(
   } else {
     ObSimpleTableSchemaV2 *tmp_schema = NULL;
     lib::Worker::CompatMode compat_mode = lib::Worker::CompatMode::INVALID;
+    const IndexNameMap &index_name_map = get_index_name_map_(is_built_in);
     if (OB_FAIL(ObCompatModeGetter::get_tenant_mode(tenant_id, compat_mode))) {
       LOG_WARN("fail to get tenant mode", K(ret));
     } else if (is_recyclebin_database_id(database_id)) { // in recyclebin
       const ObIndexSchemaHashWrapper index_name_wrapper(
           tenant_id, database_id, common::OB_INVALID_ID, table_name);
-      int hash_ret = index_name_map_.get_refactored(index_name_wrapper, tmp_schema);
+      int hash_ret = index_name_map.get_refactored(index_name_wrapper, tmp_schema);
       if (OB_SUCCESS == hash_ret) {
         if (OB_ISNULL(tmp_schema)) {
          ret = OB_ERR_UNEXPECTED;
-         LOG_WARN("NULL ptr", K(ret), K(tmp_schema));
+         LOG_WARN("NULL ptr", K(ret), K(tenant_id), K(table_name), K(is_built_in), KP(tmp_schema));
         } else {
          table_schema = tmp_schema;
         }
@@ -3788,7 +3831,10 @@ int ObSchemaMgr::get_index_schema(
       // can determine whether the index is in the recycle bin based on database_id
       ObString cutted_index_name;
       uint64_t data_table_id = ObSimpleTableSchemaV2::extract_data_table_id_from_index_name(table_name);
-      if (OB_INVALID_ID == data_table_id) {
+      if (OB_UNLIKELY(ERRSIM_INVALID_INDEX_NAME)) {
+        ret = OB_INVALID_ARGUMENT;
+        LOG_WARN("turn on ERRSIM_INVALID_INDEX_NAME", KR(ret));
+      } else if (OB_INVALID_ID == data_table_id) {
         // nothing to do, need to go on and it will get a empty ptr of dst table_schema
       } else if (OB_FAIL(ObSimpleTableSchemaV2::get_index_name(table_name, cutted_index_name))) {
         if (OB_SCHEMA_ERROR == ret) {
@@ -3803,11 +3849,11 @@ int ObSchemaMgr::get_index_schema(
                                      && !is_mysql_sys_database_id(database_id);
         const ObIndexSchemaHashWrapper cutted_index_name_wrapper(tenant_id, database_id,
             is_oracle_mode ? common::OB_INVALID_ID : data_table_id, cutted_index_name);
-        int hash_ret = index_name_map_.get_refactored(cutted_index_name_wrapper, tmp_schema);
+        int hash_ret = index_name_map.get_refactored(cutted_index_name_wrapper, tmp_schema);
         if (OB_SUCCESS == hash_ret) {
           if (OB_ISNULL(tmp_schema)) {
             ret = OB_ERR_UNEXPECTED;
-            LOG_WARN("NULL ptr", K(ret), K(tmp_schema));
+            LOG_WARN("NULL ptr", K(ret), K(is_built_in), K(tmp_schema));
           } else {
             table_schema = tmp_schema;
           }
@@ -3831,16 +3877,16 @@ int ObSchemaMgr::deep_copy_index_name_map(
   } else {
     // index_name_cache will destory or not init, so sub_map_mem_size should be set first
     // to reduce dynamic memory allocation and avoid error.
-    (void) index_name_cache.set_sub_map_mem_size(index_name_map_.get_sub_map_mem_size());
+    (void) index_name_cache.set_sub_map_mem_size(normal_index_name_map_.get_sub_map_mem_size());
     if (OB_FAIL(index_name_cache.init())) {
       LOG_WARN("init index name cache failed", KR(ret));
     }
   }
   for (int64_t sub_map_id = 0;
-       OB_SUCC(ret) && sub_map_id < index_name_map_.get_sub_map_count();
+       OB_SUCC(ret) && sub_map_id < normal_index_name_map_.get_sub_map_count();
        sub_map_id++) {
-    auto it = index_name_map_.begin(sub_map_id);
-    auto end = index_name_map_.end(sub_map_id);
+    IndexNameMap::iterator it = normal_index_name_map_.begin(sub_map_id);
+    IndexNameMap::iterator end = normal_index_name_map_.end(sub_map_id);
     for (; OB_SUCC(ret) && it != end; ++it) {
       const ObSimpleTableSchemaV2 *index_schema = *it;
       void *buf = NULL;
@@ -3899,16 +3945,17 @@ int ObSchemaMgr::get_table_schema(const uint64_t tenant_id,
                                   const ObString &table_name,
                                   const bool is_index,
                                   const ObSimpleTableSchemaV2 *&table_schema,
-                                  bool is_hidden/*false*/) const
+                                  const bool with_hidden_flag/*false*/,
+                                  const bool is_built_in_index/*false*/) const
 {
   int ret = OB_SUCCESS;
-  if (OB_UNLIKELY(is_hidden)) {
+  if (OB_UNLIKELY(with_hidden_flag)) {
     ret = get_hidden_table_schema(tenant_id, database_id, table_name, table_schema);
   } else {
     if (!is_index) {
       ret = get_table_schema(tenant_id, database_id, session_id, table_name, table_schema);
     } else {
-      ret = get_index_schema(tenant_id, database_id, table_name, table_schema);
+      ret = get_index_schema(tenant_id, database_id, table_name, table_schema, is_built_in_index);
     }
   }
   return ret;
@@ -4289,6 +4336,8 @@ int ObSchemaMgr::get_aux_schemas(
       infos = &lob_meta_infos_;
     } else if (table_type == AUX_LOB_PIECE) {
       infos = &lob_piece_infos_;
+    } else if (table_type == MATERIALIZED_VIEW_LOG) {
+      infos = &mlog_infos_;
     } else {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("Invalid table type.", K(ret), K(table_type));
@@ -4351,28 +4400,6 @@ int ObSchemaMgr::get_non_sys_table_ids(
   return ret;
 }
 
-int ObSchemaMgr::get_tenant_mv_ids(const uint64_t tenant_id, ObIArray<uint64_t> &mv_ids) const
-{
-  int ret = OB_SUCCESS;
-  if (!check_inner_stat()) {
-    ret = OB_NOT_INIT;
-    LOG_WARN("not init", K(ret));
-  } else {
-    const ObSimpleTableSchemaV2 *mv = NULL;
-    for (TableIterator iter = index_infos_.begin(); iter != index_infos_.end() && OB_SUCC(ret); ++iter) {
-      if (OB_ISNULL(mv = *iter)) {
-        ret = OB_ERR_UNEXPECTED;
-        LOG_WARN("NULL ptr", K(mv), K(ret));
-      } else if (mv->is_materialized_view()
-                 && tenant_id == mv->get_tenant_id()) {
-        if (OB_FAIL(mv_ids.push_back(mv->get_table_id()))) {
-          LOG_WARN("push back mv table id failed", K(ret));
-        } else { } // do-nothing
-      } else { } // do-nothing
-    }
-  }
-  return ret;
-}
 
 int ObSchemaMgr::del_schemas_in_tenant(const uint64_t tenant_id)
 {
@@ -4486,7 +4513,8 @@ int ObSchemaMgr::get_schema_count(int64_t &schema_count) const
     int64_t tenant_schema_count = tenant_infos_.size();
     schema_count = tenant_schema_count + user_infos_.size() + database_infos_.size()
                    + tablegroup_infos_.size() + table_infos_.size() + index_infos_.size()
-                   + aux_vp_infos_.size() + lob_meta_infos_.size() + lob_piece_infos_.size();
+                   + aux_vp_infos_.size() + lob_meta_infos_.size() + lob_piece_infos_.size()
+                   + mlog_infos_.size();
     int64_t outline_schema_count = 0;
     int64_t routine_schema_count = 0;
     int64_t priv_schema_count = 0;
@@ -4699,6 +4727,8 @@ int ObSchemaMgr::deal_with_change_table_state(const ObSimpleTableSchemaV2 &old_t
     // non-hidden table to hidden table
     if (old_table_schema.is_index_table()) {
       bool is_oracle_mode = false;
+      const bool is_built_in_index = old_table_schema.is_built_in_index();
+      IndexNameMap &index_name_map = get_index_name_map_(is_built_in_index);
       if (OB_FAIL(old_table_schema.check_if_oracle_compat_mode(is_oracle_mode))) {
         LOG_WARN("fail to check if tenant mode is oracle mode", K(ret));
       } else if (old_table_schema.is_in_recyclebin()) { // index is in recyclebin
@@ -4706,10 +4736,10 @@ int ObSchemaMgr::deal_with_change_table_state(const ObSimpleTableSchemaV2 &old_t
                                                     old_table_schema.get_database_id(),
                                                     common::OB_INVALID_ID,
                                                     old_table_schema.get_table_name_str());
-        int hash_ret = index_name_map_.erase_refactored(index_name_wrapper);
+        int hash_ret = index_name_map.erase_refactored(index_name_wrapper);
         if (OB_SUCCESS != hash_ret) {
           LOG_WARN("fail to delete index from index name hashmap",
-                    K(ret), K(hash_ret), K(old_table_schema.get_table_name_str()));
+                    K(ret), K(hash_ret), K(is_built_in_index), K(old_table_schema.get_table_name_str()));
           // increase the fault-tolerant processing of incremental schema refresh
           ret = OB_HASH_NOT_EXIST != hash_ret ? hash_ret : ret;
         }
@@ -4722,10 +4752,10 @@ int ObSchemaMgr::deal_with_change_table_state(const ObSimpleTableSchemaV2 &old_t
                                                              old_table_schema.get_database_id(),
                                                              is_oracle_mode ? common::OB_INVALID_ID : old_table_schema.get_data_table_id(),
                                                              cutted_index_name);
-          int hash_ret = index_name_map_.erase_refactored(cutted_index_name_wrapper);
+          int hash_ret = index_name_map.erase_refactored(cutted_index_name_wrapper);
           if (OB_SUCCESS != hash_ret) {
             LOG_WARN("failed delete index from index name hashmap, ",
-                      K(ret), K(hash_ret), K(cutted_index_name));
+                      K(ret), K(hash_ret), K(is_built_in_index), K(cutted_index_name));
             // increase the fault-tolerant processing of incremental schema refresh
             ret = OB_HASH_NOT_EXIST != hash_ret ? hash_ret : ret;
           }
@@ -4797,7 +4827,9 @@ int ObSchemaMgr::deal_with_table_rename(
                K(new_table_name));
       bool is_system_table = false;
       if (old_table_schema.is_index_table()) {
+        const bool is_built_in_index = old_table_schema.is_built_in_index();
         bool is_oracle_mode = false;
+        IndexNameMap &index_name_map = get_index_name_map_(is_built_in_index);
         if (OB_FAIL(old_table_schema.check_if_oracle_compat_mode(is_oracle_mode))) {
           LOG_WARN("fail to check if tenant mode is oracle mode", K(ret));
         } else if (old_table_schema.is_in_recyclebin()) { // index is in recyclebin
@@ -4805,10 +4837,10 @@ int ObSchemaMgr::deal_with_table_rename(
                                                       old_table_schema.get_database_id(),
                                                       common::OB_INVALID_ID,
                                                       old_table_schema.get_table_name_str());
-          int hash_ret = index_name_map_.erase_refactored(index_name_wrapper);
+          int hash_ret = index_name_map.erase_refactored(index_name_wrapper);
           if (OB_SUCCESS != hash_ret) {
             LOG_WARN("fail to delete index from index name hashmap",
-                     K(ret), K(hash_ret), K(old_table_name));
+                     K(ret), K(hash_ret), K(is_built_in_index), K(old_table_name));
             // 增加增量schema刷新的容错处理，此时不报错，靠rebuild逻辑解
             ret = OB_HASH_NOT_EXIST != hash_ret ? hash_ret : ret;
           }
@@ -4821,10 +4853,10 @@ int ObSchemaMgr::deal_with_table_rename(
                                                                old_table_schema.get_database_id(),
                                                                is_oracle_mode ? common::OB_INVALID_ID : old_table_schema.get_data_table_id(),
                                                                cutted_index_name);
-            int hash_ret = index_name_map_.erase_refactored(cutted_index_name_wrapper);
+            int hash_ret = index_name_map.erase_refactored(cutted_index_name_wrapper);
             if (OB_SUCCESS != hash_ret) {
               LOG_WARN("failed delete index from index name hashmap, ",
-                       K(ret), K(hash_ret), K(cutted_index_name));
+                       K(ret), K(hash_ret), K(is_built_in_index), K(cutted_index_name));
               // Increase the fault-tolerant processing of incremental schema refresh, no error is reported at this time,
               // and the solution is solved by rebuild logic
               ret = OB_HASH_NOT_EXIST != hash_ret ? hash_ret : ret;
@@ -4926,11 +4958,12 @@ int ObSchemaMgr::rebuild_table_hashmap(uint64_t &fk_cnt, uint64_t &cst_cnt)
   } else {
     table_id_map_.clear();
     table_name_map_.clear();
-    index_name_map_.clear();
+    normal_index_name_map_.clear();
     aux_vp_name_map_.clear();
     foreign_key_name_map_.clear();
     constraint_name_map_.clear();
     hidden_table_name_map_.clear();
+    built_in_index_name_map_.clear();
     ObSimpleTableSchemaV2 *table_schema = NULL;
     // It is expected that OB_HASH_EXIST should not appear in the rebuild process
     int over_write = 0;
@@ -4987,18 +5020,20 @@ int ObSchemaMgr::rebuild_table_hashmap(uint64_t &fk_cnt, uint64_t &cst_cnt)
             LOG_TRACE("index is", "table_id", table_schema->get_table_id(),
                       "database_id", table_schema->get_database_id(),
                       "table_name", table_schema->get_table_name_str());
+            const bool is_built_in_index = table_schema->is_built_in_index();
+            IndexNameMap &index_name_map = get_index_name_map_(is_built_in_index);
             // oracle mode and index is not in recyclebin
             if (table_schema->is_in_recyclebin()) {
               ObIndexSchemaHashWrapper index_name_wrapper(table_schema->get_tenant_id(),
                                                           table_schema->get_database_id(),
                                                           common::OB_INVALID_ID,
                                                           table_schema->get_table_name_str());
-              hash_ret = index_name_map_.set_refactored(index_name_wrapper, table_schema, over_write);
+              hash_ret = index_name_map.set_refactored(index_name_wrapper, table_schema, over_write);
               if (OB_SUCCESS != hash_ret) {
                 ret = OB_HASH_EXIST == hash_ret ? OB_SUCCESS : OB_ERR_UNEXPECTED;
-                tmp_ret = index_name_map_.get_refactored(index_name_wrapper, exist_schema);
+                tmp_ret = index_name_map.get_refactored(index_name_wrapper, exist_schema);
                 LOG_ERROR("build index name hashmap failed",
-                          KR(ret), KR(hash_ret), K(tmp_ret),
+                          KR(ret), KR(hash_ret), K(tmp_ret), K(is_built_in_index),
                           "exist_table_id", OB_NOT_NULL(exist_schema) ? exist_schema->get_table_id() : OB_INVALID_ID,
                           "exist_database_id", OB_NOT_NULL(exist_schema) ? exist_schema->get_database_id() : OB_INVALID_ID,
                           "index_name",  OB_NOT_NULL(exist_schema) ? exist_schema->get_table_name() : "",
@@ -5014,12 +5049,12 @@ int ObSchemaMgr::rebuild_table_hashmap(uint64_t &fk_cnt, uint64_t &cst_cnt)
                                                                    table_schema->get_database_id(),
                                                                    is_oracle_mode ? common::OB_INVALID_ID : table_schema->get_data_table_id(),
                                                                    table_schema->get_origin_index_name_str());
-                hash_ret = index_name_map_.set_refactored(cutted_index_name_wrapper, table_schema, over_write);
+                hash_ret = index_name_map.set_refactored(cutted_index_name_wrapper, table_schema, over_write);
                 if (OB_SUCCESS != hash_ret) {
                   ret = OB_HASH_EXIST == hash_ret ? OB_SUCCESS : OB_ERR_UNEXPECTED;
-                  tmp_ret = index_name_map_.get_refactored(cutted_index_name_wrapper, exist_schema);
+                  tmp_ret = index_name_map.get_refactored(cutted_index_name_wrapper, exist_schema);
                   LOG_ERROR("build index name hashmap failed",
-                            KR(ret), KR(hash_ret), K(tmp_ret),
+                            KR(ret), KR(hash_ret), K(tmp_ret), K(is_built_in_index),
                             "exist_table_id", OB_NOT_NULL(exist_schema) ? exist_schema->get_table_id() : OB_INVALID_ID,
                             "exist_database_id", OB_NOT_NULL(exist_schema) ? exist_schema->get_database_id() : OB_INVALID_ID,
                             "index_name",  OB_NOT_NULL(exist_schema) ? exist_schema->get_origin_index_name_str() : "",
@@ -5131,7 +5166,7 @@ int ObSchemaMgr::get_idx_schema_by_origin_idx_name(const uint64_t tenant_id,
     const ObIndexSchemaHashWrapper index_name_wrapper(
         tenant_id, database_id, common::OB_INVALID_ID, ori_index_name);
     lib::CompatModeGuard g(lib::Worker::CompatMode::ORACLE);
-    int hash_ret = index_name_map_.get_refactored(index_name_wrapper, tmp_schema);
+    int hash_ret = normal_index_name_map_.get_refactored(index_name_wrapper, tmp_schema);
     if (OB_SUCCESS == hash_ret) {
       if (OB_ISNULL(tmp_schema)) {
         ret = OB_ERR_UNEXPECTED;
@@ -5248,6 +5283,10 @@ int ObSchemaMgr::get_schema_statistics(common::ObIArray<ObSchemaStatisticsInfo> 
     LOG_WARN("fail to get table priv statistics", K(ret));
   } else if (OB_FAIL(schema_infos.push_back(schema_info))) {
     LOG_WARN("fail to push back schema statistics", K(ret), K(schema_info));
+  } else if (OB_FAIL(priv_mgr_.get_schema_statistics(ROUTINE_PRIV, schema_info))) {
+    LOG_WARN("fail to get table priv statistics", K(ret));
+  } else if (OB_FAIL(schema_infos.push_back(schema_info))) {
+    LOG_WARN("fail to push back schema statistics", K(ret), K(schema_info));
   } else if (OB_FAIL(priv_mgr_.get_schema_statistics(DATABASE_PRIV, schema_info))) {
     LOG_WARN("fail to get database priv statistics", K(ret));
   } else if (OB_FAIL(schema_infos.push_back(schema_info))) {
@@ -5324,6 +5363,10 @@ int ObSchemaMgr::get_schema_statistics(common::ObIArray<ObSchemaStatisticsInfo> 
     LOG_WARN("fail to push back schema statistics", K(ret), K(schema_info));
   } else if (OB_FAIL(priv_mgr_.get_schema_statistics(OBJ_PRIV, schema_info))) {
     LOG_WARN("fail to get obj priv statistics", K(ret));
+  } else if (OB_FAIL(schema_infos.push_back(schema_info))) {
+    LOG_WARN("fail to push back schema statistics", K(ret), K(schema_info));
+  } else if (OB_FAIL(priv_mgr_.get_schema_statistics(COLUMN_PRIV, schema_info))) {
+    LOG_WARN("fail to get column priv statistics", K(ret));
   } else if (OB_FAIL(schema_infos.push_back(schema_info))) {
     LOG_WARN("fail to push back schema statistics", K(ret), K(schema_info));
   } else if (OB_FAIL(dblink_mgr_.get_schema_statistics(schema_info))) {
@@ -5594,7 +5637,7 @@ int ObSchemaMgr::get_table_statistics(ObSchemaStatisticsInfo &schema_info) const
     ret = OB_NOT_INIT;
     LOG_WARN("not init", K(ret));
   } else {
-    schema_info.count_ = table_infos_.size() + index_infos_.size() + aux_vp_infos_.size() + lob_meta_infos_.size() + lob_piece_infos_.size();
+    schema_info.count_ = table_infos_.size() + index_infos_.size() + aux_vp_infos_.size() + lob_meta_infos_.size() + lob_piece_infos_.size() + mlog_infos_.size();
     for (ConstTableIterator it = table_infos_.begin(); OB_SUCC(ret) && it != table_infos_.end(); it++) {
       if (OB_ISNULL(*it)) {
         ret = OB_ERR_UNEXPECTED;
@@ -5628,6 +5671,14 @@ int ObSchemaMgr::get_table_statistics(ObSchemaStatisticsInfo &schema_info) const
       }
     }
     for (ConstTableIterator it = lob_piece_infos_.begin(); OB_SUCC(ret) && it != lob_piece_infos_.end(); it++) {
+      if (OB_ISNULL(*it)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("schema is null", K(ret));
+      } else {
+        schema_info.size_ += (*it)->get_convert_size();
+      }
+    }
+    for (ConstTableIterator it = mlog_infos_.begin(); OB_SUCC(ret) && it != mlog_infos_.end(); it++) {
       if (OB_ISNULL(*it)) {
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("schema is null", K(ret));

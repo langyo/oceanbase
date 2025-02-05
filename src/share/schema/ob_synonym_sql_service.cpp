@@ -12,12 +12,7 @@
 
 #define USING_LOG_PREFIX SHARE_SCHEMA
 #include "ob_synonym_sql_service.h"
-#include "lib/oblog/ob_log.h"
-#include "lib/oblog/ob_log_module.h"
-#include "lib/string/ob_sql_string.h"
-#include "lib/mysqlclient/ob_mysql_proxy.h"
 #include "share/ob_dml_sql_splicer.h"
-#include "share/schema/ob_schema_struct.h"
 #include "share/inner_table/ob_inner_table_schema_constants.h"
 
 namespace oceanbase
@@ -194,33 +189,6 @@ int ObSynonymSqlService::delete_synonym(const uint64_t tenant_id,
   }
   return ret;
 }
-
-
-int ObSynonymSqlService::drop_synonym(const ObSynonymInfo &synonym_info,
-                                      const int64_t new_schema_version,
-                                      common::ObISQLClient *sql_client,
-                                      const common::ObString *ddl_stmt_str)
-{
-  int ret = OB_SUCCESS;
-  ObSqlString sql;
-  const uint64_t tenant_id = synonym_info.get_tenant_id();
-  const uint64_t database_id = synonym_info.get_database_id();
-  const uint64_t synonym_id = synonym_info.get_synonym_id();
-  if (OB_ISNULL(sql_client)) {
-    ret = OB_INVALID_ARGUMENT;
-    LOG_WARN("invalid sql client is NULL", K(ret));
-  } else if (OB_UNLIKELY(OB_INVALID_ID ==tenant_id
-                         || OB_INVALID_ID == database_id
-                         || OB_INVALID_ID == synonym_id)) {
-    ret = OB_INVALID_ARGUMENT;
-    LOG_WARN("invalid synonym info in drop synonym", K(synonym_info.get_synonym_name_str()), K(ret));
-  } else if (OB_FAIL(delete_synonym(tenant_id, database_id, synonym_id,
-                                    new_schema_version, sql_client, ddl_stmt_str))) {
-    LOG_WARN("failed to delete synonym", K(synonym_info.get_synonym_name_str()), K(ret));
-  } else {/*do nothing*/}
-  return ret;
-}
-
 
 int ObSynonymSqlService::add_synonym(common::ObISQLClient &sql_client,
                                         const ObSynonymInfo &synonym_info,

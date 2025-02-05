@@ -12,9 +12,6 @@
 
 #define USING_LOG_PREFIX SERVER
 #include "sql/resolver/ddl/ob_truncate_table_resolver.h"
-#include "share/ob_define.h"
-#include "share/ob_rpc_struct.h"
-#include "sql/session/ob_sql_session_info.h"
 
 namespace oceanbase
 {
@@ -46,7 +43,6 @@ int ObTruncateTableResolver::resolve(const ParseNode &parser_tree)
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("session_info_ is null or parser error", K(ret));
   }
-
   //create alter table stmt
   if (OB_SUCC(ret)) {
     if (NULL == (truncate_table_stmt = create_stmt<ObTruncateTableStmt>())) {
@@ -82,8 +78,9 @@ int ObTruncateTableResolver::resolve(const ParseNode &parser_tree)
                                                                  false,
                                                                  table_schema))) {
               if (OB_TABLE_NOT_EXIST == ret) {
-                LOG_USER_ERROR(OB_TABLE_NOT_EXIST, to_cstring(database_name),
-                                                   to_cstring(table_name));
+                ObCStringHelper helper;
+                LOG_USER_ERROR(OB_TABLE_NOT_EXIST, helper.convert(database_name),
+                                                   helper.convert(table_name));
               }
               LOG_WARN("fail to get table schema", K(ret));
             } else if (OB_FAIL(schema_checker_->check_ora_ddl_priv(
@@ -95,8 +92,9 @@ int ObTruncateTableResolver::resolve(const ParseNode &parser_tree)
                                     stmt::T_TRUNCATE_TABLE,
                                     session_info_->get_enable_role_array()))) {
               if (OB_TABLE_NOT_EXIST == ret) {
-                LOG_USER_ERROR(OB_TABLE_NOT_EXIST, to_cstring(database_name),
-                                                   to_cstring(table_name));
+                ObCStringHelper helper;
+                LOG_USER_ERROR(OB_TABLE_NOT_EXIST, helper.convert(database_name),
+                                                   helper.convert(table_name));
               }
               LOG_WARN("failed to check ora ddl priv", K(database_name), K(table_name),
                        K(session_info_->get_priv_user_id()), K(ret));
@@ -119,10 +117,15 @@ int ObTruncateTableResolver::resolve(const ParseNode &parser_tree)
                                                   orig_table_schema))) {
       LOG_WARN("fail to get table schema", K(ret), K(truncate_table_stmt->get_table_name()));
       if (NULL == orig_table_schema && OB_TABLE_NOT_EXIST == ret) {
+        ObCStringHelper helper;
         LOG_USER_ERROR(OB_TABLE_NOT_EXIST,
-                       to_cstring(truncate_table_stmt->get_database_name()),
-                       to_cstring(truncate_table_stmt->get_table_name()));
+                       helper.convert(truncate_table_stmt->get_database_name()),
+                       helper.convert(truncate_table_stmt->get_table_name()));
       }
+    } else if (orig_table_schema->is_external_table()) {
+      ret = OB_NOT_SUPPORTED;
+      LOG_USER_WARN(OB_NOT_SUPPORTED, "truncate external table");
+      LOG_WARN("truncate external table not support", K(ret));
     } else {
       if (orig_table_schema->is_oracle_tmp_table()) {
         truncate_table_stmt->set_truncate_oracle_temp_table();
@@ -130,6 +133,18 @@ int ObTruncateTableResolver::resolve(const ParseNode &parser_tree)
       }
       if (orig_table_schema->is_mysql_tmp_table()) {
         is_mysql_tmp_table = true; 
+      }
+
+      if (orig_table_schema->is_mlog_table()) {
+        ret = OB_NOT_SUPPORTED;
+        SQL_RESV_LOG(WARN, "truncate materialized view log is not supported",
+            KR(ret), K(orig_table_schema->get_table_name()));
+        LOG_USER_ERROR(OB_NOT_SUPPORTED, "truncate materialized view log is");
+      } else if (orig_table_schema->required_by_mview_refresh()) {
+        ret = OB_NOT_SUPPORTED;
+        SQL_RESV_LOG(WARN, "truncate table required by materialized view refresh is not supported",
+            KR(ret), K(orig_table_schema->get_table_name()));
+        LOG_USER_ERROR(OB_NOT_SUPPORTED, "truncate table required by materialized view refresh is");
       }
     }
   }

@@ -12,113 +12,223 @@
 
 #pragma once
 
-#include "lib/hash/ob_link_hashmap.h"
-#include "observer/table_load/ob_table_load_object_allocator.h"
+#include "lib/list/ob_dlink_node.h"
+#include "observer/table_load/ob_table_load_exec_ctx.h"
+#include "observer/table_load/ob_table_load_instance.h"
 #include "observer/table_load/ob_table_load_struct.h"
 #include "share/table/ob_table_load_define.h"
+#include "share/table/ob_table_load_row_array.h"
 #include "sql/session/ob_sql_session_mgr.h"
+#include "storage/direct_load/ob_direct_load_struct.h"
 
 namespace oceanbase
 {
 namespace observer
 {
-class ObTableLoadClientExecCtx;
 class ObTableLoadTableCtx;
 class ObTableLoadTask;
 class ObITableLoadTaskScheduler;
+class ObTableLoadInstance;
 
-class ObTableLoadClientTask
+struct ObTableLoadClientTaskParam
+{
+public:
+  ObTableLoadClientTaskParam();
+  ~ObTableLoadClientTaskParam();
+  void reset();
+  int assign(const ObTableLoadClientTaskParam &other);
+  bool is_valid() const;
+
+#define DEFINE_VAR_GETTER_AND_SETTER(type, name)        \
+  OB_INLINE type get_##name() const { return name##_; } \
+  OB_INLINE void set_##name(type name) { name##_ = name; }
+
+#define DEFINE_STR_GETTER_AND_SETTER(type, name)               \
+  OB_INLINE const type &get_##name() const { return name##_; } \
+  OB_INLINE int set_##name(const type &name) { return set_string(name, name##_); }
+
+#define DEFINE_STR_ARRAY_GETTER_AND_SETTER(type, name)                   \
+  OB_INLINE const ObIArray<type> &get_##name() const { return name##_; } \
+  OB_INLINE int set_##name(const ObIArray<type> &name) { return set_string_array(name, name##_); }
+
+  DEFINE_VAR_GETTER_AND_SETTER(ObAddr, client_addr);
+  DEFINE_VAR_GETTER_AND_SETTER(uint64_t, task_id);
+  DEFINE_VAR_GETTER_AND_SETTER(uint64_t, tenant_id);
+  DEFINE_VAR_GETTER_AND_SETTER(uint64_t, user_id);
+  DEFINE_VAR_GETTER_AND_SETTER(uint64_t, database_id);
+  DEFINE_STR_GETTER_AND_SETTER(ObString, table_name);
+  DEFINE_VAR_GETTER_AND_SETTER(int64_t, parallel);
+  DEFINE_VAR_GETTER_AND_SETTER(uint64_t, max_error_row_count);
+  DEFINE_VAR_GETTER_AND_SETTER(sql::ObLoadDupActionType, dup_action);
+  DEFINE_VAR_GETTER_AND_SETTER(uint64_t, timeout_us);
+  DEFINE_VAR_GETTER_AND_SETTER(uint64_t, heartbeat_timeout_us);
+  DEFINE_STR_GETTER_AND_SETTER(ObString, load_method);
+  DEFINE_STR_ARRAY_GETTER_AND_SETTER(ObString, column_names);
+  DEFINE_STR_ARRAY_GETTER_AND_SETTER(ObString, part_names);
+
+#undef DEFINE_VAR_GETTER_AND_SETTER
+#undef DEFINE_STR_GETTER_AND_SETTER
+
+  TO_STRING_KV(K_(client_addr),
+               K_(task_id),
+               K_(tenant_id),
+               K_(user_id),
+               K_(database_id),
+               K_(table_name),
+               K_(parallel),
+               K_(max_error_row_count),
+               K_(dup_action),
+               K_(timeout_us),
+               K_(heartbeat_timeout_us),
+               K_(load_method),
+               K_(column_names),
+               K_(part_names));
+
+private:
+  int set_string(const ObString &src, ObString &dest);
+  int set_string_array(const ObIArray<ObString> &src, ObIArray<ObString> &dest);
+
+private:
+  ObArenaAllocator allocator_;
+  int64_t task_id_;
+  ObAddr client_addr_;
+  uint64_t tenant_id_;
+  uint64_t user_id_;
+  uint64_t database_id_;
+  ObString table_name_;
+  int64_t parallel_;
+  uint64_t max_error_row_count_;
+  sql::ObLoadDupActionType dup_action_;
+  int64_t timeout_us_;
+  int64_t heartbeat_timeout_us_;
+  ObString load_method_;
+  common::ObArray<ObString> column_names_;
+  common::ObArray<ObString> part_names_;
+};
+
+class ObTableLoadClientTask : public common::ObDLinkBase<ObTableLoadClientTask>
 {
 public:
   ObTableLoadClientTask();
   ~ObTableLoadClientTask();
-  int init(uint64_t tenant_id, uint64_t user_id, uint64_t database_id, uint64_t table_id,
-           int64_t timeout_us, int64_t heartbeat_timeout_us);
-  bool is_inited() const { return is_inited_; }
-  int64_t get_ref_count() const { return ATOMIC_LOAD(&ref_count_); }
-  int64_t inc_ref_count() { return ATOMIC_AAF(&ref_count_, 1); }
-  int64_t dec_ref_count() { return ATOMIC_SAF(&ref_count_, 1); }
-  int set_table_ctx(ObTableLoadTableCtx *table_ctx);
-  int get_table_ctx(ObTableLoadTableCtx *&table_ctx);
-  OB_INLINE sql::ObSQLSessionInfo *get_session_info() { return session_info_; }
-  OB_INLINE ObTableLoadClientExecCtx *get_exec_ctx() { return exec_ctx_; }
-  int add_trans_id(const table::ObTableLoadTransId &trans_id);
-  int get_next_trans_id(table::ObTableLoadTransId &trans_id);
-  int64_t get_next_batch_id() { return ATOMIC_FAA(&next_batch_id_, 1); }
-  OB_INLINE const common::ObIArray<table::ObTableLoadTransId> &get_trans_ids() const
-  {
-    return trans_ids_;
-  }
+  int init(const ObTableLoadClientTaskParam &param);
+  int start();
+  int write(table::ObTableLoadObjRowArray &obj_rows);
+  int commit();
+  void abort(int error_code = OB_CANCELED);
+  OB_INLINE int64_t get_ref_count() const { return ATOMIC_LOAD(&ref_count_); }
+  OB_INLINE int64_t inc_ref_count() { return ATOMIC_AAF(&ref_count_, 1); }
+  OB_INLINE int64_t dec_ref_count() { return ATOMIC_SAF(&ref_count_, 1); }
+  void set_is_in_map(bool is_in_map) { is_in_map_ = is_in_map; }
+  bool is_in_map() const { return is_in_map_; }
+  OB_INLINE int64_t get_task_id() const { return param_.get_task_id(); }
+  OB_INLINE uint64_t get_table_id() const { return 0; }
+  void heart_beat();
+  int check_status();
+
+  int set_status_initializing();
+  int set_status_waitting();
   int set_status_running();
-  int set_status_committing();
   int set_status_commit();
   int set_status_error(int error_code);
-  void set_status_abort();
+  void set_status_abort(int error_code = OB_CANCELED);
   table::ObTableLoadClientStatus get_status() const;
+  int get_error_code() const;
   void get_status(table::ObTableLoadClientStatus &client_status, int &error_code) const;
   int check_status(table::ObTableLoadClientStatus client_status);
-  int alloc_task(ObTableLoadTask *&task);
-  void free_task(ObTableLoadTask *task);
-  int add_task(ObTableLoadTask *task);
-  TO_STRING_KV(K_(tenant_id), K_(user_id), K_(database_id), K_(table_id), K_(ddl_param),
-               K_(column_names), K_(column_idxs), K_(result_info), KP_(session_info),
-               K_(free_session_ctx), KP_(exec_ctx), KP_(task_scheduler), K_(trans_ids),
-               K_(next_trans_idx), KP_(table_ctx), K_(client_status), K_(error_code),
-               K_(ref_count));
+
+  OB_INLINE const table::ObTableLoadResultInfo &get_result_info() const { return result_info_; }
+  TO_STRING_KV(K_(param),
+               KP_(session_info),
+               K_(free_session_ctx),
+               K_(client_exec_ctx),
+               KP_(task_scheduler),
+               K_(client_status),
+               K_(error_code),
+               K_(result_info),
+               K_(ref_count),
+               K_(is_in_map));
+
 private:
-  int create_session_info(uint64_t user_id, uint64_t database_id, uint64_t table_id,
-                                 sql::ObSQLSessionInfo *&session_info,
-                                 sql::ObFreeSessionCtx &free_session_ctx);
-  int init_column_names_and_idxs();
-  int init_exec_ctx(int64_t timeout_us, int64_t heartbeat_timeout_us);
-public:
-  uint64_t tenant_id_;
-  uint64_t user_id_;
-  uint64_t database_id_;
-  uint64_t table_id_;
-  ObTableLoadDDLParam ddl_param_;
-  common::ObArray<ObString> column_names_;
-  common::ObArray<int64_t> column_idxs_;
-  table::ObTableLoadResultInfo result_info_;
+  int create_session_info();
+  int init_exec_ctx();
+  int init_task_scheduler();
+
+  int advance_status_nolock(const table::ObTableLoadClientStatus expected,
+                            const table::ObTableLoadClientStatus updated);
+  int advance_status(const table::ObTableLoadClientStatus expected,
+                     const table::ObTableLoadClientStatus updated);
+
+  int init_instance(ObTableLoadParam &load_param,
+                    const ObIArray<uint64_t> &column_ids,
+                    const ObIArray<ObTabletID> &tablet_ids);
+  int commit_instance();
+  void destroy_instance();
+
+private:
+  class ClientTaskExectueProcessor;
+  class ClientTaskExectueCallback;
+
 private:
   ObArenaAllocator allocator_;
+  ObTableLoadClientTaskParam param_;
+  share::schema::ObSchemaGetterGuard schema_guard_;
   sql::ObSQLSessionInfo *session_info_;
   sql::ObFreeSessionCtx free_session_ctx_;
-  ObTableLoadClientExecCtx *exec_ctx_;
-  ObTableLoadObjectAllocator<ObTableLoadTask> task_allocator_;
+  sql::ObSqlCtx sql_ctx_;
+  sql::ObPhysicalPlanCtx plan_ctx_;
+  ObPhysicalPlan plan_;
+  ObExecContext exec_ctx_;
+  ObTableLoadClientExecCtx client_exec_ctx_;
   ObITableLoadTaskScheduler *task_scheduler_;
-  common::ObArray<table::ObTableLoadTransId> trans_ids_;
-  int64_t next_trans_idx_;
+  int64_t session_count_;
+  ObTableLoadInstance instance_;
+  ObTableLoadInstance::TransCtx trans_ctx_;
   int64_t next_batch_id_ CACHE_ALIGNED;
   mutable obsys::ObRWLock rw_lock_;
-  ObTableLoadTableCtx *table_ctx_;
   table::ObTableLoadClientStatus client_status_;
   int error_code_;
+  table::ObTableLoadResultInfo result_info_;
   int64_t ref_count_ CACHE_ALIGNED;
+  volatile bool is_in_map_;
   bool is_inited_;
 };
 
-struct ObTableLoadClientTaskBrief : public common::LinkHashValue<ObTableLoadUniqueKey>
+struct ObTableLoadClientTaskBrief : public common::ObDLinkBase<ObTableLoadClientTaskBrief>
 {
 public:
   ObTableLoadClientTaskBrief()
-    : table_id_(common::OB_INVALID_ID),
-      dest_table_id_(common::OB_INVALID_ID),
-      task_id_(0),
+    : task_id_(common::OB_INVALID_ID),
+      table_id_(common::OB_INVALID_ID),
       client_status_(table::ObTableLoadClientStatus::MAX_STATUS),
       error_code_(common::OB_SUCCESS),
-      active_time_(0)
+      active_time_(0),
+      ref_count_(0),
+      is_in_map_(false)
   {
   }
-  TO_STRING_KV(K_(table_id), K_(dest_table_id), K_(task_id), K_(client_status), K_(error_code),
-               K_(active_time));
+  OB_INLINE int64_t get_ref_count() const { return ATOMIC_LOAD(&ref_count_); }
+  OB_INLINE int64_t inc_ref_count() { return ATOMIC_AAF(&ref_count_, 1); }
+  OB_INLINE int64_t dec_ref_count() { return ATOMIC_SAF(&ref_count_, 1); }
+  void set_is_in_map(bool is_in_map) { is_in_map_ = is_in_map; }
+  bool is_in_map() const { return is_in_map_; }
+  TO_STRING_KV(K_(task_id),
+               K_(table_id),
+               K_(client_status),
+               K_(error_code),
+               K_(result_info),
+               K_(active_time),
+               K_(ref_count),
+               K_(is_in_map));
 public:
-  uint64_t table_id_;
-  uint64_t dest_table_id_;
   int64_t task_id_;
+  uint64_t table_id_;
   table::ObTableLoadClientStatus client_status_;
   int error_code_;
+  table::ObTableLoadResultInfo result_info_;
   int64_t active_time_;
+  int64_t ref_count_ CACHE_ALIGNED;
+  volatile bool is_in_map_;
 };
 
 } // namespace observer

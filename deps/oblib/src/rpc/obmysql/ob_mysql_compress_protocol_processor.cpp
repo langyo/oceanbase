@@ -14,10 +14,8 @@
 
 #include "rpc/obmysql/ob_mysql_compress_protocol_processor.h"
 #include "rpc/obmysql/ob_mysql_util.h"
-#include "rpc/obmysql/ob_mysql_request_utils.h"
 #include "lib/compress/zlib/ob_zlib_compressor.h"
 #include "rpc/obmysql/obsm_struct.h"
-#include "rpc/obmysql/ob_packet_record.h"
 
 namespace oceanbase
 {
@@ -34,6 +32,7 @@ int ObMysqlCompressProtocolProcessor::do_decode(ObSMConnection& conn, ObICSMemPo
   pkt = NULL;
   const uint32_t sessid = conn.sessid_;
   const int64_t header_size = OB_MYSQL_COMPRESSED_HEADER_SIZE;
+  conn.mysql_pkt_context_.is_auth_switch_ = conn.is_in_auth_switch_phase();
   // no need duplicated check 'm' valid, ObMySQLHandler::process() has already checked
   if ((end - start) >= header_size) {
     //1. decode length from net buffer
@@ -198,7 +197,8 @@ inline int ObMysqlCompressProtocolProcessor::process_compressed_packet(
               pkt_rec_wrapper.record_recieve_comp_packet(*iraw_pkt, *raw_pkt);
             }
           }
-          context.reset();
+          // reset all context except the compress packet sequence
+          context.reuse();
         }
       }
     }

@@ -13,7 +13,6 @@
 #define USING_LOG_PREFIX SQL_DTL
 
 #include "ob_dtl_utils.h"
-#include "sql/engine/px/ob_px_row_store.h"
 #include "ob_dtl_flow_control.h"
 
 using namespace oceanbase::common;
@@ -186,7 +185,7 @@ int ObTransmitEofAsynSender::action(ObDtlChannel* ch)
   int ret = OB_SUCCESS;
   ObPxNewRow px_eof_row;
   px_eof_row.set_eof_row();
-  px_eof_row.set_data_type(ObDtlMsgType::PX_DATUM_ROW);
+  px_eof_row.set_data_type(type_);
   if (OB_FAIL(ch->send(px_eof_row, timeout_ts_, eval_ctx_, true))) {
     LOG_WARN("fail send eof row to slice channel", K(px_eof_row), K(ret));
   } else if (OB_FAIL(ch->flush(true, false))) {

@@ -17,6 +17,7 @@
 #include <stdio.h>
 #include <new>
 #include <pthread.h>
+#include <type_traits>
 #include "lib/hash/ob_hashutils.h"
 #include "lib/hash/ob_hashtable.h"
 #include "lib/hash/ob_serialization.h"
@@ -76,6 +77,55 @@ public:
   {
   };
 public:
+  class PrintFunctor
+  {
+  public:
+    PrintFunctor(char *buf, int64_t len, int64_t &pos) : buf_(buf), len_(len), pos_(pos), loop_cnt_(0) {}
+    template<typename ObjType>
+    int obj_to_string(const ObjType &obj, char *buf, int64_t len, int64_t &pos)
+    {
+      int ret = common::OB_SUCCESS;
+      int64_t tmp_pos = 0;
+      tmp_pos = obj.to_string(buf + pos, len - pos);
+      if (tmp_pos > 0) {
+        pos += tmp_pos;
+      } else {
+        ret = common::OB_SIZE_OVERFLOW;
+      }
+      return ret;
+    }
+    template<>
+    int obj_to_string<uint64_t>(const uint64_t &obj, char *buf, int64_t len, int64_t &pos)
+    {
+      return databuff_printf(buf, len, pos, "%lu", obj);
+    }
+    int operator()(pair_type &entry)
+    {
+      int ret = common::OB_SUCCESS;
+      int64_t tmp_pos = pos_;
+      if (loop_cnt_ > 0) {
+        ret = databuff_printf(buf_, len_, pos_, ", ");
+      }
+      if (OB_SUCC(ret)) {
+        if (OB_SUCC(obj_to_string(entry.first, buf_, len_, pos_))) {
+          if (OB_SUCC(databuff_printf(buf_, len_, pos_, "->"))) {
+            ret = obj_to_string(entry.second, buf_, len_, pos_);
+          }
+        }
+      }
+      if (common::OB_SUCCESS != ret) {
+        pos_ = tmp_pos;
+      }
+      loop_cnt_++;
+      return ret;
+    }
+  private:
+    char *buf_;
+    int64_t len_;
+    int64_t &pos_;
+  private:
+    int64_t loop_cnt_;
+  };
   bucket_iterator bucket_begin()
   {
     return ht_.bucket_begin();
@@ -84,6 +134,10 @@ public:
   {
     return ht_.bucket_end();
   };
+  int get_bucket_iterator(const int64_t bucket_pos, bucket_iterator &iterator)
+  {
+    return ht_.get_bucket_iterator(bucket_pos, iterator);
+  }
   iterator begin()
   {
     return ht_.begin();
@@ -191,10 +245,14 @@ public:
     return ret;
   };
   // flag: 0 shows that do not cover existing object
-  inline _value_type *get(_key_type &key)
+  inline _value_type *get(const _key_type &key)
   {
-    const _value_type *ret = get(const_cast<const _key_type&>(key));
-    return const_cast<_value_type*>(ret);
+    // we can not add const for T by T* directly.
+    // and T is too long compare to decltype.
+    // and auto is forbidden, otherwise const auto &const_me = *this is better.
+    // so we have to define PointerOfConstMe.
+    using PointerOfConstMe = typename std::add_pointer<typename std::add_const<typename std::remove_pointer<decltype(this)>::type>::type>::type;
+    return const_cast<_value_type*>(reinterpret_cast<PointerOfConstMe>(this)->get(key));
   }
   template <typename _callback = void>
   int set_refactored(const _key_type &key, const _value_type &value, int flag = 0,

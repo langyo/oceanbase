@@ -11,9 +11,8 @@
  */
 
 #define USING_LOG_PREFIX SQL_JO
-#include "sql/optimizer/ob_fd_item.h"
+#include "ob_fd_item.h"
 #include "sql/optimizer/ob_optimizer_util.h"
-#include "sql/optimizer/ob_fd_item.h"
 
 
 using namespace oceanbase;
@@ -122,7 +121,7 @@ int ObTableFdItem::check_expr_in_child(const ObRawExpr *expr,
   if (OB_ISNULL(expr)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("get null expr", K(ret));
-  } else if (expr->has_flag(CNT_AGG)) {
+  } else if (expr->has_flag(CNT_AGG) || expr->has_flag(CNT_WINDOW_FUNC)) {
     //do nothing
   } else if (expr->has_flag(CNT_COLUMN) || expr->has_flag(CNT_SET_OP)) {
     if (!expr->get_relation_ids().is_empty() &&

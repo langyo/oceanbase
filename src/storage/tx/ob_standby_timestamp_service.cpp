@@ -11,15 +11,9 @@
  */
 
 #include "ob_standby_timestamp_service.h"
-#include "share/rc/ob_tenant_base.h"
-#include "lib/mysqlclient/ob_mysql_proxy.h"
 #include "ob_timestamp_access.h"
-#include "ob_timestamp_service.h"
 #include "logservice/ob_log_service.h"
-#include "share/scn.h"
-#include "observer/ob_server_struct.h"
 #include "observer/ob_srv_network_frame.h"
-#include "storage/tx/ob_trans_service.h"
 #include "rootserver/ob_tenant_info_loader.h"
 
 namespace oceanbase
@@ -149,7 +143,7 @@ void ObStandbyTimestampService::run1()
     int64_t end_tstamp = ObTimeUtility::current_time();
     int64_t wait_interval = GCONF.weak_read_version_refresh_interval - (end_tstamp - begin_tstamp);
     if (wait_interval > 0) {
-      ob_usleep(wait_interval);
+      ob_usleep(wait_interval, true/*is_idle_sleep*/);
     }
   }
   TRANS_LOG(INFO, "ObStandbyTimestampService thread end", K_(tenant_id));
@@ -193,7 +187,7 @@ int ObStandbyTimestampService::switch_to_leader()
   if (OB_FAIL(MTL(logservice::ObLogService *)->get_palf_role(share::GTS_LS, role, tmp_epoch))) {
     TRANS_LOG(WARN, "get ObStandbyTimestampService role fail", KR(ret));
   } else {
-    ATOMIC_STORE(&switch_to_leader_ts_, ObClockGenerator::getCurrentTime());
+    ATOMIC_STORE(&switch_to_leader_ts_, ObClockGenerator::getClock());
     epoch_ = tmp_epoch;
     int64_t type = MTL(ObTimestampAccess *)->get_service_type();
     if (ObTimestampAccess::ServiceType::FOLLOWER == type) {

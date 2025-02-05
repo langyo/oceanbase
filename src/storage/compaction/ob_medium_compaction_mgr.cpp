@@ -12,15 +12,9 @@
 
 #define USING_LOG_PREFIX STORAGE
 
-#include "storage/compaction/ob_medium_compaction_mgr.h"
-#include "storage/tablet/ob_tablet_meta.h"
-#include "storage/tablet/ob_tablet.h"
-#include "logservice/ob_log_base_header.h"
-#include "storage/multi_data_source/mds_ctx.h"
-#include "storage/multi_data_source/mds_writer.h"
-#include "storage/tx/ob_trans_define.h"
-#include "storage/tablet/ob_tablet_obj_load_helper.h"
-#include "storage/tablet/ob_tablet_service_clog_replay_executor.h"
+#include "ob_medium_compaction_mgr.h"
+#include "src/logservice/replayservice/ob_tablet_replay_executor.h"
+#include "storage/compaction/ob_tenant_tablet_scheduler.h"
 
 namespace oceanbase
 {
@@ -248,6 +242,7 @@ int ObTabletMediumCompactionInfoRecorder::inner_replay_clog(
     } else if (OB_FAIL(replay_executor.execute(scn, ls_id_, tablet_id_))) {
       if (OB_TABLET_NOT_EXIST == ret || OB_NO_NEED_UPDATE == ret) {
         ret = OB_SUCCESS;
+        LOG_INFO("skip reply medium info", KR(ret), K(replay_medium_info));
       } else {
         LOG_WARN("failed to replay medium info", K(ret), K(replay_medium_info));
       }
@@ -271,7 +266,7 @@ int ObTabletMediumCompactionInfoRecorder::sync_clog_succ_for_leader(const int64_
   } else if (OB_FAIL(submit_trans_on_mds_table(true/*is_commit*/))) {
     LOG_WARN("failed to dec ref on memtable", K(ret), K_(tablet_id), KPC(medium_info_));
   } else {
-    FLOG_INFO("success to save medium info for leader", K(ret), K_(ls_id), K_(tablet_id), KPC(medium_info_),
+    LOG_TRACE("success to save medium info for leader", K(ret), K_(ls_id), K_(tablet_id), KPC(medium_info_),
         K(max_saved_version_), K_(clog_scn));
   }
   return ret;
@@ -300,6 +295,27 @@ int ObTabletMediumCompactionInfoRecorder::submit_trans_on_mds_table(const bool i
   return ret;
 }
 
+int64_t ObTabletMediumCompactionInfoRecorder::cal_buf_len(
+    const common::ObTabletID &tablet_id,
+    const ObMediumCompactionInfo &medium_info,
+    const logservice::ObLogBaseHeader *log_header)
+{
+  int64_t buf_len = 0;
+  if (OB_NOT_NULL(log_header)) {
+    buf_len += log_header->get_serialize_size();
+  } else {
+    const logservice::ObLogBaseHeader tmp_log_header(
+      logservice::ObLogBaseType::MEDIUM_COMPACTION_LOG_BASE_TYPE,
+      logservice::ObReplayBarrierType::NO_NEED_BARRIER,
+      tablet_id.id());
+    buf_len += tmp_log_header.get_serialize_size();
+  }
+  buf_len += (tablet_id.get_serialize_size()
+      + serialization::encoded_length_i64(medium_info.medium_snapshot_)
+      + medium_info.get_serialize_size());
+  return buf_len;
+}
+
 // log_header + tablet_id + medium_snapshot + medium_compaction_info
 int ObTabletMediumCompactionInfoRecorder::prepare_struct_in_lock(
     int64_t &update_version,
@@ -321,10 +337,7 @@ int ObTabletMediumCompactionInfoRecorder::prepare_struct_in_lock(
   char *buf = nullptr;
   char *alloc_clog_buf = nullptr;
   int64_t alloc_buf_offset = 0;
-  const int64_t buf_len = log_header.get_serialize_size()
-      + tablet_id_.get_serialize_size()
-      + serialization::encoded_length_i64(medium_info_->medium_snapshot_)
-      + medium_info_->get_serialize_size();
+  const int64_t buf_len = cal_buf_len(tablet_id_, *medium_info_, &log_header);
   const int64_t alloc_buf_size = buf_len + sizeof(ObTabletHandle) + sizeof(ObStorageCLogCb) + sizeof(mds::MdsCtx);
 
   if (OB_UNLIKELY(nullptr == medium_info_ || nullptr == allocator)) {
@@ -453,7 +466,7 @@ int ObMediumCompactionInfoList::init(
 int ObMediumCompactionInfoList::init(
     common::ObIAllocator &allocator,
     const ObExtraMediumInfo &extra_medium_info,
-    const ObTabletDumpedMediumInfo *medium_info_list)
+    const common::ObIArray<ObMediumCompactionInfo*> &medium_info_array)
 {
   int ret = OB_SUCCESS;
 
@@ -462,32 +475,24 @@ int ObMediumCompactionInfoList::init(
     LOG_WARN("init twice", K(ret));
   } else {
     allocator_ = &allocator;
-    if (nullptr == medium_info_list) {
-      // medium info is null, no need to copy
-    } else {
-      const common::ObIArray<ObMediumCompactionInfo*> &array = medium_info_list->medium_info_list_;
-      ObMediumCompactionInfo *medium_info = nullptr;
-      for (int64_t i = 0; OB_SUCC(ret) && i < array.count(); ++i) {
-        medium_info = nullptr;
-        const ObMediumCompactionInfo *src_medium_info = array.at(i);
-        if (OB_ISNULL(src_medium_info)) {
-          ret = OB_ERR_UNEXPECTED;
-          LOG_WARN("unexpected error, medium info is null", K(ret), K(i), KP(src_medium_info));
-        } else if (OB_FAIL(ObTabletObjLoadHelper::alloc_and_new(allocator, medium_info))) {
-          LOG_WARN("failed to alloc and new", K(ret));
-        } else if (OB_FAIL(medium_info->init(allocator, *src_medium_info))) {
-          LOG_WARN("failed to copy medium info", K(ret), KPC(src_medium_info));
-        } else if (OB_UNLIKELY(!medium_info_list_.add_last(medium_info))) {
-          ret = OB_ERR_UNEXPECTED;
-          LOG_WARN("failed to add last", K(ret), KPC(medium_info));
-        }
+    ObMediumCompactionInfo *medium_info = nullptr;
+    for (int64_t i = 0; OB_SUCC(ret) && i < medium_info_array.count(); ++i) {
+      medium_info = nullptr;
+      const ObMediumCompactionInfo *src_medium_info = medium_info_array.at(i);
+      if (OB_ISNULL(src_medium_info)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("unexpected error, medium info is null", K(ret), K(i), KP(src_medium_info));
+      } else if (OB_FAIL(ObTabletObjLoadHelper::alloc_and_new(allocator, medium_info))) {
+        LOG_WARN("failed to alloc and new", K(ret));
+      } else if (OB_FAIL(medium_info->init(allocator, *src_medium_info))) {
+        LOG_WARN("failed to copy medium info", K(ret), KPC(src_medium_info));
+      } else if (OB_UNLIKELY(!medium_info_list_.add_last(medium_info))) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("failed to add last", K(ret), KPC(medium_info));
+      }
 
-        if (OB_FAIL(ret)) {
-          if (OB_NOT_NULL(medium_info)) {
-            medium_info->~ObMediumCompactionInfo();
-            allocator.free(medium_info);
-          }
-        }
+      if (OB_FAIL(ret)) {
+        ObTabletObjLoadHelper::free(allocator, medium_info);
       }
     }
 
@@ -501,6 +506,7 @@ int ObMediumCompactionInfoList::init(
 
   return ret;
 }
+
 void ObMediumCompactionInfoList::reset_list()
 {
   DLIST_REMOVE_ALL_NORET(info, medium_info_list_) {
@@ -616,7 +622,7 @@ int ObMediumCompactionInfoList::deserialize(
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("medium info list is invalid", K(ret), KPC(this));
   } else {
-    extra_info_.compat_ = ObExtraMediumInfo::MEDIUM_LIST_VERSION;
+    extra_info_.compat_ = ObExtraMediumInfo::MEDIUM_LIST_VERSION_V1;
     is_inited_ = true;
     pos = new_pos;
   }
@@ -678,5 +684,73 @@ int ObMediumCompactionInfoList::get_max_sync_medium_scn(int64_t &max_sync_medium
   return ret;
 }
 
-} //namespace compaction
+int ObMediumCompactionInfoList::get_specific_medium_reason(
+    const int64_t medium_scn,
+    ObAdaptiveMergePolicy::AdaptiveMergeReason &medium_merge_reason) const
+{
+  int ret = OB_SUCCESS;
+  medium_merge_reason = ObAdaptiveMergePolicy::NONE;
+
+  if (OB_UNLIKELY(!is_valid())) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("medium list is invalid", KR(ret), KPC(this));
+  } else {
+    bool is_found = false;
+    DLIST_FOREACH_NORET(info, get_list()) {
+      if (info->medium_snapshot_ == medium_scn) {
+        medium_merge_reason = (ObAdaptiveMergePolicy::AdaptiveMergeReason) info->medium_merge_reason_;
+        is_found = true;
+        break;
+      }
+    }
+
+    if (OB_SUCC(ret) && !is_found) {
+      ret = OB_ENTRY_NOT_EXIST;
+    }
+  }
+  return ret;
+}
+
+bool ObMediumCompactionInfoList::need_check_finish() const
+{
+  const int64_t wait_check_scn = get_wait_check_medium_scn();
+  bool need_check = (wait_check_scn > 0);
+#ifndef ERRSIM
+  if (need_check && ObMediumCompactionInfo::MAJOR_COMPACTION == get_last_compaction_type()) {
+    need_check = wait_check_scn > MERGE_SCHEDULER_PTR->get_inner_table_merged_scn();
+  }
+#endif
+  return need_check;
+}
+
+int ObMediumCompactionInfoList::get_next_schedule_info(
+    const int64_t last_major_snapshot,
+    const int64_t major_frozen_snapshot,
+    const bool is_mv_refresh_tablet,
+    ObMediumCompactionInfo::ObCompactionType &compaction_type,
+    int64_t &schedule_scn,
+    ObCOMajorMergePolicy::ObCOMajorMergeType &co_major_merge_type) const
+{
+  int ret = OB_SUCCESS;
+  DLIST_FOREACH_X(info, get_list(), OB_SUCC(ret)) {
+    if (info->medium_snapshot_ <= last_major_snapshot) {
+      // finished, this medium info could recycle
+    } else {
+      if (info->is_medium_compaction()
+          || info->medium_snapshot_ <= major_frozen_snapshot
+          || is_mv_refresh_tablet) {
+        schedule_scn = info->medium_snapshot_;
+        compaction_type = (ObMediumCompactionInfo::ObCompactionType)info->compaction_type_;
+        co_major_merge_type = static_cast<ObCOMajorMergePolicy::ObCOMajorMergeType>(info->co_major_merge_type_);
+      }
+      break; // found one unfinish medium info, loop end
+    }
+  }
+  if (schedule_scn <= 0) {
+    ret = OB_NO_NEED_MERGE;
+  }
+  return ret;
+}
+
+} // namespace compaction
 } // namespace oceanbase

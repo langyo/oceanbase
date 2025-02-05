@@ -11,11 +11,8 @@
  */
 
 #define USING_LOG_PREFIX SHARE_SCHEMA
-#include "share/schema/ob_column_schema.h"
-#include "lib/oblog/ob_log_module.h"
-#include "share/schema/ob_table_schema.h"
+#include "ob_column_schema.h"
 #include "share/schema/ob_schema_service.h"
-#include "share/ob_cluster_version.h"
 
 namespace oceanbase
 {
@@ -92,32 +89,28 @@ ColumnType ObColumnSchemaV2::convert_str_to_column_type(const char *str)
 }
 
 ObColumnSchemaV2::ObColumnSchemaV2()
-    : ObSchema()
+    : ObSchema(),
+    local_session_vars_(get_allocator())
 {
   reset();
 }
 
 ObColumnSchemaV2::ObColumnSchemaV2(ObIAllocator *allocator)
-    : ObSchema(allocator)
+    : ObSchema(allocator),
+    local_session_vars_(allocator)
 {
   reset();
-}
-
-ObColumnSchemaV2::ObColumnSchemaV2(const ObColumnSchemaV2 &src_schema)
-    : ObSchema()
-{
-  reset();
-  *this = src_schema;
 }
 
 ObColumnSchemaV2::~ObColumnSchemaV2()
 {
 }
 
-ObColumnSchemaV2 &ObColumnSchemaV2::operator =(const ObColumnSchemaV2 &src_schema)
+int ObColumnSchemaV2::assign(const ObColumnSchemaV2 &src_schema)
 {
+  int ret = OB_SUCCESS;
   if (this != &src_schema) {
-    reset();
+    ObColumnSchemaV2::reset();
     error_ret_ = src_schema.error_ret_;
     tenant_id_ = src_schema.tenant_id_;
     table_id_ = src_schema.table_id_;
@@ -145,8 +138,8 @@ ObColumnSchemaV2 &ObColumnSchemaV2::operator =(const ObColumnSchemaV2 &src_schem
     udt_set_id_ = src_schema.udt_set_id_;
     sub_type_ = src_schema.sub_type_;
     skip_index_attr_ = src_schema.skip_index_attr_;
+    lob_chunk_size_ = src_schema.lob_chunk_size_;
 
-    int ret = OB_SUCCESS;
     if (OB_FAIL(deep_copy_obj(src_schema.orig_default_value_, orig_default_value_))) {
       LOG_WARN("Fail to deepy copy orig_default_value, ", K(ret));
     } else if (OB_FAIL(deep_copy_obj(src_schema.cur_default_value_, cur_default_value_))) {
@@ -165,18 +158,18 @@ ObColumnSchemaV2 &ObColumnSchemaV2::operator =(const ObColumnSchemaV2 &src_schem
       }
     } else {/*do nothing*/}
 
+    if (OB_SUCC(ret)) {
+      if (OB_FAIL(local_session_vars_.deep_copy(src_schema.local_session_vars_))) {
+        LOG_WARN("fail to deep copy sys var info", K(ret));
+      }
+    }
+
     if (OB_FAIL(ret)) {
       error_ret_ = ret;
     }
     LOG_DEBUG("operator =", K(src_schema), K(*this));
   }
-  return *this;
-}
-
-int ObColumnSchemaV2::assign(const ObColumnSchemaV2 &other)
-{
-  *this = other;
-  return error_ret_;
+  return ret;
 }
 
 bool ObColumnSchemaV2::operator==(const ObColumnSchemaV2 &r) const
@@ -205,6 +198,7 @@ int64_t ObColumnSchemaV2::get_convert_size() const
   for (int64_t i = 0; i < extended_type_info_.count(); ++i) {
     convert_size += extended_type_info_.at(i).length() + 1;
   }
+  convert_size += local_session_vars_.get_deep_copy_size();
   return convert_size;
 }
 
@@ -265,6 +259,8 @@ void ObColumnSchemaV2::reset()
   sub_type_ = 0;
   reset_string_array(extended_type_info_);
   skip_index_attr_.reset();
+  lob_chunk_size_ = OB_DEFAULT_LOB_CHUNK_SIZE;
+  local_session_vars_.reset();
   ObSchema::reset();
 }
 
@@ -314,7 +310,9 @@ OB_DEF_SERIALIZE(ObColumnSchemaV2)
                 srs_id_,
                 udt_set_id_,
                 sub_type_,
-                skip_index_attr_);
+                skip_index_attr_,
+                lob_chunk_size_,
+                local_session_vars_);
   }
 
   return ret;
@@ -381,7 +379,9 @@ OB_DEF_DESERIALIZE(ObColumnSchemaV2)
                 srs_id_,
                 udt_set_id_,
                 sub_type_,
-                skip_index_attr_);
+                skip_index_attr_,
+                lob_chunk_size_,
+                local_session_vars_);
   }
   return ret;
 }
@@ -426,7 +426,9 @@ OB_DEF_SERIALIZE_SIZE(ObColumnSchemaV2)
               srs_id_,
               udt_set_id_,
               sub_type_,
-              skip_index_attr_);
+              skip_index_attr_,
+              lob_chunk_size_,
+              local_session_vars_);
   return len;
 }
 
@@ -521,7 +523,9 @@ int64_t ObColumnSchemaV2::to_string(char *buf, const int64_t buf_len) const
     K_(udt_set_id),
     K_(sub_type),
     K_(skip_index_attr),
-    KPC_(column_ref_idxs));
+    K_(lob_chunk_size),
+    KPC_(column_ref_idxs),
+    K(local_session_vars_));
   J_OBJ_END();
   return pos;
 }
@@ -538,7 +542,7 @@ int ObColumnSchemaV2::get_byte_length(
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("collation type is invalid", K(ret));
   } else if (ob_is_text_tc(meta_type_.get_type()) || ob_is_json(meta_type_.get_type())
-             || ob_is_geometry(meta_type_.get_type())) {
+             || ob_is_geometry(meta_type_.get_type()) || ob_is_roaringbitmap(meta_type_.get_type())) {
     if (for_check_length) {
       // when check row length, a lob will occupy at most 2KB
       length = min(get_data_length(), OB_MAX_LOB_HANDLE_LENGTH);
@@ -776,6 +780,46 @@ int ObColumnSchemaV2::set_geo_type(const int32_t type_val)
     }
   }
 
+  return ret;
+}
+int ObColumnSchemaV2::get_each_column_group_name(ObString &cg_name) const {
+  int ret = OB_SUCCESS;
+  /* to avoid column_name_str not end with \0, write cg_name using ObString::write*/
+  char tmp_cg_name[OB_MAX_COLUMN_GROUP_NAME_LENGTH] = {'\0'};
+  int32_t write_len = snprintf(tmp_cg_name, OB_MAX_COLUMN_GROUP_NAME_LENGTH, "%.*s_%.*s",
+                               static_cast<int>(sizeof(OB_COLUMN_GROUP_NAME_PREFIX)),
+                               OB_COLUMN_GROUP_NAME_PREFIX, column_name_.length(), column_name_.ptr());
+  if (write_len < 0) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("fail to format column group_name", K(ret), K(write_len));
+  } else if (write_len > OB_MAX_COLUMN_GROUP_NAME_LENGTH) {
+    ret = OB_ERR_TOO_LONG_IDENT;
+    LOG_WARN("too long column name to format column group name", K(ret), KPC(this), K(write_len));
+    LOG_USER_ERROR(OB_ERR_TOO_LONG_IDENT, column_name_.length(), column_name_.ptr());
+  }
+
+  if (OB_SUCC(ret)) {
+    if (cg_name.write(tmp_cg_name, write_len) != write_len) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("fail to write column group name to str", K(ret), K(cg_name), K(write_len));
+    }
+  }
+  return ret;
+}
+
+int ObColumnSchemaV2::is_same_collection_column(const ObColumnSchemaV2 &other, bool &is_same) const
+{
+  int ret = OB_SUCCESS;
+  if (get_extended_type_info().count() == other.get_extended_type_info().count()) {
+    if (get_extended_type_info().count() != 1) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("failed to check type info incremental change", K(ret));
+    } else {
+      ObString src_sub_name = get_extended_type_info().at(0);
+      ObString dst_sub_name = other.get_extended_type_info().at(0);
+      is_same = (src_sub_name.case_compare(dst_sub_name) == 0);
+    }
+  }
   return ret;
 }
 

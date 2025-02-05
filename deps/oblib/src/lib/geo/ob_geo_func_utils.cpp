@@ -14,9 +14,6 @@
 #define USING_LOG_PREFIX LIB
 
 #include "lib/geo/ob_geo_func_utils.h"
-#include "lib/oblog/ob_log_module.h"
-#include "common/ob_smart_call.h"
-#include "lib/utility/ob_hang_fatal_error.h"
 
 using namespace oceanbase::common;
 namespace oceanbase
@@ -24,6 +21,18 @@ namespace oceanbase
 namespace common
 {
 
+int ObGeoFuncUtils::apply_bg_to_tree(const ObGeometry *g1, const ObGeoEvalCtx &context, ObGeometry *&result)
+{
+  INIT_SUCC(ret);
+  ObGeoToTreeVisitor geom_visitor(context.get_allocator());
+  ObGeometry *geo1 = const_cast<ObGeometry *>(g1);
+  if (OB_FAIL(geo1->do_visit(geom_visitor))) {
+    LOG_WARN("failed to convert bin to tree", K(ret));
+  } else {
+    result = geom_visitor.get_geometry();
+  }
+  return ret;
+}
 
 } // sql
 } // oceanbase

@@ -90,6 +90,7 @@ public:
   int set_refactored(const DatumRow &row, const ObDatum &result, const int64_t deep_copy_size);
   void set_parent(const ObSubPlanFilterOp *filter) { parent_ = filter; }
   int reset_hash_map();
+  int64_t cur_idx() const { return batch_row_pos_ - 1; }
 
   bool check_can_insert(const int64_t deep_copy_size)
   {
@@ -103,7 +104,6 @@ public:
   //for vectorized end
   bool is_onetime_plan() const { return onetime_plan_; }
 
-  void set_new_batch(bool new_batch) { is_new_batch_ = new_batch;};
   TO_STRING_KV(K(onetime_plan_), K(init_plan_), K(inited_));
 
   //a row cache for hash optimizer to use
@@ -111,13 +111,14 @@ public:
   //hard core, 1M limit for each hashmap
   const static int HASH_MAP_MEMORY_LIMIT = 1024 * 1024;
   void drain_exch();
-
+  int init_batch_rows_holder(const common::ObIArray<ObExpr *> &exprs, ObEvalCtx &eval_ctx);
 private:
 
+  int get_next_row_from_child();
+  int get_next_row_vecrorizely();
+  int cast_vector_format();
   // for das batch spf
   int alloc_das_batch_store();
-  int save_das_batch_store();
-  int resume_das_batch_store();
   // for das batch spf end
   ObOperator &op_;
   bool onetime_plan_;
@@ -140,11 +141,9 @@ private:
   int64_t batch_size_;
   int64_t batch_row_pos_;
   bool iter_end_;
+  ObBatchResultHolder brs_holder_;
   // for vectorized end
 
-  // for das batch spf
-  bool is_new_batch_;
-  uint64_t current_group_;
   common::ObArrayWrap<ObObjParam> das_batch_params_recovery_;
   // for das batch spf end
 };
@@ -207,7 +206,7 @@ public:
   int handle_next_row();
   bool enable_px_batch_rescan() { return enable_left_px_batch_; }
   //for vectorized
-  int inner_get_next_batch(const int64_t max_row_cnt);
+  virtual int inner_get_next_batch(const int64_t max_row_cnt);
   // for vectorized end
 
   int init_left_cur_row(const int64_t column_cnt, ObExecContext &ctx);
@@ -216,7 +215,8 @@ public:
   //for DAS batch SPF
   int fill_cur_row_das_batch_param(ObEvalCtx& eval_ctx, uint64_t current_group) const;
   int bind_das_batch_params_to_store() const;
-  void get_current_group(uint64_t& current_group) const;
+  virtual void get_current_group(uint64_t& current_group) const;
+  virtual void get_current_batch_cnt(int64_t& current_batch_cnt) const { current_batch_cnt = group_rescan_cnt_; }
   bool enable_left_das_batch() const {return MY_SPEC.enable_das_group_rescan_;}
   //for DAS batch SPF end
 
@@ -227,6 +227,7 @@ public:
   ObBatchRescanCtl &get_batch_rescan_ctl() { return batch_rescan_ctl_; }
   int handle_next_batch_with_px_rescan(const int64_t op_max_batch_size);
   int handle_next_batch_with_group_rescan(const int64_t op_max_batch_size);
+  virtual const GroupParamArray *get_rescan_params_info() const { return &rescan_params_info_; }
 private:
   void set_param_null() { set_pushdown_param_null(MY_SPEC.rescan_params_); };
   void destroy_subplan_iters();
@@ -239,7 +240,7 @@ private:
     }
   }
 
-  int prepare_rescan_params(bool save);
+  int prepare_rescan_params(bool save, int64_t &params_size);
   int prepare_onetime_exprs();
   int prepare_onetime_exprs_inner();
   int handle_update_set();
@@ -256,16 +257,19 @@ private:
   int deep_copy_dynamic_obj();
   // for das batch spf end
 
-private:
+protected:
   common::ObSEArray<Iterator *, 16> subplan_iters_;
-  lib::MemoryContext update_set_mem_;
   bool iter_end_;
+  uint64_t max_group_size_; //Das batch rescan size;
+
+private:
+  lib::MemoryContext update_set_mem_;
   // for px batch rescan
   bool enable_left_px_batch_;
   // for px batch rescan end
   // for das batch rescan
-  uint64_t max_group_size_; //Das batch rescan size;
   uint64_t current_group_;  //The group id in this time right iter rescan;
+
   common::ObArrayWrap<ObSqlArrayObj> das_batch_params_;
   // for das batch rescan end
   ObChunkDatumStore left_rows_;
@@ -282,37 +286,15 @@ private:
   common::ObSEArray<Iterator*, 8> subplan_iters_to_check_;
   lib::MemoryContext last_store_row_mem_;
   ObBatchResultHolder brs_holder_;
-};
-
-class GroupParamBackupGuard
-{
 public:
-  GroupParamBackupGuard(ObEvalCtx& eval_ctx,
-                       common::ObArrayWrap<ObObjParam>& das_batch_params_recovery,
-                       const common::ObFixedArray<ObDynamicParamSetter, common::ObIAllocator>& rescan_params,
-                       int64_t params_count)
-    : eval_ctx_(eval_ctx),
-      das_batch_params_recovery_(das_batch_params_recovery),
-      rescan_params_(rescan_params),
-      params_count_(params_count)
-  {
-    save_das_batch_store();
-  }
-  ~GroupParamBackupGuard()
-  {
-    resume_das_batch_store();
-  }
-private:
-  void save_das_batch_store();
-  void resume_das_batch_store();
-private:
-  ObEvalCtx& eval_ctx_;
-  common::ObArrayWrap<ObObjParam>& das_batch_params_recovery_;
-  const common::ObFixedArray<ObDynamicParamSetter, common::ObIAllocator>& rescan_params_;
-  int64_t params_count_;
+  static const int64_t MAX_PX_RESCAN_PARAMS_SIZE = 4 << 20; // 4M
+  static const int64_t MAX_DUMP_SIZE = 16 << 20; // 16M
+public:
+  // Count of reals rescan initiated by the spf operator; for batch rescan, it was plus one for each batch;
+  // For normal rescan, it was plus one  for each rescan
+  int64_t group_rescan_cnt_;
+  GroupParamArray rescan_params_info_;
 };
-
-
 } // end namespace sql
 } // end namespace oceanbase
 

@@ -11,16 +11,10 @@
  */
 
 #define USING_LOG_PREFIX SQL_OPT
-#include "lib/number/ob_number_v2.h"
 
-#include "sql/optimizer/ob_opt_est_utils.h"
-#include "sql/resolver/expr/ob_raw_expr_util.h"
+#include "ob_opt_est_utils.h"
 #include "sql/optimizer/ob_log_plan.h"
-#include "sql/ob_sql_utils.h"
 #include "sql/engine/expr/ob_expr_equal.h"
-#include "sql/optimizer/ob_optimizer_util.h"
-#include "common/ob_smart_call.h"
-#include <cmath>
 
 namespace oceanbase
 {
@@ -75,26 +69,103 @@ int ObOptEstUtils::extract_column_exprs_with_op_check(
 }
 
 
-int ObOptEstUtils::is_range_expr(const ObRawExpr *qual, bool &is_simple_filter, const int64_t level)
+int ObOptEstUtils::is_range_expr(const ObRawExpr *qual, bool &is_simple_filter)
 {
   int ret = OB_SUCCESS;
-  if (0 == level) {
-    is_simple_filter = true;
-  }
+  is_simple_filter = true;
   if (OB_ISNULL(qual)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("qual is null", K(ret));
-  } else if (IS_RANGE_CMP_OP(qual->get_expr_type()) && qual->has_flag(IS_RANGE_COND)) {
-    // c1 > 1 , 1 < c1 do nothing
+  } else if (IS_RANGE_CMP_OP(qual->get_expr_type()) ||
+             T_OP_BTW == qual->get_expr_type() ||
+             T_OP_NOT_BTW == qual->get_expr_type()) {
+    // c1 > 1 , 1 < c1, c1 (not) between 1 and '2'
+    const ObRawExpr *var = NULL;
+    const ObRawExpr *const_expr1 = NULL;
+    const ObRawExpr *const_expr2 = NULL;
+    ObItemType dummy = T_INVALID;
+    if (OB_FAIL(extract_var_op_const(qual, var, const_expr1, const_expr2, dummy, is_simple_filter))) {
+      LOG_WARN("failed to extract var", K(ret));
+    } else if (!is_simple_filter) {
+      // do nothing
+    } else if (OB_FAIL(ObOptimizerUtil::get_expr_without_lossless_cast(var, var))) {
+      LOG_WARN("failed to get expr without lossless cast", K(ret));
+    } else if (!var->is_column_ref_expr()) {
+      is_simple_filter = false;
+    }
   } else if (T_OP_AND == qual->get_expr_type() || T_OP_OR == qual->get_expr_type()) {
     const ObOpRawExpr *op_expr = static_cast<const ObOpRawExpr *>(qual);
     for (int idx = 0 ; idx < op_expr->get_param_count() && is_simple_filter && OB_SUCC(ret); ++idx) {
-      if (OB_FAIL(is_range_expr(op_expr->get_param_expr(idx), is_simple_filter, level + 1))) {
+      if (OB_FAIL(is_range_expr(op_expr->get_param_expr(idx), is_simple_filter))) {
         LOG_WARN("failed to judge if expr is range", K(ret));
       }
     }
   } else {
     is_simple_filter = false;
+  }
+  return ret;
+}
+
+int ObOptEstUtils::extract_var_op_const(const ObRawExpr *qual,
+                                        const ObRawExpr *&var_expr,
+                                        const ObRawExpr *&const_expr1,
+                                        const ObRawExpr *&const_expr2,
+                                        ObItemType &type,
+                                        bool &is_valid)
+{
+  int ret = OB_SUCCESS;
+  type = T_INVALID;
+  is_valid = false;
+  var_expr = NULL;
+  const_expr1 = NULL;
+  const_expr2 = NULL;
+  if (OB_ISNULL(qual)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected null", K(ret));
+  } else if (FALSE_IT(type = qual->get_expr_type())) {
+  } else if (IS_RANGE_CMP_OP(type) || T_OP_EQ == type || T_OP_NSEQ == type || T_OP_NE == type) {
+    if (OB_UNLIKELY(qual->get_param_count() != 2) ||
+        OB_ISNULL(qual->get_param_expr(0)) ||
+        OB_ISNULL(qual->get_param_expr(1))) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("unexpected param", KPC(qual));
+    } else if (!qual->get_param_expr(0)->is_const_expr() &&
+               qual->get_param_expr(1)->is_const_expr()) {
+      var_expr = qual->get_param_expr(0);
+      const_expr1 = qual->get_param_expr(1);
+      is_valid = true;
+    } else if (!qual->get_param_expr(1)->is_const_expr() &&
+               qual->get_param_expr(0)->is_const_expr()) {
+      var_expr = qual->get_param_expr(1);
+      const_expr1 = qual->get_param_expr(0);
+      is_valid = true;
+      type = get_opposite_compare_type(type);
+    }
+  } else if (T_OP_IS == type || T_OP_IS_NOT == type) {
+    if (OB_UNLIKELY(qual->get_param_count() != 2) ||
+        OB_ISNULL(qual->get_param_expr(0)) ||
+        OB_ISNULL(qual->get_param_expr(1))) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("unexpected param", KPC(qual));
+    } else if (!qual->get_param_expr(0)->is_const_expr() &&
+               qual->get_param_expr(1)->is_const_expr()) {
+      var_expr = qual->get_param_expr(0);
+      const_expr1 = qual->get_param_expr(1);
+      is_valid = true;
+    }
+  } else if (T_OP_BTW == type || T_OP_NOT_BTW == type) {
+    if (OB_UNLIKELY(3 != qual->get_param_count()) || OB_ISNULL(qual->get_param_expr(0)) ||
+        OB_ISNULL(qual->get_param_expr(1)) || OB_ISNULL(qual->get_param_expr(2))) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("unexpected param", K(ret), KPC(qual));
+    } else if (!qual->get_param_expr(0)->is_const_expr() &&
+               qual->get_param_expr(1)->is_const_expr() &&
+               qual->get_param_expr(2)->is_const_expr()) {
+      var_expr = qual->get_param_expr(0);
+      const_expr1 = qual->get_param_expr(1);
+      const_expr2 = qual->get_param_expr(2);
+      is_valid = true;
+    }
   }
   return ret;
 }
@@ -198,12 +269,14 @@ int ObOptEstUtils::if_expr_start_with_patten_sign(const ParamStore *params,
                                                   const ObRawExpr *esp_expr,
                                                   ObExecContext *exec_ctx,
                                                   ObIAllocator &allocator,
-                                                  bool &is_start_with)
+                                                  bool &is_start_with,
+                                                  bool &all_is_percent_sign)
 {
   int ret = OB_SUCCESS;
   is_start_with = false;
+  all_is_percent_sign = false;
   bool get_value = false;
-  bool empty_escape = false;
+  bool valid_escape = true;
   char escape;
   ObObj value;
   ObObj esp_value;
@@ -216,21 +289,46 @@ int ObOptEstUtils::if_expr_start_with_patten_sign(const ParamStore *params,
   } else if (!get_value || !esp_value.is_string_type()) {
     // do nothing
   } else {
-    if (esp_value.get_char().length() > 0) {
-      escape = esp_value.get_char()[0];
-    } else {
-      empty_escape = true;
+    size_t escape_length = ObCharset::strlen_char(esp_expr->get_collation_type(),
+                                                  esp_value.get_string().ptr(),
+                                                  esp_value.get_string().length());
+    int32_t escape_wc = 0;
+    if (1 != escape_length) {
+      valid_escape = false;
+    } else if (OB_FAIL(ObCharset::mb_wc(esp_expr->get_collation_type(), esp_value.get_string(), escape_wc))) {
+      ret = OB_SUCCESS;
+      valid_escape = false;
     }
     if (OB_FAIL(get_expr_value(params, *expr, exec_ctx, allocator, get_value, value))) {
       LOG_WARN("Failed to get expr value", K(ret));
     } else if (get_value && value.is_string_type() && value.get_string().length() > 0) {
       // 1. patten not start with `escape sign`
       // 2. patten start with `%` or `_` && `%` or `_` is not `escape sign`
-      char start_c = value.get_string()[0];
-      if (empty_escape) {
-        is_start_with = ('%' == start_c || '_' == start_c);
-      } else {
-        is_start_with = (escape != start_c && ('%' == start_c || '_' == start_c));
+      ObStringScanner scanner(value.get_string(), expr->get_collation_type());
+      ObString encoding;
+      int32_t wc = 0;
+      ObString first_c;
+      bool is_first_char = true;
+      all_is_percent_sign = true;
+      while (OB_SUCC(ret)
+            && scanner.next_character(encoding, wc, ret)
+            && all_is_percent_sign) {
+        if (is_first_char) {
+          bool is_wild = (static_cast<int32_t>('%') == wc || static_cast<int32_t>('_') == wc);
+          if (!valid_escape) {
+            is_start_with = is_wild;
+          } else {
+            is_start_with = (escape_wc != wc && is_wild);
+          }
+          is_first_char = false;
+        }
+        if (static_cast<int32_t>('%') != wc) {
+          all_is_percent_sign = false;
+        }
+      }
+      if (OB_FAIL(ret)) {
+        ret = OB_SUCCESS;
+        all_is_percent_sign = false;
       }
     } else { /* do nothing */ }
   }
@@ -360,9 +458,14 @@ int ObOptEstUtils::columns_has_unique_subset(const ObIArray<uint64_t> &full,
   return ret;
 }
 
-double ObOptEstObjToScalar::convert_obj_to_scalar(const ObObj *obj)
+int ObOptEstObjToScalar::convert_obj_to_scalar(const ObObj *obj, double &scalar)
 {
-  double scalar = 0.0;
+  int ret = OB_SUCCESS;
+  scalar = 0.0;
+  ObDateSqlMode date_sql_mode;
+  date_sql_mode.allow_invalid_dates_ = true;
+  int32_t date = 0;
+  int64_t datetime = 0;
 
   if (NULL == obj) {
     //NULL obj means a double 0.0 as scalar to return
@@ -390,7 +493,7 @@ double ObOptEstObjToScalar::convert_obj_to_scalar(const ObObj *obj)
         scalar = static_cast<double>(obj->get_utinyint());
         break;
     case ObUSmallIntType:               // uint16
-        scalar = static_cast<double>(obj->get_smallint());
+        scalar = static_cast<double>(obj->get_usmallint());
         break;
     case ObUMediumIntType:              // uint24
         scalar = static_cast<double>(obj->get_umediumint());
@@ -443,24 +546,24 @@ double ObOptEstObjToScalar::convert_obj_to_scalar(const ObObj *obj)
     case ObLongTextType:
     case ObVarcharType: {  // charset: utf-8, collation: utf8_general_ci
         const ObString &str = obj->get_varchar();
-        scalar = convert_string_to_scalar(str);
+        ret = convert_string_to_scalar(obj->get_collation_type(), str, scalar);
         break;
     }
     case ObCharType:
     case ObNCharType:
     case ObNVarchar2Type: {    // charset: utf-8, collation: utf8_general_ci
         const ObString &str = obj->get_string();
-        scalar = convert_string_to_scalar(str);
+        ret = convert_string_to_scalar(obj->get_collation_type(), str, scalar);
         break;
     }
     case ObHexStringType: {
         const ObString &str = obj->get_varbinary();
-        scalar = convert_string_to_scalar(str);
+        ret = convert_string_to_scalar(obj->get_collation_type(), str, scalar);
         break;
     }
     case ObRawType: {
         const ObString &str = obj->get_raw();
-        scalar = convert_string_to_scalar(str);
+        ret = convert_string_to_scalar(obj->get_collation_type(), str, scalar);
         break;
     }
     case ObIntervalYMType: {
@@ -473,6 +576,14 @@ double ObOptEstObjToScalar::convert_obj_to_scalar(const ObObj *obj)
           + obj->get_interval_ds().get_fs());
         break;
     }
+    case ObMySQLDateType:
+        ObTimeConverter::mdate_to_date(obj->get_mysql_date(), date, date_sql_mode);
+        scalar = static_cast<double>(date);
+        break;
+    case ObMySQLDateTimeType:
+        ObTimeConverter::mdatetime_to_datetime(obj->get_mysql_datetime(), datetime, date_sql_mode);
+        scalar = static_cast<double>(datetime);
+        break;
     case ObExtendType:                 // Min, Max, NOP etc.
     case ObUnknownType:                // For question mark(?) in prepared statement, no need to serialize
       //TODO:
@@ -482,7 +593,7 @@ double ObOptEstObjToScalar::convert_obj_to_scalar(const ObObj *obj)
     }
   }
 
-  return scalar;
+  return ret;
 }
 
 int ObOptEstObjToScalar::convert_obj_to_double(const ObObj *obj, double &num)
@@ -513,8 +624,8 @@ int ObOptEstObjToScalar::convert_obj_to_double(const ObObj *obj, double &num)
         LOG_WARN("failed to get double from number", K(ret));
       }
     }
-  } else {
-    num = convert_obj_to_scalar(obj);
+  } else if (OB_FAIL(convert_obj_to_scalar(obj, num))) {
+    LOG_WARN("failed to convert obj to scalar", K(ret));
   }
   return ret;
 }
@@ -570,7 +681,12 @@ int ObOptEstObjToScalar::convert_obj_to_scalar_obj(const common::ObObj* obj, com
       break;
     }
     default: {
-      out->set_double(convert_obj_to_scalar(obj));
+      double num = 0.0;
+      if (OB_FAIL(convert_obj_to_scalar(obj, num))) {
+        LOG_WARN("failed to convert obj to scalar", K(ret));
+      } else {
+        out->set_double(num);
+      }
       break;
     }
     }
@@ -587,7 +703,8 @@ int ObOptEstObjToScalar::convert_objs_to_scalars(
     ObObj *min_out,
     ObObj *max_out,
     ObObj *start_out,
-    ObObj *end_out)
+    ObObj *end_out,
+    bool convert2sortkey)
 {
   int ret = OB_SUCCESS;
   const static int64_t START_POS = 0;
@@ -628,18 +745,19 @@ int ObOptEstObjToScalar::convert_objs_to_scalars(
       //Special case for All String : truncate common header and use dynamic base
       ObString str;
       ObSEArray<ObString, 4> strs;
+      ObSEArray<ObCollationType, 4> cs_type;
       if (start->is_string_type()
-          && OB_FAIL(add_to_string_conversion_array(*start, strs, str_conv_map, START_POS))) {
+          && OB_FAIL(add_to_string_conversion_array(*start, cs_type, strs, str_conv_map, START_POS))) {
         LOG_WARN("Failed to add start to convert array", K(ret));
       } else if (end->is_string_type()
-          && OB_FAIL(add_to_string_conversion_array(*end, strs, str_conv_map, END_POS))) {
+          && OB_FAIL(add_to_string_conversion_array(*end, cs_type, strs, str_conv_map, END_POS))) {
         LOG_WARN("Failed to add end to convert array", K(ret));
       } else if (with_min_max) {
         if (min->is_string_type()
-            && OB_FAIL(add_to_string_conversion_array(*min, strs, str_conv_map, MIN_POS))) {
+            && OB_FAIL(add_to_string_conversion_array(*min, cs_type, strs, str_conv_map, MIN_POS))) {
           LOG_WARN("Failed to add min to convert array", K(ret));
         } else if (max->is_string_type()
-            && OB_FAIL(add_to_string_conversion_array(*max, strs, str_conv_map, MAX_POS))) {
+            && OB_FAIL(add_to_string_conversion_array(*max, cs_type, strs, str_conv_map, MAX_POS))) {
           LOG_WARN("Failed to add min to convert array", K(ret));
         } else {
           //do nothing
@@ -647,7 +765,12 @@ int ObOptEstObjToScalar::convert_objs_to_scalars(
       }
       if (OB_SUCC(ret)) {
         if (strs.count() > 0) {
-          if (OB_FAIL(convert_strings_to_scalar(strs, string_scalars))) {
+          if (!convert2sortkey) {
+            for (int64_t i = 0; i < cs_type.count(); i ++) {
+              cs_type.at(i) = CS_TYPE_BINARY;
+            }
+          }
+          if (OB_FAIL(convert_strings_to_scalar(cs_type, strs, string_scalars))) {
             LOG_WARN("Failed to convert string scalar", K(ret));
           } else if (string_scalars.count() != strs.count()) {
             ret = OB_ERR_UNEXPECTED;
@@ -700,6 +823,7 @@ int ObOptEstObjToScalar::convert_objs_to_scalars(
 
 int ObOptEstObjToScalar::add_to_string_conversion_array(
     const ObObj &strobj,
+    common::ObIArray<ObCollationType> &cs_type,
     ObIArray<common::ObString> &arr,
     uint64_t &convertable_map,
     int64_t pos)
@@ -716,6 +840,8 @@ int ObOptEstObjToScalar::add_to_string_conversion_array(
     LOG_WARN("Failed to get string", K(ret));
   } else if (OB_FAIL(arr.push_back(str))) {
     LOG_WARN("Failed to push back", K(ret));
+  } else if (OB_FAIL(cs_type.push_back(strobj.get_collation_type()))) {
+    LOG_WARN("failed to push back", K(ret));
   } else {
     convertable_map |= (0x1 << pos);
   }
@@ -723,6 +849,7 @@ int ObOptEstObjToScalar::add_to_string_conversion_array(
 }
 
 int ObOptEstObjToScalar::convert_strings_to_scalar(
+    const common::ObIArray<ObCollationType> &cs_type,
     const common::ObIArray<common::ObString> &origin_strs,
     common::ObIArray<double> &scalars)
 {
@@ -731,13 +858,29 @@ int ObOptEstObjToScalar::convert_strings_to_scalar(
   double base = 256.0;
   uint8_t offset = 0;
   int64_t common_prefix_length = 0;
-  if (OB_FAIL(find_common_prefix_len(origin_strs, common_prefix_length))) {
+  ObArenaAllocator tmp_alloc("ObOptEstUtils");
+  common::ObSEArray<common::ObString, 4> sort_keys;
+  if (OB_UNLIKELY(origin_strs.count() != cs_type.count())) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected cs type", K(ret));
+  }
+  for (int64_t i = 0; OB_SUCC(ret) && i < origin_strs.count(); i ++)
+  {
+    ObString *sort_key = sort_keys.alloc_place_holder();
+    if (OB_ISNULL(sort_key)) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+      LOG_WARN("failed to allocate", K(ret));
+    } else if (OB_FAIL(get_string_sort_key(tmp_alloc, cs_type.at(i), origin_strs.at(i), *sort_key))) {
+      LOG_WARN("failed to get sort key", K(ret));
+    }
+  }
+  if (FAILEDx(find_common_prefix_len(sort_keys, common_prefix_length))) {
     LOG_WARN("Failed to find common prefix length", K(ret));
-  } else if (OB_FAIL(find_string_scalar_offset_base(origin_strs, common_prefix_length, offset, base))) {
+  } else if (OB_FAIL(find_string_scalar_offset_base(sort_keys, common_prefix_length, offset, base))) {
     LOG_WARN("Failed to find offset and base", K(ret));
   } else {
     for (int64_t i = 0; OB_SUCC(ret) && i < origin_strs.count(); ++i) {
-      double scalar = convert_string_to_scalar(origin_strs.at(i),
+      double scalar = convert_string_to_scalar(sort_keys.at(i),
                                                common_prefix_length,
                                                offset,
                                                base);
@@ -844,6 +987,42 @@ int ObOptEstObjToScalar::find_string_scalar_offset_base(
       offset = min;
       base = static_cast<double>(max - min + 1);
     }
+  }
+  return ret;
+}
+
+int ObOptEstObjToScalar::get_string_sort_key(ObIAllocator &alloc, ObCollationType cs_type,
+                                             const common::ObString &str, common::ObString &sort_key)
+{
+  int ret = OB_SUCCESS;
+  const ObCharsetInfo *cs = ObCharset::get_charset(cs_type);
+  if (ObCharset::is_bin_sort(cs_type) || str.empty() ||
+      NULL == cs || NULL == cs->coll) {
+    sort_key = str;
+  } else {
+    size_t buf_len = cs->coll->strnxfrmlen(cs, str.length()) * cs->mbmaxlen;
+    ObArrayWrap<char> buffer;
+    bool is_valid_character = false;
+    if (OB_FAIL(buffer.allocate_array(alloc, buf_len))) {
+      LOG_WARN("failed to allocate", K(ret));
+    } else {
+      size_t sort_key_len = ObCharset::sortkey(cs_type, str.ptr(), str.length(),
+                                               buffer.get_data(), buf_len, is_valid_character);
+      sort_key.assign_ptr(buffer.get_data(), sort_key_len);
+    }
+  }
+  return ret;
+}
+
+int ObOptEstObjToScalar::convert_string_to_scalar(ObCollationType cs_type, const common::ObString &str, double &scalar)
+{
+  int ret = OB_SUCCESS;
+  ObString sort_key;
+  ObArenaAllocator tmp_alloc("ObOptEstUtils");
+  if (OB_FAIL(get_string_sort_key(tmp_alloc, cs_type, str, sort_key))) {
+    LOG_WARN("failed to get sort key", K(ret));
+  } else {
+    scalar = convert_string_to_scalar(sort_key);
   }
   return ret;
 }

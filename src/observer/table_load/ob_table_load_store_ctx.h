@@ -19,13 +19,17 @@
 #include "share/table/ob_table_load_array.h"
 #include "share/table/ob_table_load_define.h"
 #include "storage/direct_load/ob_direct_load_table_data_desc.h"
+#include "storage/direct_load/ob_direct_load_insert_table_ctx.h"
+#include "storage/direct_load/ob_direct_load_trans_param.h"
+#include "observer/table_load/ob_table_load_service.h"
+#include "observer/table_load/ob_table_load_assigned_memory_manager.h"
 
 namespace oceanbase
 {
 namespace storage
 {
+class ObDirectLoadTransParam;
 class ObDirectLoadInsertTableContext;
-class ObDirectLoadFastHeapTableContext;
 class ObDirectLoadTmpFileManager;
 }  // namespace storage
 namespace share
@@ -41,10 +45,13 @@ class ObTableLoadTransStore;
 class ObITableLoadTaskScheduler;
 class ObTableLoadMerger;
 class ObTableLoadErrorRowHandler;
+class ObTableLoadStoreTableCtx;
+class ObTableLoadMergerManager;
+class ObTableLoadOpenInsertTableCtxManager;
+class ObTableLoadPreSorter;
 
 class ObTableLoadStoreCtx
 {
-static const int64_t MACRO_BLOCK_WRITER_MEM_SIZE = 10 * 1024LL * 1024LL;
 public:
   ObTableLoadStoreCtx(ObTableLoadTableCtx *ctx);
   ~ObTableLoadStoreCtx();
@@ -98,11 +105,6 @@ public:
   int set_status_error(int error_code);
   int set_status_abort();
   int check_status(table::ObTableLoadStatusType status) const;
-  OB_INLINE bool enable_heart_beat_check() const { return enable_heart_beat_check_; }
-  OB_INLINE void set_enable_heart_beat_check(bool enable_heart_beat_check)
-  {
-    enable_heart_beat_check_ = enable_heart_beat_check;
-  }
   void heart_beat();
   bool check_heart_beat_expired(const uint64_t expired_time_us);
 private:
@@ -128,27 +130,30 @@ public:
 private:
   int alloc_trans_ctx(const table::ObTableLoadTransId &trans_id, ObTableLoadTransCtx *&trans_ctx);
   int alloc_trans(const table::ObTableLoadTransId &trans_id, ObTableLoadStoreTrans *&trans);
-  int get_wa_memory_limit(int64_t &wa_mem_limit);
   int init_session_ctx_array();
+  int init_store_table_ctxs(
+    const table::ObTableLoadArray<table::ObTableLoadLSIdAndPartitionId> &partition_id_array,
+    const table::ObTableLoadArray<table::ObTableLoadLSIdAndPartitionId> &target_partition_id_array);
+  int init_trans_param();
   int generate_autoinc_params(share::AutoincParam &autoinc_param);
   int init_sequence();
 public:
   int commit_autoinc_value();
+  int get_next_insert_tablet_ctx(ObDirectLoadInsertTabletContext *&tablet_ctx);
+  void handle_open_insert_tablet_ctx_finish(bool &is_finish);
 public:
-  ObTableLoadTableCtx * const ctx_;
+  ObTableLoadTableCtx * ctx_;
   common::ObArenaAllocator allocator_;
-  common::ObArray<table::ObTableLoadLSIdAndPartitionId> ls_partition_ids_;
-  common::ObArray<table::ObTableLoadLSIdAndPartitionId> target_ls_partition_ids_;
-  storage::ObDirectLoadTableDataDesc table_data_desc_;
+  storage::ObDirectLoadTransParam trans_param_;
   table::ObTableLoadResultInfo result_info_;
   ObITableLoadTaskScheduler *task_scheduler_;
-  ObTableLoadMerger *merger_;
-  storage::ObDirectLoadInsertTableContext *insert_table_ctx_;
-  bool is_multiple_mode_;
-  bool is_fast_heap_table_;
-  storage::ObDirectLoadFastHeapTableContext *fast_heap_table_ctx_;
-  storage::ObDirectLoadTmpFileManager *tmp_file_mgr_;
   ObTableLoadErrorRowHandler *error_row_handler_;
+  hash::ObHashMap<ObTableID,  ObTableLoadStoreTableCtx* > index_store_table_ctx_map_;
+  ObTableLoadStoreTableCtx *data_store_table_ctx_;
+  ObTableLoadMergerManager *merger_manager_;
+  ObTableLoadOpenInsertTableCtxManager *open_insert_tablet_ctx_manager_;
+  int64_t px_writer_count_;
+  storage::ObDirectLoadTmpFileManager *tmp_file_mgr_;
   share::schema::ObSequenceSchema sequence_schema_;
   uint64_t next_session_id_ CACHE_ALIGNED;
   struct SessionContext
@@ -160,6 +165,8 @@ public:
     int64_t extra_buf_size_;
   };
   SessionContext *session_ctx_array_;
+  ObTableLoadPreSorter *pre_sorter_;
+  bool enable_pre_sort_;
 private:
   struct SegmentCtx : public common::LinkHashValue<table::ObTableLoadSegmentID>
   {
@@ -189,9 +196,8 @@ private:
   TransMap trans_map_;
   TransCtxMap trans_ctx_map_;
   SegmentCtxMap segment_ctx_map_;
-  common::ObSEArray<ObTableLoadTransStore *, 64> committed_trans_store_array_;
+  common::ObArray<ObTableLoadTransStore *> committed_trans_store_array_;
   uint64_t last_heart_beat_ts_;
-  bool enable_heart_beat_check_;
   bool is_inited_;
 };
 

@@ -18,25 +18,12 @@
 
 #include "ob_table_service_config.h"
 
-#include "lib/mysqlclient/ob_mysql_proxy.h"
-#include "lib/mysqlclient/ob_mysql_connection_pool.h"
-#include "lib/mysqlclient/ob_single_mysql_connection_pool.h"
-#include "lib/task/ob_timer.h"
 #include "lib/encrypt/ob_encrypted_helper.h"
-#include "share/schema/ob_multi_version_schema_service.h" // ObMultiVersionSchemaService
-#include "share/schema/ob_schema_getter_guard.h"          // ObSchemaGetterGuard
-#include "share/schema/ob_schema_struct.h"                // TableStatus
-#include "share/table/ob_table_rpc_proxy.h"               // ObTableRpcProxy
-#include "share/ob_thread_mgr.h"
 #include "rpc/obrpc/ob_net_client.h"      // ObNetClient
-#include "sql/optimizer/ob_table_location.h"  // ObTableLocation
 #include "sql/session/ob_sql_session_info.h"
 #include "ob_tablet_location_proxy.h"
 #include "observer/ob_signal_handle.h"
-#include "share/ob_get_compat_mode.h"
-#include "observer/ob_server_struct.h"
 #include "share/ob_schema_status_proxy.h"
-#include "share/rc/ob_tenant_base.h"
 using namespace oceanbase::common;
 using namespace oceanbase::table;
 using namespace oceanbase::share;
@@ -195,7 +182,6 @@ int ObTableServiceClientEnv::init_schema_service()
     // refresh Schema
     share::schema::ObSchemaService::g_ignore_column_retrieve_error_ = true;
     share::schema::ObSchemaService::g_liboblog_mode_ = true;
-    share::schema::ObMultiVersionSchemaService::g_skip_resolve_materialized_view_definition_ = true;
     ObSEArray<uint64_t, 1> tenant_ids;
     // init GCTX
     bool check_bootstrap = false;
@@ -959,8 +945,7 @@ int ObTableServiceClientImpl::get_tablet_location(const ObString &table_name, co
                                        0, ObReplicaType::REPLICA_TYPE_FULL, ObReplicaProperty(),
                                        role_status, 1))) {
       LOG_WARN("fail to init tablet replication location", K(ret));
-    }
-    if (OB_FAIL(tablet_location.add_replica_location(fake_leader_loc))) {
+    } else if (OB_FAIL(tablet_location.add_replica_location(fake_leader_loc))) {
       LOG_WARN("failed to push back", K(ret));
     } else {
       tablet_location.set_tenant_id(tenant_id_);

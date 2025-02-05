@@ -12,8 +12,7 @@
 
 #define USING_LOG_PREFIX SQL_ENG
 
-#include "sql/engine/join/ob_basic_nested_loop_join_op.h"
-#include "sql/engine/ob_exec_context.h"
+#include "ob_basic_nested_loop_join_op.h"
 #include "sql/engine/join/ob_nested_loop_join_op.h"
 
 namespace oceanbase
@@ -92,6 +91,7 @@ int ObBasicNestedLoopJoinOp::prepare_rescan_params(bool is_group)
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("unexpected param", K(ret));
       } else {
+        LOG_DEBUG("dynamic param", K(i), K(param));
         ObObjParam copy_res;
         int64_t expr_idx = 0;
         OZ(batch_rescan_ctl->params_.deep_copy_param(*param, copy_res));

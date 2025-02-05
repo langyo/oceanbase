@@ -35,6 +35,8 @@ public:
   inline int init(ObIAllocator *alloc, int64_t n_bit);
   inline void set(uint64_t hash_val);
   inline void sets(uint64_t *hash_vals, int64_t count);
+  inline char *get_buckets() { return buckets_; }
+  inline int64_t get_bucket_num() { return n_bucket_; }
   inline uint64_t estimate();
   void reuse()
   {
@@ -53,6 +55,8 @@ public:
     n_bit_ = 0;
     n_count_ = 0;
   }
+
+  TO_STRING_KV(K_(n_bucket), K_(n_bit), K_(n_count), KP_(alloc), KP_(buckets));
 
 private:
   inline int32_t calc_leading_zero(uint64_t hash_value)
@@ -105,10 +109,11 @@ inline int ObHyperLogLogCalculator::init(ObIAllocator *alloc, int64_t n_bit)
     n_bit_ = n_bit;
     n_bucket_ = 1 << n_bit_;
     buckets_ = (char*)alloc_->alloc(n_bucket_ * sizeof(char));
-    memset(buckets_, 0, n_bucket_ * sizeof(char));
     if (OB_ISNULL(buckets_)) {
       ret = OB_ALLOCATE_MEMORY_FAILED;
       COMMON_LOG(WARN, "failed to allocate buckets", K(ret), K(n_bucket_));
+    } else {
+      memset(buckets_, 0, n_bucket_ * sizeof(char));
     }
   }
   return ret;

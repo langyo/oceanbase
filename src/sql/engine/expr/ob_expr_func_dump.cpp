@@ -12,13 +12,8 @@
 
 #define USING_LOG_PREFIX SQL_ENG
 
-#include <string.h>
-#include "lib/utility/ob_print_utils.h"
-#include "share/object/ob_obj_cast.h"
-#include "objit/common/ob_item_type.h"
 #include "sql/engine/expr/ob_expr_func_dump.h"
 #include "sql/session/ob_sql_session_info.h"
-#include "sql/engine/expr/ob_expr_util.h"
 
 namespace oceanbase
 {
@@ -26,7 +21,7 @@ using namespace common;
 namespace sql
 {
 
-const int64_t MAX_DUMP_BUFFER_SIZE = 1024;
+const int64_t MAX_DUMP_BUFFER_SIZE = 4000;
 const char *CONST_HEADER = "Typ=%d Len=%ld: ";
 
 enum ReturnFormat {
@@ -76,11 +71,15 @@ int print_value(char *tmp_buf, const int64_t buff_size, int64_t &pos,
       for (int64_t i = 0; i < print_value_string.length() && OB_SUCC(ret); ++i) {
         if (isprint(print_value_string[i])) {
           if (OB_FAIL(databuff_printf(tmp_buf, buff_size, pos, "%c,", print_value_string[i]))) {
-            LOG_WARN("failed to databuff_printf", K(ret), K(pos));
+            if (OB_SIZE_OVERFLOW != ret) {
+              LOG_WARN("failed to databuff_printf", K(ret), K(pos));
+            }
           }
         } else {
           if (OB_FAIL(databuff_printf(tmp_buf, buff_size, pos, "%x,", (unsigned)(unsigned char)print_value_string[i]))) {
-            LOG_WARN("failed to databuff_printf", K(ret), K(pos));
+            if (OB_SIZE_OVERFLOW != ret) {
+              LOG_WARN("failed to databuff_printf", K(ret), K(pos));
+            }
           }
         }
       }
@@ -92,9 +91,14 @@ int print_value(char *tmp_buf, const int64_t buff_size, int64_t &pos,
 
       for (int64_t i = 0; i < print_value_string.length() && OB_SUCC(ret); ++i) {
         if (OB_FAIL(databuff_printf(tmp_buf, buff_size, pos, fmt_str, (unsigned)(unsigned char)print_value_string[i]))) {
-          LOG_WARN("failed to databuff_printf", K(ret), K(pos));
+          if (OB_SIZE_OVERFLOW != ret) {
+            LOG_WARN("failed to databuff_printf", K(ret), K(pos));
+          }
         }
       }
+    }
+    if (OB_SIZE_OVERFLOW == ret) {
+      ret = common::OB_SUCCESS; // result string length > MAX_DUMP_BUFFER_SIZE, cut the result string and return
     }
   }
 
@@ -631,7 +635,7 @@ int ObExprFuncDump::eval_dump(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &expr_
         bool dumped = false;
         if (OB_FAIL(databuff_printf(buf, buf_len, buf_pos, CONST_HEADER,
                                     expr.args_[0]->datum_meta_.type_,
-                                    static_cast<int64_t>(input->len_)))) {
+                                    min(static_cast<int64_t>(input->len_), MAX_DUMP_BUFFER_SIZE)))) {
           LOG_WARN("data buffer print fail", K(ret));
         } else if (ReturnFormat::RF_OB_SEPC == fmt_val) {
           if (OB_FAIL(dump_ob_spec(buf, buf_len, buf_pos, dumped, *expr.args_[0], *input))) {
@@ -667,11 +671,17 @@ int ObExprFuncDump::eval_dump(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &expr_
       switch (expr.args_[0]->datum_meta_.type_) {
         case ObNumberType: {
           number::ObNumber nmb(input->get_number());
-          const char *nmb_str = to_cstring(nmb);
-          ObString src_str(0, (int32_t)strlen(nmb_str), const_cast<char *>(nmb_str));
-          if (OB_FAIL(ObExprUtil::set_expr_ascii_result(
-                      expr, ctx, expr_datum, src_str))) {
-            LOG_WARN("set ASCII result failed", K(ret));
+          ObCStringHelper helper;
+          const char *nmb_str = helper.convert(nmb);
+          if (OB_ISNULL(nmb_str)) {
+            ret = OB_ERR_NULL_VALUE;
+            LOG_WARN("nmb_str is NULL, maybe convert nmb failed", K(ret), K(nmb));
+          } else {
+            ObString src_str(0, (int32_t)strlen(nmb_str), const_cast<char *>(nmb_str));
+            if (OB_FAIL(ObExprUtil::set_expr_ascii_result(
+                        expr, ctx, expr_datum, src_str))) {
+              LOG_WARN("set ASCII result failed", K(ret));
+            }
           }
           break;
         }

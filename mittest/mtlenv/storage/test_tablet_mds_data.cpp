@@ -1,3 +1,6 @@
+// owner: gaishun.gs
+// owner group: storage
+
 /**
  * Copyright (c) 2022 OceanBase
  * OceanBase CE is licensed under Mulan PubL v2.
@@ -15,13 +18,8 @@
 #define protected public
 #define private public
 
-#include "lib/oblog/ob_log.h"
-#include "lib/time/ob_time_utility.h"
 #include "mtlenv/mock_tenant_module_env.h"
 #include "mtlenv/storage/medium_info_helper.h"
-#include "share/io/ob_io_manager.h"
-#include "storage/tablet/ob_tablet_mds_data.h"
-#include "storage/tablet/ob_tablet_obj_load_helper.h"
 
 #define BUILD_AND_WRITE_MEDIUM_INFO(id) \
         { \
@@ -42,12 +40,14 @@
               } else if (OB_FAIL(info->serialize(buffer, size, pos))) { \
                 STORAGE_LOG(WARN, "failed to serialize", K(ret), K(size)); \
               } else { \
-                ObSharedBlockWriteInfo write_info; \
+                ObSharedObjectWriteInfo write_info; \
                 write_info.buffer_ = buffer; \
                 write_info.offset_ = 0; \
                 write_info.size_ = size; \
                 write_info.io_desc_.set_wait_event(ObWaitEventIds::DB_FILE_COMPACT_WRITE); \
-                if (OB_FAIL(reader_writer.async_link_write(write_info, write_handle))) { \
+                blocksstable::ObStorageObjectOpt curr_opt; \
+                curr_opt.set_private_object_opt(); \
+                if (OB_FAIL(reader_writer.async_link_write(write_info, curr_opt, write_handle))) { \
                   STORAGE_LOG(WARN, "failed to async link write", K(ret)); \
                 } \
               } \
@@ -98,10 +98,6 @@ void TestTabletMdsData::TearDownTestCase()
 void TestTabletMdsData::SetUp()
 {
   int ret = OB_SUCCESS;
-  const ObTenantIOConfig &io_config = ObTenantIOConfig::default_instance();
-  if (OB_FAIL(ObIOManager::get_instance().add_tenant_io_manager(OB_SERVER_TENANT_ID, io_config))) {
-    STORAGE_LOG(WARN, "add tenant io config failed");
-  }
 }
 
 void TestTabletMdsData::TearDown()
@@ -111,12 +107,12 @@ void TestTabletMdsData::TearDown()
 TEST_F(TestTabletMdsData, read_medium_info)
 {
   int ret = OB_SUCCESS;
-  ObSharedBlockReaderWriter reader_writer;
+  ObSharedObjectReaderWriter reader_writer;
   ret = reader_writer.init(true/*need align*/, false/*need cross*/);
   ASSERT_EQ(OB_SUCCESS, ret);
 
   // write
-  ObSharedBlockLinkHandle write_handle;
+  ObSharedObjectLinkHandle write_handle;
   const int64_t current_time = ObTimeUtility::fast_current_time();
   BUILD_AND_WRITE_MEDIUM_INFO(current_time + 1);
   BUILD_AND_WRITE_MEDIUM_INFO(current_time + 2);
@@ -127,8 +123,8 @@ TEST_F(TestTabletMdsData, read_medium_info)
   ASSERT_TRUE(write_handle.is_valid());
 
   // read
-  ObSharedBlocksWriteCtx write_ctx;
-  ObSharedBlockLinkIter iter;
+  ObSharedObjectsWriteCtx write_ctx;
+  ObSharedObjectLinkIter iter;
   ret = write_handle.get_write_ctx(write_ctx);
   ASSERT_EQ(OB_SUCCESS, ret);
 

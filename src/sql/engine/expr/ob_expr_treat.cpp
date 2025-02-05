@@ -13,12 +13,7 @@
 
 #define USING_LOG_PREFIX SQL_ENG
 #include "sql/engine/expr/ob_expr_treat.h"
-#include "sql/session/ob_sql_session_info.h"
-#include "share/object/ob_obj_cast.h"
 #include "sql/engine/expr/ob_datum_cast.h"
-#include "sql/engine/ob_exec_context.h"
-#include "lib/json_type/ob_json_parse.h"
-#include "lib/json_type/ob_json_base.h"
 #include "sql/engine/expr/ob_expr_json_func_helper.h"
 #ifdef OB_BUILD_ORACLE_PL
 #include "pl/sys_package/ob_json_pl_utils.h"
@@ -98,19 +93,21 @@ int ObExprTreat::cg_expr(ObExprCGCtx &expr_cg_ctx,
 static int treat_as_json_udt(const ObExpr &expr, ObEvalCtx &ctx, common::ObIAllocator &temp_allocator,
                                 pl::ObPLOpaque *opaque, ObDatum &res) {
   INIT_SUCC(ret);
-  ObJsonNode *json_doc = nullptr;
   pl::ObPLJsonBaseType *jsontype = nullptr;
+  pl::ObPlJsonNode *pl_json_node = nullptr;
   pl::ObPLJsonBaseType *new_jsontype = nullptr;
   ObObj res_obj;
 
   if(OB_ISNULL(jsontype = static_cast<pl::ObPLJsonBaseType*>(opaque))) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("cast to json type is null", K(ret), K(opaque));
-  } else if(OB_ISNULL(json_doc = jsontype->get_data())) {
-    ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("get json doc is null", K(ret), K(jsontype));
+  } else if(OB_ISNULL(pl_json_node = jsontype->get_data())) {
+    res.set_null();
   } else {
-    if (OB_FAIL(pl::ObPlJsonUtil::transform_JsonBase_2_PLJsonType(ctx.exec_ctx_, json_doc, new_jsontype))) {
+    DISABLE_SQL_MEMLEAK_GUARD;
+    if (OB_FAIL(pl::ObPlJsonUtil::transform_JsonBase_2_PLJsonType(ctx.exec_ctx_,
+      pl_json_node->get_ref_node() ? pl_json_node->get_ref_node() : pl_json_node->get_data_node(),
+      new_jsontype))) {
       LOG_WARN("failed to transfrom ObJsonNode to ObPLJsonBaseType", K(ret));
     } else if(OB_ISNULL(new_jsontype)) {
       ret = OB_ERR_UNEXPECTED;
@@ -175,6 +172,13 @@ int ObExprTreat::eval_treat(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &res) {
     ret = OB_ERR_INVALID_TYPE_FOR_OP;
     LOG_WARN("in type unexpected", K(ret), K(in_type), K(in_cs_type));
   }
+  return ret;
+}
+
+DEF_SET_LOCAL_SESSION_VARS(ObExprTreat, raw_expr) {
+  int ret = OB_SUCCESS;
+  SET_LOCAL_SYSVAR_CAPACITY(1);
+  EXPR_ADD_LOCAL_SYSVAR(share::SYS_VAR_COLLATION_CONNECTION);
   return ret;
 }
 

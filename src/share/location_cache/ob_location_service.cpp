@@ -13,12 +13,8 @@
 #define USING_LOG_PREFIX SHARE_LOCATION
 
 #include "share/location_cache/ob_location_service.h"
-#include "share/config/ob_server_config.h" // GCONF
-#include "share/inner_table/ob_inner_table_schema.h"
-#include "share/schema/ob_multi_version_schema_service.h" // ObMultiVersionSchemaService
-#include "observer/ob_server_struct.h" // GCTX
-#include "lib/utility/ob_tracepoint.h" // ERRSIM_POINT_DEF
 #include "share/ls/ob_ls_status_operator.h" // ObLSStatus
+#include "share/ob_all_server_tracer.h"
 
 namespace oceanbase
 {
@@ -30,7 +26,8 @@ ObLocationService::ObLocationService()
     : inited_(false),
       stopped_(false),
       ls_location_service_(),
-      tablet_ls_service_()
+      tablet_ls_service_(),
+      vtable_location_service_()
 {
 }
 
@@ -260,9 +257,29 @@ int ObLocationService::external_table_get(
     ObIArray<ObAddr> &locations)
 {
   UNUSED(table_id);
+  int ret = OB_SUCCESS;
   bool is_cache_hit = false;
   //using the locations from any distributed virtual table
-  return vtable_get(tenant_id, OB_ALL_VIRTUAL_PROCESSLIST_TID, 0, is_cache_hit, locations);
+  ObSEArray<ObAddr, 16> all_active_locations;
+  if (OB_FAIL(vtable_get(tenant_id, OB_ALL_VIRTUAL_PROCESSLIST_TID, 0, is_cache_hit, all_active_locations))) {
+    LOG_WARN("failed to get active server", K(ret), K(tenant_id));
+  } else {
+    for (int64_t i = 0; OB_SUCC(ret) && i < all_active_locations.count(); ++i) {
+      bool is_stopped = false;
+      if (OB_FAIL(SVR_TRACER.is_server_stopped(all_active_locations.at(i), is_stopped))) {
+        LOG_WARN("failed to check is server stopped", K(ret), K(tenant_id), K(i), K(all_active_locations));
+      } else if (!is_stopped && OB_FAIL(locations.push_back(all_active_locations.at(i)))) {
+        LOG_WARN("failed to push back", K(ret), K(i), K(tenant_id));
+      }
+    }
+    if (OB_FAIL(ret)) {
+      // do nothing
+    } else if (0 == locations.count() && OB_FAIL(locations.assign(all_active_locations))) {
+      LOG_WARN("failed to assign locations", K(ret));
+    }
+    LOG_TRACE("locations for external table", K(locations), K(ret));
+  }
+  return ret;
 }
 
 int ObLocationService::vtable_nonblock_renew(
@@ -286,9 +303,7 @@ int ObLocationService::init(
     ObLSTableOperator &ls_pt,
     schema::ObMultiVersionSchemaService &schema_service,
     common::ObMySQLProxy &sql_proxy,
-    ObIAliveServerTracer &server_tracer,
     ObRsMgr &rs_mgr,
-    obrpc::ObCommonRpcProxy &rpc_proxy,
     obrpc::ObSrvRpcProxy &srv_rpc_proxy)
 {
   int ret = OB_SUCCESS;
@@ -297,9 +312,9 @@ int ObLocationService::init(
     LOG_WARN("location service init twice", KR(ret));
   } else if (OB_FAIL(ls_location_service_.init(ls_pt, schema_service, rs_mgr, srv_rpc_proxy))) {
     LOG_WARN("ls_location_service init failed", KR(ret));
-  } else if (OB_FAIL(tablet_ls_service_.init(sql_proxy))) {
+  } else if (OB_FAIL(tablet_ls_service_.init(schema_service, sql_proxy, srv_rpc_proxy))) {
     LOG_WARN("tablet_ls_service init failed", KR(ret));
-  } else if (OB_FAIL(vtable_location_service_.init(server_tracer, rs_mgr, rpc_proxy))) {
+  } else if (OB_FAIL(vtable_location_service_.init(rs_mgr))) {
     LOG_WARN("vtable_location_service init failed", KR(ret));
   } else {
     inited_ = true;
@@ -315,8 +330,9 @@ int ObLocationService::start()
     LOG_WARN("location service not init", KR(ret));
   } else if (OB_FAIL(ls_location_service_.start())) {
     LOG_WARN("ls_location_service start failed", KR(ret));
+  } else if (OB_FAIL(tablet_ls_service_.start())) {
+    LOG_WARN("tablet_ls_service start failed", KR(ret));
   }
-  // tablet_ls_service_ and vtable_location_service_ have no threads need to be started
   return ret;
 }
 
@@ -374,6 +390,7 @@ int ObLocationService::batch_renew_tablet_locations(
     const int error_code,
     const bool is_nonblock)
 {
+  ObASHSetInnerSqlWaitGuard ash_inner_sql_guard(ObInnerSqlWaitTypeId::RENEW_TABLET_LOCATION);
   int ret = OB_SUCCESS;
   if (OB_UNLIKELY(!inited_)) {
     ret = OB_NOT_INIT;
@@ -486,6 +503,30 @@ int ObLocationService::renew_tablet_location(
   } else if (OB_FAIL(batch_renew_tablet_locations(tenant_id, tablet_list, error_code, is_nonblock))) {
     LOG_WARN("renew tablet locations failed", KR(ret),
         K(tenant_id), K(tablet_list), K(error_code), K(is_nonblock));
+  }
+  return ret;
+}
+
+int ObLocationService::submit_tablet_broadcast_task(const ObTabletLocationBroadcastTask &task)
+{
+  int ret = OB_SUCCESS;
+  if (OB_UNLIKELY(!inited_)) {
+    ret = OB_NOT_INIT;
+    LOG_WARN("not init", KR(ret));
+  } else if (OB_FAIL(tablet_ls_service_.submit_broadcast_task(task))) {
+    LOG_WARN("failed to submit_broadcast_task by tablet_ls_service_", KR(ret));
+  }
+  return ret;
+}
+
+int ObLocationService::submit_tablet_update_task(const ObTabletLocationBroadcastTask &task)
+{
+  int ret = OB_SUCCESS;
+  if (OB_UNLIKELY(!inited_)) {
+    ret = OB_NOT_INIT;
+    LOG_WARN("not init", KR(ret));
+  } else if (OB_FAIL(tablet_ls_service_.submit_update_task(task))) {
+    LOG_WARN("failed to submit_broadcast_task by tablet_ls_service_", KR(ret));
   }
   return ret;
 }

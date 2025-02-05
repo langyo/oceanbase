@@ -20,7 +20,6 @@
 #include "lib/utility/ob_macro_utils.h"     // OB_UNLIKELY
 #include "lib/oblog/ob_log_module.h"        // LOG_ERROR
 
-#include "ob_log_fetcher_dispatcher.h"      // IObLogFetcherDispatcher
 #include "ob_log_utils.h"
 
 using namespace oceanbase::common;
@@ -153,10 +152,12 @@ int PartTransDispatcher::dispatch_part_trans_task_(PartTransTask &task, volatile
 {
   int ret = OB_SUCCESS;
   // Save the basic information of the task in advance, the output will not be accessible afterwards
-  int64_t prepare_ts = task.get_prepare_ts();
+  const int64_t prepare_ts = task.get_prepare_ts();
   const int64_t trans_commit_version = task.get_trans_commit_version();
-  // Note: prepare_log_lsn is only valid for DDL and DML types
-  const palf::LSN &prepare_lsn = task.get_prepare_log_lsn();
+  // Note:
+  // 1. prepare_log_lsn is only valid for DDL and DML types
+  // 2. should not use reference of prepare_log_lsn in case of usage of prepare_lsn after part_trans_task recycled
+  const palf::LSN prepare_lsn = task.get_prepare_log_lsn();
 
   if (OB_INVALID_TIMESTAMP != prepare_ts) {
     // Check if progress is backed up
@@ -170,8 +171,7 @@ int PartTransDispatcher::dispatch_part_trans_task_(PartTransTask &task, volatile
     // not have a corresponding guarantee. Therefore, it is normal for data progress to be rolled back here. But it is
     // dangerous. This problem can only be completely solved when the schema is split within the tenant.
     if (OB_UNLIKELY(prepare_ts < last_dispatch_progress_)) {
-      ret = OB_ERR_UNEXPECTED;
-      LOG_WARN("partition dispatch progress is rollback, we should check it", KR(ret),
+      LOG_WARN_RET(OB_ERR_UNEXPECTED, "partition dispatch progress is rollback, we should check it",
           K_(tls_id),
           "prepare_ts", NTS_TO_STR(prepare_ts),
           "prepare_lsn", prepare_lsn,
@@ -208,6 +208,8 @@ int PartTransDispatcher::handle_before_fetcher_dispatch_(PartTransTask &task)
     if (OB_FAIL(handle_dml_trans_before_fetcher_dispatch_(task))) {
       LOG_ERROR("handle_dml_trans_before_fetcher_dispatch_ fail", KR(ret), K(task));
     }
+  } else if (task.is_ls_op_trans()) {
+    task.set_data_ready();
   } else {
     // do nothing
   }

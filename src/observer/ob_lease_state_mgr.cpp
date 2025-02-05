@@ -12,14 +12,8 @@
 
 #define USING_LOG_PREFIX SERVER
 
-#include "observer/ob_lease_state_mgr.h"
-#include "share/ob_common_rpc_proxy.h"
-#include "share/ob_global_merge_table_operator.h"
-#include "share/ob_zone_merge_table_operator.h"
-#include "share/ob_zone_merge_info.h"
-#include "share/rc/ob_tenant_base.h"
+#include "ob_lease_state_mgr.h"
 #include "observer/ob_server.h"
-#include "storage/compaction/ob_tenant_tablet_scheduler.h"
 #include "storage/tx_storage/ob_ls_service.h"
 #ifdef OB_BUILD_TDE_SECURITY
 #include "share/ob_master_key_getter.h"
@@ -135,8 +129,8 @@ int ObLeaseStateMgr::register_self()
     }
 
     LOG_INFO("start_heartbeat anyway");
-    // ignore ret overwrite
     if (OB_FAIL(start_heartbeat())) {
+      // overwrite ret
       LOG_ERROR("start_heartbeat failed", K(ret));
     }
   }
@@ -288,6 +282,7 @@ int ObLeaseStateMgr::renew_lease()
     }
     const bool repeat = false;
     if (OB_FAIL(hb_timer_.schedule(hb_, DELAY_TIME, repeat))) {
+      // overwrite ret
       LOG_WARN("schedule failed", LITERAL_K(DELAY_TIME), K(repeat), K(ret));
     }
   }
@@ -359,6 +354,7 @@ int ObLeaseStateMgr::do_renew_lease()
   ObLeaseResponse lease_response;
   ObAddr rs_addr;
   NG_TRACE(do_renew_lease_begin);
+  DEBUG_SYNC(BEFORE_SEND_HB);
   if (!inited_) {
     ret = OB_NOT_INIT;
     LOG_WARN("not init", K(ret));

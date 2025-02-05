@@ -77,7 +77,7 @@ public:
       const bool is_across_cluster,
       logfetcher::IObLogErrHandler *err_handler,
       const char *external_server_blacklist = "|",
-      const int64_t background_refresh_time_sec = 10,
+      const int64_t background_refresh_time_sec = 1200,
       const int64_t all_server_cache_update_interval_sec = 5,
       const int64_t all_zone_cache_update_interval_sec = 5,
       const int64_t blacklist_survival_time_sec = 30,
@@ -86,7 +86,8 @@ public:
       const int64_t blacklist_history_overdue_time_min = 30,
       const int64_t blacklist_history_clear_interval_min = 20,
       const bool is_tenant_mode = false,
-      const uint64_t tenant_id = OB_INVALID_TENANT_ID);
+      const uint64_t tenant_id = OB_INVALID_TENANT_ID,
+      const uint64_t self_tenant_id = OB_SERVER_TENANT_ID);
   int start();
   void stop();
   void wait();
@@ -273,6 +274,15 @@ public:
        const share::ObLSID &ls_id);
 
 private:
+  int get_ls_svr_list_(const ObLSRouterKey &router_key,
+      LSSvrList &svr_list);
+
+  int query_ls_log_info_and_update_(const ObLSRouterKey &router_key,
+      LSSvrList &svr_list);
+
+  int query_units_info_and_update_(const ObLSRouterKey &router_key,
+      LSSvrList &svr_list);
+
   int get_ls_router_value_(
       const ObLSRouterKey &router_key,
       ObLSRouterValue *&router_value);
@@ -331,11 +341,19 @@ private:
     ObIArray<ObLSRouterValue *> *router_values_;
   };
 
-  struct ObLSRouterKeyUpdater
+  struct ObAllLSRouterKeyGetter
   {
-    ObLSRouterKeyUpdater(ObLogRouteService &log_route_service) : log_route_service_(log_route_service) {}
+    ObAllLSRouterKeyGetter(): router_keys_() {}
     bool operator()(const ObLSRouterKey &key, ObLSRouterValue *value);
-    ObLogRouteService &log_route_service_;
+
+    ObSEArray<ObLSRouterKey, 4> router_keys_;
+  };
+
+  struct ObLSRouterValueUpdater
+  {
+    ObLSRouterValueUpdater(const LSSvrList &svr_list): svr_list_(svr_list) {}
+    bool operator()(const ObLSRouterKey &key, ObLSRouterValue *value);
+    const LSSvrList &svr_list_;
   };
 
   class ObLSRouteTimerTask : public common::ObTimerTask
@@ -346,18 +364,17 @@ private:
     int init(int tg_id);
     void destroy();
     virtual void runTimerTask() override;
-    static const int64_t REFRESH_INTERVAL = 5 * _SEC_;
   private:
     bool is_inited_;
     ObLogRouteService &log_route_service_;
   };
-  int schedule_ls_timer_task_();
 
 private:
   bool is_inited_;
   int64_t cluster_id_;
   bool is_tenant_mode_;
   int64_t source_tenant_id_;
+  uint64_t self_tenant_id_;
   volatile bool is_stopped_ CACHE_ALIGNED;
   LSRouteKeySet ls_route_key_set_;
   LSRouterMap ls_router_map_;
@@ -377,6 +394,7 @@ private:
   int64_t blacklist_survival_time_penalty_period_min_;
   int64_t blacklist_history_overdue_time_min_;
   int64_t blacklist_history_clear_interval_min_;
+  int64_t ls_svr_list_last_update_time_;
 
   DISALLOW_COPY_AND_ASSIGN(ObLogRouteService);
 };

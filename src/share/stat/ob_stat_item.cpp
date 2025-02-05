@@ -11,13 +11,9 @@
  */
 
 #define USING_LOG_PREFIX SQL_OPT
-#include "share/stat/ob_stat_item.h"
-#include "lib/utility/ob_print_utils.h"
-#include "pl/sys_package/ob_dbms_stats.h"
-#include "share/stat/ob_opt_table_stat.h"
+#include "ob_stat_item.h"
 #include "share/stat/ob_hybrid_hist_estimator.h"
 #include "share/stat/ob_dbms_stats_utils.h"
-#include "sql/engine/expr/ob_expr_lob_utils.h"
 namespace oceanbase
 {
 using namespace sql;
@@ -27,7 +23,7 @@ namespace common
 int ObStatRowCount::gen_expr(char *buf, const int64_t buf_len, int64_t &pos)
 {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(databuff_printf( buf, buf_len, pos, " COUNT(1)"))) {
+  if (OB_FAIL(databuff_printf( buf, buf_len, pos, " COUNT(*)"))) {
     LOG_WARN("failed to print buf row count expr", K(ret));
   }
   return ret;
@@ -117,7 +113,7 @@ int ObStatMaxValue::decode(ObObj &obj, ObIAllocator &allocator)
   if (OB_ISNULL(col_stat_)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("col stat is not given", K(ret), K(col_stat_));
-  } else if (OB_FAIL(ObDbmsStatsUtils::shadow_truncate_string_for_opt_stats(obj, allocator))) {
+  } else if (OB_FAIL(ObDbmsStatsUtils::truncate_string_for_opt_stats(obj, allocator))) {
     LOG_WARN("fail to truncate string", K(ret));
   } else {
     col_stat_->set_max_value(obj);
@@ -147,7 +143,7 @@ int ObStatMinValue::decode(ObObj &obj, ObIAllocator &allocator)
   if (OB_ISNULL(col_stat_)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("col stat is not given", K(ret), K(col_stat_));
-  } else if (OB_FAIL(ObDbmsStatsUtils::shadow_truncate_string_for_opt_stats(obj, allocator))) {
+  } else if (OB_FAIL(ObDbmsStatsUtils::truncate_string_for_opt_stats(obj, allocator))) {
     LOG_WARN("fail to truncate string", K(ret));
   } else {
     col_stat_->set_min_value(obj);
@@ -207,10 +203,10 @@ int ObStatLlcBitmap::decode(ObObj &obj)
   ObString llc_bitmap_buf;
   if (OB_ISNULL(col_stat_) ||
       OB_ISNULL(col_stat_->get_llc_bitmap()) ||
-      OB_UNLIKELY(!obj.is_varchar())) {
+      OB_UNLIKELY(!obj.is_varchar() && !obj.is_varbinary())) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("get unexpected null", K(ret), K(col_stat_), K(obj));
-  } else if (OB_FAIL(obj.get_varchar(llc_bitmap_buf))) {
+  } else if (OB_FAIL(obj.get_string(llc_bitmap_buf))) {
     LOG_WARN("failed to get varchar", K(ret));
   } else if (OB_UNLIKELY(llc_bitmap_buf.length() > col_stat_->get_llc_bitmap_size())) {
     ret = OB_ERR_UNEXPECTED;
@@ -233,8 +229,6 @@ bool ObStatTopKHist::is_needed() const
 int ObStatTopKHist::gen_expr(char *buf, const int64_t buf_len, int64_t &pos)
 {
   int ret = OB_SUCCESS;
-  const int64_t MIN_BUCKET_SIZE = 256;
-  const int64_t MAX_BUCKET_SIZE = 2048;
   if (OB_ISNULL(col_param_)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("column param is null", K(ret), K(col_param_));
@@ -246,15 +240,16 @@ int ObStatTopKHist::gen_expr(char *buf, const int64_t buf_len, int64_t &pos)
       ret = OB_ERR_INVALID_SIZE_SPECIFIED;
       LOG_WARN("get invalid argument, expected value in the range[1, 2048]", K(ret), K(bkt_num));
     }
-    double err_rate = 1.0 / (1000 * (bkt_num / MIN_BUCKET_SIZE));
+    double err_rate = 1.0 / get_window_size(bkt_num);
     if (OB_SUCC(ret)) {
       if (OB_FAIL(databuff_printf(buf, buf_len, pos,
-                                  lib::is_oracle_mode() ? " TOP_K_FRE_HIST(%lf, \"%.*s\", %ld)" :
-                                  " TOP_K_FRE_HIST(%lf, `%.*s`, %ld)",
+                                  lib::is_oracle_mode() ? " TOP_K_FRE_HIST(%lf, \"%.*s\", %ld, %ld)" :
+                                  " TOP_K_FRE_HIST(%lf, `%.*s`, %ld, %ld)",
                                   err_rate,
                                   col_param_->column_name_.length(),
                                   col_param_->column_name_.ptr(),
-                                  col_param_->bucket_num_))) {
+                                  col_param_->bucket_num_,
+                                  max_disuse_cnt_))) {
         LOG_WARN("failed to print buf topk hist expr", K(ret));
       }
     }
@@ -344,7 +339,7 @@ int ObStatTopKHist::build_histogram_from_topk_items(ObIAllocator &allocator,
   }
   if (OB_SUCC(ret) && tmp.count() > 0) {
     ObBucketCompare cmp;
-    std::sort(&tmp.at(0),
+    lib::ob_sort(&tmp.at(0),
               &tmp.at(0) + tmp.count(),
               CopyableBucketComparer(cmp));
     if (OB_FAIL(cmp.ret_)) {
@@ -507,7 +502,8 @@ void ObGlobalTableStat::add(int64_t rc, int64_t rs, int64_t ds, int64_t mac, int
 }
 
 int ObGlobalTableStat::add(int64_t rc, int64_t rs, int64_t ds, int64_t mac, int64_t mic,
-                           ObIArray<int64_t> &cg_macro_arr, ObIArray<int64_t> &cg_micro_arr)
+                           ObIArray<int64_t> &cg_macro_arr, ObIArray<int64_t> &cg_micro_arr,
+                           int64_t scnt, int64_t mcnt)
 {
   // skip empty partition
   int ret = OB_SUCCESS;
@@ -518,6 +514,8 @@ int ObGlobalTableStat::add(int64_t rc, int64_t rs, int64_t ds, int64_t mac, int6
     macro_block_count_ += mac;
     micro_block_count_ += mic;
     part_cnt_ ++;
+    sstable_row_cnt_ += scnt;
+    memtable_row_cnt_ += mcnt;
     if (cg_macro_arr.empty()) {
       //do nothing
     } else if (cg_macro_cnt_arr_.empty()) {
@@ -700,10 +698,6 @@ int ObStatHybridHist::gen_expr(char *buf, const int64_t buf_len, int64_t &pos)
   if (OB_ISNULL(col_param_)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("column param is null", K(ret), K(col_param_));
-  } else if (is_null_item_) {
-    if (OB_FAIL(databuff_printf(buf, buf_len, pos, " NULL"))) {
-      LOG_WARN("failed to print buf", K(ret));
-    } else {/*do nothing*/}
   } else if (OB_FAIL(databuff_printf(buf, buf_len, pos,
                                      lib::is_oracle_mode() ? " HYBRID_HIST(\"%.*s\", %ld)" :
                                      " HYBRID_HIST(`%.*s`, %ld)",
@@ -743,8 +737,105 @@ int ObStatHybridHist::decode(ObObj &obj, ObIAllocator &allocator)
       col_stat_->get_histogram().set_sample_size(hybrid_hist.get_total_count());
       col_stat_->get_histogram().set_pop_frequency(hybrid_hist.get_pop_freq());
       col_stat_->get_histogram().set_pop_count(hybrid_hist.get_pop_count());
+      col_stat_->get_histogram().calc_density(ObHistType::HYBIRD,
+                                              hybrid_hist.get_total_count(),
+                                              hybrid_hist.get_pop_freq(),
+                                              col_stat_->get_num_distinct(),
+                                              hybrid_hist.get_pop_count());
       LOG_TRACE("succeed to build hybrid hist", K(hybrid_hist), K(col_stat_->get_histogram()));
     }
+  }
+  return ret;
+}
+
+static const int32_t DEFAULT_DATA_TYPE_LEGNTH[] =
+{
+  /*ObNullType        = 0*/  12,
+  /*ObTinyIntType     = 1*/  20,
+  /*ObSmallIntType    = 2*/  20,
+  /*ObMediumIntType   = 3*/  20,
+  /*ObInt32Type       = 4*/  20,
+  /*ObIntType         = 5*/  20,
+
+  /*ObUTinyIntType    = 6*/  20,
+  /*ObUSmallIntType   = 7*/  20,
+  /*ObUMediumIntType  = 8*/  20,
+  /*ObUInt32Type      = 9*/  20,
+  /*ObUInt64Type      = 10*/ 20,
+
+  /*ObFloatType       = 11*/ 16,
+  /*ObDoubleType      = 12*/ 20,
+
+  /*ObUFloatType      = 13*/ 16,
+  /*ObUDoubleType     = 14*/ 20,
+
+  /*ObNumberType      = 15*/ -1,
+  /*ObUNumberType     = 16*/ -1,
+
+  /*ObDateTimeType    = 17*/ 20,
+  /*ObTimestampType   = 18*/ 20,
+  /*ObDateType        = 19*/ 16,
+  /*ObTimeType        = 20*/ 20,
+  /*ObYearType        = 21*/ 13,
+
+  /*ObVarcharType     = 22*/ -1,
+  /*ObCharType        = 23*/ -1,
+
+  /*ObHexStringType   = 24*/ -1,
+
+  /*ObExtendType      = 25*/ -1,
+  /*ObUnknownType     = 26*/ -1,
+
+  /*ObTinyTextType    = 27*/ -1,
+  /*ObTextType        = 28*/ -1,
+  /*ObMediumTextType  = 29*/ -1,
+  /*ObLongTextType    = 30*/ -1,
+
+  /*ObBitType         = 31*/ 20,
+  /*ObEnumType        = 32*/ 20,
+  /*ObSetType         = 33*/ 20,
+  /*ObEnumInnerType   = 34*/ -1,
+  /*ObSetInnerType    = 35*/ -1,
+
+  /*ObTimestampTZType   = 36*/ 24,
+  /*ObTimestampLTZType  = 37*/ 22,
+  /*ObTimestampNanoType = 38*/ 22,
+  /*ObRawType           = 39*/ -1,
+  /*ObIntervalYMType    = 40*/ -1,
+  /*ObIntervalDSType    = 41*/ -1,
+  /*ObNumberFloatType   = 42*/ -1,
+  /*ObNVarchar2Type     = 43*/ -1,
+  /*ObNCharType         = 44*/ -1,
+  /*ObURowIDType        = 45*/ -1,
+  /*ObLobType           = 46*/ -1,
+  /*ObJsonType          = 47*/ -1,
+  /*ObGeometryType      = 48*/ -1,
+
+  /*ObUserDefinedSQLType = 49*/ -1,
+  /*ObDecimalIntType     = 50*/ -1,
+  /*ObCollectionSQLType  = 51*/ -1,
+  /*ObMySQLDateType      = 52*/ 16,
+  /*ObMySQLDateTimeType  = 53*/ 20,
+  /*ObMaxType                */ -1
+};
+
+int ObStatAvgLen::gen_expr(char *buf, const int64_t buf_len, int64_t &pos)
+{
+  int ret = OB_SUCCESS;
+  int64_t type_count = sizeof(DEFAULT_DATA_TYPE_LEGNTH) / sizeof(int32_t);
+  if (OB_ISNULL(col_param_) || OB_ISNULL(get_fmt())) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("column param is null", K(ret));
+  } else if (col_param_->column_type_ < type_count &&
+             DEFAULT_DATA_TYPE_LEGNTH[col_param_->column_type_] > 0) {
+    if (OB_FAIL(databuff_printf(buf, buf_len, pos, "%d",
+                                DEFAULT_DATA_TYPE_LEGNTH[col_param_->column_type_]))) {
+      LOG_WARN("failed to print avg column size", K(ret));
+    }
+  } else if (OB_FAIL(databuff_printf(buf, buf_len, pos, get_fmt(),
+                                     col_param_->column_name_.length(),
+                                     col_param_->column_name_.ptr()))) {
+    LOG_WARN("failed to print AVG(SYS_OP_OPNSIZE(c2)) expr", K(ret));
   }
   return ret;
 }

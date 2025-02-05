@@ -43,8 +43,9 @@ class QueueThread
 {
 public:
   QueueThread(const char *thread_name = nullptr,
-              uint64_t tenant_id = OB_SERVER_TENANT_ID)
-      : thread_(queue_, thread_name, tenant_id), tg_id_(0),
+              uint64_t tenant_id = OB_SERVER_TENANT_ID,
+              uint64_t group_id = share::OBCG_DEFAULT)
+      : thread_(queue_, thread_name, tenant_id, group_id), tg_id_(0),
         tenant_id_(tenant_id), n_thread_(0) {}
 
   ~QueueThread() { destroy(); }
@@ -65,19 +66,16 @@ public:
   void destroy() { TG_DESTROY(tg_id_); }
   class Thread : public lib::TGRunnable {
   public:
-    Thread(ObReqQueue &queue, const char *thread_name, const uint64_t tenant_id)
-        : queue_(queue), thread_name_(thread_name), tenant_id_(tenant_id) {}
+    Thread(ObReqQueue &queue, const char *thread_name,
+            const uint64_t tenant_id, const uint64_t group_id)
+        : queue_(queue), thread_name_(thread_name),
+          tenant_id_(tenant_id), group_id_(group_id) {}
     void run1()
     {
       if (thread_name_ != nullptr) {
         lib::set_thread_name(thread_name_, get_thread_idx());
       }
-      if (GCONF._enable_new_sql_nio && GCONF._enable_tenant_sql_net_thread &&
-          tenant_id_ != common::OB_INVALID_ID && nullptr != GCTX.cgroup_ctrl_ &&
-          OB_LIKELY(GCTX.cgroup_ctrl_->is_valid())) {
-        GCTX.cgroup_ctrl_->add_self_to_cgroup(tenant_id_,
-            share::OBCG_MYSQL_LOGIN);
-      }
+      lib::SET_GROUP_ID(group_id_);
       queue_.loop();
     }
 
@@ -85,6 +83,7 @@ public:
     ObReqQueue &queue_;
     const char *thread_name_;
     const uint64_t tenant_id_;
+    const uint64_t group_id_;
   } thread_;
   ObReqQueue queue_;
   int tg_id_;
@@ -117,6 +116,7 @@ private:
   int deliver_rpc_request(rpc::ObRequest &req);
 
   int deliver_mysql_request(rpc::ObRequest &req);
+  int acquire_diagnostic_info_object(int64_t tenant_id, int64_t group_id, int64_t session_id, ObDiagnosticInfo *&di);
 
 private:
   bool is_inited_;

@@ -13,10 +13,6 @@
 #define USING_LOG_PREFIX SQL_ENG
 
 #include "sql/engine/expr/ob_expr_userenv.h"
-#include "sql/engine/expr/ob_expr_util.h"
-#include "lib/ob_errno.h"
-#include "sql/session/ob_sql_session_info.h"
-#include "share/schema/ob_schema_getter_guard.h"
 #include "sql/engine/ob_exec_context.h"
 #include "sql/engine/expr/ob_expr_sys_context.h"
 
@@ -152,6 +148,7 @@ int ObExprUserEnv::cg_expr(ObExprCGCtx &ctx, const ObRawExpr &raw_expr, ObExpr &
 int ObExprUserEnv::calc_user_env_expr(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &res)
 {
   int ret = OB_SUCCESS;
+  DISABLE_SQL_MEMLEAK_GUARD;
   ObDatum *arg = NULL;
   if (OB_FAIL(expr.eval_param_value(ctx, arg))) {
     LOG_WARN("eval arg failed", K(ret));
@@ -242,7 +239,7 @@ int ObExprUserEnv::eval_sessionid_result1(const ObExpr &expr, ObEvalCtx &ctx, Ob
     } else if (arg->is_null()) {
       res.set_null();
     } else {
-      const uint64_t sid = ctx.exec_ctx_.get_my_session()->get_sessid();
+      const uint64_t sid = ctx.exec_ctx_.get_my_session()->get_compatibility_sessid();
       ObNumStackOnceAlloc tmp_alloc;
       number::ObNumber res_nmb;
       if (OB_FAIL(res_nmb.from(sid, tmp_alloc))) {
@@ -259,7 +256,7 @@ int ObExprUserEnv::eval_instance(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &re
 {
   int ret = OB_SUCCESS;
   UNUSED(expr);
-  uint64_t instance_id = GCTX.server_id_;
+  uint64_t instance_id = GCTX.get_server_id();
   number::ObNumber res_nmb;
   ObEvalCtx::TempAllocGuard alloc_guard(ctx);
   ObIAllocator &calc_alloc = alloc_guard.get_allocator();

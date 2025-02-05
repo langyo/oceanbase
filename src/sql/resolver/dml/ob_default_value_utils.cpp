@@ -12,12 +12,8 @@
 
 #define USING_LOG_PREFIX SQL_RESV
 #include "sql/resolver/dml/ob_default_value_utils.h"
-#include "common/sql_mode/ob_sql_mode_utils.h"
 #include "sql/engine/expr/ob_expr_column_conv.h"
-#include "sql/resolver/dml/ob_dml_resolver.h"
-#include "sql/resolver/dml/ob_insert_stmt.h"
-#include "sql/resolver/expr/ob_raw_expr_util.h"
-#include "sql/session/ob_sql_session_info.h"
+#include "sql/resolver/dml/ob_del_upd_resolver.h"
 namespace oceanbase
 {
 using namespace common;
@@ -30,9 +26,11 @@ int ObDefaultValueUtils::generate_insert_value(const ColumnItem *column,
 {
   int ret = OB_SUCCESS;
   ObDMLDefaultOp op = OB_INVALID_DEFAULT_OP;
-  if (OB_ISNULL(column)) {
+  if (OB_ISNULL(column) || OB_ISNULL(params_) ||
+      OB_ISNULL(params_->expr_factory_) ||
+      OB_ISNULL(params_->session_info_)) {
     ret = OB_INVALID_ARGUMENT;
-    LOG_WARN("invalid argument", K(column));
+    LOG_WARN("invalid argument", K(column), K(params_), K(params_->expr_factory_), K(params_->session_info_));
   } else if (OB_FAIL(get_default_type_for_insert(column, op))) {
     LOG_WARN("fail to check column default value", K(column), K(ret));
   } else if (has_instead_of_trigger
@@ -118,7 +116,8 @@ int ObDefaultValueUtils::resolve_default_function_static(
                   expr_factory, col_schema, fun_expr->get_param_expr(4),
                   session_info))) {
         LOG_WARN("fail to build default value", K(ret));
-      } else if (ob_is_enumset_tc(col_schema->get_data_type())) {
+      } else if (ob_is_enumset_tc(col_schema->get_data_type())
+                 || ob_is_collection_sql_type(col_schema->get_data_type())) {
         const ObIArray<ObString> &enum_set_values = col_schema->get_extended_type_info();
         if (OB_FAIL(fun_expr->set_enum_set_values(enum_set_values))) {
           LOG_WARN("failed to set_enum_set_values", K(ret));
@@ -208,7 +207,8 @@ int ObDefaultValueUtils::resolve_default_function(ObRawExpr *&expr, ObStmtScope 
         } else if (OB_FAIL(build_default_function_expr(
                     column_item, fun_expr->get_param_expr(4), scope, false))) {
           LOG_WARN("fail to build default value", K(ret));
-        } else if (ob_is_enumset_tc(column_expr->get_data_type())) {
+        } else if (ob_is_enumset_tc(column_expr->get_data_type())
+                   || ob_is_collection_sql_type(column_expr->get_data_type())) {
           const ObIArray<ObString> &enum_set_values = column_expr->get_enum_set_values();
           if (OB_FAIL(fun_expr->set_enum_set_values(enum_set_values))) {
             LOG_WARN("failed to set_enum_set_values", K(ret));
@@ -255,7 +255,7 @@ int ObDefaultValueUtils::resolve_default_expr(const ColumnItem &column_item, ObR
       LOG_WARN("params_.session_info_ is null", K(ret));
     } else {
       default_func_expr->set_func_name(ObString::make_string(N_DEFAULT));
-      default_func_expr->set_data_type(column_item.get_column_type()->get_type());
+      default_func_expr->set_result_type(*column_item.get_column_type());
       if (OB_FAIL(build_type_expr(&column_item, c_expr))) {
         LOG_WARN("fail to build type expr", K(ret));
       } else if (OB_FAIL(default_func_expr->add_param_expr(c_expr))) {
@@ -278,7 +278,8 @@ int ObDefaultValueUtils::resolve_default_expr(const ColumnItem &column_item, ObR
         LOG_WARN("fail to add defualt value expr", K(ret));
       } else {
         const ObColumnSchemaV2 *column_schema = NULL;
-        if (ob_is_enumset_tc(column_item.get_column_type()->get_type())) {
+        if (ob_is_enumset_tc(column_item.get_column_type()->get_type())
+            || ob_is_collection_sql_type(column_item.get_column_type()->get_type())) {
           bool is_link = ObSqlSchemaGuard::is_link_table(stmt_, column_item.table_id_);
           if (OB_ISNULL(params_->schema_checker_)) {
             ret = OB_ERR_UNEXPECTED;
@@ -335,7 +336,8 @@ int ObDefaultValueUtils::build_default_expr_strict_static(
     } else {
       c_expr->set_value(column_schema->get_cur_default_value());
     }
-    if (OB_SUCC(ret) && ob_is_enumset_tc(c_expr->get_data_type())) {
+    if (OB_SUCC(ret)
+        && (ob_is_enumset_tc(c_expr->get_data_type()) || ob_is_collection_sql_type(c_expr->get_data_type()))) {
       if (OB_UNLIKELY(column_schema->get_extended_type_info().count() < 1)) {
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("invalid column schema", KPC(column_schema), K(ret));
@@ -370,11 +372,21 @@ int ObDefaultValueUtils::build_default_expr_strict(const ColumnItem *column, ObR
   } else if (NULL != column->default_value_expr_) {
     if (OB_FAIL(build_expr_default_expr(column, const_cast<ColumnItem *>(column)->default_value_expr_, expr))) {
       LOG_WARN("fail to build expr_default expr", K(ret));
+    } else {
+      ObDelUpdResolver* del_upd_resolver = dynamic_cast<ObDelUpdResolver *>(resolver_);
+      if (OB_ISNULL(del_upd_resolver)) {
+        // do nothing
+      } else if (OB_FAIL(del_upd_resolver->recursive_search_sequence_expr(expr))) {
+        LOG_WARN("fail to search sequence expr", K(ret));
+      }
     }
   } else if (column->base_cid_ == OB_HIDDEN_PK_INCREMENT_COLUMN_ID) {
     if (OB_FAIL(resolver_->build_heap_table_hidden_pk_expr(expr, column->get_expr()))) {
       LOG_WARN("failed to build next_val expr", K(ret), KPC(column->get_expr()));
     }
+  } else if (OB_ISNULL(column->get_expr())) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected error, column expr is nullptr", K(ret), KPC(column));
   } else if (column->is_auto_increment()) {
     if (OB_FAIL(resolver_->build_autoinc_nextval_expr(expr,
                                                       column->base_tid_,
@@ -401,7 +413,8 @@ int ObDefaultValueUtils::build_default_expr_strict(const ColumnItem *column, ObR
     } else {
       c_expr->set_value(column->default_value_);
     }
-    if (OB_SUCC(ret) && ob_is_enumset_tc(c_expr->get_data_type())) {
+    if (OB_SUCC(ret)
+        && (ob_is_enumset_tc(c_expr->get_data_type()) || ob_is_collection_sql_type(c_expr->get_data_type()))) {
       const ObColumnRefRawExpr *column_expr = column->get_expr();
       if (OB_ISNULL(column_expr)) {
         ret = OB_ERR_UNEXPECTED;
@@ -471,6 +484,7 @@ int ObDefaultValueUtils::build_expr_default_expr(const ColumnItem *column,
 {
   int ret = OB_SUCCESS;
   ObRawExpr *temp_expr = NULL;
+  ObRawExpr *seq_expr = nullptr;
   if (OB_ISNULL(column)) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid arguemnt", K(column));
@@ -481,6 +495,11 @@ int ObDefaultValueUtils::build_expr_default_expr(const ColumnItem *column,
                                                 input_expr,
                                                 temp_expr))) {
     LOG_WARN("failed to copy expr", K(ret));
+  } else if (OB_FAIL(ObRawExprUtils::extract_invalid_sequence_expr(temp_expr, seq_expr))) {
+    LOG_WARN("fail to get invalid sequence expr", K(ret));
+  } else if (nullptr != seq_expr) {
+    ret = OB_ERR_SEQ_NOT_EXIST;
+    LOG_WARN("sequence not exist", K(ret));
   } else {
     const_expr = temp_expr;
   }
@@ -564,11 +583,13 @@ int ObDefaultValueUtils::get_default_type_for_insert(const ColumnItem *column, O
       if (params_->session_info_->get_ddl_info().is_ddl()) {
         op = OB_NOT_STRICT_DEFAULT_OP;
       } else if (is_strict_mode(params_->session_info_->get_sql_mode()) && !del_upd_stmt->is_ignore()) {
-        LOG_USER_ERROR(OB_ERR_NO_DEFAULT_FOR_FIELD, to_cstring(column->column_name_));
+        ObCStringHelper helper;
+        LOG_USER_ERROR(OB_ERR_NO_DEFAULT_FOR_FIELD, helper.convert(column->column_name_));
         ret = OB_ERR_NO_DEFAULT_FOR_FIELD;
         LOG_WARN("Column can not be null", K(column->column_name_), K(ret));
       } else {
-        LOG_USER_WARN(OB_ERR_NO_DEFAULT_FOR_FIELD, to_cstring(column->column_name_));
+        ObCStringHelper helper;
+        LOG_USER_WARN(OB_ERR_NO_DEFAULT_FOR_FIELD, helper.convert(column->column_name_));
         op = OB_NOT_STRICT_DEFAULT_OP;
       }
     }
@@ -585,6 +606,7 @@ int ObDefaultValueUtils::get_default_type_for_default_function_static(
 {
   int ret = OB_SUCCESS;
   if (OB_ISNULL(column_schema)) {
+    ret = OB_ERR_UNEXPECTED;
     LOG_WARN("invalid argument", K(column_schema));
   } else if (column_schema->is_autoincrement()) {
     op = OB_NOT_STRICT_DEFAULT_OP;
@@ -629,7 +651,8 @@ int ObDefaultValueUtils::get_default_type_for_default_function(const ColumnItem 
     op = OB_NORMAL_DEFAULT_OP;
   } else if (column->is_not_null_for_write() && column->default_value_.is_null()) {
     ret = OB_ERR_NO_DEFAULT_FOR_FIELD;
-    LOG_USER_ERROR(OB_ERR_NO_DEFAULT_FOR_FIELD, to_cstring(column->column_name_));
+    ObCStringHelper helper;
+    LOG_USER_ERROR(OB_ERR_NO_DEFAULT_FOR_FIELD, helper.convert(column->column_name_));
   } else {
     op = OB_NORMAL_DEFAULT_OP;
   }
@@ -755,11 +778,8 @@ int ObDefaultValueUtils::build_default_expr_not_strict_static(
     default_value.set_null();
   } else {
     default_value.set_type(column_schema->get_data_type());
-    if (OB_FAIL(default_value.build_not_strict_default_value())) {
+    if (OB_FAIL(default_value.build_not_strict_default_value(column_schema->get_accuracy().get_precision(), column_schema->get_collation_type()))) {
       LOG_WARN("failed to build not strict default value info", K(column_schema), K(ret));
-    } else if (default_value.is_string_type()) {
-      default_value.set_collation_level(CS_LEVEL_IMPLICIT);
-      default_value.set_collation_type(column_schema->get_collation_type());
     }
   }
   if (OB_SUCC(ret)) {
@@ -779,7 +799,8 @@ int ObDefaultValueUtils::build_default_expr_not_strict_static(
     }
   }
 
-  if (OB_SUCC(ret) && ob_is_enumset_tc(c_expr->get_data_type())) {
+  if (OB_SUCC(ret)
+      && (ob_is_enumset_tc(c_expr->get_data_type()) || ob_is_collection_sql_type(c_expr->get_data_type()))) {
     if (OB_UNLIKELY(column_schema->get_extended_type_info().count() < 1)) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("invalid column_expr", KPC(column_schema), K(ret));
@@ -810,11 +831,8 @@ int ObDefaultValueUtils::build_default_expr_not_strict(const ColumnItem *column,
     default_value.set_null();
   } else {
     default_value.set_type(column->get_column_type()->get_type());
-    if (OB_FAIL(default_value.build_not_strict_default_value())) {
+    if (OB_FAIL(default_value.build_not_strict_default_value(column->get_column_type()->get_accuracy().get_precision(), column->get_column_type()->get_collation_type()))) {
       LOG_WARN("failed to build not strict default value info", K(column), K(ret));
-    } else if (default_value.is_string_type()) {
-      default_value.set_collation_level(CS_LEVEL_IMPLICIT);
-      default_value.set_collation_type(column->get_column_type()->get_collation_type());
     }
   }
   if (OB_SUCC(ret)) {
@@ -833,7 +851,8 @@ int ObDefaultValueUtils::build_default_expr_not_strict(const ColumnItem *column,
     }
   }
 
-  if (OB_SUCC(ret) && ob_is_enumset_tc(c_expr->get_data_type())) {
+  if (OB_SUCC(ret)
+      && (ob_is_enumset_tc(c_expr->get_data_type()) || ob_is_collection_sql_type(c_expr->get_data_type()))) {
     const ObColumnRefRawExpr *column_expr = column->get_expr();
     if (OB_ISNULL(column_expr)) {
       ret = OB_ERR_UNEXPECTED;
@@ -1084,12 +1103,19 @@ int ObDefaultValueUtils::build_nullable_expr(const ColumnItem *column, ObRawExpr
 int ObDefaultValueUtils::build_default_expr_for_generated_column(const ColumnItem &column, ObRawExpr *&expr)
 {
   int ret = OB_SUCCESS;
-  if (OB_ISNULL(column.expr_) || OB_ISNULL(stmt_) || OB_ISNULL(params_) || OB_ISNULL(params_->expr_factory_)) {
+  bool contain = false;
+  if (OB_ISNULL(column.expr_) || OB_ISNULL(stmt_) || OB_ISNULL(params_)
+      || OB_ISNULL(params_->expr_factory_) || OB_ISNULL(column.expr_->get_dependant_expr())) {
     ret = OB_NOT_INIT;
     LOG_WARN("column expr is null", K_(column.expr), K_(stmt));
-  } else if (OB_FAIL(ObDMLResolver::copy_schema_expr(*params_->expr_factory_,
-                                                     column.expr_->get_dependant_expr(),
-                                                     expr))) {
+  } else if (OB_FAIL(ObResolverUtils::cnt_external_pseudo_column(*column.expr_->get_dependant_expr(), contain))) {
+    LOG_WARN("failed to check if contain external pseudo column", K(ret));
+    // 外表生成列包含伪列  默认值为null
+  } else if (contain && OB_FAIL(ObRawExprUtils::build_null_expr(*params_->expr_factory_, expr))) {
+    LOG_WARN("fail to build null expr", K(ret));
+  } else if (!contain && OB_FAIL(ObDMLResolver::copy_schema_expr(*params_->expr_factory_,
+                                                                 column.expr_->get_dependant_expr(),
+                                                                 expr))) {
     LOG_WARN("failed to copy dependant expr", K(ret));
   }
   return ret;

@@ -14,8 +14,6 @@
 #include "ob_micro_block_row_lock_checker.h"
 #include "storage/access/ob_rows_info.h"
 #include "storage/blocksstable/ob_storage_cache_suite.h"
-#include "storage/memtable/ob_memtable_interface.h"
-#include "storage/tx_table/ob_tx_table.h"
 
 namespace oceanbase {
 namespace blocksstable {
@@ -25,14 +23,28 @@ using namespace share;
 
 ObMicroBlockRowLockChecker::ObMicroBlockRowLockChecker(common::ObIAllocator &allocator)
     : ObMicroBlockRowScanner(allocator),
-      check_exist_(false),
-      snapshot_version_(),
-      lock_state_(nullptr)
+    check_exist_(false),
+    snapshot_version_(),
+    lock_state_(nullptr),
+    row_state_(nullptr)
 {
 }
 
 ObMicroBlockRowLockChecker::~ObMicroBlockRowLockChecker()
 {
+}
+
+void ObMicroBlockRowLockChecker::inc_empty_read(int64_t empty_read_prefix)
+{
+  if (OB_NOT_NULL(context_) && OB_NOT_NULL(sstable_) &&
+       !context_->query_flag_.is_index_back() && context_->query_flag_.is_use_bloomfilter_cache() &&
+       !sstable_->is_small_sstable()) {
+     (void) OB_STORE_CACHE.get_bf_cache().inc_empty_read(
+              MTL_ID(),
+              param_->table_id_,
+              macro_id_,
+              empty_read_prefix);
+  }
 }
 
 int ObMicroBlockRowLockChecker::inner_get_next_row(
@@ -144,7 +156,7 @@ int ObMicroBlockRowLockChecker::get_next_row(const ObDatumRow *&row)
         } else if (OB_FAIL(lock_state->trans_version_.convert_for_tx(trans_version))) {
           LOG_ERROR("convert failed", K(ret), K(trans_version));
         } else if (row_header->get_row_multi_version_flag().is_uncommitted_row()) {
-          ObTxTableGuards tx_table_guards = ctx.get_tx_table_guards();
+          ObTxTableGuards &tx_table_guards = ctx.get_tx_table_guards();
           transaction::ObTxSEQ tx_sequence = transaction::ObTxSEQ::cast_from_int(sql_sequence);
           if (!tx_table_guards.is_valid()) {
             ret = OB_ERR_UNEXPECTED;
@@ -182,6 +194,7 @@ int ObMicroBlockRowLockChecker::get_next_row(const ObDatumRow *&row)
 
 ObMicroBlockRowLockMultiChecker::ObMicroBlockRowLockMultiChecker(common::ObIAllocator &allocator)
     : ObMicroBlockRowLockChecker(allocator),
+      reach_end_(false),
       rowkey_current_idx_(0),
       rowkey_begin_idx_(0),
       rowkey_end_idx_(0),
@@ -211,13 +224,16 @@ int ObMicroBlockRowLockMultiChecker::open(
     rowkey_end_idx_ = rowkey_end_idx;
     empty_read_cnt_ = 0;
     rows_info_ = &rows_info;
+    reach_end_ = false;
   }
   return ret;
 }
 
 void ObMicroBlockRowLockMultiChecker::inc_empty_read()
 {
-  if (empty_read_cnt_ > 0) {
+  if (OB_NOT_NULL(context_) && OB_NOT_NULL(sstable_) &&
+      !context_->query_flag_.is_index_back() && context_->query_flag_.is_use_bloomfilter_cache() &&
+      !sstable_->is_small_sstable() && empty_read_cnt_ > 0) {
     (void) OB_STORE_CACHE.get_bf_cache().inc_empty_read(
              MTL_ID(),
              param_->table_id_,
@@ -233,7 +249,9 @@ int ObMicroBlockRowLockMultiChecker::inner_get_next_row(
     ObStoreRowLockState *&lock_state)
 {
   int ret = OB_SUCCESS;
-  if (OB_ITER_END == end_of_block() || rows_info_->is_row_skipped(rowkey_current_idx_ - 1)) {
+  if (reach_end_) {
+    ret = OB_ITER_END;
+  } else if (OB_ITER_END == end_of_block() || rows_info_->is_row_skipped(rowkey_current_idx_ - 1)) {
     if (OB_FAIL(seek_forward())) {
       if (OB_UNLIKELY(OB_ITER_END != ret)) {
         LOG_WARN("Failed to seek forward to next row", K(ret), K_(check_exist));
@@ -283,16 +301,16 @@ int ObMicroBlockRowLockMultiChecker::check_row(
         rows_info_->set_conflict_rowkey(rowkey_idx);
         rows_info_->set_error_code(OB_TRY_LOCK_ROW_CONFLICT);
         need_stop = true;
-        LOG_WARN("Find lock conflict in mini/minor sstable", K(rowkey_idx), K(rows_info_->rowkeys_[rowkey_idx]),
-                 K_(rowkey_current_idx), K_(rowkey_begin_idx), K_(rowkey_end_idx), K_(empty_read_cnt), K(lock_state),
-                 K(inner_dml_flag), K_(current), K_(start), K_(last), K(row_lock_checked));
+        LOG_DEBUG("Find lock conflict in mini/minor sstable", K(rowkey_idx), K(rows_info_->rowkeys_[rowkey_idx]),
+                  K_(rowkey_current_idx), K_(rowkey_begin_idx), K_(rowkey_end_idx), K_(empty_read_cnt), K(lock_state),
+                  K(inner_dml_flag), K_(current), K_(start), K_(last), K(row_lock_checked), K_(macro_id));
       } else if (lock_state.trans_version_ > snapshot_version_) {
         rows_info_->set_conflict_rowkey(rowkey_idx);
         rows_info_->set_error_code(OB_TRANSACTION_SET_VIOLATION);
         need_stop = true;
-        LOG_WARN("Find tsv conflict in mini/minor sstable", K(rowkey_idx), K(rows_info_->rowkeys_[rowkey_idx]),
-                 K_(rowkey_current_idx), K_(rowkey_begin_idx), K_(rowkey_end_idx), K_(empty_read_cnt), K(lock_state),
-                 K(inner_dml_flag), K_(current), K_(start), K_(last), K(row_lock_checked));
+        LOG_DEBUG("Find tsv conflict in mini/minor sstable", K(rowkey_idx), K(rows_info_->rowkeys_[rowkey_idx]),
+                  K_(rowkey_current_idx), K_(rowkey_begin_idx), K_(rowkey_end_idx), K_(empty_read_cnt), K(lock_state),
+                  K(inner_dml_flag), K_(current), K_(start), K_(last), K(row_lock_checked), K_(macro_id));
       } else {
         rows_info_->set_row_lock_checked(rowkey_idx, check_exist_);
       }
@@ -305,9 +323,9 @@ int ObMicroBlockRowLockMultiChecker::check_row(
         rows_info_->set_conflict_rowkey(rowkey_idx);
         rows_info_->set_error_code(OB_ERR_PRIMARY_KEY_DUPLICATE);
         need_stop = true;
-        LOG_WARN("Find duplication in mini/minor sstable", K(rowkey_idx), K(rows_info_->rowkeys_[rowkey_idx]),
-                 K_(rowkey_current_idx), K_(rowkey_begin_idx), K_(rowkey_end_idx), K_(empty_read_cnt), K(lock_state),
-                 K(inner_dml_flag), K_(current), K_(start), K_(last), K(row_lock_checked));
+        LOG_DEBUG("Find duplication in mini/minor sstable", K(rowkey_idx), K(rows_info_->rowkeys_[rowkey_idx]),
+                  K_(rowkey_current_idx), K_(rowkey_begin_idx), K_(rowkey_end_idx), K_(empty_read_cnt), K(lock_state),
+                  K(inner_dml_flag), K_(current), K_(start), K_(last), K(row_lock_checked), K_(macro_id));
       } else {
         rows_info_->set_row_checked(rowkey_idx);
       }
@@ -324,9 +342,9 @@ void ObMicroBlockRowLockMultiChecker::check_row_in_major_sstable(bool &need_stop
     rows_info_->set_conflict_rowkey(rowkey_idx);
     rows_info_->set_error_code(OB_ERR_PRIMARY_KEY_DUPLICATE);
     need_stop = true;
-    LOG_WARN_RET(OB_SUCCESS, "Find duplication in major sstable", K(rowkey_idx), K(rows_info_->rowkeys_[rowkey_idx]),
-                 K_(rowkey_current_idx), K_(rowkey_begin_idx), K_(rowkey_end_idx), K_(empty_read_cnt),
-                 K_(current), K_(start), K_(last));
+    LOG_DEBUG("Find duplication in major sstable", K(rowkey_idx), K(rows_info_->rowkeys_[rowkey_idx]),
+              K_(rowkey_current_idx), K_(rowkey_begin_idx), K_(rowkey_end_idx), K_(empty_read_cnt),
+              K_(current), K_(start), K_(last), K_(macro_id));
   } else {
     rows_info_->set_row_checked(rowkey_idx);
   }
@@ -347,6 +365,7 @@ int ObMicroBlockRowLockMultiChecker::seek_forward()
   const int64_t row_count = micro_block_reader->row_count();
   while (OB_SUCC(ret)) {
     if (rowkey_current_idx_ == rowkey_end_idx_) {
+      reach_end_ = true;
       ret = OB_ITER_END;
     } else if (rows_info_->is_row_skipped(rowkey_current_idx_)) {
       ++rowkey_current_idx_;
@@ -356,7 +375,10 @@ int ObMicroBlockRowLockMultiChecker::seek_forward()
       int64_t row_idx = 0;
       bool is_equal = false;
       if (begin_idx >= row_count) {
-        ret = OB_ITER_END;
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("Unexpected state in ObMicroBlockRowLockMultiChecker", K(begin_idx), K(row_count), K(rowkey),
+                 K_(rowkey_current_idx), K_(rowkey_begin_idx), K_(rowkey_end_idx), K_(current), K_(start), K_(last),
+                 K_(macro_id));
       } else if (OB_FAIL(micro_block_reader->find_bound(rowkey, true, begin_idx, row_idx, is_equal))) {
         LOG_WARN("Failed to find bound", K(ret), K(begin_idx), K(rowkey), K_(current), K_(start), K_(last),
                  K_(rowkey_current_idx), K(need_search_duplicate_row));

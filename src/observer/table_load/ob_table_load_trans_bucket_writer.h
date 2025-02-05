@@ -50,10 +50,14 @@ private:
   int handle_partition_with_autoinc_identity(SessionContext &session_ctx,
                                              table::ObTableLoadObjRowArray &obj_rows,
                                              const uint64_t &sql_mode, int32_t session_id);
-  int handle_autoinc_column(blocksstable::ObStorageDatum &datum, const ObObjTypeClass &tc,
-                            int32_t session_id, const uint64_t &sql_mode);
+  int handle_autoinc_column(const share::schema::ObColumnSchemaV2 *column_schema,
+                            const common::ObObj &obj,
+                            common::ObObj &out_obj,
+                            int32_t session_id,
+                            const uint64_t &sql_mode);
   int handle_identity_column(const share::schema::ObColumnSchemaV2 *column_schema,
-                             blocksstable::ObStorageDatum &datum,
+                             const common::ObObj &obj,
+                             common::ObObj &out_obj,
                              common::ObArenaAllocator &cast_allocator);
   // 非分区表
   int write_for_non_partitioned(SessionContext &session_ctx,
@@ -65,11 +69,14 @@ private:
                       ObTableLoadBucket *&load_bucket);
   int write_load_bucket(SessionContext &session_ctx, ObTableLoadBucket *load_bucket);
 private:
+  static const int64_t WRITE_ROW_SIZE = 2LL * 1024 * 1024;
   ObTableLoadTransCtx *const trans_ctx_;
   ObTableLoadCoordinatorCtx *const coordinator_ctx_;
   const ObTableLoadParam &param_;
   common::ObArenaAllocator allocator_;
   bool is_partitioned_;
+  int64_t column_count_;
+  common::ObCastMode cast_mode_;
   struct SessionContext
   {
     SessionContext();
@@ -83,7 +90,7 @@ private:
     ObTableLoadBucket load_bucket_;
     // for partitioned table
     common::hash::ObHashMap<common::ObAddr, ObTableLoadBucket *> load_bucket_map_;
-    common::ObSEArray<ObTableLoadBucket *, 64> load_bucket_array_;
+    common::ObArray<ObTableLoadBucket *> load_bucket_array_;
     // 以下参数加锁访问
     lib::ObMutex mutex_;
     uint64_t last_receive_sequence_no_;

@@ -11,20 +11,12 @@
  */
 
 #define USING_LOG_PREFIX SQL_ENG
-#include "sql/ob_sql.h"
-#include "sql/engine/ob_exec_context.h"
-#include "lib/allocator/ob_mod_define.h"
-#include "common/ob_smart_call.h"
-#include "sql/session/ob_sql_session_info.h"
-#include "sql/engine/ob_physical_plan_ctx.h"
+#include "ob_exec_context.h"
 #include "sql/engine/px/ob_px_util.h"
 #include "sql/engine/expr/ob_expr_lob_utils.h"
-#include "sql/executor/ob_task_executor_ctx.h"
-#include "sql/monitor/ob_phy_plan_monitor_info.h"
-#include "lib/profile/ob_perf_event.h"
-#include "share/interrupt/ob_global_interrupt_call.h"
-#include "ob_operator.h"
 #include "observer/ob_server.h"
+#include "storage/lob/ob_lob_persistent_reader.h"
+#include "sql/executor/ob_memory_tracker.h"
 #ifdef OB_BUILD_SPM
 #include "sql/spm/ob_spm_controller.h"
 #endif
@@ -92,7 +84,6 @@ ObExecContext::ObExecContext(ObIAllocator &allocator)
     row_id_list_(nullptr),
     row_id_list_array_(),
     total_row_count_(0),
-    is_evolution_(false),
     reusable_interm_result_(false),
     is_async_end_trans_(false),
     gi_task_map_(nullptr),
@@ -108,9 +99,9 @@ ObExecContext::ObExecContext(ObIAllocator &allocator)
     frame_cnt_(0),
     op_kit_store_(),
     convert_allocator_(nullptr),
+    mem_context_(nullptr),
     pwj_map_(nullptr),
-    calc_type_(CALC_NORMAL),
-    fixed_id_(OB_INVALID_ID),
+    group_pwj_map_(nullptr),
     check_status_times_(0),
     vt_ift_(nullptr),
     px_batch_id_(0),
@@ -130,7 +121,16 @@ ObExecContext::ObExecContext(ObIAllocator &allocator)
     table_direct_insert_ctx_(),
     errcode_(OB_SUCCESS),
     dblink_snapshot_map_(),
-    cur_row_num_(-1)
+    user_logging_ctx_(),
+    is_online_stats_gathering_(false),
+    is_ddl_idempotent_auto_inc_(false),
+    table_all_slice_count_(0),
+    table_level_slice_idx_(0),
+    slice_row_idx_(0),
+    autoinc_range_interval_(0),
+    lob_access_ctx_(nullptr),
+    auto_dop_map_(),
+    force_local_plan_(false)
 {
 }
 
@@ -139,9 +139,15 @@ ObExecContext::~ObExecContext()
   row_id_list_array_.reset();
   destroy_eval_allocator();
   reset_op_ctx();
-  //对于后台线程, 需要调用析构
-  if (NULL != phy_plan_ctx_ && !THIS_WORKER.has_req_flag()) {
-    phy_plan_ctx_->~ObPhysicalPlanCtx();
+
+  if (NULL != phy_plan_ctx_) {
+    if (!THIS_WORKER.has_req_flag()) {
+      //对于后台线程, 需要调用析构
+      phy_plan_ctx_->~ObPhysicalPlanCtx();
+    } else {
+      // free subschema map memory
+      phy_plan_ctx_->destroy();
+    }
   }
   phy_plan_ctx_ = NULL;
   // destory gi task info map
@@ -161,9 +167,9 @@ ObExecContext::~ObExecContext()
     package_guard_->~ObPLPackageGuard();
     package_guard_ = NULL;
   }
-  if (OB_NOT_NULL(pwj_map_)) {
-    pwj_map_->destroy();
-    pwj_map_ = NULL;
+  if (OB_NOT_NULL(group_pwj_map_)) {
+    group_pwj_map_->destroy();
+    group_pwj_map_ = nullptr;
   }
   if (OB_NOT_NULL(vt_ift_)) {
     vt_ift_->~ObIVirtualTableIteratorFactory();
@@ -174,6 +180,10 @@ ObExecContext::~ObExecContext()
   if (OB_LIKELY(NULL != convert_allocator_)) {
     DESTROY_CONTEXT(convert_allocator_);
     convert_allocator_ = NULL;
+  }
+  if (OB_LIKELY(NULL != mem_context_)) {
+    DESTROY_CONTEXT(mem_context_);
+    mem_context_ = NULL;
   }
   admission_addr_map_.destroy();
   if (!temp_expr_ctx_map_.created()) {
@@ -188,6 +198,12 @@ ObExecContext::~ObExecContext()
   }
   update_columns_ = nullptr;
   errcode_ = OB_SUCCESS;
+
+  if (OB_NOT_NULL(lob_access_ctx_)) {
+    lob_access_ctx_->~ObLobAccessCtx();
+    lob_access_ctx_ = nullptr;
+  }
+  auto_dop_map_.destroy();
 }
 
 void ObExecContext::clean_resolve_ctx()
@@ -232,31 +248,6 @@ void ObExecContext::reset_op_env()
     udf_ctx_mgr_->reset();
   }
 }
-
-int ObExecContext::get_fk_root_ctx(ObExecContext* &fk_root_ctx)
-{
-  int ret = OB_SUCCESS;
-  if (OB_ISNULL(this->get_parent_ctx())) {
-    fk_root_ctx = this;
-  } else if (!this->get_my_session()->is_foreign_key_cascade()) {
-    fk_root_ctx = this;
-  } else if (OB_FAIL(SMART_CALL(get_parent_ctx()->get_fk_root_ctx(fk_root_ctx)))) {
-    LOG_WARN("failed to get fk root ctx", K(ret));
-  }
-  return ret;
-}
-
-bool ObExecContext::is_fk_root_ctx()
-{
-  bool ret = false;
-  if (OB_ISNULL(this->get_parent_ctx())) {
-    ret = true;
-  } else if (!this->get_my_session()->is_foreign_key_cascade()) {
-    ret = true;
-  }
-  return ret;
-}
-
 int ObExecContext::init_phy_op(const uint64_t phy_op_size)
 {
   int ret = OB_SUCCESS;
@@ -274,16 +265,6 @@ int ObExecContext::init_phy_op(const uint64_t phy_op_size)
     phy_op_size_ = phy_op_size;
     if (OB_FAIL(op_kit_store_.init(allocator_, phy_op_size))) {
       LOG_WARN("init operator kit store failed", K(ret));
-    }
-  }
-  if (OB_SUCC(ret)) {
-    if (OB_ISNULL(gi_task_map_)) {
-      // Do nothing.
-    } else if (gi_task_map_->created()) {
-      // Do nothing. If this map has been created, it means this plan is trying to reopen.
-    } else if (OB_FAIL(gi_task_map_->create(PARTITION_WISE_JOIN_TSC_HASH_BUCKET_NUM, /* assume no more than 8 table scan in a plan */
-        ObModIds::OB_SQL_PX))) {
-      LOG_WARN("create gi task map failed", K(ret));
     }
   }
   return ret;
@@ -371,7 +352,10 @@ int ObExecContext::build_temp_expr_ctx(const ObTempExpr &temp_expr, ObTempExprCt
   char **frames = NULL;
   char *mem = static_cast<char*>(get_allocator().alloc(sizeof(ObTempExprCtx)));
   ObArray<char *> tmp_param_frame_ptrs;
-  CK(OB_NOT_NULL(mem));
+  if (OB_ISNULL(mem)) {
+    ret = OB_ALLOCATE_MEMORY_FAILED;
+    LOG_WARN("no more memory to create temp expr ctx", K(ret));
+  }
   OX(temp_expr_ctx = new(mem)ObTempExprCtx(*this));
   OZ(temp_expr.alloc_frame(get_allocator(), tmp_param_frame_ptrs, frame_cnt, frames));
   OX(temp_expr_ctx->frames_ = frames);
@@ -514,6 +498,8 @@ int ObExecContext::check_status()
     LOG_WARN("px execution was interrupted", K(ic), K(ret));
   } else if (lib::Worker::WS_OUT_OF_THROTTLE == THIS_WORKER.check_wait()) {
     ret = OB_KILLED_BY_THROTTLING;
+  } else if (OB_UNLIKELY((OB_SUCCESS != (ret = CHECK_MEM_STATUS())))) {
+    LOG_WARN("Exceeded memory usage limit", K(ret));
   }
   int tmp_ret = OB_SUCCESS;
   if (OB_SUCCESS != (tmp_ret = check_extra_status())) {
@@ -643,6 +629,32 @@ int ObExecContext::get_convert_charset_allocator(ObArenaAllocator *&allocator)
   return ret;
 }
 
+int ObExecContext::get_malloc_allocator(ObIAllocator *&allocator)
+{
+  int ret = OB_SUCCESS;
+  allocator = NULL;
+  if (OB_ISNULL(mem_context_)) {
+    if (OB_ISNULL(my_session_)) {
+      ret = OB_INVALID_ARGUMENT;
+      LOG_WARN("session is null", K(ret));
+    } else {
+      lib::ContextParam param;
+      param.set_properties(lib::USE_TL_PAGE_OPTIONAL)
+           .set_mem_attr(my_session_->get_effective_tenant_id(),
+                         common::ObModIds::OB_SQL_EXPR_CALC,
+                         common::ObCtxIds::DEFAULT_CTX_ID);
+      if (OB_FAIL(CURRENT_CONTEXT->CREATE_CONTEXT(mem_context_, param))) {
+        SQL_ENG_LOG(WARN, "create entity failed", K(ret));
+      }
+    }
+  }
+  if (OB_SUCC(ret)) {
+    allocator = &mem_context_->get_malloc_allocator();
+  }
+
+  return ret;
+}
+
 void ObExecContext::try_reset_convert_charset_allocator()
 {
   if (OB_NOT_NULL(convert_allocator_)) {
@@ -731,6 +743,8 @@ int ObExecContext::init_physical_plan_ctx(const ObPhysicalPlan &plan)
 {
   int ret = OB_SUCCESS;
   int64_t foreign_key_checks = 0;
+  uint64_t tenant_data_version = 0;
+  bool supprt_check_pdml_affected_row = false;
   if (OB_ISNULL(phy_plan_ctx_) || OB_ISNULL(my_session_) || OB_ISNULL(sql_ctx_)) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid argument", K_(phy_plan_ctx), K_(my_session), K(ret));
@@ -770,12 +784,26 @@ int ObExecContext::init_physical_plan_ctx(const ObPhysicalPlan &plan)
       } else {
         consistency = STRONG;
       }
+      if (stmt::T_INSERT == plan.get_stmt_type()) {
+        bool is_direct_load = plan.get_enable_append();
+        phy_plan_ctx_->set_is_direct_insert_plan(is_direct_load);
+      }
       phy_plan_ctx_->set_consistency_level(consistency);
       phy_plan_ctx_->set_timeout_timestamp(start_time + plan_timeout);
+      phy_plan_ctx_->set_rich_format(my_session_->use_rich_format());
       reference_my_plan(&plan);
       phy_plan_ctx_->set_ignore_stmt(plan.is_ignore());
       phy_plan_ctx_->set_foreign_key_checks(0 != foreign_key_checks);
       phy_plan_ctx_->set_table_row_count_list_capacity(plan.get_access_table_num());
+      if (plan.is_use_pdml() && GCONF.enable_defensive_check()) {
+        if (OB_FAIL(GET_MIN_DATA_VERSION(my_session_->get_effective_tenant_id(), tenant_data_version))) {
+          LOG_WARN("get tenant data version failed", K(ret));
+        } else if ((DATA_VERSION_4_3_5_0 <= tenant_data_version)) {
+          // ([4.3.5, ...)) support check pdml affected_rows
+          supprt_check_pdml_affected_row = true;
+        }
+      }
+      phy_plan_ctx_->set_check_pdml_affected_rows(supprt_check_pdml_affected_row);
       THIS_WORKER.set_timeout_ts(phy_plan_ctx_->get_timeout_timestamp());
 #ifdef OB_BUILD_SPM
       if (sql_ctx_ != NULL && sql_ctx_->spm_ctx_.need_spm_timeout_) {
@@ -858,24 +886,63 @@ int ObExecContext::add_row_id_list(const common::ObIArray<int64_t> *row_id_list)
   return ret;
 }
 
-int ObExecContext::get_pwj_map(PWJTabletIdMap *&pwj_map)
+int ObExecContext::get_group_pwj_map(GroupPWJTabletIdMap *&group_pwj_map)
 {
   int ret = OB_SUCCESS;
-  pwj_map = nullptr;
-  if (nullptr == pwj_map_) {
-    void *buf = allocator_.alloc(sizeof(PWJTabletIdMap));
+  group_pwj_map = nullptr;
+  if (nullptr == group_pwj_map_) {
+    void *buf = allocator_.alloc(sizeof(GroupPWJTabletIdMap));
     if (nullptr == buf) {
       ret = OB_ALLOCATE_MEMORY_FAILED;
       LOG_WARN("Failed to allocate memories", K(ret));
-    } else if (FALSE_IT(pwj_map_ = new(buf) PWJTabletIdMap())) {
-    } else if (OB_FAIL(pwj_map_->create(PARTITION_WISE_JOIN_TSC_HASH_BUCKET_NUM, /* assume no more than 8 table scan in a plan */
-                                        ObModIds::OB_SQL_PX))) {
-      LOG_WARN("Failed to create gi task map", K(ret));
     } else {
-      pwj_map = pwj_map_;
+      group_pwj_map_ = new (buf) GroupPWJTabletIdMap();
+      /* assume no more than 8table scan in a plan */
+      if (OB_FAIL(group_pwj_map_->create(PARTITION_WISE_JOIN_TSC_HASH_BUCKET_NUM, ObModIds::OB_SQL_PX))) {
+        LOG_WARN("Failed to create group_pwj_map_", K(ret));
+      } else {
+        group_pwj_map = group_pwj_map_;
+      }
     }
   } else {
-    pwj_map = pwj_map_;
+    group_pwj_map = group_pwj_map_;
+  }
+  return ret;
+}
+
+int ObExecContext::deep_copy_group_pwj_map(const GroupPWJTabletIdMap *src)
+{
+  int ret = OB_SUCCESS;
+  GroupPWJTabletIdMap *des = nullptr;
+  if (OB_ISNULL(src)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected null");
+  } else if (OB_FAIL(get_group_pwj_map(des))) {
+    LOG_WARN("failed to get_group_pwj_map");
+  } else if (des->size() > 0) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("size should be 0", K(des->size()), K(src->size()));
+  } else {
+    FOREACH_X(iter, *src, OB_SUCC(ret)) {
+      const uint64_t table_id = iter->first;
+      const GroupPWJTabletIdInfo &group_pwj_tablet_id_info = iter->second;
+      if (OB_FAIL(des->set_refactored(table_id, group_pwj_tablet_id_info))) {
+        LOG_WARN("failed to set refactored", K(table_id));
+      }
+    }
+  }
+  return ret;
+}
+
+int ObExecContext::get_local_var_array(int64_t local_var_array_id, const ObSolidifiedVarsContext *&var_array)
+{
+  int ret = OB_SUCCESS;
+  var_array = NULL;
+  if (OB_ISNULL(phy_plan_ctx_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("phy_plan_ctx_ is null", K(ret));
+  } else if (OB_FAIL(phy_plan_ctx_->get_local_session_vars(local_var_array_id, var_array))) {
+    LOG_WARN("get local session var failed", K(ret), K(local_var_array_id));
   }
   return ret;
 }
@@ -975,6 +1042,17 @@ pl::ObPLPackageGuard* ObExecContext::get_package_guard()
   return package_guard_;
 }
 
+int ObExecContext::get_package_guard(pl::ObPLPackageGuard *&package_guard)
+{
+  int ret = OB_SUCCESS;
+  package_guard = get_package_guard();
+  if (OB_ISNULL(package_guard)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("get package guard failed", K(ret));
+  }
+  return ret;
+}
+
 DEFINE_SERIALIZE(ObExecContext)
 {
   int ret = OB_SUCCESS;
@@ -1033,5 +1111,219 @@ DEFINE_GET_SERIALIZE_SIZE(ObExecContext)
   }
   return len;
 }
+
+int64_t ObExecContext::get_group_pwj_map_serialize_size() const
+{
+  int64_t len = 0;
+  // add serialize size for group_pwj_map_
+  int64_t pwj_map_element_count = 0;
+  if (group_pwj_map_ != nullptr) {
+    pwj_map_element_count = group_pwj_map_->size();
+    OB_UNIS_ADD_LEN(pwj_map_element_count);
+    FOREACH(iter, *group_pwj_map_) {
+      const uint64_t table_id = iter->first;
+      const GroupPWJTabletIdInfo &group_pwj_tablet_id_info = iter->second;
+      OB_UNIS_ADD_LEN(table_id);
+      OB_UNIS_ADD_LEN(group_pwj_tablet_id_info);
+    }
+  } else {
+    OB_UNIS_ADD_LEN(pwj_map_element_count);
+  }
+  return len;
+}
+
+int ObExecContext::serialize_group_pwj_map(char *buf, const int64_t buf_len, int64_t &pos) const
+{
+  int ret = OB_SUCCESS;
+  // serialize group_pwj_map_
+  int64_t pwj_map_element_count = 0;
+  if (OB_SUCC(ret)) {
+    if (group_pwj_map_ != nullptr) {
+      pwj_map_element_count = group_pwj_map_->size();
+      OB_UNIS_ENCODE(pwj_map_element_count);
+      FOREACH_X(iter, *group_pwj_map_, OB_SUCC(ret)) {
+        const uint64_t table_id = iter->first;
+        const GroupPWJTabletIdInfo &group_pwj_tablet_id_info = iter->second;
+        OB_UNIS_ENCODE(table_id);
+        OB_UNIS_ENCODE(group_pwj_tablet_id_info);
+      }
+    } else {
+      OB_UNIS_ENCODE(pwj_map_element_count);
+    }
+  }
+  return ret;
+}
+
+int ObExecContext::deserialize_group_pwj_map(const char *buf, const int64_t data_len, int64_t &pos)
+{
+  int ret = OB_SUCCESS;
+  // deserialize size for group_pwj_map_
+  int64_t pwj_map_element_count = 0;
+  OB_UNIS_DECODE(pwj_map_element_count);
+  if (OB_SUCC(ret) && pwj_map_element_count > 0) {
+    GroupPWJTabletIdMap *group_pwj_map = nullptr;
+    uint64_t table_id;
+    GroupPWJTabletIdInfo group_pwj_tablet_id_info;
+    if (OB_FAIL(get_group_pwj_map(group_pwj_map))) {
+      LOG_WARN("failed to get_group_pwj_map");
+    } else {
+      for (int64_t i = 0; i < pwj_map_element_count && OB_SUCC(ret); ++i) {
+        OB_UNIS_DECODE(table_id);
+        OB_UNIS_DECODE(group_pwj_tablet_id_info);
+        if (OB_FAIL(ret)) {
+        } else if (OB_FAIL(group_pwj_map->set_refactored(table_id, group_pwj_tablet_id_info))) {
+          LOG_WARN("failed to set refactored", K(table_id), K(pwj_map_element_count),
+                   K(group_pwj_map->size()));
+        }
+      }
+    }
+    if (OB_SUCC(ret)) {
+      group_pwj_map_ = group_pwj_map;
+    }
+  }
+  return ret;
+}
+
+int ObExecContext::get_sqludt_meta_by_subschema_id(uint16_t subschema_id, ObSqlUDTMeta &udt_meta)
+{
+  int ret = OB_SUCCESS;
+  if (ob_is_reserved_subschema_id(subschema_id)) {
+    ret = ob_get_reserved_udt_meta(subschema_id, udt_meta);
+  } else if (OB_ISNULL(phy_plan_ctx_)) {
+    ret = OB_NOT_INIT;
+    SQL_ENG_LOG(WARN, "not phyical plan ctx for subschema mapping", K(ret), K(lbt()));
+  } else {
+    ret = phy_plan_ctx_->get_sqludt_meta_by_subschema_id(subschema_id, udt_meta);
+  }
+  return ret;
+}
+
+int ObExecContext::get_sqludt_meta_by_subschema_id(uint16_t subschema_id, ObSubSchemaValue &sub_meta)
+{
+  int ret = OB_SUCCESS;
+  if (ob_is_reserved_subschema_id(subschema_id)) {
+    ret = OB_ERR_UNEXPECTED;
+    SQL_ENG_LOG(WARN, "unexpected subschema id", K(ret), K(subschema_id), K(lbt()));
+  } else if (OB_ISNULL(phy_plan_ctx_)) {
+    ret = OB_NOT_INIT;
+    SQL_ENG_LOG(WARN, "not phyical plan ctx for subschema mapping", K(ret), K(lbt()));
+  } else {
+    ret = phy_plan_ctx_->get_sqludt_meta_by_subschema_id(subschema_id, sub_meta);
+  }
+  return ret;
+}
+
+int ObExecContext::get_enumset_meta_by_subschema_id(uint16_t subschema_id,
+                                                    const ObEnumSetMeta *&meta) const
+{
+  int ret = OB_SUCCESS;
+  if (ob_is_reserved_subschema_id(subschema_id)) {
+    ret = OB_ERR_UNEXPECTED;
+    SQL_ENG_LOG(WARN, "reserved subschema id not used in enumset meta", K(ret), K(lbt()));
+  } else if (OB_ISNULL(phy_plan_ctx_)) {
+    ret = OB_NOT_INIT;
+    SQL_ENG_LOG(WARN, "not phyical plan ctx for subschema mapping", K(ret), K(lbt()));
+  } else {
+    ret = phy_plan_ctx_->get_enumset_meta_by_subschema_id(subschema_id, meta);
+  }
+  return ret;
+}
+
+int ObExecContext::get_subschema_id_by_udt_id(uint64_t udt_type_id,
+                                              uint16_t &subschema_id,
+                                              share::schema::ObSchemaGetterGuard *schema_guard)
+{
+  int ret = OB_SUCCESS;
+  if (ob_is_reserved_udt_id(udt_type_id)) {
+    ret = ob_get_reserved_subschema(udt_type_id, subschema_id);
+  } else if (OB_ISNULL(phy_plan_ctx_)) {
+    ret = OB_NOT_INIT;
+    SQL_ENG_LOG(WARN, "not phyical plan ctx for reverse mapping", K(ret), K(lbt()));
+  } else {
+    schema_guard = OB_ISNULL(schema_guard) ? get_sql_ctx()->schema_guard_ : schema_guard;
+    ret = phy_plan_ctx_->get_subschema_id_by_udt_id(udt_type_id, subschema_id, schema_guard);
+  }
+  return ret;
+}
+
+int ObExecContext::get_subschema_id_by_collection_elem_type(ObNestedType coll_type,
+                                                            const ObDataType &elem_type,
+                                                            uint16_t &subschema_id)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(phy_plan_ctx_)) {
+    ret = OB_NOT_INIT;
+    SQL_ENG_LOG(WARN, "not phyical plan ctx for reverse mapping", K(ret), K(lbt()));
+  } else {
+    ret = phy_plan_ctx_->get_subschema_id_by_collection_elem_type(coll_type, elem_type, subschema_id);
+  }
+  return ret;
+}
+
+bool ObExecContext::support_enum_set_type_subschema(ObSQLSessionInfo &session)
+{
+  // Considering compatibility, enumset subschema is only supported in versions [4_2_5, 4_3_0) and
+  // versions 4_3_5 at least.
+  bool bret = true;
+  const uint64_t min_cluster_version = GET_MIN_CLUSTER_VERSION();
+  if ((min_cluster_version < MOCK_CLUSTER_VERSION_4_2_5_0) ||
+        (min_cluster_version >= CLUSTER_VERSION_4_3_0_0
+          && min_cluster_version < CLUSTER_VERSION_4_3_5_0)) {
+    bret = false;
+  } else {
+    // tenant configuration Control
+    if (!session.is_enable_enum_set_with_subschema()) {
+      bret = false;
+    }
+    // hint control
+    if (OB_NOT_NULL(stmt_factory_) && OB_NOT_NULL(stmt_factory_->get_query_ctx())) {
+      stmt_factory_->get_query_ctx()->get_global_hint().opt_params_.get_bool_opt_param(
+          ObOptParamHint::ENABLE_ENUM_SET_SUBSCHEMA, bret);
+    }
+  }
+  return bret;
+}
+
+int ObExecContext::get_subschema_id_by_type_info(const ObObjMeta &obj_meta,
+                                                 const ObIArray<common::ObString> &type_info,
+                                                 uint16_t &subschema_id)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(phy_plan_ctx_)) {
+    ret = OB_NOT_INIT;
+    SQL_ENG_LOG(WARN, "not phyical plan ctx for reverse mapping", K(ret), K(lbt()));
+  } else {
+    ret = phy_plan_ctx_->get_subschema_id_by_type_info(obj_meta, type_info, subschema_id);
+  }
+  return ret;
+}
+
+int ObExecContext::get_subschema_id_by_type_string(const ObString &type_string, uint16_t &subschema_id)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(phy_plan_ctx_)) {
+    ret = OB_NOT_INIT;
+    SQL_ENG_LOG(WARN, "not phyical plan ctx for reverse mapping", K(ret), K(lbt()));
+  } else {
+    ret = phy_plan_ctx_->get_subschema_id_by_type_string(type_string, subschema_id);
+  }
+  return ret;
+}
+
+int ObExecContext::get_lob_access_ctx(ObLobAccessCtx *&lob_access_ctx)
+{
+  int ret = OB_SUCCESS;
+  ObIAllocator &allocator = get_allocator();
+  if (OB_NOT_NULL(lob_access_ctx_)) {
+    lob_access_ctx = lob_access_ctx_;
+  } else if (OB_ISNULL(lob_access_ctx_ = OB_NEWx(ObLobAccessCtx, &allocator))) {
+    ret = OB_ALLOCATE_MEMORY_FAILED;
+    LOG_WARN("alloc", K(ret), "size", sizeof(ObLobAccessCtx));
+  } else {
+    lob_access_ctx = lob_access_ctx_;
+  }
+  return ret;
+}
+
 }  // namespace sql
 }  // namespace oceanbase

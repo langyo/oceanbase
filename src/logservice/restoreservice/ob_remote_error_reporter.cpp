@@ -12,12 +12,6 @@
 
 #define USING_LOG_PREFIX CLOG
 #include "ob_remote_error_reporter.h"
-#include "lib/ob_errno.h"
-#include "lib/utility/ob_macro_utils.h"
-#include "lib/ob_define.h"
-#include "storage/ls/ob_ls.h"                   // ObLS
-#include "storage/restore/ob_ls_restore_handler.h"
-#include "storage/tx_storage/ob_ls_map.h"       // ObLSIterator
 #include "storage/tx_storage/ob_ls_service.h"   // ObLSService
 
 namespace oceanbase
@@ -124,7 +118,7 @@ int ObRemoteErrorReporter::do_report_(ObLS &ls)
   } else if (! error_exist) {
   } else if (OB_FAIL(ls.get_ls_meta().get_restore_status(restore_status))) {
     LOG_WARN("get restore status failed", K(ret), K(ls));
-  } else if (restore_status.is_in_restore()) {
+  } else if (!restore_status.is_none()) {
     ret = report_restore_error_(ls, trace_id, ret_code);
   } else {
     ret = report_standby_error_(ls, trace_id, ret_code);

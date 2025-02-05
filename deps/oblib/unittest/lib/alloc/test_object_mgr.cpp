@@ -11,12 +11,8 @@
  */
 
 #define private public
-#include "lib/resource/achunk_mgr.h"
-#include "lib/resource/ob_resource_mgr.h"
-#include "lib/alloc/object_mgr.h"
 #undef private
 #include "lib/allocator/ob_malloc.h"
-#include "lib/utility/ob_test_util.h"
 #include "lib/coro/testing.h"
 #include <gtest/gtest.h>
 
@@ -238,10 +234,10 @@ TEST_F(TestObjectMgr, TestSubObjectMgr)
   abort_unless(ptr != MAP_FAILED);
   int64_t tenant_id = OB_SERVER_TENANT_ID;
   int64_t ctx_id = ObCtxIds::DEFAULT_CTX_ID;
-  SubObjectMgr som(false, tenant_id, ctx_id, INTACT_NORMAL_AOBJECT_SIZE, false, NULL);
+  auto ta = ObMallocAllocator::get_instance()->get_tenant_ctx_allocator(
+    tenant_id, ctx_id);
+  ObjectMgr som(*ta.ref_allocator(), false, INTACT_NORMAL_AOBJECT_SIZE, 1, false, NULL);
   ObMemAttr attr;
-  som.set_tenant_ctx_allocator(*ObMallocAllocator::get_instance()->get_tenant_ctx_allocator(
-                                 tenant_id, ctx_id).ref_allocator());
   ObTenantResourceMgrHandle resource_handle;
   ObResourceMgr::get_instance().get_tenant_resource_mgr(
 		  tenant_id, resource_handle);
@@ -262,7 +258,7 @@ TEST_F(TestObjectMgr, TestSubObjectMgr)
       AObject *obj = it->second;
       ABlock *block = obj->block();
       abort_unless(block->is_valid());
-      ObjectSet *set = block->obj_set_;
+      ObjectSet *set = (ObjectSet *)block->obj_set_;
       set->free_object(obj);
       allocs.erase(it->first);
     }

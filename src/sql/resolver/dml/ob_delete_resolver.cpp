@@ -12,8 +12,6 @@
 
 #define USING_LOG_PREFIX SQL_RESV
 #include "sql/resolver/dml/ob_delete_resolver.h"
-#include "sql/session/ob_sql_session_info.h"
-#include "sql/resolver/ob_resolver_utils.h"
 #include "sql/optimizer/ob_optimizer_util.h"
 
 /**
@@ -60,7 +58,11 @@ int ObDeleteResolver::resolve(const ParseNode &parse_tree)
   // create the delete stmt
   ObDeleteStmt *delete_stmt = NULL;
   bool is_multi_table_delete = false;
-  if (NULL == (delete_stmt = create_stmt<ObDeleteStmt>())) {
+  bool disable_limit_offset = false;
+  if (OB_ISNULL(session_info_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected null", K(ret));
+  } else if (OB_ISNULL(delete_stmt = create_stmt<ObDeleteStmt>())) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
     LOG_ERROR("create delete stmt failed", K(ret));
   } else if (OB_UNLIKELY(parse_tree.type_ != T_DELETE) || OB_UNLIKELY(parse_tree.num_child_ < 2)) {
@@ -69,8 +71,17 @@ int ObDeleteResolver::resolve(const ParseNode &parse_tree)
   } else if (OB_ISNULL(parse_tree.children_[TABLE])) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("table_node is null", K(ret));
+  } else if (OB_FAIL(session_info_->check_feature_enable(ObCompatFeatureType::UPD_LIMIT_OFFSET,
+                                                         disable_limit_offset))) {
+    LOG_WARN("failed to check feature enable", K(ret));
   } else {
     stmt_ = delete_stmt;
+    // Only support the syntax of delete ignore, and there is no semantic support.
+//   delete_stmt->set_ignore(false);
+//    if (NULL != parse_tree.children_[IGNORE]) {
+//      delete_stmt->set_ignore(true);
+//      session_info_->set_ignore_stmt(true);
+//    }
     if (OB_FAIL(resolve_outline_data_hints())) {
       LOG_WARN("resolve outline data hints failed", K(ret));
     } else if (is_mysql_mode() && OB_FAIL(resolve_with_clause(parse_tree.children_[WITH_MYSQL]))) {
@@ -102,14 +113,14 @@ int ObDeleteResolver::resolve(const ParseNode &parse_tree)
     }
 
     if (OB_SUCC(ret)) {
-      if (OB_FAIL(resolve_where_clause(parse_tree.children_[WHERE]))) {
+      if (OB_FAIL(resolve_hints(parse_tree.children_[HINT]))) {
+        LOG_WARN("resolve hints failed", K(ret));
+      } else if (OB_FAIL(resolve_where_clause(parse_tree.children_[WHERE]))) {
         LOG_WARN("resolve delete where clause failed", K(ret));
       } else if (OB_FAIL(resolve_order_clause(parse_tree.children_[ORDER_BY]))) {
         LOG_WARN("resolve delete order clause failed", K(ret));
-      } else if (OB_FAIL(resolve_limit_clause(parse_tree.children_[LIMIT]))) {
+      } else if (OB_FAIL(resolve_limit_clause(parse_tree.children_[LIMIT], disable_limit_offset))) {
         LOG_WARN("resolve delete limit clause failed", K(ret));
-      } else if (OB_FAIL(resolve_hints(parse_tree.children_[HINT]))) {
-        LOG_WARN("resolve hints failed", K(ret));
       } else if (OB_FAIL(resolve_returning(parse_tree.children_[RETURNING]))) {
         LOG_WARN("resolve returning failed", K(ret));
       } else if (is_oracle_mode() && NULL != parse_tree.children_[ERRORLOGGING] &&
@@ -263,10 +274,7 @@ int ObDeleteResolver::resolve_table_list(const ParseNode &table_list, bool &is_m
       //single table delete, delete list is same with from list
       CK(delete_stmt->get_table_size() == 1);
       OZ(delete_tables_.push_back(delete_stmt->get_table_item(0)));
-      if (OB_SUCC(ret) && delete_stmt->get_table_item(0)->is_view_table_ && is_oracle_mode()) {
-        OZ(has_need_fired_trigger_on_view(delete_stmt->get_table_item(0), has_tg));
-      }
-      OX(delete_stmt->set_has_instead_of_trigger(has_tg));
+      OZ (check_need_fired_trigger(table_item));
     } else {
       //multi table delete
       is_multi_table_delete = true;
@@ -289,6 +297,8 @@ int ObDeleteResolver::resolve_table_list(const ParseNode &table_list, bool &is_m
           ret = OB_ERR_NONUNIQ_TABLE;
           LOG_USER_ERROR(OB_ERR_NONUNIQ_TABLE, table_item->table_name_.length(),
                       table_item->table_name_.ptr());
+        } else if (OB_FAIL(check_need_fired_trigger(table_item))) {
+          LOG_WARN("failed to check need fired trigger", K(ret));
         } else if (OB_FAIL(delete_tables_.push_back(table_item))) {
           LOG_WARN("failed to push back table item", K(ret));
         }
@@ -384,8 +394,8 @@ int ObDeleteResolver::generate_delete_table_info(const TableItem &table_item)
   const ObTableSchema *table_schema = NULL;
   ObDeleteStmt *delete_stmt = get_delete_stmt();
   ObDeleteTableInfo *table_info = NULL;
-  uint64_t index_tid[OB_MAX_INDEX_PER_TABLE];
-  int64_t gindex_cnt = OB_MAX_INDEX_PER_TABLE;
+  uint64_t index_tid[OB_MAX_AUX_TABLE_PER_MAIN_TABLE];
+  int64_t gindex_cnt = OB_MAX_AUX_TABLE_PER_MAIN_TABLE;
   int64_t binlog_row_image = ObBinlogRowImage::FULL;
   if (OB_ISNULL(schema_checker_) || OB_ISNULL(params_.session_info_) ||
       OB_ISNULL(allocator_) || OB_ISNULL(delete_stmt)) {
@@ -448,6 +458,7 @@ int ObDeleteResolver::generate_delete_table_info(const TableItem &table_item)
       }
     }
     if (OB_SUCC(ret)) {
+      TableItem *rowkey_doc = NULL;
       if (OB_FAIL(delete_stmt->get_delete_table_info().push_back(table_info))) {
         LOG_WARN("failed to push back table info", K(ret));
       } else if (gindex_cnt > 0) {

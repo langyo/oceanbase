@@ -11,8 +11,7 @@
  */
 
 #define USING_LOG_PREFIX SQL_RESV
-#include "common/ob_smart_call.h"
-#include "sql/resolver/expr/ob_raw_expr_copier.h"
+#include "ob_raw_expr_copier.h"
 #include "sql/resolver/expr/ob_raw_expr_util.h"
 using namespace oceanbase;
 using namespace oceanbase::sql;
@@ -61,6 +60,14 @@ int ObPLExprCopier::check_need_copy(const ObRawExpr *old_expr,
   return OB_SUCCESS;
 }
 
+int ObPLExprCopier::find_in_copy_context(const ObRawExpr *old_expr,
+                                         ObRawExpr *&new_expr)
+{
+  UNUSED(old_expr);
+  new_expr = NULL;
+  return OB_SUCCESS;
+}
+
 int ObPLExprCopier::do_copy_expr(const ObRawExpr *old_expr,
                                  ObRawExpr *&new_expr)
 {
@@ -88,6 +95,23 @@ int ObRawExprCopier::check_need_copy(const ObRawExpr *old_expr,
                                      ObRawExpr *&new_expr)
 {
   int ret = OB_SUCCESS;
+  new_expr = NULL;
+  if (OB_FAIL(find_in_copy_context(old_expr, new_expr))) {
+    LOG_WARN("faild to find in copy context", K(ret));
+  } else if (OB_ISNULL(new_expr) &&
+             old_expr->is_exec_param_expr() &&
+             !static_cast<const ObExecParamRawExpr *>(old_expr)->is_onetime()) {
+    // TODO link.zt skip the copy of exec param expr
+    // let the query ref raw expr to copy the expr
+    // to be improved
+    new_expr = const_cast<ObRawExpr *>(old_expr);
+  }
+  return ret;
+}
+
+int ObRawExprCopier::find_in_copy_context(const ObRawExpr *old_expr, ObRawExpr *&new_expr)
+{
+  int ret = OB_SUCCESS;
   int tmp = OB_SUCCESS;
   uint64_t key = reinterpret_cast<uint64_t>(old_expr);
   uint64_t val = 0;
@@ -105,14 +129,6 @@ int ObRawExprCopier::check_need_copy(const ObRawExpr *old_expr,
   } else if (OB_UNLIKELY(OB_HASH_NOT_EXIST != tmp)) {
     ret = tmp;
     LOG_WARN("get expr from hash map failed", K(ret));
-  }
-  if (OB_SUCC(ret) && OB_ISNULL(new_expr) &&
-      old_expr->is_exec_param_expr() &&
-      !static_cast<const ObExecParamRawExpr *>(old_expr)->is_onetime()) {
-    // TODO link.zt skip the copy of exec param expr
-    // let the query ref raw expr to copy the expr
-    // to be improved
-    new_expr = const_cast<ObRawExpr *>(old_expr);
   }
   return ret;
 }
@@ -185,13 +201,23 @@ int ObRawExprCopier::add_expr(const ObRawExpr *from,
       LOG_WARN("failed to create expr set", K(ret));
     }
   }
-  if (OB_SUCC(ret)) {
-    if (OB_FAIL(copied_exprs_.set_refactored(reinterpret_cast<uint64_t>(from),
-                                             reinterpret_cast<uint64_t>(to)))) {
+  if (OB_FAIL(ret)) {
+  } else if (OB_SUCCESS != (ret = copied_exprs_.set_refactored(reinterpret_cast<uint64_t>(from),
+                                                               reinterpret_cast<uint64_t>(to)))) {
+    if (OB_UNLIKELY(ret != OB_HASH_EXIST)) {
       LOG_WARN("faield to add copied expr into map", K(ret));
-    } else if (OB_FAIL(new_exprs_.set_refactored(reinterpret_cast<uint64_t>(to)))) {
-      LOG_WARN("failed to add copied expr into set", K(ret));
+    } else {
+      ret = OB_SUCCESS;
+      uint64_t val = 0;
+      if (OB_FAIL(copied_exprs_.get_refactored(reinterpret_cast<uint64_t>(from), val))) {
+        LOG_WARN("get expr from hash map failed", K(ret));
+      } else if (OB_UNLIKELY(val != reinterpret_cast<uint64_t>(to))) {
+        ret = OB_HASH_EXIST;
+        LOG_WARN("from expr exists", K(ret), KPC(from), KPC(to), K(val));
+      }
     }
+  } else if (OB_FAIL(new_exprs_.set_refactored(reinterpret_cast<uint64_t>(to)))) {
+    LOG_WARN("failed to add copied expr into set", K(ret));
   }
   return ret;
 }

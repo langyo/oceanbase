@@ -12,19 +12,25 @@
 
 #define USING_LOG_PREFIX SQL_OPT
 
-#include "sql/optimizer/ob_opt_est_cost.h"
-#include "sql/session/ob_sql_session_info.h"
-#include "sql/ob_sql_utils.h"
-#include "sql/optimizer/ob_optimizer_context.h"
+#include "ob_opt_est_cost.h"
 #include "sql/optimizer/ob_join_order.h"
-#include "sql/optimizer/ob_optimizer.h"
-#include "storage/access/ob_table_scan_range.h"
-#include "storage/tx_storage/ob_access_service.h"
-#include "sql/optimizer/ob_opt_selectivity.h"
 #include "ob_opt_est_parameter_normal.h"
 #include "ob_opt_est_parameter_vector.h"
 #include "share/stat/ob_opt_stat_manager.h"
 #include "ob_opt_est_cost_model_vector.h"
+#include "ob_opt_est_parameter_normal.h"
+#include "ob_opt_est_parameter_vector.h"
+
+#define GET_COST_MODEL()                                                \
+      ObOptEstCostModel normal_model(cost_params_normal,                \
+                                     opt_ctx.get_system_stat());        \
+      ObOptEstVectorCostModel vector_model(cost_params_vector,          \
+                                           opt_ctx.get_system_stat());  \
+      ObOptEstCostModel *model = &normal_model;                 \
+      if (VECTOR_MODEL == opt_ctx.get_cost_model_type()) {      \
+        model = &vector_model;                                  \
+      }                                                         \
+
 
 using namespace oceanbase::common;
 using namespace oceanbase::share;
@@ -35,48 +41,42 @@ using namespace oceanbase::jit::expr;
 // using share::schema::ObSchemaGetterGuard;
 
 const int64_t ObOptEstCost::MAX_STORAGE_RANGE_ESTIMATION_NUM = 10;
-ObOptEstCostModel normal_model_(comparison_params_normal,
-                                hash_params_normal,
-                                project_params_normal,
-                                cost_params_normal);
-
-ObOptEstVectorCostModel vector_model_(comparison_params_vector,
-                                      hash_params_vector,
-                                      project_params_vector,
-                                      cost_params_vector);
 
 int ObOptEstCost::cost_nestloop(const ObCostNLJoinInfo &est_cost_info,
                                 double &cost,
-                                ObIArray<ObExprSelPair> &all_predicate_sel,
-                                MODEL_TYPE model_type)
+                                const ObOptimizerContext &opt_ctx)
 {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(get_model(model_type).cost_nestloop(est_cost_info,
-                                                  cost,
-                                                  all_predicate_sel))) {
-    LOG_WARN("failed to est cost for nestloop join", K(model_type), K(ret));
+  GET_COST_MODEL();
+  if (OB_FAIL(model->cost_nestloop(est_cost_info,
+                                   cost))) {
+    LOG_WARN("failed to est cost for nestloop join", K(ret));
   }
   return ret;
 }
 
 int ObOptEstCost::cost_mergejoin(const ObCostMergeJoinInfo &est_cost_info,
                                  double &cost,
-                                 MODEL_TYPE model_type)
+                                 const ObOptimizerContext &opt_ctx)
 {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(get_model(model_type).cost_mergejoin(est_cost_info, cost))) {
-    LOG_WARN("failed to est cost for merge join", K(model_type), K(ret));
+  GET_COST_MODEL();
+  if (OB_FAIL(model->cost_mergejoin(est_cost_info,
+                                   cost))) {
+    LOG_WARN("failed to est cost for merge join", K(ret));
   }
   return ret;
 }
 
 int ObOptEstCost::cost_hashjoin(const ObCostHashJoinInfo &est_cost_info,
                                 double &cost,
-                                MODEL_TYPE model_type)
+                                const ObOptimizerContext &opt_ctx)
 {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(get_model(model_type).cost_hashjoin(est_cost_info, cost))) {
-    LOG_WARN("failed to est cost for hash join", K(model_type), K(ret));
+  GET_COST_MODEL();
+  if (OB_FAIL(model->cost_hashjoin(est_cost_info,
+                                   cost))) {
+    LOG_WARN("failed to est cost for hash join", K(ret));
   }
   return ret;
 }
@@ -96,69 +96,78 @@ int ObOptEstCost::cost_sort_and_exchange(OptTableMetas *table_metas,
                                          const bool need_sort,
                                          const int64_t prefix_pos,
                                          double &cost,
-                                         MODEL_TYPE model_type)
+                                         const ObOptimizerContext &opt_ctx)
 {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(get_model(model_type).cost_sort_and_exchange(table_metas,
-                                                          sel_ctx,
-                                                          dist_method,
-                                                          is_distributed,
-                                                          is_local_order,
-                                                          input_card,
-                                                          input_width,
-                                                          input_cost,
-                                                          out_parallel,
-                                                          in_server_cnt,
-                                                          in_parallel,
-                                                          expected_ordering,
-                                                          need_sort,
-                                                          prefix_pos,
-                                                          cost))) {
-    LOG_WARN("failed to est cost for sort and exchange", K(model_type), K(ret));
+  GET_COST_MODEL();
+  if (OB_FAIL(model->cost_sort_and_exchange(table_metas,
+                                          sel_ctx,
+                                          dist_method,
+                                          is_distributed,
+                                          is_local_order,
+                                          input_card,
+                                          input_width,
+                                          input_cost,
+                                          out_parallel,
+                                          in_server_cnt,
+                                          in_parallel,
+                                          expected_ordering,
+                                          need_sort,
+                                          prefix_pos,
+                                          cost))) {
+    LOG_WARN("failed to est cost for sort and exchange", K(ret));
   }
   return ret;
 }
 
 int ObOptEstCost::cost_sort(const ObSortCostInfo &cost_info,
                             double &cost,
-                            MODEL_TYPE model_type)
+                            const ObOptimizerContext &opt_ctx)
 {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(get_model(model_type).cost_sort(cost_info, cost))) {
-    LOG_WARN("failed to est cost for sort", K(model_type), K(ret));
+  GET_COST_MODEL();
+  if (OB_FAIL(model->cost_sort(cost_info,
+                              cost))) {
+    LOG_WARN("failed to est cost for sort", K(ret));
   }
   return ret;
 }
 
 int ObOptEstCost::cost_exchange(const ObExchCostInfo &cost_info,
                                 double &cost,
-                                MODEL_TYPE model_type)
+                                const ObOptimizerContext &opt_ctx)
 {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(get_model(model_type).cost_exchange(cost_info, cost))) {
-    LOG_WARN("failed to est cost for exchange", K(model_type), K(ret));
+  GET_COST_MODEL();
+  if (OB_FAIL(model->cost_exchange(cost_info,
+                                  cost))) {
+    LOG_WARN("failed to est cost for exchange", K(ret));
   }
   return ret;
 }
 
 int ObOptEstCost::cost_exchange_in(const ObExchInCostInfo &cost_info,
                                    double &cost,
-                                   MODEL_TYPE model_type)
+                                   const ObOptimizerContext &opt_ctx)
 {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(get_model(model_type).cost_exchange_in(cost_info, cost))) {
-    LOG_WARN("failed to est cost for exchange in", K(model_type), K(ret));
+  GET_COST_MODEL();
+  if (OB_FAIL(model->cost_exchange_in(cost_info,
+                                     cost))) {
+    LOG_WARN("failed to est cost for exchange in", K(ret));
   }
   return ret;
 }
 
 int ObOptEstCost::cost_exchange_out(const ObExchOutCostInfo &cost_info,
                                     double &cost,
-                                    MODEL_TYPE model_type)
+                                    const ObOptimizerContext &opt_ctx)
 {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(get_model(model_type).cost_exchange_out(cost_info, cost))) {
-    LOG_WARN("failed to est cost for exchange out", K(model_type), K(ret));
+  GET_COST_MODEL();
+  if (OB_FAIL(model->cost_exchange_out(cost_info,
+                                      cost))) {
+    LOG_WARN("failed to est cost for exchange out", K(ret));
   }
   return ret;
 }
@@ -168,13 +177,14 @@ double ObOptEstCost::cost_merge_group(double rows,
                                       double row_width,
                                       const ObIArray<ObRawExpr *> &group_columns,
                                       int64_t agg_col_count,
-                                      MODEL_TYPE model_type)
+                                      const ObOptimizerContext &opt_ctx)
 {
-  return get_model(model_type).cost_merge_group(rows,
-                                                res_rows,
-                                                row_width,
-                                                group_columns,
-                                                agg_col_count);
+  GET_COST_MODEL();
+  return model->cost_merge_group(rows,
+                                  res_rows,
+                                  row_width,
+                                  group_columns,
+                                  agg_col_count);
 }
 
 double ObOptEstCost::cost_hash_group(double rows,
@@ -182,140 +192,161 @@ double ObOptEstCost::cost_hash_group(double rows,
                                      double row_width,
                                      const ObIArray<ObRawExpr *> &group_columns,
                                      int64_t agg_col_count,
-                                     MODEL_TYPE model_type)
+                                     const ObOptimizerContext &opt_ctx)
 {
-  return get_model(model_type).cost_hash_group(rows,
-                                              res_rows,
-                                              row_width,
-                                              group_columns,
-                                              agg_col_count);
+  GET_COST_MODEL();
+  return model->cost_hash_group(rows,
+                                res_rows,
+                                row_width,
+                                group_columns,
+                                agg_col_count);
 }
 
 double ObOptEstCost::cost_scalar_group(double rows,
                                        int64_t agg_col_count,
-                                       MODEL_TYPE model_type)
+                                       const ObOptimizerContext &opt_ctx)
 {
-  return get_model(model_type).cost_scalar_group(rows, agg_col_count);
+  GET_COST_MODEL();
+  return model->cost_scalar_group(rows,
+                                  agg_col_count);
 }
 
 double ObOptEstCost::cost_merge_distinct(double rows,
                                          double res_rows,
                                          double row_width,
                                          const ObIArray<ObRawExpr *> &distinct_columns,
-                                         MODEL_TYPE model_type)
+                                         const ObOptimizerContext &opt_ctx)
 {
-  return get_model(model_type).cost_merge_distinct(rows,
-                                                  res_rows,
-                                                  row_width,
-                                                  distinct_columns);
+  GET_COST_MODEL();
+  return model->cost_merge_distinct(rows,
+                                    res_rows,
+                                    row_width,
+                                    distinct_columns);
 }
 
 double ObOptEstCost::cost_hash_distinct(double rows,
                                         double res_rows,
                                         double row_width,
                                         const ObIArray<ObRawExpr *> &distinct_columns,
-                                        MODEL_TYPE model_type)
+                                        const ObOptimizerContext &opt_ctx)
 {
-  return get_model(model_type).cost_hash_distinct(rows,
-                                                  res_rows,
-                                                  row_width,
-                                                  distinct_columns);
+  GET_COST_MODEL();
+  return model->cost_hash_distinct(rows,
+                                  res_rows,
+                                  row_width,
+                                  distinct_columns);
 }
 
 double ObOptEstCost::cost_sequence(double rows,
                                    double uniq_sequence_cnt,
-                                   MODEL_TYPE model_type)
+                                   const ObOptimizerContext &opt_ctx)
 {
-  return get_model(model_type).cost_sequence(rows, uniq_sequence_cnt);
+  GET_COST_MODEL();
+  return model->cost_sequence(rows,
+                              uniq_sequence_cnt);
 }
 
-double ObOptEstCost::cost_get_rows(double rows, MODEL_TYPE model_type)
+double ObOptEstCost::cost_get_rows(double rows, const ObOptimizerContext &opt_ctx)
 {
-  return get_model(model_type).cost_get_rows(rows);
+  GET_COST_MODEL();
+  return model->cost_get_rows(rows);
 }
 
-double ObOptEstCost::cost_read_materialized(double rows, MODEL_TYPE model_type)
+double ObOptEstCost::cost_read_materialized(double rows, const ObOptimizerContext &opt_ctx)
 {
-  return get_model(model_type).cost_read_materialized(rows);
+  GET_COST_MODEL();
+  return model->cost_read_materialized(rows);
 }
 
 double ObOptEstCost::cost_material(const double rows,
                                    const double average_row_size,
-                                   MODEL_TYPE model_type)
+                                   const ObOptimizerContext &opt_ctx)
 {
-  return get_model(model_type).cost_material(rows, average_row_size);
+  GET_COST_MODEL();
+  return model->cost_material(rows,
+                              average_row_size);
 }
 
 double ObOptEstCost::cost_filter_rows(double rows,
                                       ObIArray<ObRawExpr*> &filters,
-                                      MODEL_TYPE model_type)
+                                      const ObOptimizerContext &opt_ctx)
 {
-  return get_model(model_type).cost_filter_rows(rows, filters);
+  GET_COST_MODEL();
+  return model->cost_filter_rows(rows,
+                                 filters);
 }
 
 int ObOptEstCost::cost_subplan_filter(const ObSubplanFilterCostInfo &info,
                                       double &cost,
-                                      MODEL_TYPE model_type)
+                                      const ObOptimizerContext &opt_ctx)
 {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(get_model(model_type).cost_subplan_filter(info, cost))) {
-    LOG_WARN("failed to est cost for subplan filter", K(model_type), K(ret));
+  GET_COST_MODEL();
+  if (OB_FAIL(model->cost_subplan_filter(info, cost))) {
+    LOG_WARN("failed to est cost for subplan filter", K(ret));
   }
   return ret;
 }
 
 int ObOptEstCost::cost_union_all(const ObCostMergeSetInfo &info,
                                  double &cost,
-                                 MODEL_TYPE model_type)
+                                 const ObOptimizerContext &opt_ctx)
 {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(get_model(model_type).cost_union_all(info, cost))) {
-    LOG_WARN("failed to est cost for union all", K(model_type), K(ret));
+  GET_COST_MODEL();
+  if (OB_FAIL(model->cost_union_all(info,
+                                   cost))) {
+    LOG_WARN("failed to est cost for union all", K(ret));
   }
   return ret;
 }
 
 int ObOptEstCost::cost_merge_set(const ObCostMergeSetInfo &info,
                                  double &cost,
-                                 MODEL_TYPE model_type)
+                                 const ObOptimizerContext &opt_ctx)
 {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(get_model(model_type).cost_merge_set(info, cost))) {
-    LOG_WARN("failed to est cost for merge set", K(model_type), K(ret));
+  GET_COST_MODEL();
+  if (OB_FAIL(model->cost_merge_set(info,
+                                   cost))) {
+    LOG_WARN("failed to est cost for merge set", K(ret));
   }
   return ret;
 }
 
 int ObOptEstCost::cost_hash_set(const ObCostHashSetInfo &info,
                                 double &cost,
-                                MODEL_TYPE model_type)
+                                const ObOptimizerContext &opt_ctx)
 {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(get_model(model_type).cost_hash_set(info, cost))) {
-    LOG_WARN("failed to est cost for hash set", K(model_type), K(ret));
+  GET_COST_MODEL();
+  if (OB_FAIL(model->cost_hash_set(info,
+                                  cost))) {
+    LOG_WARN("failed to est cost for hash set", K(ret));
   }
   return ret;
 }
 
 double ObOptEstCost::cost_quals(double rows,
                                 const ObIArray<ObRawExpr *> &quals,
-                                MODEL_TYPE model_type,
+                                const ObOptimizerContext &opt_ctx,
                                 bool need_scale)
 {
-  return get_model(model_type).cost_quals(rows, quals, need_scale);
+  GET_COST_MODEL();
+  return model->cost_quals(rows, quals, need_scale);
 }
 
 int ObOptEstCost::cost_table(const ObCostTableScanInfo &est_cost_info,
                              int64_t parallel,
                              double &cost,
-                             MODEL_TYPE model_type)
+                             const ObOptimizerContext &opt_ctx)
 {
   int ret = OB_SUCCESS;
-  double index_back_cost = 0;
-  if (OB_FAIL(get_model(model_type).cost_table(est_cost_info,
-                                               parallel,
-                                               cost))) {
-    LOG_WARN("failed to est cost for table scan", K(model_type), K(ret));
+  GET_COST_MODEL();
+  if (OB_FAIL(model->cost_table(est_cost_info,
+                                parallel,
+                                cost))) {
+    LOG_WARN("failed to est cost for table scan", K(ret));
   }
   return ret;
 }
@@ -325,22 +356,24 @@ int ObOptEstCost::cost_table_for_parallel(const ObCostTableScanInfo &est_cost_in
                                           const double part_cnt_per_dop,
                                           double &px_cost,
                                           double &cost,
-                                          MODEL_TYPE model_type)
+                                          const ObOptimizerContext &opt_ctx)
 {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(get_model(model_type).cost_table_for_parallel(est_cost_info,
+  GET_COST_MODEL();
+  if (OB_FAIL(model->cost_table_for_parallel(est_cost_info,
                                                             parallel,
                                                             part_cnt_per_dop,
                                                             px_cost,
                                                             cost))) {
-    LOG_WARN("failed to est cost for table scan parallel", K(model_type), K(ret));
+    LOG_WARN("failed to est cost for table scan parallel", K(ret));
   }
   return ret;
 }
 
-double ObOptEstCost::cost_late_materialization_table_get(int64_t column_cnt, MODEL_TYPE model_type)
+double ObOptEstCost::cost_late_materialization_table_get(int64_t column_cnt, const ObOptimizerContext &opt_ctx)
 {
-  return get_model(model_type).cost_late_materialization_table_get(column_cnt);
+  GET_COST_MODEL();
+  return model->cost_late_materialization_table_get(column_cnt);
 }
 
 void ObOptEstCost::cost_late_materialization_table_join(double left_card,
@@ -349,76 +382,82 @@ void ObOptEstCost::cost_late_materialization_table_join(double left_card,
                                                         double right_cost,
                                                         double &op_cost,
                                                         double &cost,
-                                                        MODEL_TYPE model_type)
+                                                        const ObOptimizerContext &opt_ctx)
 {
-  get_model(model_type).cost_late_materialization_table_join(left_card,
-                                                            left_cost,
-                                                            right_card,
-                                                            right_cost,
-                                                            op_cost,
-                                                            cost);
+  GET_COST_MODEL();
+  model->cost_late_materialization_table_join(left_card,
+                                              left_cost,
+                                              right_card,
+                                              right_cost,
+                                              op_cost,
+                                              cost);
 }
 
 void ObOptEstCost::cost_late_materialization(double left_card,
                                              double left_cost,
                                              int64_t column_count,
                                              double &cost,
-                                             MODEL_TYPE model_type)
+                                             const ObOptimizerContext &opt_ctx)
 {
-  get_model(model_type).cost_late_materialization(left_card,
-                                                  left_cost,
-                                                  column_count,
-                                                  cost);
+  GET_COST_MODEL();
+  model->cost_late_materialization(left_card,
+                                  left_cost,
+                                  column_count,
+                                  cost);
 }
 
 int ObOptEstCost::cost_window_function(double rows,
                                        double width,
                                        double win_func_cnt,
                                        double &cost,
-                                       MODEL_TYPE model_type)
+                                       const ObOptimizerContext &opt_ctx)
 {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(get_model(model_type).cost_window_function(rows,
-                                                        width,
-                                                        win_func_cnt,
-                                                        cost))) {
-    LOG_WARN("failed to est cost for window function", K(model_type), K(ret));
+  GET_COST_MODEL();
+  if (OB_FAIL(model->cost_window_function(rows,
+                                        width,
+                                        win_func_cnt,
+                                        cost))) {
+    LOG_WARN("failed to est cost for window function", K(ret));
   }
   return ret;
 }
 
 int ObOptEstCost::cost_insert(ObDelUpCostInfo& cost_info,
                               double &cost,
-                              MODEL_TYPE model_type)
+                              const ObOptimizerContext &opt_ctx)
 {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(get_model(model_type).cost_insert(cost_info,
-                                                cost))) {
-    LOG_WARN("failed to est cost for insert", K(model_type), K(ret));
+  GET_COST_MODEL();
+  if (OB_FAIL(model->cost_insert(cost_info,
+                                cost))) {
+    LOG_WARN("failed to est cost for insert", K(ret));
   }
   return ret;
 }
 
 int ObOptEstCost::cost_update(ObDelUpCostInfo& cost_info,
                               double &cost,
-                              MODEL_TYPE model_type)
+                              const ObOptimizerContext &opt_ctx)
 {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(get_model(model_type).cost_update(cost_info,
-                                                cost))) {
-    LOG_WARN("failed to est cost for update", K(model_type), K(ret));
+  GET_COST_MODEL();
+  if (OB_FAIL(model->cost_update(cost_info,
+                                cost))) {
+    LOG_WARN("failed to est cost for update", K(ret));
   }
   return ret;
 }
 
 int ObOptEstCost::cost_delete(ObDelUpCostInfo& cost_info,
                               double &cost,
-                              MODEL_TYPE model_type)
+                              const ObOptimizerContext &opt_ctx)
 {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(get_model(model_type).cost_delete(cost_info,
-                                                cost))) {
-    LOG_WARN("failed to est cost for delete", K(model_type), K(ret));
+  GET_COST_MODEL();
+  if (OB_FAIL(model->cost_delete(cost_info,
+                                cost))) {
+    LOG_WARN("failed to est cost for delete", K(ret));
   }
   return ret;
 }
@@ -429,16 +468,17 @@ int ObOptEstCost::calc_range_cost(const ObTableMetaInfo& table_meta_info,
                                   int64_t range_count,
                                   double range_sel,
                                   double &cost,
-                                  MODEL_TYPE model_type)
+                                  const ObOptimizerContext &opt_ctx)
 {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(get_model(model_type).calc_range_cost(table_meta_info,
-                                                    filters,
-                                                    index_column_count,
-                                                    range_count,
-                                                    range_sel,
-                                                    cost))) {
-    LOG_WARN("failed to est cost for range scan", K(model_type), K(ret));
+  GET_COST_MODEL();
+  if (OB_FAIL(model->calc_range_cost(table_meta_info,
+                                    filters,
+                                    index_column_count,
+                                    range_count,
+                                    range_sel,
+                                    cost))) {
+    LOG_WARN("failed to est cost for range scan", K(ret));
   }
   return ret;
 }
@@ -461,6 +501,8 @@ int ObOptEstCost::estimate_width_for_table(const OptTableMetas &table_metas,
     for (int i = 0; OB_SUCC(ret) && i < columns.count(); ++i) {
       const ColumnItem &column_item = columns.at(i);
       ObColumnRefRawExpr *column_expr = column_item.expr_;
+      const OptColumnMeta *column_meta = NULL == table_meta ? NULL :
+                                         table_meta->get_column_meta(column_expr->get_column_id());
       if (OB_ISNULL(column_expr)) {
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("get unexpected null", K(ret));
@@ -469,23 +511,11 @@ int ObOptEstCost::estimate_width_for_table(const OptTableMetas &table_metas,
                  !column_expr->is_explicited_reference() ||
                  column_expr->is_hidden_column()) {
         // do nothing
+      } else if (OB_NOT_NULL(column_meta) && table_meta->use_opt_stat() && column_meta->get_avg_len() != 0) {
+        width += column_meta->get_avg_len();
       } else {
-        ObGlobalColumnStat stat;
-        if (OB_NOT_NULL(table_meta) && table_meta->use_opt_stat() &&
-            OB_FAIL(ctx.get_opt_stat_manager()->get_column_stat(ctx.get_session_info()->get_effective_tenant_id(),
-                                                                table_meta->get_ref_table_id(),
-                                                                table_meta->get_all_used_parts(),
-                                                                column_expr->get_column_id(),
-                                                                table_meta->get_all_used_global_parts(),
-                                                                table_meta->get_rows(),
-                                                                table_meta->get_scale_ratio(),
-                                                                stat))) {
-          LOG_WARN("failed to get column stat", K(ret));
-        } else if (stat.avglen_val_ != 0) {
-          width += stat.avglen_val_;
-        } else {
-          width += get_estimate_width_from_type(column_expr->get_result_type());
-        }
+        // non base table column expr use estimation
+        width += get_estimate_width_from_type(column_expr->get_result_type());
       }
     }
   }
@@ -516,19 +546,11 @@ int ObOptEstCost::estimate_width_for_exprs(const OptTableMetas &table_metas,
         uint64_t table_id = column_expr->get_table_id();
         ObGlobalColumnStat stat;
         const OptTableMeta *table_meta = table_metas.get_table_meta_by_table_id(table_id);
+        const OptColumnMeta *column_meta = NULL == table_meta ? NULL :
+                                           table_meta->get_column_meta(column_expr->get_column_id());
         // base table column expr use statistic
-        if (OB_NOT_NULL(table_meta) && table_meta->use_opt_stat() &&
-            OB_FAIL(ctx.get_opt_stat_manager()->get_column_stat(ctx.get_session_info()->get_effective_tenant_id(),
-                                                                table_meta->get_ref_table_id(),
-                                                                table_meta->get_all_used_parts(),
-                                                                column_expr->get_column_id(),
-                                                                table_meta->get_all_used_global_parts(),
-                                                                table_meta->get_rows(),
-                                                                table_meta->get_scale_ratio(),
-                                                                stat))) {
-          LOG_WARN("failed to get column stat", K(ret));
-        } else if (stat.avglen_val_ != 0) {
-          width += stat.avglen_val_;
+        if (OB_NOT_NULL(column_meta) && table_meta->use_opt_stat() && column_meta->get_avg_len() != 0) {
+          width += column_meta->get_avg_len();
         } else {
           // non base table column expr use estimation
           width += get_estimate_width_from_type(column_expr->get_result_type());
@@ -626,39 +648,53 @@ int ObOptEstCost::calculate_filter_selectivity(ObCostTableScanInfo &est_cost_inf
                                                ObIArray<ObExprSelPair> &all_predicate_sel)
 {
   int ret = OB_SUCCESS;
-  if (OB_ISNULL(est_cost_info.table_metas_) || OB_ISNULL(est_cost_info.sel_ctx_)) {
+  ObSEArray<ObRawExpr *, 8> apply_filters;
+  double total_sel = 1.0;
+  if (OB_ISNULL(est_cost_info.table_metas_) || OB_ISNULL(est_cost_info.sel_ctx_) ||
+      OB_ISNULL(est_cost_info.table_meta_info_)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("null point error", K(est_cost_info.table_metas_), K(est_cost_info.sel_ctx_), K(ret));
-  } else if (OB_FAIL(ObOptSelectivity::calculate_selectivity(*est_cost_info.table_metas_,
-                                                             *est_cost_info.sel_ctx_,
-                                                             est_cost_info.prefix_filters_,
-                                                             est_cost_info.prefix_filter_sel_,
-                                                             all_predicate_sel))) {
-    LOG_WARN("failed to calculate selectivity", K(est_cost_info.postfix_filters_), K(ret));
-  } else if (OB_FAIL(ObOptSelectivity::calculate_selectivity(*est_cost_info.table_metas_,
-                                                             *est_cost_info.sel_ctx_,
-                                                             est_cost_info.pushdown_prefix_filters_,
-                                                             est_cost_info.pushdown_prefix_filter_sel_,
-                                                             all_predicate_sel))) {
-    LOG_WARN("failed to calculate selectivity", K(est_cost_info.pushdown_prefix_filters_), K(ret));
-  } else if (OB_FAIL(ObOptSelectivity::calculate_selectivity(*est_cost_info.table_metas_,
-                                                             *est_cost_info.sel_ctx_,
-                                                             est_cost_info.ss_postfix_range_filters_,
-                                                             est_cost_info.ss_postfix_range_filters_sel_,
-                                                             all_predicate_sel))) {
-    LOG_WARN("failed to calculate selectivity", K(est_cost_info.ss_postfix_range_filters_), K(ret));
-  } else if (OB_FAIL(ObOptSelectivity::calculate_selectivity(*est_cost_info.table_metas_,
-                                                             *est_cost_info.sel_ctx_,
-                                                             est_cost_info.postfix_filters_,
-                                                             est_cost_info.postfix_filter_sel_,
-                                                             all_predicate_sel))) {
-    LOG_WARN("failed to calculate selectivity", K(est_cost_info.postfix_filters_), K(ret));
-  } else if (OB_FAIL(ObOptSelectivity::calculate_selectivity(*est_cost_info.table_metas_,
-                                                             *est_cost_info.sel_ctx_,
-                                                             est_cost_info.table_filters_,
-                                                             est_cost_info.table_filter_sel_,
-                                                             all_predicate_sel))) {
-    LOG_WARN("failed to calculate selectivity", K(est_cost_info.table_filters_), K(ret));
+  } else if (FALSE_IT(est_cost_info.sel_ctx_->init_op_ctx(NULL, est_cost_info.table_meta_info_->table_row_count_))) {
+  } else if (OB_FAIL(ObOptSelectivity::calculate_conditional_selectivity(*est_cost_info.table_metas_,
+                                                                         *est_cost_info.sel_ctx_,
+                                                                         apply_filters,
+                                                                         est_cost_info.prefix_filters_,
+                                                                         total_sel,
+                                                                         est_cost_info.prefix_filter_sel_,
+                                                                         all_predicate_sel))) {
+    LOG_WARN("failed to calculate prefix filter sel", K(est_cost_info.prefix_filters_));
+  } else if (OB_FAIL(ObOptSelectivity::calculate_conditional_selectivity(*est_cost_info.table_metas_,
+                                                                         *est_cost_info.sel_ctx_,
+                                                                         apply_filters,
+                                                                         est_cost_info.pushdown_prefix_filters_,
+                                                                         total_sel,
+                                                                         est_cost_info.pushdown_prefix_filter_sel_,
+                                                                         all_predicate_sel))) {
+    LOG_WARN("failed to calculate prefix filter sel", K(est_cost_info.pushdown_prefix_filters_));
+  } else if (OB_FAIL(ObOptSelectivity::calculate_conditional_selectivity(*est_cost_info.table_metas_,
+                                                                         *est_cost_info.sel_ctx_,
+                                                                         apply_filters,
+                                                                         est_cost_info.ss_postfix_range_filters_,
+                                                                         total_sel,
+                                                                         est_cost_info.ss_postfix_range_filters_sel_,
+                                                                         all_predicate_sel))) {
+    LOG_WARN("failed to calculate prefix filter sel", K(est_cost_info.ss_postfix_range_filters_));
+  } else if (OB_FAIL(ObOptSelectivity::calculate_conditional_selectivity(*est_cost_info.table_metas_,
+                                                                         *est_cost_info.sel_ctx_,
+                                                                         apply_filters,
+                                                                         est_cost_info.postfix_filters_,
+                                                                         total_sel,
+                                                                         est_cost_info.postfix_filter_sel_,
+                                                                         all_predicate_sel))) {
+    LOG_WARN("failed to calculate prefix filter sel", K(est_cost_info.postfix_filters_));
+  } else if (OB_FAIL(ObOptSelectivity::calculate_conditional_selectivity(*est_cost_info.table_metas_,
+                                                                         *est_cost_info.sel_ctx_,
+                                                                         apply_filters,
+                                                                         est_cost_info.table_filters_,
+                                                                         total_sel,
+                                                                         est_cost_info.table_filter_sel_,
+                                                                         all_predicate_sel))) {
+    LOG_WARN("failed to calculate prefix filter sel", K(est_cost_info.table_filters_));
   } else {
     LOG_TRACE("table filter info", K(est_cost_info.ref_table_id_), K(est_cost_info.index_id_),
         K(est_cost_info.prefix_filters_), K(est_cost_info.pushdown_prefix_filters_),
@@ -707,11 +743,18 @@ int ObOptEstCost::stat_estimate_single_range_rc(const ObCostTableScanInfo &est_c
   return ret;
 }
 
-ObOptEstCostModel &ObOptEstCost::get_model(MODEL_TYPE model_type)
+double ObOptEstCost::calc_pred_cost_per_row(const ObRawExpr *expr,
+                                            double card,
+                                            double &cost,
+                                            const ObOptimizerContext &opt_ctx)
 {
-  if (VECTOR_MODEL == model_type) {
-    return vector_model_;
-  } else {
-    return normal_model_;
-  }
+  GET_COST_MODEL();
+  return model->calc_pred_cost_per_row(expr, card, cost);
+}
+
+double ObOptEstCost::cost_values_table(double rows,
+                                       ObIArray<ObRawExpr*> &filters,
+                                       const ObOptimizerContext &opt_ctx)
+{
+  return cost_get_rows(rows, opt_ctx) + cost_quals(rows, filters, opt_ctx);
 }

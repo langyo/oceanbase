@@ -11,11 +11,7 @@
  */
 
 #define USING_LOG_PREFIX SQL_ENG
-#include "sql/engine/px/datahub/components/ob_dh_barrier.h"
-#include "sql/engine/px/datahub/ob_dh_msg_ctx.h"
-#include "sql/engine/px/ob_dfo.h"
 #include "sql/engine/px/ob_px_util.h"
-#include "sql/engine/px/datahub/ob_dh_msg.h"
 #include "sql/engine/px/datahub/components/ob_dh_init_channel.h"
 using namespace oceanbase::sql;
 using namespace oceanbase::common;
@@ -81,7 +77,6 @@ int ObInitChannelWholeMsg::assign(const ObInitChannelWholeMsg &other, common::Ob
   return ret;
 }
 
-bool ObInitChannelPieceMsgCtx::enable_dh_channel_sync(const bool channel_sync_enabled) { return channel_sync_enabled; }
 
 int ObInitChannelPieceMsgCtx::send_whole_msg(common::ObIArray<ObPxSqcMeta *> &sqcs)
 {

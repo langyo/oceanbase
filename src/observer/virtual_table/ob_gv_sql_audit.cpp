@@ -11,18 +11,9 @@
  */
 
 #include "observer/virtual_table/ob_gv_sql_audit.h"
-#include <stdint.h>
-#include "common/rowkey/ob_rowkey.h"
-#include "common/ob_smart_call.h"
-#include "share/ob_define.h"
 #include "observer/ob_server.h"
-#include "observer/mysql/ob_mysql_request_manager.h"
-#include "lib/utility/utility.h"
-#include "observer/omt/ob_multi_tenant.h"
-#include "observer/ob_server_struct.h"
-#include "share/rc/ob_tenant_base.h"
+#include "sql/resolver/ob_resolver_utils.h"
 
-#include <algorithm> // std::sort
 
 using namespace oceanbase::common;
 using namespace oceanbase::obmysql;
@@ -56,7 +47,7 @@ ObGvSqlAudit::~ObGvSqlAudit() {
 void ObGvSqlAudit::reset()
 {
   if (with_tenant_ctx_ != nullptr && allocator_ != nullptr) {
-    if (cur_mysql_req_mgr_ != nullptr && ref_.idx_ != -1) {
+    if (cur_mysql_req_mgr_ != nullptr && ref_.is_not_null()) {
       cur_mysql_req_mgr_->revert(&ref_);
     }
     with_tenant_ctx_->~ObTenantSpaceFetcher();
@@ -210,7 +201,7 @@ int ObGvSqlAudit::inner_get_next_row(common::ObNewRow *&row)
           // inc ref count by 1
           if (with_tenant_ctx_ != nullptr) { // free old memory
             // before freeing tenant ctx, we must release ref_ if possible
-            if (nullptr != prev_req_mgr && ref_.idx_ != -1) {
+            if (nullptr != prev_req_mgr && ref_.is_not_null()) {
               prev_req_mgr->revert(&ref_);
             }
             with_tenant_ctx_->~ObTenantSpaceFetcher();
@@ -274,7 +265,7 @@ int ObGvSqlAudit::inner_get_next_row(common::ObNewRow *&row)
       if (OB_ITER_END == ret) {
         // release last tenant's ctx
         if (with_tenant_ctx_ != nullptr) {
-          if (prev_req_mgr != nullptr && ref_.idx_ != -1) {
+          if (prev_req_mgr != nullptr && ref_.is_not_null()) {
             prev_req_mgr->revert(&ref_);
           }
           with_tenant_ctx_->~ObTenantSpaceFetcher();
@@ -287,7 +278,7 @@ int ObGvSqlAudit::inner_get_next_row(common::ObNewRow *&row)
 
   if (OB_SUCC(ret)) {
     void *rec = NULL;
-    if (ref_.idx_ != -1) {
+    if (ref_.is_not_null()) {
       cur_mysql_req_mgr_->revert(&ref_);
     }
     do {
@@ -430,7 +421,7 @@ int ObGvSqlAudit::extract_tenant_ids()
       if (is_always_false) {
         tenant_id_array_.reset();
       } else {
-        std::sort(tenant_id_array_.begin(), tenant_id_array_.end());
+        lib::ob_sort(tenant_id_array_.begin(), tenant_id_array_.end());
         SERVER_LOG(DEBUG, "get tenant ids from req mgr map", K(tenant_id_array_));
       }
     }
@@ -498,7 +489,7 @@ int ObGvSqlAudit::extract_tenant_ids()
       if (is_always_false) {
         tenant_id_array_.reset();
       } else {
-        std::sort(tenant_id_array_.begin(), tenant_id_array_.end());
+        lib::ob_sort(tenant_id_array_.begin(), tenant_id_array_.end());
         SERVER_LOG(DEBUG, "get tenant ids from req mgr map", K(tenant_id_array_));
       }
     }
@@ -545,7 +536,8 @@ bool ObGvSqlAudit::is_perf_event_dep_field(uint64_t col_id) {
     case INDEX_BLOCK_CACHE_HIT:
     case BLOCKSCAN_BLOCK_CNT:
     case BLOCKSCAN_ROW_CNT:
-    case PUSHDOWN_STORAGE_FILTER_ROW_CNT: {
+    case PUSHDOWN_STORAGE_FILTER_ROW_CNT:
+    case NETWORK_WAIT_TIME: {
       is_contain = true;
       break;
     }
@@ -565,7 +557,7 @@ int ObGvSqlAudit::fill_cells(obmysql::ObMySQLRequestRecord &record)
   ObObj *cells = cur_row_.cells_;
   const bool is_perf_event_closed = record.data_.is_perf_event_closed_;
 
-  if (OB_ISNULL(cells)) {
+  if (OB_ISNULL(cells) || OB_ISNULL(allocator_)) {
     ret = OB_INVALID_ARGUMENT;
     SERVER_LOG(WARN, "invalid argument", K(cells));
   } else {
@@ -635,6 +627,9 @@ int ObGvSqlAudit::fill_cells(obmysql::ObMySQLRequestRecord &record)
           }
           break;
         }
+        case USER_CLIENT_PORT: {
+          cells[cell_idx].set_int(0);
+        } break;
         case TENANT_ID: {
           cells[cell_idx].set_int(record.data_.tenant_id_);
         } break;
@@ -686,7 +681,7 @@ int ObGvSqlAudit::fill_cells(obmysql::ObMySQLRequestRecord &record)
         case QUERY_SQL: {
           ObCollationType src_cs_type = ObCharset::is_valid_collation(record.data_.sql_cs_type_) ?
                 record.data_.sql_cs_type_ : ObCharset::get_system_collation();
-          ObString src_string(static_cast<int32_t>(record.data_.sql_len_), record.data_.sql_);
+          ObString src_string(static_cast<int64_t>(record.data_.sql_len_), record.data_.sql_);
           ObString dst_string;
           if (OB_FAIL(ObCharset::charset_convert(row_calc_buf_,
                                                         src_string,
@@ -701,6 +696,9 @@ int ObGvSqlAudit::fill_cells(obmysql::ObMySQLRequestRecord &record)
             cells[cell_idx].set_collation_type(ObCharset::get_default_collation(
                                                 ObCharset::get_default_charset()));
           }
+        } break;
+        case TRANS_STATUS: {
+          cells[cell_idx].set_null();
         } break;
         case PLAN_ID: {
           cells[cell_idx].set_int(record.data_.plan_id_);
@@ -899,7 +897,7 @@ int ObGvSqlAudit::fill_cells(obmysql::ObMySQLRequestRecord &record)
           cells[cell_idx].set_uint64(record.data_.exec_record_.user_io_time_);
         } break;
         case SCHEDULE_TIME: {
-          cells[cell_idx].set_uint64(0);
+          cells[cell_idx].set_uint64(record.data_.exec_record_.schedule_time_);
         } break;
         case ROW_CACHE_HIT: {
           cells[cell_idx].set_int(record.data_.exec_record_.row_cache_hit_);
@@ -984,8 +982,9 @@ int ObGvSqlAudit::fill_cells(obmysql::ObMySQLRequestRecord &record)
         case SNAPSHOT_SOURCE: {
           ObString src_name = record.data_.get_snapshot_source();
           cells[cell_idx].set_varchar(src_name);
-          cells[cell_idx].set_default_collation_type();
-          break;
+          cells[cell_idx].set_collation_type(ObCharset::get_default_collation(
+                                             ObCharset::get_default_charset()));
+             break;
         }
         case REQUEST_TYPE: {
           cells[cell_idx].set_int(record.data_.request_type_);
@@ -1044,6 +1043,79 @@ int ObGvSqlAudit::fill_cells(obmysql::ObMySQLRequestRecord &record)
           cells[cell_idx].set_collation_type(ObCharset::get_default_collation(
                                               ObCharset::get_default_charset()));
 
+        } break;
+        case PL_TRACE_ID: {
+          const ObCurTraceId::TraceId &pl_trace_id = record.data_.pl_trace_id_;
+          if (pl_trace_id.is_invalid()) {
+            cells[cell_idx].set_null();
+          } else {
+            int64_t len = pl_trace_id.to_string(pl_trace_id_, sizeof(pl_trace_id_));
+            cells[cell_idx].set_varchar(pl_trace_id_, len);
+            cells[cell_idx].set_collation_type(ObCharset::get_default_collation(
+                ObCharset::get_default_charset()));
+          }
+        } break;
+        case PLSQL_EXEC_TIME: {
+          cells[cell_idx].set_int(record.data_.plsql_exec_time_);
+        } break;
+        case NETWORK_WAIT_TIME: {
+          cells[cell_idx].set_uint64(record.data_.exec_record_.network_wait_time_);
+        } break;
+        case STMT_TYPE: {
+          ObString stmt_type_name;
+          ObString tmp_type_name = ObResolverUtils::get_stmt_type_string(record.data_.stmt_type_);
+          if (!tmp_type_name.empty()) {
+            stmt_type_name = tmp_type_name.make_string(tmp_type_name.ptr() + 2);
+          } else {
+            stmt_type_name = tmp_type_name;
+          }
+          cells[cell_idx].set_varchar(stmt_type_name);
+          cells[cell_idx].set_default_collation_type();
+        } break;
+        case SEQ_NUM: {
+          int64_t set_v = record.data_.seq_num_;
+          cells[cell_idx].set_int(set_v);
+        } break;
+        case TOTAL_MEMSTORE_READ_ROW_COUNT: {
+          if (record.data_.sql_len_ > 0) {
+            // qc thread
+            cells[cell_idx].set_int(record.data_.exec_record_.memstore_read_row_count_
+                                + record.data_.total_memstore_read_row_count_);
+          } else {
+            // work thread
+            cells[cell_idx].set_int(record.data_.exec_record_.memstore_read_row_count_);
+          }
+        } break;
+        case TOTAL_SSSTORE_READ_ROW_COUNT: {
+          if (record.data_.sql_len_ > 0) {
+            // qc thread
+            cells[cell_idx].set_int(record.data_.exec_record_.ssstore_read_row_count_
+                                  + record.data_.total_ssstore_read_row_count_);
+          } else {
+            // work thread
+            cells[cell_idx].set_int(record.data_.exec_record_.ssstore_read_row_count_);
+          }
+        } break;
+        case PROXY_USER_NAME: {
+          int64_t len = min(record.data_.proxy_user_name_len_, OB_MAX_USER_NAME_LENGTH);
+          cells[cell_idx].set_varchar(record.data_.proxy_user_name_,
+                                      static_cast<ObString::obstr_size_t>(len));
+          cells[cell_idx].set_collation_type(ObCharset::get_default_collation(
+                                              ObCharset::get_default_charset()));
+        } break;
+        //format_sql_id
+        case FORMAT_SQL_ID: {
+          if (OB_MAX_SQL_ID_LENGTH == strlen(record.data_.format_sql_id_)) {
+            cells[cell_idx].set_varchar(record.data_.format_sql_id_,
+                                        static_cast<ObString::obstr_size_t>(OB_MAX_SQL_ID_LENGTH));
+          } else {
+            cells[cell_idx].set_varchar("");
+          }
+          cells[cell_idx].set_collation_type(ObCharset::get_default_collation(
+                                              ObCharset::get_default_charset()));
+        } break;
+        case PLSQL_COMPILE_TIME: {
+          cells[cell_idx].set_int(record.data_.plsql_compile_time_);
         } break;
         default: {
           ret = OB_ERR_UNEXPECTED;

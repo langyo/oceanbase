@@ -12,21 +12,12 @@
 
 #define USING_LOG_PREFIX ARCHIVE
 #include "rootserver/backup/ob_tenant_archive_scheduler.h"
-#include "rootserver/ob_rs_event_history_table_operator.h"
-#include "rootserver/ob_unit_manager.h"
 #include "storage/tx/ob_ts_mgr.h"
-#include "lib/ob_define.h"
-#include "lib/utility/utility.h"
-#include "lib/utility/ob_tracepoint.h"
-#include "share/schema/ob_schema_mgr.h"
-#include "share/ob_srv_rpc_proxy.h"
 #include "share/backup/ob_tenant_archive_mgr.h"
 #include "share/backup/ob_archive_store.h"
 #include "share/backup/ob_backup_connectivity.h"
-#include "share/ls/ob_ls_i_life_manager.h"
 #include "share/ls/ob_ls_operator.h"
-#include "share/scn.h"
-#include "share/ob_debug_sync.h"
+#include "rootserver/tenant_snapshot/ob_tenant_snapshot_util.h"
 
 using namespace oceanbase;
 using namespace rootserver;
@@ -128,7 +119,7 @@ static int record_piece_extend_info(
   return ret;
 }
 
-static int record_piece_checkpoint(const ObTenantArchivePieceAttr &piece_info, const ObArchiveStore &store)
+static int record_piece_checkpoint(const ObTenantArchiveRoundAttr &old_round_info, const ObTenantArchivePieceAttr &piece_info, const ObArchiveStore &store)
 {
   int ret = OB_SUCCESS;
   if (!(piece_info.status_.is_active() 
@@ -146,7 +137,7 @@ static int record_piece_checkpoint(const ObTenantArchivePieceAttr &piece_info, c
     checkpoint_desc.checkpoint_scn_ = piece_info.checkpoint_scn_;
     checkpoint_desc.max_scn_ = piece_info.max_scn_;
     checkpoint_desc.end_scn_ = piece_info.end_scn_;
-    if (OB_FAIL(store.write_piece_checkpoint(piece_info.key_.dest_id_, piece_info.key_.round_id_, piece_info.key_.piece_id_, 0, checkpoint_desc))) {
+    if (OB_FAIL(store.write_piece_checkpoint(piece_info.key_.dest_id_, piece_info.key_.round_id_, piece_info.key_.piece_id_, 0, old_round_info.checkpoint_scn_, checkpoint_desc))) {
       LOG_WARN("failed to write piece checkpoint info file", K(ret), K(piece_info), K(checkpoint_desc));
     }
   }
@@ -181,7 +172,7 @@ static int record_piece_info(const ObDestRoundCheckpointer::GeneratedPiece &piec
         single_ls_desc.round_id_, single_ls_desc.piece_id_, single_ls_desc.ls_id_,
         single_ls_desc.filelist_))) {
         LOG_WARN("failed to get archive file list", K(ret), K(single_ls_desc));
-      } else if (OB_FALSE_IT(std::sort(single_ls_desc.filelist_.begin(), single_ls_desc.filelist_.end()))) {
+      } else if (OB_FALSE_IT(lib::ob_sort(single_ls_desc.filelist_.begin(), single_ls_desc.filelist_.end()))) {
       } else if (OB_FAIL(piece_info_desc.filelist_.push_back(single_ls_desc))) {
         LOG_WARN("failed to push backup single_ls_desc", K(ret), K(single_ls_desc), K(piece_info_desc));
       } else if (OB_FAIL(store.is_single_ls_info_file_exist(single_ls_desc.dest_id_, single_ls_desc.round_id_, single_ls_desc.piece_id_, single_ls_desc.ls_id_, is_exist))) {
@@ -232,6 +223,7 @@ static int record_piece_inner_placeholder(const ObTenantArchivePieceAttr &piece_
 static int record_single_piece_info(const ObTenantArchivePieceAttr &piece_info, const ObArchiveStore &store)
 {
   int ret = OB_SUCCESS;
+  int tmp_ret = OB_SUCCESS;
   bool is_exist = false;
   ObSinglePieceDesc single_piece_desc;
   if (!piece_info.status_.is_frozen()) {
@@ -243,7 +235,7 @@ static int record_single_piece_info(const ObTenantArchivePieceAttr &piece_info, 
   } else if (OB_FAIL(store.write_single_piece(piece_info.key_.dest_id_, piece_info.key_.round_id_, piece_info.key_.piece_id_, single_piece_desc))) {
     LOG_WARN("failed to write single piece info file", K(ret), K(piece_info), K(single_piece_desc));
   }
-  
+
   return ret;
 }
 
@@ -339,7 +331,7 @@ static int piece_generated_cb(
     LOG_WARN("failed to record piece start", K(ret), K(old_round_info), K(piece));
   } else if (OB_FAIL(record_piece_extend_info(*sql_proxy, old_round_info, result, piece.piece_info_, store))) {
     LOG_WARN("failed to record piece extend info", K(ret));
-  } else if (OB_FAIL(record_piece_checkpoint(piece_info, store))) {
+  } else if (OB_FAIL(record_piece_checkpoint(old_round_info, piece_info, store))) {
     LOG_WARN("failed to record piece checkpoint", K(ret), K(old_round_info), K(piece));
   } else if (OB_FAIL(record_piece_info(piece, store))) {
     LOG_WARN("failed to record piece info", K(ret), K(old_round_info), K(piece));
@@ -458,6 +450,7 @@ int ObArchiveHandler::close_archive_mode()
 {
   int ret = OB_SUCCESS;
   ObArchiveMode archive_mode;
+  bool has_tenant_snapshot = false;
   if (IS_NOT_INIT) {
     ret = OB_NOT_INIT;
     LOG_WARN("tenant archive scheduler not init", K(ret));
@@ -470,6 +463,13 @@ int ObArchiveHandler::close_archive_mode()
     ret = OB_ALREADY_IN_NOARCHIVE_MODE;
     LOG_USER_ERROR(OB_ALREADY_IN_NOARCHIVE_MODE);
     LOG_WARN("already in noarchive mode", K(ret), K_(tenant_id));
+  } else if (OB_FAIL(ObTenantSnapshotUtil::check_tenant_has_snapshot(*sql_proxy_,
+                                        tenant_id_, has_tenant_snapshot))) {
+    LOG_WARN("failed to check whether tenant has snapshot", K(ret));
+  } else if (has_tenant_snapshot) {
+    ret = OB_OP_NOT_ALLOW;
+    LOG_WARN("can not close log archive while tenant snapshots exist", KR(ret));
+    LOG_USER_ERROR(OB_OP_NOT_ALLOW, "tenant snapshots exist, close log archive");
   } else if (OB_FAIL(archive_table_op_.close_archive_mode(*sql_proxy_))) {
     LOG_WARN("failed to close archive mode", K(ret), K_(tenant_id));
   } else {
@@ -524,6 +524,9 @@ int ObArchiveHandler::check_can_do_archive(bool &can) const
     LOG_WARN("failed to get schema guard", K(ret), K_(tenant_id));
   } else if (OB_FAIL(schema_guard.get_tenant_info(tenant_id_, tenant_schema))) {
     LOG_WARN("failed to get tenant info", K(ret), K_(tenant_id));
+  } else if (OB_ISNULL(tenant_schema)) {
+    can = false;
+    LOG_WARN("tenant schema is null, tenant may has been dropped", K(ret), K_(tenant_id));
   } else if (tenant_schema->is_normal()) {
     can = true;
   } else if (tenant_schema->is_creating()) {
@@ -589,10 +592,18 @@ int ObArchiveHandler::disable_archive(const int64_t dest_no)
   int ret = OB_SUCCESS;
   int tmp_ret = OB_SUCCESS;
   ObTenantArchiveRoundAttr new_round_attr;
+  bool has_tenant_snapshot = false;
 
   if (IS_NOT_INIT) {
     ret = OB_NOT_INIT;
     LOG_WARN("tenant archive scheduler not init", K(ret));
+  } else if (OB_FAIL(ObTenantSnapshotUtil::check_tenant_has_snapshot(*sql_proxy_,
+                                        tenant_id_, has_tenant_snapshot))) {
+    LOG_WARN("failed to check whether tenant has snapshot", K(ret));
+  } else if (has_tenant_snapshot) {
+    ret = OB_OP_NOT_ALLOW;
+    LOG_WARN("can not disable archive while tenant snapshots exist", KR(ret));
+    LOG_USER_ERROR(OB_OP_NOT_ALLOW, "tenant snapshots exist, disable log archive");
   } else if (OB_FAIL(round_handler_.disable_archive(dest_no, new_round_attr))) {
     LOG_WARN("failed to disable archive", K(ret), K_(tenant_id), K(dest_no));
   } else {
@@ -680,24 +691,36 @@ int ObArchiveHandler::checkpoint_(ObTenantArchiveRoundAttr &round_info)
       if (OB_FAIL(start_archive_(round_info))) {
         LOG_WARN("failed to prepare archive", K(ret), K(round_info));
       }
-    }
       break;
+    }
     case ObArchiveRoundState::Status::BEGINNING: {
       DEBUG_SYNC(BEFROE_LOG_ARCHIVE_SCHEDULE_BEGINNING);
+      if (OB_FAIL(do_checkpoint_(round_info))) {
+        LOG_WARN("failed to checkpoint", K(ret), K(round_info));
+      }
+      break;
     }
     case ObArchiveRoundState::Status::DOING: {
       DEBUG_SYNC(BEFROE_LOG_ARCHIVE_SCHEDULE_DOING);
+      if (OB_FAIL(do_checkpoint_(round_info))) {
+        LOG_WARN("failed to checkpoint", K(ret), K(round_info));
+      }
+      break;
     }
     case ObArchiveRoundState::Status::SUSPENDING: {
       DEBUG_SYNC(BEFROE_LOG_ARCHIVE_SCHEDULE_SUSPENDING);
+      if (OB_FAIL(do_checkpoint_(round_info))) {
+        LOG_WARN("failed to checkpoint", K(ret), K(round_info));
+      }
+      break;
     }
     case ObArchiveRoundState::Status::STOPPING: {
       DEBUG_SYNC(BEFROE_LOG_ARCHIVE_SCHEDULE_STOPPING);
       if (OB_FAIL(do_checkpoint_(round_info))) {
         LOG_WARN("failed to checkpoint", K(ret), K(round_info));
       }
-    }
       break;
+    }
     default: {
       ret = OB_ERR_SYS;
       LOG_ERROR("unknown archive status", K(ret), K(round_info));
@@ -746,6 +769,7 @@ int ObArchiveHandler::do_checkpoint_(share::ObTenantArchiveRoundAttr &round_info
   ObDestRoundCheckpointer checkpointer;
   SCN max_checkpoint_scn = SCN::min_scn();
   bool can = false;
+  bool allow_force_stop = false;
   if (OB_FAIL(ObTenantArchiveMgr::decide_piece_id(round_info.start_scn_, round_info.base_piece_id_, round_info.piece_switch_interval_, round_info.checkpoint_scn_, since_piece_id))) {
     LOG_WARN("failed to calc since piece id", K(ret), K(round_info));
   } else if (OB_FAIL(archive_table_op_.get_dest_round_summary(*sql_proxy_, round_info.dest_id_, round_info.round_id_, since_piece_id, summary))) {
@@ -757,8 +781,12 @@ int ObArchiveHandler::do_checkpoint_(share::ObTenantArchiveRoundAttr &round_info
   } else if (!can) {
     ret = OB_NOT_SUPPORTED;
     LOG_WARN("tenant can not do archive", K(ret), K_(tenant_id));
+  } else if (OB_FALSE_IT(DEBUG_SYNC(BEFROE_LOG_ARCHIVE_DO_CHECKPOINT))) {
   } else if (OB_FAIL(checkpointer.init(&round_handler_, piece_generated_cb, round_checkpoint_cb, max_checkpoint_scn))) {
     LOG_WARN("failed to init checkpointer", K(ret), K(round_info));
+  } else if (round_info.state_.is_stopping() && OB_FAIL(check_allow_force_stop_(round_info, allow_force_stop))) {
+    LOG_WARN("failed to check allow force stop", K(ret), K(round_info));
+  } else if (allow_force_stop && OB_FALSE_IT(checkpointer.set_allow_force_stop())) {
   } else if (OB_FAIL(checkpointer.checkpoint(round_info, summary))) {
     LOG_WARN("failed to do checkpoint.", K(ret), K(round_info), K(summary));
   }
@@ -815,6 +843,26 @@ int ObArchiveHandler::get_max_checkpoint_scn_(const uint64_t tenant_id, SCN &max
   int ret = OB_SUCCESS;
   if (OB_FAIL(ObBackupUtils::get_backup_scn(tenant_id_, max_checkpoint_scn))) {
     LOG_WARN("failed to get max checkpoint scn.", K(ret), K_(tenant_id));
+  }
+  return ret;
+}
+
+
+int ObArchiveHandler::check_allow_force_stop_(const ObTenantArchiveRoundAttr &round, bool &allow_force_stop) const
+{
+  int ret = OB_SUCCESS;
+  int64_t stopping_ts = 0;
+  const int64_t current_ts = ObTimeUtility::current_time();
+#ifdef ERRSIM
+  const int64_t force_stop_threshold = GCONF.errsim_allow_force_archive_threshold;;
+#else
+  const int64_t force_stop_threshold = ALLOW_FORCE_STOP_THRESHOLD;
+#endif
+  allow_force_stop = false;
+  if (OB_FAIL(archive_table_op_.get_round_stopping_ts(*sql_proxy_, round.key_.dest_no_, stopping_ts))) {
+    LOG_WARN("failed to get round stopping ts.", K(ret), K(round));
+  } else {
+    allow_force_stop = force_stop_threshold <= (current_ts - stopping_ts);
   }
   return ret;
 }

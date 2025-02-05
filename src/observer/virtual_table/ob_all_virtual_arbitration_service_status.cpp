@@ -11,10 +11,6 @@
  */
 
 #include "ob_all_virtual_arbitration_service_status.h"
-#include "common/row/ob_row.h"
-#include "lib/ob_define.h"
-#include "lib/ob_errno.h"
-#include "lib/string/ob_string.h"
 #include "observer/ob_server_struct.h"
 #include "rpc/obrpc/ob_net_keepalive.h"
 #include "storage/ob_locality_manager.h"
@@ -141,9 +137,9 @@ int ObAllVirtualArbServiceStatus::insert_row_(
       }
       case OB_APP_MIN_COLUMN_ID + 3: {
         if (is_in_blacklist) {
-          strncpy(arb_service_status_buf_, ARB_STATUS_INACTIVE, VARCHAR_32);
+          strncpy(arb_service_status_buf_, ARB_STATUS_INACTIVE, VARCHAR_32 - 1);
         } else {
-          strncpy(arb_service_status_buf_, ARB_STATUS_ACTIVE, VARCHAR_32);
+          strncpy(arb_service_status_buf_, ARB_STATUS_ACTIVE, VARCHAR_32 - 1);
         }
         cur_row_.cells_[i].set_varchar(ObString::make_string(arb_service_status_buf_));
         cur_row_.cells_[i].set_collation_type(ObCharset::get_default_collation(

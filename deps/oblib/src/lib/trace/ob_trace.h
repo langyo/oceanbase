@@ -144,14 +144,14 @@ struct ObTagCtxBase
   virtual int tostring(char* buf, const int64_t buf_len, int64_t& pos)
   {
     int ret = OB_SUCCESS;
-    const auto l = strlen(__tag_name_mapper[tag_type_]);
+    const size_t l = strlen(__tag_name_mapper[tag_type_]);
     if (pos + l + 7 >= buf_len) {
       buf[std::min(pos - 1, buf_len - 1)] = '\0';
       ret = OB_BUF_NOT_ENOUGH;
     } else {
       buf[pos++] = '{';
       buf[pos++] = '\"';
-      IGNORE_RETURN strcpy(buf + pos, __tag_name_mapper[tag_type_]);
+      IGNORE_RETURN strncpy(buf + pos, __tag_name_mapper[tag_type_], buf_len - pos);
       pos += l;
       buf[pos++] = '\"';
       buf[pos++] = ':';
@@ -320,7 +320,7 @@ struct ObTrace
     } else {
       v = value;
     }
-    auto l = v.length();
+    int32_t l = v.length();
     if (offset_ + sizeof(ObTagCtx<void*>) + l + 1 - sizeof(void*) >= buffer_size_) {
       // do nothing
     } else {

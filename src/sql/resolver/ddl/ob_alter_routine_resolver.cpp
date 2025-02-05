@@ -13,14 +13,12 @@
 #define USING_LOG_PREFIX SQL_RESV
 #include "ob_alter_routine_resolver.h"
 #include "ob_alter_routine_stmt.h"
-#include "share/ob_rpc_struct.h"
-#include "sql/resolver/ob_resolver_utils.h"
-#include "pl/ob_pl.h"
-#include "pl/ob_pl_compile.h"
 #include "pl/ob_pl_package.h"
-#include "pl/ob_pl_router.h"
-#include "pl/ob_pl_stmt.h"
 #include "pl/parser/parse_stmt_item_type.h"
+
+#ifdef OB_BUILD_ORACLE_PL
+#include "pl/debug/ob_pl_debugger_manager.h"
+#endif
 namespace oceanbase
 {
 using namespace common;
@@ -57,9 +55,12 @@ int ObAlterRoutineResolver::resolve(const ParseNode &parse_tree)
                                               session_info_->get_enable_role_array()));
     }
     //Step2: create alter stmt
-    if (OB_SUCC(ret) && OB_ISNULL(alter_routine_stmt = create_stmt<ObAlterRoutineStmt>())) {
+    if (OB_FAIL(ret)) {
+    } else if (OB_ISNULL(alter_routine_stmt = create_stmt<ObAlterRoutineStmt>())) {
       ret = OB_ALLOCATE_MEMORY_FAILED;
       LOG_WARN("failed to alloc memory for ObAlterRoutineStmt", K(ret));
+    } else {
+      crt_resolver_->set_basic_stmt(alter_routine_stmt);
     }
     //Step3: got standalone routine info 
     if (OB_FAIL(ret)) {
@@ -77,11 +78,20 @@ int ObAlterRoutineResolver::resolve(const ParseNode &parse_tree)
                      db_name.length(), db_name.ptr(),
                      sp_name.length(), sp_name.ptr());
     }
+    // add schema check info
+    OZ (ob_add_ddl_dependency(routine_info->get_routine_id(),
+                              ROUTINE_SCHEMA,
+                              routine_info->get_schema_version(),
+                              routine_info->get_tenant_id(),
+                              alter_routine_stmt->get_routine_arg()));
     //Step4: do real alter resolve
     if (OB_FAIL(ret)) {
     } else if (lib::is_mysql_mode()) {
-      OX (alter_routine_stmt->get_routine_arg().routine_info_ = *routine_info);
-      OZ (resolve_clause_list(parse_tree.children_[1], alter_routine_stmt->get_routine_arg()));
+      if (OB_NOT_NULL(parse_tree.children_[1])) {
+        OZ (resolve_impl(alter_routine_stmt->get_routine_arg(), *routine_info, *(parse_tree.children_[1])));
+      } else {
+        OX (alter_routine_stmt->get_routine_arg().routine_info_ = *routine_info);
+      }
       OX (alter_routine_stmt->get_routine_arg().db_name_ = db_name);
       OX (alter_routine_stmt->get_routine_arg().routine_info_.set_tenant_id(routine_info->get_tenant_id()));
       OX (alter_routine_stmt->get_routine_arg().routine_info_.set_routine_id(routine_info->get_routine_id()));
@@ -94,7 +104,6 @@ int ObAlterRoutineResolver::resolve(const ParseNode &parse_tree)
         .routine_info_.set_tenant_id(routine_info->get_tenant_id()));
       OX (alter_routine_stmt->get_routine_arg()
         .routine_info_.set_routine_id(routine_info->get_routine_id()));
-
     }
     //Step5: collection error info
     if (OB_SUCC(ret)) {
@@ -159,6 +168,9 @@ int ObAlterRoutineResolver::resolve_impl(
     ret = OB_NOT_SUPPORTED;
     LOG_WARN("not supported yet!", K(ret));
     LOG_USER_ERROR(OB_NOT_SUPPORTED, "alter editionable");
+  } else if (T_SP_CLAUSE_LIST == alter_clause_node.type_) {
+    OX (crt_routine_arg.routine_info_ = routine_info);
+    OZ (resolve_clause_list(&alter_clause_node, crt_routine_arg));
   } else {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("unknow alter clause node type", K(ret), K(alter_clause_node.type_));
@@ -176,6 +188,7 @@ int ObAlterRoutineResolver::resolve_compile_clause(
   bool need_recreate = false;
   ObExecEnv old_env;
   ObExecEnv new_env;
+  ObArenaAllocator tmp_allocator;
 
   CK (OB_LIKELY(T_SP_COMPILE_CLAUSE == alter_clause_node.type_));
   CK (OB_LIKELY(1 == alter_clause_node.num_child_));
@@ -186,11 +199,11 @@ int ObAlterRoutineResolver::resolve_compile_clause(
   OX (reuse_setting = (1==alter_clause_node.int32_values_[1]) ? true : false);
  
   if (OB_SUCC(ret)) {
-    OZ (old_env.load(*session_info_));
+    OZ (old_env.load(*session_info_, &tmp_allocator));
     if (reuse_setting) {
       OZ (new_env.init(routine_info.get_exec_env()));
     } else {
-      OZ (new_env.load(*session_info_));
+      OZ (new_env.load(*session_info_, &tmp_allocator));
     }
     if (params.count() > 0) {
       for (int64_t i = 0; OB_SUCC(ret) && i < params.count(); ++i) {
@@ -215,6 +228,13 @@ int ObAlterRoutineResolver::resolve_compile_clause(
     OZ (parse_routine(routine_info.get_routine_body(), parse_tree));
     CK (OB_NOT_NULL(parse_tree));
     OZ (resolve_routine(crt_routine_arg, routine_info, need_recreate, parse_tree));
+    if (OB_SUCC(ret)
+          && 1 == alter_clause_node.int32_values_[0]  // ALTER COMPILE DEBUG
+          && !need_recreate
+          && session_info_->get_pl_attached_id() > 0
+          && OB_INVALID_ID != session_info_->get_pl_attached_id()) {
+      OZ (register_debug_info(routine_info));
+    }
     OZ (old_env.store(*session_info_));
   }
   return ret;
@@ -286,7 +306,7 @@ int ObAlterRoutineResolver::resolve_compile_parameter(
   for (int64_t i = 0; OB_SUCC(ret) && i < params.count(); ++i) {
     if (params.at(i).first == var_type) {
       ret = OB_ERR_DUP_COMPILE_PARAM;
-      LOG_WARN("ORA-39956: duplicate setting for PL/SQL compiler parameter string");
+      LOG_WARN("OBE-39956: duplicate setting for PL/SQL compiler parameter string");
       LOG_USER_ERROR(OB_ERR_DUP_COMPILE_PARAM, var_name.length(), var_name.ptr());
     }
   }
@@ -309,11 +329,20 @@ int ObAlterRoutineResolver::parse_routine(
   ObDataTypeCastParams dtc_params = session_info_->get_dtc_params();
   pl::ObPLParser parser(*(params_.allocator_), session_info_->get_charsets4parser(), session_info_->get_sql_mode());
   ParseResult parse_result;
-  ObString body = source;
+  ObString orig_body = source;
+  ObString body;
   MEMSET(&parse_result, 0, SIZEOF(ParseResult));
   OZ (ObSQLUtils::convert_sql_text_from_schema_for_resolve(
                                   *(params_.allocator_), dtc_params, body));
-  OZ (parser.parse(body, body, parse_result));
+  if(lib::is_mysql_mode()) {
+    char * buf;
+    buf = static_cast<char *>(allocator_->alloc(orig_body.length() + 8));
+    snprintf(buf, orig_body.length() + 8, "create %s", orig_body.ptr());
+    body = ObString(orig_body.length() + 7, buf);
+  } else {
+    body= source;
+  }
+  OZ (parser.parse(body, orig_body, parse_result));
   CK (OB_NOT_NULL(parse_result.result_tree_));
   CK (T_STMT_LIST == parse_result.result_tree_->type_);
   CK (1 == parse_result.result_tree_->num_child_);
@@ -342,25 +371,164 @@ int ObAlterRoutineResolver::resolve_routine(
   int ret = OB_SUCCESS;
   ParseNode *crt_tree = NULL;
   CK (OB_NOT_NULL(source_tree));
-  CK (T_SP_SOURCE == source_tree->type_ || T_SF_SOURCE == source_tree->type_);
-  CK (lib::is_oracle_mode());
-  if (OB_SUCC(ret)
-      && OB_ISNULL(crt_tree = new_non_terminal_node(
-          params_.allocator_,
-          T_SP_SOURCE == source_tree->type_ ? T_SP_CREATE : T_SF_CREATE,
-          1,
-          source_tree))) {
-    ret = OB_ALLOCATE_MEMORY_FAILED;
-    LOG_WARN("failed alloc memory for create routine node", K(ret));
+  if (lib::is_oracle_mode()) {
+    CK (T_SP_SOURCE == source_tree->type_
+        || T_SF_SOURCE == source_tree->type_
+        || T_SF_AGGREGATE_SOURCE == source_tree->type_);
+    if (OB_SUCC(ret)
+        && OB_ISNULL(crt_tree = new_non_terminal_node(
+            params_.allocator_,
+            T_SP_SOURCE == source_tree->type_ ? T_SP_CREATE : T_SF_CREATE,
+            1,
+            source_tree))) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+      LOG_WARN("failed alloc memory for create routine node", K(ret));
+    }
+    OX (crt_tree->int32_values_[0] = need_recreate ? 1 : 0);
+    OX (crt_tree->int32_values_[1] = routine_info.is_noneditionable() ? 1 : 0);
+  } else {
+    crt_tree = const_cast<ParseNode *>(source_tree);
   }
-  OX (crt_tree->int32_values_[0] = need_recreate ? 1 : 0);
-  OX (crt_tree->int32_values_[1] = routine_info.is_noneditionable() ? 1 : 0);
   CK (OB_NOT_NULL(crt_resolver_));
   OZ (crt_resolver_->resolve_impl(*crt_tree, &crt_routine_arg));
   return ret;
 }
 
-} //namespace sql
+int ObAlterRoutineResolver::register_debug_info(const share::schema::ObRoutineInfo &routine_info)
+{
+  int ret = OB_SUCCESS;
+
+#ifndef OB_BUILD_ORACLE_PL
+  UNUSED(routine_info);
+#else
+  CK (OB_NOT_NULL(session_info_));
+  CK (OB_NOT_NULL(session_info_->get_pl_engine()));
+
+  if (OB_FAIL(ret)) {
+    // do nothing
+  } else {
+    uint32_t id = session_info_->get_pl_attached_id();
+    pl::ObPLDebuggerGuard guard(id);
+    pl::debugger::ObPLDebugger *pl_debugger = nullptr;
+    ObExecContext *exec_ctx = nullptr;
+
+    if (OB_FAIL(guard.get(pl_debugger))) {
+      LOG_WARN("failed get pl debugger", K(ret));
+    } else if (OB_ISNULL(pl_debugger) || !pl_debugger->is_debug_on()) {
+      // do nothing
+    } else if (OB_ISNULL(exec_ctx = session_info_->get_cur_exec_ctx())) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("failed to get cur exec context", K(session_info_));
+    } else if (OB_ISNULL(exec_ctx->get_package_guard())) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("failed to get package guard", K(session_info_), K(exec_ctx));
+    } else {
+      pl::ObPLFunction *routine = nullptr;
+      pl::ObPLFunction *local_routine = nullptr;
+      ObCacheObjGuard cacheobj_guard(PL_ROUTINE_HANDLE);
+      ObArray<int64_t> subprogram_path;  // empty array
+
+      ObSqlString const_name;
+      common::ObIArray<pl::debugger::ObPLDebugger::DwarfHelperWrapper> *pl_dwarf_helpers = nullptr;
+
+      pl::debugger::ObPLDebugger *old_debugger = session_info_->get_pl_debugger();
+      session_info_->set_pl_debugger(pl_debugger);
+
+      // always set pl debugger back to old debugger
+      DEFER(session_info_->set_pl_debugger(old_debugger));
+
+      if (OB_FAIL(session_info_
+                    ->get_pl_engine()
+                    ->get_pl_function(*exec_ctx,
+                                      *exec_ctx->get_package_guard(),
+                                      routine_info.get_package_id(),
+                                      routine_info.get_routine_id(),
+                                      subprogram_path,
+                                      cacheobj_guard,
+                                      local_routine))) {
+        LOG_WARN("failed to compile pl function", K(ret), K(routine_info));
+      } else if (nullptr != local_routine) {
+        routine = local_routine;
+      } else {
+        routine = static_cast<pl::ObPLFunction*>(cacheobj_guard.get_cache_obj());
+      }
+
+      if (OB_FAIL(ret)) {
+        // do nothing
+      } else if (OB_ISNULL(routine)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("unexpected NULL routine", K(local_routine), K(cacheobj_guard));
+      } else if (OB_ISNULL(pl_dwarf_helpers = pl_debugger->get_dwarf_helpers())) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("unexpected NULL pl dwarf helpers", K(pl_debugger->get_dwarf_helpers()));
+      } else if (OB_FAIL(const_name.append(routine->get_name_debuginfo().owner_name_))) {
+        LOG_WARN("failed to append owner name", K(ret), K(routine->get_name_debuginfo().owner_name_));
+      } else if (OB_FAIL(const_name.append("."))) {
+        LOG_WARN("failed to append sep .", K(ret));
+      } else if (OB_FAIL(const_name.append(routine->get_name_debuginfo().routine_name_))) {
+        LOG_WARN("failed to append routine name", K(ret), K(routine->get_name_debuginfo().routine_name_));
+      } else {
+        int64_t line = 1;
+        int64_t address = -1;
+        for (int64_t i = 0; OB_SUCC(ret) && address == -1 && i < pl_dwarf_helpers->count(); ++i) {
+          jit::ObDWARFHelper* dwarf_helper = pl_dwarf_helpers->at(i).first;
+          if (OB_ISNULL(dwarf_helper)) {
+            ret = OB_ERR_UNEXPECTED;
+            LOG_WARN("unexpected NULL dwarf helper", KPC(pl_dwarf_helpers));
+          } else if (OB_FAIL(dwarf_helper->find_address_by_function_line(
+                                            const_name.string(),
+                                            line,
+                                            address))) {
+            LOG_WARN("failed to find address by function line", K(ret), K(const_name), K(line));
+          }
+        }
+
+        if (OB_SUCC(ret) && address == -1) {
+          char *copy = nullptr;
+          jit::ObDIRawData di_raw_data = routine->get_debug_info();
+          jit::ObDWARFHelper* dwarf_helper = nullptr;
+
+          if (di_raw_data.empty()) {
+            ret = OB_ERR_UNEXPECTED;
+            LOG_WARN("unexpected empty di raw data", K(di_raw_data.get_size()), K(di_raw_data.get_data()));
+          } else if (OB_ISNULL(pl_debugger->get_allocator())) {
+            ret = OB_ERR_UNEXPECTED;
+            LOG_WARN("unexpected NULL allocator in pl_debugger", K(pl_debugger));
+          } else if (OB_ISNULL(copy = static_cast<char *>(
+                                  pl_debugger->get_allocator()->alloc(di_raw_data.get_size())))) {
+            ret = OB_ALLOCATE_MEMORY_FAILED;
+            LOG_WARN("failed to alloc memory for debug info", K(di_raw_data.get_size()));
+          } else if (OB_ISNULL(MEMCPY(copy, di_raw_data.get_data(), di_raw_data.get_size()))) {
+            ret = OB_ERR_UNEXPECTED;
+            LOG_WARN("failed to MEMCPY debug info",
+                    "dst", copy,
+                    K(di_raw_data.get_data()),
+                    K(di_raw_data.get_size()));
+          } else if (OB_ISNULL(dwarf_helper = static_cast<jit::ObDWARFHelper *>(
+                                  pl_debugger->get_allocator()->alloc(sizeof(jit::ObDWARFHelper))))) {
+            ret = OB_ALLOCATE_MEMORY_FAILED;
+            LOG_WARN("failed to alloc memory for dwarf helper",K(sizeof(jit::ObDWARFHelper)));
+          } else if (OB_ISNULL(
+                        dwarf_helper = new (dwarf_helper)
+                            jit::ObDWARFHelper(*pl_debugger->get_allocator(),
+                                                copy,
+                                                di_raw_data.get_size()))) {
+            ret = OB_ERR_UNEXPECTED;
+            LOG_WARN("failed to placement new ObDWARFHelper");
+          } else if (OB_FAIL(dwarf_helper->init())) {
+            LOG_WARN("failed to init dwarf helper", K(ret));
+          } else if (OB_FAIL(pl_debugger->get_debugger_ctrl().register_debug_info(dwarf_helper, true))) {
+            LOG_WARN("failed to register debug info", K(ret));
+          }
+        }
+      }
+    }
+  }
+#endif
+
+  return ret;
+}
+} // namespace sql
 } //namespace oceanbase
 
 

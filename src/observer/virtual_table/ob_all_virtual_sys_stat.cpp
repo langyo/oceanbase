@@ -13,12 +13,9 @@
 #define USING_LOG_PREFIX SERVER
 
 #include "ob_all_virtual_sys_stat.h"
-#include "lib/ob_running_mode.h"
-#include "observer/ob_server_struct.h"
 #include "observer/ob_server.h"
-#include "observer/omt/ob_multi_tenant.h"
-#include "share/cache/ob_kv_storecache.h"
 #include "storage/tx_storage/ob_tenant_freezer.h"
+#include "share/ash/ob_di_util.h"
 
 namespace oceanbase
 {
@@ -73,16 +70,16 @@ int ObAllVirtualSysStat::set_ip(common::ObAddr *addr)
   return ret;
 }
 
-int ObAllVirtualSysStat::update_all_stats(const int64_t tenant_id, ObStatEventSetStatArray &stat_events)
+int ObAllVirtualSysStat::update_all_stats(const int64_t tenant_id, common::ObDiagnoseTenantInfo &diag_info)
 {
   int ret = OB_SUCCESS;
   if (is_virtual_tenant_id(tenant_id)) {
-    if (OB_FAIL(update_all_stats_(tenant_id, stat_events))) {
+    if (OB_FAIL(update_all_stats_(tenant_id, diag_info))) {
       SERVER_LOG(WARN, "Fail to update_all_stats_ for virtual tenant", K(ret), K(tenant_id));
     }
   } else {
     MTL_SWITCH(tenant_id) {
-      if (OB_FAIL(update_all_stats_(tenant_id, stat_events))) {
+      if (OB_FAIL(update_all_stats_(tenant_id, diag_info))) {
         SERVER_LOG(WARN, "Fail to update_all_stats_ for tenant", K(ret), K(tenant_id));
       }
     }
@@ -90,9 +87,10 @@ int ObAllVirtualSysStat::update_all_stats(const int64_t tenant_id, ObStatEventSe
   return ret;
 }
 
-int ObAllVirtualSysStat::update_all_stats_(const int64_t tenant_id, ObStatEventSetStatArray &stat_events)
+int ObAllVirtualSysStat::update_all_stats_(const int64_t tenant_id, common::ObDiagnoseTenantInfo &diag_info)
 {
   int ret = OB_SUCCESS;
+  ObStatEventSetStatArray &stat_events = diag_info.get_set_stat_stats();
   if (OB_FAIL(get_cache_size_(tenant_id, stat_events))) {
     SERVER_LOG(WARN, "Fail to get cache size", K(ret));
   } else {
@@ -199,21 +197,25 @@ int ObAllVirtualSysStat::update_all_stats_(const int64_t tenant_id, ObStatEventS
         (OB_SYS_TENANT_ID == tenant_id) ? GMEMCONF.get_reserved_server_memory() : 0;
     stat_events.get(ObStatEventIds::HIDDEN_SYS_MEMORY - ObStatEventIds::STAT_EVENT_ADD_END -1)->stat_value_ =
         (OB_SYS_TENANT_ID == tenant_id) ? GMEMCONF.get_hidden_sys_memory() : 0;
+    stat_events.get(ObStatEventIds::UNMANAGED_MEMORY_SIZE - ObStatEventIds::STAT_EVENT_ADD_END -1)->stat_value_ =
+        (OB_SYS_TENANT_ID == tenant_id) ? get_unmanaged_memory_size() : 0;
 
     int ret_bk = ret;
     if (NULL != GCTX.omt_) {
       double cpu_usage = .0;
-      if (!OB_FAIL(GCTX.omt_->get_tenant_cpu_usage(tenant_id, cpu_usage))) {
+      if (OB_SUCC(GCTX.omt_->get_tenant_cpu_usage(tenant_id, cpu_usage))) {
         stat_events.get(ObStatEventIds::CPU_USAGE - ObStatEventIds::STAT_EVENT_ADD_END -1)->stat_value_
             = static_cast<int64_t>(cpu_usage * 100);
         stat_events.get(ObStatEventIds::MEMORY_USAGE - ObStatEventIds::STAT_EVENT_ADD_END -1)->stat_value_
             = lib::get_tenant_memory_hold(tenant_id);
+        stat_events.get(ObStatEventIds::KV_CACHE_HOLD - ObStatEventIds::STAT_EVENT_ADD_END -1)->stat_value_
+            = lib::get_tenant_cache_hold(tenant_id);
       } else {
         // it is ok to not have any records
       }
 
       int64_t worker_time = 0;
-      if (!OB_FAIL(GCTX.omt_->get_tenant_worker_time(tenant_id, worker_time))) {
+      if (OB_SUCC(GCTX.omt_->get_tenant_worker_time(tenant_id, worker_time))) {
         stat_events.get(ObStatEventIds::WORKER_TIME - ObStatEventIds::STAT_EVENT_ADD_END -1)->stat_value_
             = worker_time;
       } else {
@@ -222,7 +224,7 @@ int ObAllVirtualSysStat::update_all_stats_(const int64_t tenant_id, ObStatEventS
 
       double min_cpu = .0;
       double max_cpu = .0;
-      if (!OB_FAIL(GCTX.omt_->get_tenant_cpu(tenant_id, min_cpu, max_cpu))) {
+      if (OB_SUCC(GCTX.omt_->get_tenant_cpu(tenant_id, min_cpu, max_cpu))) {
         stat_events.get(ObStatEventIds::MIN_CPUS - ObStatEventIds::STAT_EVENT_ADD_END -1)->stat_value_
             = static_cast<int64_t>(min_cpu * 100);
         stat_events.get(ObStatEventIds::MAX_CPUS - ObStatEventIds::STAT_EVENT_ADD_END -1)->stat_value_
@@ -258,6 +260,13 @@ int ObAllVirtualSysStat::update_all_stats_(const int64_t tenant_id, ObStatEventS
               = max_sess_num;
         }
       }
+
+#ifdef OB_BUILD_SHARED_STORAGE
+      int tmp_ret = OB_SUCCESS;
+      if (GCTX.is_shared_storage_mode() && OB_TMP_FAIL(set_ss_stats(tenant_id, diag_info))) {
+        SERVER_LOG(ERROR, "fail to set ss stats", KR(ret), KR(tmp_ret), K(tenant_id));
+      }
+#endif
     }
 
     ret = ret_bk;
@@ -271,7 +280,7 @@ int ObAllVirtualSysStat::get_the_diag_info(
 {
   int ret = OB_SUCCESS;
   diag_info.reset();
-  if (OB_FAIL(common::ObDIGlobalTenantCache::get_instance().get_the_diag_info(tenant_id, diag_info))) {
+  if (OB_FAIL(share::ObDiagnosticInfoUtil::get_the_diag_info(tenant_id, diag_info))) {
     if (OB_ENTRY_NOT_EXIST == ret) {
       ret = OB_SUCCESS;
     } else {
@@ -308,8 +317,7 @@ int ObAllVirtualSysStat::process_curr_tenant(ObNewRow *&row)
         SERVER_LOG(WARN, "get diag info fail", K(ret), K(tenant_id_));
       } else {
         stat_iter_ = 0;
-        ObStatEventSetStatArray &stat_events = diag_info_.get_set_stat_stats();
-        if (OB_FAIL(update_all_stats_(tenant_id_, stat_events))) {
+        if (OB_FAIL(update_all_stats_(tenant_id_, diag_info_))) {
           SERVER_LOG(WARN, "update all stats fail", K(ret), K(tenant_id_));
         }
       }
@@ -450,6 +458,9 @@ int ObAllVirtualSysStat::get_cache_size_(const int64_t tenant_id, ObStatEventSet
       } else if (0 == STRNCMP(inst->status_.config_->cache_name_, "bf_cache", MAX_CACHE_NAME_LENGTH)) {
         stat_events.get(ObStatEventIds::BLOOM_FILTER_CACHE_SIZE - ObStatEventIds::STAT_EVENT_ADD_END -1)->stat_value_
             = inst->status_.map_size_ + inst->status_.store_size_;
+      } else if (0 == STRNCMP(inst->status_.config_->cache_name_, "log_kv_cache", MAX_CACHE_NAME_LENGTH)) {
+        stat_events.get(ObStatEventIds::LOG_KV_CACHE_SIZE - ObStatEventIds::STAT_EVENT_ADD_END -1)->stat_value_
+            = inst->status_.map_size_ + inst->status_.store_size_;
       } else {
         //do nothing
       }
@@ -477,7 +488,7 @@ int ObAllVirtualSysStatI1::get_the_diag_info(
   diag_info.reset();
   if (!is_contain(get_index_ids(), (int64_t)tenant_id)) {
     ret = OB_ITER_END;
-  } else if (OB_FAIL(common::ObDIGlobalTenantCache::get_instance().get_the_diag_info(tenant_id, diag_info))) {
+  } else if (OB_FAIL(share::ObDiagnosticInfoUtil::get_the_diag_info(tenant_id, diag_info))) {
     if (OB_ENTRY_NOT_EXIST == ret) {
       ret = OB_SUCCESS;
     } else {

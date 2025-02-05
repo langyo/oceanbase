@@ -9,12 +9,9 @@
  * MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
  * See the Mulan PubL v2 for more details.
  */
-
+#define USING_LOG_PREFIX SHARE
 
 #include "share/detect/ob_detect_manager.h"
-#include "lib/ob_running_mode.h"
-#include "share/rc/ob_context.h"
-#include "lib/lock/ob_spin_lock.h"
 
 namespace oceanbase {
 namespace common {
@@ -34,18 +31,18 @@ ObDetectableIdGen &ObDetectableIdGen::instance()
 int ObDetectableIdGen::generate_detectable_id(ObDetectableId &detectable_id, uint64_t tenant_id)
 {
   int ret = OB_SUCCESS;
-  // use server id to ensure that the detectable_id is unique in cluster
-  uint64_t server_id = GCTX.server_id_;
-  if (!is_valid_server_id(server_id)) {
+  // use server index to ensure that the detectable_id is unique in cluster
+  uint64_t server_index = GCTX.get_server_index();
+  if (OB_UNLIKELY(!is_valid_server_index(server_index))) {
     ret = OB_SERVER_IS_INIT;
-    LIB_LOG(WARN, "[DM] server id is invalid");
+    LIB_LOG(WARN, "[DM] server index is invalid", K(server_index));
   } else {
     detectable_id.first_ = get_detect_sequence_id();
     // use timestamp to ensure that the detectable_id is unique during the process
     uint64_t timestamp = ObTimeUtility::current_time();
-    // [ server_id (16bits) ][ timestamp (32bits) ]
+    // [ server_index (16bits) ][ timestamp (32bits) ]
     // only if qps > 2^48 or same server reboots after 2^48 the detectable_id be repeated
-    detectable_id.second_ = (server_id) << 48 | (timestamp & 0x0000FFFFFFFFFFFF);
+    detectable_id.second_ = (server_index) << 48 | (timestamp & 0x0000FFFFFFFFFFFF);
     detectable_id.tenant_id_ = tenant_id;
   }
   return ret;
@@ -155,6 +152,18 @@ void ObDMMultiDlist::pop_active_node(
   }
 }
 
+int ObDetectManager::mtl_new(ObDetectManager *&dm)
+{
+  int ret = OB_SUCCESS;
+  uint64_t tenant_id = MTL_ID();
+  dm = OB_NEW(ObDetectManager, ObMemAttr(tenant_id, "DetectManager"), tenant_id);
+  if (OB_ISNULL(dm)) {
+    ret = OB_ALLOCATE_MEMORY_FAILED;
+    LIB_LOG(WARN, "[DM] failed to alloc detect manager", K(ret));
+  }
+  return ret;
+}
+
 int ObDetectManager::mtl_init(ObDetectManager *&dm)
 {
   int ret = OB_SUCCESS;
@@ -165,11 +174,7 @@ int ObDetectManager::mtl_init(ObDetectManager *&dm)
   if (is_meta_tenant(tenant_id)) {
     mem_factor = mem_factor * 0.01;
   }
-  dm = OB_NEW(ObDetectManager, ObMemAttr(tenant_id, "DetectManager"), tenant_id);
-  if (OB_ISNULL(dm)) {
-    ret = OB_ALLOCATE_MEMORY_FAILED;
-    LIB_LOG(WARN, "[DM] failed to alloc detect manager", K(ret));
-  } else if (OB_FAIL(dm->init(GCTX.self_addr(), mem_factor))) {
+  if (OB_FAIL(dm->init(GCTX.self_addr(), mem_factor))) {
     LIB_LOG(WARN, "[DM] failed to init detect manager", K(ret));
   }
   return ret;
@@ -678,6 +683,7 @@ int ObDetectManagerThread::detect() {
           MTL_SWITCH(tenant_ids.at(i)) {
             ObDetectManager* dm = MTL(ObDetectManager*);
             if (OB_ISNULL(dm)) {
+              // ignore ret
               LIB_LOG(WARN, "[DM] dm is null", K(tenant_ids.at(i)));
             } else if (OB_FAIL(dm->gather_requests(req_map_, temp_mem_context))) {
               LIB_LOG(WARN, "[DM] failed to gather_requests", K(tenant_ids.at(i)));
@@ -704,7 +710,7 @@ int ObDetectManagerThread::detect() {
     if (sleep_time < 0) {
       sleep_time = 0;
     } else {
-      ob_usleep(sleep_time);
+      ob_usleep(sleep_time, true/*is_idle_sleep*/);
     }
     ++loop_time;
     LIB_LOG(DEBUG, "[DM] detect has execute ", K(loop_time));
@@ -733,6 +739,7 @@ void ObDetectManagerThread::detect_local(const obrpc::ObTaskStateDetectReq *req)
     MTL_SWITCH(detectable_id.tenant_id_) {
       ObDetectManager* dm = MTL(ObDetectManager*);
       if (OB_ISNULL(dm)) {
+        // ignore ret
         LIB_LOG(WARN, "[DM] dm is null", K(detectable_id.tenant_id_));
       } else {
         dm->do_detect_local(detectable_id);
@@ -807,6 +814,7 @@ void ObDetectManagerThread::handle_one_result(const obrpc::ObDetectRpcStatus &rp
       MTL_SWITCH(detectable_id.tenant_id_) {
         ObDetectManager* dm = MTL(ObDetectManager*);
         if (OB_ISNULL(dm)) {
+          // ignore ret
           LIB_LOG(WARN, "[DM] dm is null", K(detectable_id.tenant_id_));
         } else {
           dm->do_handle_one_result(detectable_id, rpc_status);

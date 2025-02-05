@@ -10,14 +10,9 @@
  * See the Mulan PubL v2 for more details.
  */
 
-#include <gtest/gtest.h>
 #define private public
 #define protected public
 
-#include "lib/random/ob_random.h"
-#include "sql/engine/basic/ob_pushdown_filter.h"
-#include "storage/tablet/ob_tablet.h"
-#include "storage/column_store/ob_cg_prefetcher.h"
 #include "storage/column_store/ob_cg_scanner.h"
 #include "ob_index_block_data_prepare.h"
 
@@ -84,17 +79,9 @@ void TestCGScanner::prepare_cg_query_param(const bool is_reverse_scan, const ObV
   access_param_.iter_param_.vectorized_enabled_ = true;
   access_param_.iter_param_.pd_storage_flag_.pd_blockscan_ = true;
   access_param_.iter_param_.pd_storage_flag_.pd_filter_ = true;
-  access_param_.iter_param_.pd_storage_flag_.use_iter_pool_ = true;
+  access_param_.iter_param_.pd_storage_flag_.use_stmt_iter_pool_ = true;
   access_param_.iter_param_.pd_storage_flag_.use_column_store_ = true;
-  /*
-     ObSEArray<ObColDesc, 1> cg_col_descs;
-     ObTableReadInfo *cg_read_info = nullptr;
-     ASSERT_EQ(OB_SUCCESS, tablet_handle_.get_obj()->get_cg_col_descs(cg_idx, cg_col_descs));
-     ASSERT_EQ(OB_SUCCESS, MTL(ObTenantCGReadInfoMgr *)->get_cg_read_info(cg_col_descs.at(0),
-     ObTabletID(tablet_id_),
-     cg_read_info));
-     */
-  access_param_.iter_param_.read_info_ = cg_read_info_handle_.get_read_info();
+  access_param_.iter_param_.read_info_ = &cg_read_info_;
 
   //jsut for test
   ObQueryFlag query_flag(ObQueryFlag::Forward,
@@ -244,8 +231,8 @@ void TestCGScanner::test_random(const bool is_reverse)
   buf = allocator_.alloc(sizeof(ObCGRowScanner));
   ASSERT_NE(nullptr, buf);
   ObCGRowScanner *cg_scanner = new (buf) ObCGRowScanner();
-  ObCGTableWrapper wrapper;
-  wrapper.cg_sstable_ = &sstable_;
+  ObSSTableWrapper wrapper;
+  wrapper.sstable_ = &sstable_;
   ASSERT_EQ(OB_SUCCESS, cg_scanner->init(access_param_.iter_param_, context_, wrapper));
 
   int retry_cnt = 15;
@@ -327,8 +314,8 @@ void TestCGScanner::test_border(const bool is_reverse)
   buf = allocator_.alloc(sizeof(ObCGRowScanner));
   ASSERT_NE(nullptr, buf);
   ObCGRowScanner *cg_scanner = new (buf) ObCGRowScanner();
-  ObCGTableWrapper wrapper;
-  wrapper.cg_sstable_ = &sstable_;
+  ObSSTableWrapper wrapper;
+  wrapper.sstable_ = &sstable_;
   ASSERT_EQ(OB_SUCCESS, cg_scanner->init(access_param_.iter_param_, context_, wrapper));
 
   int64_t start = 0;
@@ -417,8 +404,8 @@ TEST_F(TestCGScanner, test_large_micro_selected)
   buf = allocator_.alloc(sizeof(ObCGRowScanner));
   ASSERT_NE(nullptr, buf);
   ObCGRowScanner *cg_scanner = new (buf) ObCGRowScanner();
-  ObCGTableWrapper wrapper;
-  wrapper.cg_sstable_ = &sstable_;
+  ObSSTableWrapper wrapper;
+  wrapper.sstable_ = &sstable_;
   ASSERT_EQ(OB_SUCCESS, cg_scanner->init(access_param_.iter_param_, context_, wrapper));
 
   int64_t start = 0;
@@ -426,7 +413,7 @@ TEST_F(TestCGScanner, test_large_micro_selected)
   int64_t sql_batch_size = 256;
   int64_t total_cnt = row_cnt_ / 10;
   ObCGBitmap bitmap(allocator_);
-  bitmap.init(row_cnt_);
+  bitmap.init(row_cnt_, false);
   bitmap.reuse(0);
   for (int64_t i = 0; i < total_cnt; i++) {
     bitmap.set(i * 10);
@@ -561,7 +548,6 @@ TEST_F(TestCGScanner, test_filter)
   filter.datum_params_.push_back(arg_datum);
   filter.filter_.expr_->args_[1] = reinterpret_cast<sql::ObExpr *>(expr_buf3) + 1;
   filter.filter_.expr_->args_[1]->type_ = T_REF_COLUMN;
-  ASSERT_EQ(OB_SUCCESS, filter.init_obj_set());
   filter.cmp_func_ = get_datum_cmp_func(filter.filter_.expr_->args_[0]->obj_meta_, filter.filter_.expr_->args_[0]->obj_meta_);
 
   exprs.init(1);
@@ -578,8 +564,8 @@ TEST_F(TestCGScanner, test_filter)
   buf = allocator_.alloc(sizeof(ObCGRowScanner));
   ASSERT_NE(nullptr, buf);
   ObCGRowScanner *cg_scanner = new (buf) ObCGRowScanner();
-  ObCGTableWrapper wrapper;
-  wrapper.cg_sstable_ = &sstable_;
+  ObSSTableWrapper wrapper;
+  wrapper.sstable_ = &sstable_;
   ASSERT_EQ(OB_SUCCESS, cg_scanner->init(access_param_.iter_param_, context_, wrapper));
 
   sql::PushdownFilterInfo pd_filter;
@@ -592,16 +578,17 @@ TEST_F(TestCGScanner, test_filter)
   pd_filter.datum_buf_ = new (buf3) blocksstable::ObStorageDatum[1]();
   buf3 = allocator_.alloc(sizeof(char *) * pd_filter.batch_size_);
   pd_filter.cell_data_ptrs_ = reinterpret_cast<const char **>(buf3);
-  buf3 = allocator_.alloc(sizeof(int64_t) * pd_filter.batch_size_);
-  pd_filter.row_ids_ = reinterpret_cast<int64_t *>(buf3);
+  buf3 = allocator_.alloc(sizeof(int32_t) * pd_filter.batch_size_);
+  pd_filter.row_ids_ = reinterpret_cast<int32_t *>(buf3);
+  pd_filter.skip_bit_ = to_bit_vector(allocator_.alloc(ObBitVector::memory_size(256)));
   pd_filter.is_inited_ = true;
 
   int64_t start = 5;
   int64_t locate_count = 25;
   ObCGBitmap parent_bitmap(allocator_);
   ObCGBitmap bitmap(allocator_);
-  bitmap.init(locate_count);
-  bitmap.reuse(start, false);
+  bitmap.init(locate_count, false);
+  bitmap.reuse(start);
   ASSERT_EQ(OB_SUCCESS, cg_scanner->locate(ObCSRange(start, locate_count)));
   ASSERT_EQ(OB_SUCCESS, cg_scanner->apply_filter(nullptr, pd_filter, locate_count, &parent_bitmap, bitmap));
 

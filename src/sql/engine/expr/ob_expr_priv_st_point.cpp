@@ -13,14 +13,7 @@
 
 #define USING_LOG_PREFIX SQL_ENG
 #include "sql/engine/expr/ob_expr_priv_st_point.h"
-#include "observer/omt/ob_tenant_srs.h"
-#include "sql/session/ob_sql_session_info.h"
 #include "share/object/ob_obj_cast_util.h"
-#include "lib/geo/ob_geo_func_common.h"
-#include "lib/geo/ob_geo_common.h"
-#include "lib/geo/ob_geo_utils.h"
-#include "lib/geo/ob_geo_bin.h"
-#include "lib/geo/ob_geo.h"
 #include "sql/engine/expr/ob_geo_expr_utils.h"
 
 
@@ -93,38 +86,8 @@ int ObExprPrivSTPoint::calc_result_typeN(ObExprResType& type,
       cast_mode &= ~CM_WARN_ON_FAIL; // make cast return error when fail
       cast_mode |= CM_STRING_INTEGER_TRUNC; // make cast check range when string to int
       type_ctx.set_cast_mode(cast_mode); // cast mode only do work in new sql engine cast frame.
-      type.set_type(ObGeometryType);
-      type.set_collation_level(common::CS_LEVEL_COERCIBLE);
-      type.set_collation_type(CS_TYPE_BINARY);
+      type.set_geometry();
       type.set_length((ObAccuracy::DDL_DEFAULT_ACCURACY[ObGeometryType]).get_length());
-    }
-  }
-
-  return ret;
-}
-
-int ObExprPrivSTPoint::string_to_double(const common::ObString &in_str, ObCollationType cs_type,
-                                        double &res)
-{
-  int ret = OB_SUCCESS;
-
-  if (in_str.empty()) {
-    ret = OB_ERR_DOUBLE_TRUNCATED;
-    LOG_WARN("input string is empty", K(ret), K(in_str));
-  } else {
-    int err = 0;
-    char *endptr = NULL;
-    double out_val = ObCharset::strntodv2(in_str.ptr(), in_str.length(), &endptr, &err);
-    if (EOVERFLOW == err && (-DBL_MAX == out_val || DBL_MAX == out_val)) {
-      ret = OB_DATA_OUT_OF_RANGE;
-      LOG_WARN("value is out of range", K(ret), K(out_val));
-    } else {
-      if (OB_FAIL(check_convert_str_err(in_str.ptr(), endptr, in_str.length(), err, cs_type))) {
-        LOG_WARN("fail to check convert str err", K(ret), K(in_str), K(out_val), K(err));
-        ret = OB_ERR_DOUBLE_TRUNCATED;
-      } else {
-        res = out_val;
-      }
     }
   }
 
@@ -202,9 +165,9 @@ int ObExprPrivSTPoint::eval_priv_st_point(const ObExpr &expr,
     if (!ob_is_string_type(type_y)) {
       y = datum_y->get_double();
     }
-    if (ob_is_string_type(type_x) && OB_FAIL(string_to_double(datum_x->get_string(), arg_x->datum_meta_.cs_type_, x))) {
+    if (ob_is_string_type(type_x) && OB_FAIL(ObGeoExprUtils::string_to_double(datum_x->get_string(), arg_x->datum_meta_.cs_type_, x))) {
       LOG_WARN("fail to get x", K(ret), K(type_x));
-    } else if (ob_is_string_type(type_y) && OB_FAIL(string_to_double(datum_y->get_string(), arg_y->datum_meta_.cs_type_, y))) {
+    } else if (ob_is_string_type(type_y) && OB_FAIL(ObGeoExprUtils::string_to_double(datum_y->get_string(), arg_y->datum_meta_.cs_type_, y))) {
       LOG_WARN("fail to get y", K(ret), K(type_y));
     } else if (OB_FAIL(res_wkb_buf.append(srid))) {
       LOG_WARN("fail to append srid to point wkb buf", K(ret), K(srid));
@@ -225,12 +188,11 @@ int ObExprPrivSTPoint::eval_priv_st_point(const ObExpr &expr,
       double longti = x;
       longti *= srs_item->angular_unit();
       if (longti <= -M_PI || longti > M_PI) {
-        if (OB_FAIL(srs_item->from_radians_to_srs_unit(longti, out_of_range_val))) {
-          LOG_WARN("fail to convert radians to srs unit", K(ret), K(longti), K(srs_item));
-        }
         double min_long_val = 0.0;
         double max_long_val = 0.0;
-        if (OB_FAIL(srs_item->longtitude_convert_from_radians(-M_PI, min_long_val))) {
+        if (OB_FAIL(srs_item->from_radians_to_srs_unit(longti, out_of_range_val))) {
+          LOG_WARN("fail to convert radians to srs unit", K(ret), K(longti), K(srs_item));
+        } else if (OB_FAIL(srs_item->longtitude_convert_from_radians(-M_PI, min_long_val))) {
           LOG_WARN("fail to convert longitude from radians", K(ret));
         } else if (OB_FAIL(srs_item->longtitude_convert_from_radians(M_PI, max_long_val))) {
           LOG_WARN("fail to convert longitude from radians", K(ret));
@@ -243,12 +205,11 @@ int ObExprPrivSTPoint::eval_priv_st_point(const ObExpr &expr,
         double lati = y;
         lati *= srs_item->angular_unit();
         if (lati <= -M_PI_2 || lati > M_PI_2) {
-          if (OB_FAIL(srs_item->from_radians_to_srs_unit(lati, out_of_range_val))) {
-            LOG_WARN("fail to convert radians to srs unit", K(ret), K(lati), K(srs_item));
-          }
           double min_lat_val = 0.0;
           double max_lat_val = 0.0;
-          if (OB_FAIL(srs_item->latitude_convert_from_radians(-M_PI_2, min_lat_val))) {
+          if (OB_FAIL(srs_item->from_radians_to_srs_unit(lati, out_of_range_val))) {
+            LOG_WARN("fail to convert radians to srs unit", K(ret), K(lati), K(srs_item));
+          } else if (OB_FAIL(srs_item->latitude_convert_from_radians(-M_PI_2, min_lat_val))) {
             LOG_WARN("fail to convert latitude from radians", K(ret));
           } else if (OB_FAIL(srs_item->latitude_convert_from_radians(M_PI_2, max_lat_val))) {
             LOG_WARN("fail to convert latitude from radians", K(ret));

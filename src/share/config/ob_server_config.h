@@ -53,13 +53,25 @@ const char* const SSL_EXTERNAL_KMS_INFO = "ssl_external_kms_info";
 const char* const CLUSTER_ID = "cluster_id";
 const char* const CLUSTER_NAME = "cluster";
 const char* const FREEZE_TRIGGER_PERCENTAGE = "freeze_trigger_percentage";
+const char* const _NO_LOGGING = "_no_logging";
 const char* const WRITING_THROTTLEIUNG_TRIGGER_PERCENTAGE = "writing_throttling_trigger_percentage";
+const char* const DATA_DISK_WRITE_LIMIT_PERCENTAGE = "data_disk_write_limit_percentage";
+const char* const DATA_DISK_USAGE_LIMIT_PERCENTAGE = "data_disk_usage_limit_percentage";
+const char* const _TX_SHARE_MEMORY_LIMIT_PERCENTAGE = "_tx_share_memory_limit_percentage";
+const char* const MEMSTORE_LIMIT_PERCENTAGE = "memstore_limit_percentage";
+const char* const TENANT_MEMSTORE_LIMIT_PERCENTAGE = "_memstore_limit_percentage";
+const char* const _TX_DATA_MEMORY_LIMIT_PERCENTAGE = "_tx_data_memory_limit_percentage";
+const char* const _MDS_MEMORY_LIMIT_PERCENTAGE = "_mds_memory_limit_percentage";
 const char* const COMPATIBLE = "compatible";
+const char* const ENABLE_COMPATIBLE_MONOTONIC = "_enable_compatible_monotonic";
 const char* const WEAK_READ_VERSION_REFRESH_INTERVAL = "weak_read_version_refresh_interval";
 const char* const PARTITION_BALANCE_SCHEDULE_INTERVAL = "partition_balance_schedule_interval";
 const char* const BALANCER_IDLE_TIME = "balancer_idle_time";
 const char* const LOG_DISK_UTILIZATION_LIMIT_THRESHOLD = "log_disk_utilization_limit_threshold";
 const char* const LOG_DISK_THROTTLING_PERCENTAGE = "log_disk_throttling_percentage";
+const char* const ARCHIVE_LAG_TARGET = "archive_lag_target";
+const char* const OB_VECTOR_MEMORY_LIMIT_PERCENTAGE = "ob_vector_memory_limit_percentage";
+const char* const _TRANSFER_TASK_TABLET_COUNT_THRESHOLD = "_transfer_task_tablet_count_threshold";
 
 class ObServerMemoryConfig;
 
@@ -79,6 +91,10 @@ public:
   int strict_check_special() const;
   // print all config to log file
   void print() const;
+
+  int add_extra_config(const char *config_str,
+                       const int64_t version = 0,
+                       const bool check_config = true);
 
   double get_sys_tenant_default_min_cpu();
   double get_sys_tenant_default_max_cpu();
@@ -168,7 +184,7 @@ public:
   int64_t get_hidden_sys_memory() { return hidden_sys_memory_; }
   //the extra_memory just used by real sys when non_mini_mode
   int64_t get_extra_memory();
-  void check_500_tenant_hold(bool ignore_error);
+  void check_limit(bool ignore_error);
 
 #ifdef ENABLE_500_MEMORY_LIMIT
   int set_500_tenant_limit(const int64_t limit_mode);

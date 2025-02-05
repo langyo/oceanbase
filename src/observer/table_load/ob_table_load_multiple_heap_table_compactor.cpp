@@ -14,15 +14,12 @@
 
 #include "observer/table_load/ob_table_load_multiple_heap_table_compactor.h"
 #include "observer/table_load/ob_table_load_error_row_handler.h"
-#include "observer/table_load/ob_table_load_service.h"
-#include "observer/table_load/ob_table_load_stat.h"
 #include "observer/table_load/ob_table_load_store_ctx.h"
-#include "observer/table_load/ob_table_load_table_ctx.h"
 #include "observer/table_load/ob_table_load_task.h"
 #include "observer/table_load/ob_table_load_task_scheduler.h"
 #include "observer/table_load/ob_table_load_trans_store.h"
-#include "storage/direct_load/ob_direct_load_multiple_heap_table_builder.h"
 #include "storage/direct_load/ob_direct_load_multiple_heap_table_compactor.h"
+#include "observer/table_load/ob_table_load_store_table_ctx.h"
 
 namespace oceanbase
 {
@@ -85,6 +82,7 @@ public:
   {
     ctx_->inc_ref_count();
     heap_table_allocator_.set_tenant_id(MTL_ID());
+    heap_table_array_.set_tenant_id(MTL_ID());
   }
   virtual ~CompactTaskProcessor()
   {
@@ -117,7 +115,7 @@ public:
       if (OB_ISNULL(sorter)) {
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("unexpected worker", KR(ret), KPC(worker));
-      } else if (FALSE_IT(sorter->set_work_param(index_dir_id_, data_dir_id_, heap_table_array_,
+      } else if (FALSE_IT(sorter->set_work_param(ctx_, index_dir_id_, data_dir_id_, heap_table_array_,
                                                  heap_table_allocator_))) {
       } else if (OB_FAIL(sorter->work())) {
         LOG_WARN("fail to compact", KR(ret));
@@ -142,6 +140,7 @@ private:
     ObArray<ObDirectLoadMultipleHeapTable *> *next_round = &tmp_heap_table_array;
     ObDirectLoadMultipleHeapTableCompactParam heap_table_compact_param;
     ObDirectLoadMultipleHeapTableCompactor heap_table_compactor;
+    tmp_heap_table_array.set_tenant_id(MTL_ID());
     heap_table_compact_param.table_data_desc_ = mem_ctx_->table_data_desc_;
     heap_table_compact_param.file_mgr_ = mem_ctx_->file_mgr_;
     heap_table_compact_param.index_dir_id_ = index_dir_id_;
@@ -155,6 +154,7 @@ private:
       } else {
         heap_table_compactor.reuse();
         std::swap(curr_round, next_round);
+        ATOMIC_AAF(&ctx_->job_stat_->store_.compact_stage_consume_tmp_files_, mem_ctx_->table_data_desc_.merge_count_per_round_ - 1);
       }
     }
     if (OB_SUCC(ret)) {
@@ -171,6 +171,8 @@ private:
           LOG_WARN("fail to do compact", KR(ret));
         } else if (OB_FAIL(mem_ctx_->add_tables_from_table_compactor(heap_table_compactor))) {
           LOG_WARN("fail to add table from table compactor", KR(ret));
+        } else {
+          ATOMIC_AAF(&ctx_->job_stat_->store_.compact_stage_consume_tmp_files_, curr_round->count());
         }
       }
     }
@@ -194,7 +196,7 @@ private:
     int ret = OB_SUCCESS;
     // sort heap table array
     ObTableLoadMultipleHeapTableCompactCompare compare;
-    std::sort(curr_round->begin(), curr_round->end(), compare);
+    lib::ob_sort(curr_round->begin(), curr_round->end(), compare);
     // compact top merge_count_per_round heap table
     for (int64_t i = 0; OB_SUCC(ret) && i < mem_ctx_->table_data_desc_.merge_count_per_round_;
          ++i) {
@@ -290,10 +292,12 @@ private:
 
 ObTableLoadMultipleHeapTableCompactor::ObTableLoadMultipleHeapTableCompactor()
   : store_ctx_(nullptr),
+    store_table_ctx_(nullptr),
     param_(nullptr),
     allocator_("TLD_MemC"),
     finish_task_count_(0)
 {
+  allocator_.set_tenant_id(MTL_ID());
 }
 
 ObTableLoadMultipleHeapTableCompactor::~ObTableLoadMultipleHeapTableCompactor()
@@ -304,6 +308,7 @@ ObTableLoadMultipleHeapTableCompactor::~ObTableLoadMultipleHeapTableCompactor()
 void ObTableLoadMultipleHeapTableCompactor::reset()
 {
   store_ctx_ = nullptr;
+  store_table_ctx_ = nullptr;
   param_ = nullptr;
   finish_task_count_ = 0;
   mem_ctx_.reset();
@@ -315,19 +320,20 @@ int ObTableLoadMultipleHeapTableCompactor::inner_init()
   int ret = OB_SUCCESS;
   const uint64_t tenant_id = MTL_ID();
   store_ctx_ = compact_ctx_->store_ctx_;
+  store_table_ctx_ = compact_ctx_->store_table_ctx_;
   param_ = &(store_ctx_->ctx_->param_);
-  allocator_.set_tenant_id(tenant_id);
 
   mem_ctx_.mem_dump_task_count_ = param_->session_count_ / 3; //暂时先写成1/3，后续再优化
   if (mem_ctx_.mem_dump_task_count_ == 0)  {
     mem_ctx_.mem_dump_task_count_ = 1;
   }
-  mem_ctx_.table_data_desc_ = store_ctx_->table_data_desc_;
-  mem_ctx_.datum_utils_ = &(store_ctx_->ctx_->schema_.datum_utils_);
-  mem_ctx_.need_sort_ = param_->need_sort_;
+  mem_ctx_.table_data_desc_ = store_table_ctx_->table_data_desc_;
+  mem_ctx_.datum_utils_ = &(store_table_ctx_->schema_->datum_utils_);
+  mem_ctx_.need_sort_ = store_table_ctx_->need_sort_;
   mem_ctx_.mem_load_task_count_ = param_->session_count_;
-  mem_ctx_.column_count_ = param_->column_count_;
-  mem_ctx_.dml_row_handler_ = store_ctx_->error_row_handler_;
+  mem_ctx_.column_count_ = (store_table_ctx_->schema_->is_heap_table_ ? store_table_ctx_->schema_->store_column_count_ - 1
+                                                                    : store_table_ctx_->schema_->store_column_count_);
+  mem_ctx_.dml_row_handler_ =  store_table_ctx_->row_handler_;
   mem_ctx_.file_mgr_ = store_ctx_->tmp_file_mgr_;
   mem_ctx_.dup_action_ = param_->dup_action_;
 
@@ -360,7 +366,8 @@ int ObTableLoadMultipleHeapTableCompactor::start()
 int ObTableLoadMultipleHeapTableCompactor::construct_compactors()
 {
   int ret = OB_SUCCESS;
-  ObSEArray<ObTableLoadTransStore *, 64> trans_store_array;
+  ObArray<ObTableLoadTransStore *> trans_store_array;
+  trans_store_array.set_tenant_id(MTL_ID());
   if (OB_FAIL(store_ctx_->get_committed_trans_stores(trans_store_array))) {
     LOG_WARN("fail to get committed trans stores", KR(ret));
   }
@@ -496,9 +503,6 @@ int ObTableLoadMultipleHeapTableCompactor::finish()
   } else if (OB_FAIL(compact_ctx_->handle_table_compact_success())) {
     LOG_WARN("fail to handle_table_compact_success", KR(ret));
   }
-  if (OB_SUCC(ret)) {
-    mem_ctx_.reset(); // mem_ctx的tables已经copy，需要提前释放
-  }
   return ret;
 }
 
@@ -521,6 +525,8 @@ int ObTableLoadMultipleHeapTableCompactor::build_result_for_heap_table()
       LOG_WARN("fail to copy external table", KR(ret));
     } else if (OB_FAIL(result.add_table(copied_multi_heap_sstable))) {
       LOG_WARN("fail to add tablet sstable", KR(ret));
+    } else {
+      LOG_INFO("finish compact", K(i), K(copied_multi_heap_sstable->get_tablet_id()), K(copied_multi_heap_sstable->get_row_count()));
     }
     if (OB_FAIL(ret)) {
       if (nullptr != copied_multi_heap_sstable) {
@@ -528,6 +534,9 @@ int ObTableLoadMultipleHeapTableCompactor::build_result_for_heap_table()
         copied_multi_heap_sstable = nullptr;
       }
     }
+  }
+  if (OB_SUCC(ret)) {
+    mem_ctx_.reset(); // mem_ctx的tables已经copy，需要提前释放
   }
   return ret;
 }

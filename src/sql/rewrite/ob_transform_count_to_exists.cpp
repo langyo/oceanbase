@@ -13,11 +13,8 @@
 #define USING_LOG_PREFIX SQL_REWRITE
 
 #include "ob_transform_count_to_exists.h"
-#include "share/ob_errno.h"
-#include "lib/oblog/ob_log_module.h"
 #include "sql/rewrite/ob_transform_utils.h"
 #include "sql/optimizer/ob_optimizer_util.h"
-#include "sql/resolver/dml/ob_merge_stmt.h"
 namespace oceanbase
 {
 using namespace common;
@@ -96,7 +93,7 @@ int ObTransformCountToExists::construct_transform_hint(ObDMLStmt &stmt, void *tr
         LOG_WARN("get unexpected null", K(ret), K(query_expr));
       } else if (OB_FAIL(query_expr->get_ref_stmt()->get_qb_name(qb_name))) {
         LOG_WARN("failed to get qb name", K(ret));
-      } else if (OB_FAIL(hint->get_qb_name_list().push_back(qb_name))) {
+      } else if (OB_FAIL(hint->get_qb_names().push_back(qb_name))) {
         LOG_WARN("failed to push back qb name", K(ret));
       }
     }
@@ -190,14 +187,21 @@ int ObTransformCountToExists::check_trans_valid(ObDMLStmt *stmt, ObRawExpr *expr
     ObRawExpr *sel_expr = NULL;
     bool is_sel_expr_valid = false;
     bool is_const_expr_valid = false;
+    bool has_rownum = false;
     if (OB_ISNULL(tmp_subquery = tmp_subquery_expr->get_ref_stmt())) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("get unexpected null", K(ret));
     } else if (OB_ISNULL(sel_expr = tmp_subquery->get_select_item(0).expr_)) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("get unexpected null expr", K(ret));
+    } else if (OB_FAIL(tmp_subquery->has_rownum(has_rownum))) {
+      LOG_WARN("failed to check if subquery has rownum", K(ret));
+    } else if (has_rownum) {
+      // do nothing
     } else if (tmp_subquery_expr->get_ref_count() > 1 ||
-               tmp_subquery->has_having() || !tmp_subquery->is_scala_group_by()) {
+               tmp_subquery->has_having() || !tmp_subquery->is_scala_group_by() ||
+               tmp_subquery->has_order_by() || tmp_subquery->has_limit() ||
+               tmp_subquery->has_window_function_filter()) {
       // only scalar group by subquery without having and referred by once can be transformed
       OPT_TRACE("only scalar group by subquery without having and referred by once can be transformed");
     } else if (OB_FAIL(check_sel_expr_valid(sel_expr,
@@ -434,6 +438,7 @@ int ObTransformCountToExists::do_transform(ObDMLStmt *stmt,
         }
         if (OB_FAIL(ret)) {
         } else if (OB_FALSE_IT(subquery->get_select_items().reuse())) {
+        } else if (OB_FALSE_IT(subquery->get_aggr_items().reuse())) {
         } else if (OB_FAIL(ObTransformUtils::create_dummy_select_item(*subquery, ctx_))) {
           LOG_WARN("failed to create dummy select item", K(ret));
         } else if (OB_FAIL(ObOptimizerUtil::remove_item(stmt->get_condition_exprs(),

@@ -1,9 +1,17 @@
-#include <gtest/gtest.h>
+/**
+ * Copyright (c) 2023 OceanBase
+ * OceanBase CE is licensed under Mulan PubL v2.
+ * You can use this software according to the terms and conditions of the Mulan PubL v2.
+ * You may obtain a copy of Mulan PubL v2 at:
+ *          http://license.coscl.org.cn/MulanPubL-2.0
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND,
+ * EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
+ * MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
+ * See the Mulan PubL v2 for more details.
+ */
 #define private public
 #define protected public
 
-#include "storage/blocksstable/index_block/ob_index_block_tree_cursor.h"
-#include "storage/blocksstable/index_block/ob_index_block_macro_iterator.h"
 #include "storage/blocksstable/ob_macro_block_bare_iterator.h"
 #include "ob_index_block_data_prepare.h"
 
@@ -51,12 +59,6 @@ void TestCgSSTable::SetUp()
   ASSERT_EQ(OB_SUCCESS, ls_svr->get_ls(ls_id, ls_handle, ObLSGetMod::STORAGE_MOD));
 
   ASSERT_EQ(OB_SUCCESS, ls_handle.get_ls()->get_tablet(tablet_id, tablet_handle_));
-
-  if (is_cg_data_) {
-    prepare_cg_data();
-  } else {
-    prepare_data();
-  }
 }
 
 void TestCgSSTable::TearDown()
@@ -144,12 +146,6 @@ TEST_F(TestCgSSTable, test_cg_index_tree_cursor)
     cg_rowkey[0].set_int(i);
     OK(tree_cursor.pull_up_to_root());
     OK(tree_cursor.drill_down(rowkey, ObIndexBlockTreeCursor::MoveDepth::LEAF, true, equal, is_beyond_range));
-    // {
-    //   STORAGE_LOG(INFO, "zhuixin debug", K(i), KPC(tree_cursor.curr_path_item_));
-    //   OK(tree_cursor.get_idx_parser(parser));
-    //   OK(tree_cursor.get_current_endkey(endkey));
-    //   STORAGE_LOG(INFO, "zhuixin debug", KPC(parser), K(endkey), K(is_beyond_range));
-    // }
     ASSERT_FALSE(is_beyond_range);
     if (is_macro_start) {
       OK(tree_cursor.get_current_endkey(endkey));
@@ -157,10 +153,6 @@ TEST_F(TestCgSSTable, test_cg_index_tree_cursor)
       is_macro_start = false;
     }
     if ((i + 1) % 100 == 0) {
-      int64_t row_offset = 0;
-      OK(tree_cursor.get_start_row_offset(row_offset));
-      ASSERT_EQ(row_offset, start_row_offset);
-
       OK(tree_cursor.get_idx_parser(parser));
       ASSERT_EQ(parser->get_row_offset(), 99);
 

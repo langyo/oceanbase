@@ -13,12 +13,6 @@
 #define USING_LOG_PREFIX SQL_ENG
 
 #include "ob_temp_table_access_op.h"
-#include "sql/engine/ob_operator_reg.h"
-#include "sql/dtl/ob_dtl_interm_result_manager.h"
-#include "sql/session/ob_sql_session_info.h"
-#include "sql/engine/px/ob_px_util.h"
-#include "sql/engine/ob_physical_plan.h"
-#include "sql/engine/ob_exec_context.h"
 
 namespace oceanbase
 {
@@ -170,9 +164,39 @@ OB_SERIALIZE_MEMBER_INHERIT(ObTempTableAccessOpSpec, ObOpSpec,
 int ObTempTableAccessOp::inner_rescan()
 {
   int ret = OB_SUCCESS;
-  is_started_ = false;
+  int64_t result_id = 0;
   cur_idx_ = 0;
-  return ObOperator::inner_rescan();
+  is_started_ = false;
+  can_rescan_ = true;
+  if (!MY_SPEC.is_distributed_) {
+    interm_result_ids_.reuse();
+    if (OB_FAIL(get_local_interm_result_id(result_id))) {
+      LOG_WARN("failed to get local result id", K(ret));
+    } else if (OB_FAIL(interm_result_ids_.push_back(result_id))) {
+      LOG_WARN("failed to push back result id", K(ret));
+    }
+  } else {
+    int64_t index = 0;
+    bool is_end = false;
+    while (!is_end && OB_SUCC(ret)) {
+      if (OB_FAIL(check_status())) {
+        LOG_WARN("check status failed", K(ret));
+      } else
+      if (OB_FAIL(MY_INPUT.check_finish(is_end, index))) {
+        LOG_WARN("failed to check finish.", K(ret));
+      } else if (!is_end) {
+        result_id = MY_INPUT.interm_result_ids_.at(index);
+        if (OB_FAIL(interm_result_ids_.push_back(result_id))) {
+          LOG_WARN("failed to push back result id", K(ret));
+        }
+      }
+    }
+  }
+  if (OB_SUCC(ret) &&
+      OB_FAIL(ObOperator::inner_rescan())) {
+    LOG_WARN("failed to rescan", K(ret));
+  }
+  return ret;
 }
 
 int ObTempTableAccessOp::inner_open()
@@ -230,7 +254,6 @@ int ObTempTableAccessOp::inner_get_next_row()
   }
   if (OB_SUCC(ret) && is_end) {
     ret = OB_ITER_END;
-    can_rescan_ = true;
   } else if (OB_FAIL(ret)) {
   } else if (OB_ISNULL(tmp_sr)) {
     ret = OB_ERR_UNEXPECTED;
@@ -298,7 +321,6 @@ int ObTempTableAccessOp::inner_get_next_batch(const int64_t max_row_cnt)
     if (is_end) {
       brs_.size_ = 0;
       brs_.end_ = true;
-      can_rescan_ = true;
     } else {
       brs_.size_ = read_rows;
     }

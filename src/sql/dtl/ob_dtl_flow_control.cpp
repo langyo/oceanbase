@@ -13,12 +13,8 @@
 #define USING_LOG_PREFIX SQL_DTL
 
 #include "ob_dtl_flow_control.h"
-#include "share/ob_errno.h"
-#include "ob_dtl_basic_channel.h"
 #include "sql/engine/px/ob_sqc_ctx.h"
-#include "ob_dtl_channel_loop.h"
 #include "ob_dtl_utils.h"
-#include "observer/omt/ob_tenant_config_mgr.h"
 
 using namespace oceanbase::common;
 using namespace oceanbase::omt;
@@ -146,7 +142,7 @@ int ObDtlFlowControl::unregister_all_channel()
   ObDtlChannel* ch = nullptr;
   // 这里不能同时pop出来，否则clean recv list时，根据ch去clean
   for (int i = 0; i < chans_.count(); ++i) {
-    if (OB_ISNULL(ch = chans_.at(i))) {
+    if (nullptr == (ch = chans_.at(i))) {
       LOG_WARN("failed to unregister channel", K(ret));
     } else if (OB_FAIL(ch->clean_recv_list())) {
       LOG_WARN("failed to clean channel", K(ret));
@@ -154,6 +150,7 @@ int ObDtlFlowControl::unregister_all_channel()
   }
   for (int64_t i = chans_.count() - 1; 0 <= i; --i) {
     if (OB_FAIL(chans_.pop_back(ch))) {
+      // overwrite ret
       LOG_WARN("failed to unregister channel", K(ret));
     }
   }

@@ -24,6 +24,7 @@
 #include "rootserver/ddl_task/ob_index_build_task.h"
 #include "rootserver/ddl_task/ob_modify_autoinc_task.h"
 #include "rootserver/ddl_task/ob_table_redefinition_task.h"
+#include "rootserver/ddl_task//ob_partition_split_task.h"
 #include "rootserver/ob_thread_idling.h"
 #include "lib/hash/ob_hashmap.h"
 #include "lib/profile/ob_trace_id.h"
@@ -111,14 +112,17 @@ struct ObPrepareAlterTableArgParam final
 {
 public:
   ObPrepareAlterTableArgParam() :
+    consumer_group_id_(0),
     session_id_(common::OB_INVALID_ID),
     sql_mode_(0),
     tz_info_wrap_(),
     allocator_(lib::ObLabel("PrepAlterTblArg")),
-    nls_formats_{}
+    nls_formats_{},
+    foreign_key_checks_(true)
   {}
   ~ObPrepareAlterTableArgParam() = default;
-  int init(const uint64_t session_id,
+  int init(const int64_t consumer_group_id,
+          const uint64_t session_id,
           const ObSQLMode &sql_mode,
           const ObString &ddl_stmt_str,
           const ObString &orig_table_name,
@@ -126,24 +130,27 @@ public:
           const ObString &target_database_name,
           const ObTimeZoneInfo &tz_info,
           const ObTimeZoneInfoWrap &tz_info_wrap,
-          const ObString *nls_formats);
+          const ObString *nls_formats,
+          const bool foreign_key_checks);
   bool is_valid() const
   {
-    return OB_INVALID_ID != session_id_ &&
-            !orig_table_name_.empty() &&
+    return !orig_table_name_.empty() &&
             !orig_database_name_.empty() &&
             !target_database_name_.empty();
   }
   int set_nls_formats(const common::ObString *nls_formats);
-  TO_STRING_KV(K_(session_id),
+  TO_STRING_KV(K_(consumer_group_id),
+                K_(session_id),
                 K_(sql_mode),
                 K_(ddl_stmt_str),
                 K_(orig_table_name),
                 K_(orig_database_name),
                 K_(target_database_name),
                 K_(tz_info_wrap),
-                "nls_formats", common::ObArrayWrap<ObString>(nls_formats_, common::ObNLSFormatEnum::NLS_MAX));
+                "nls_formats", common::ObArrayWrap<ObString>(nls_formats_, common::ObNLSFormatEnum::NLS_MAX),
+                K_(foreign_key_checks));
 public:
+  int64_t consumer_group_id_;
   uint64_t session_id_;
   ObSQLMode sql_mode_;
   common::ObString ddl_stmt_str_;
@@ -154,6 +161,7 @@ public:
   common::ObTimeZoneInfoWrap tz_info_wrap_;
   common::ObArenaAllocator allocator_;
   common::ObString nls_formats_[common::ObNLSFormatEnum::NLS_MAX];
+  bool foreign_key_checks_;
 };
 
 class ObRedefCallback
@@ -207,13 +215,14 @@ class ObUpdateSSTableCompleteStatusCallback : public ObRedefCallback
 {
 public:
   ObUpdateSSTableCompleteStatusCallback()
-    : ret_code_(OB_SUCCESS)
+    : ret_code_(common::OB_SUCCESS)
   {}
   ~ObUpdateSSTableCompleteStatusCallback() = default;
+  void set_ret_code (const int ret_code) { ret_code_ = ret_code; }
+  int get_ret_code() const { return ret_code_; }
   virtual int update_redef_task_info(ObTableRedefinitionTask& redef_task) override;
   virtual int update_task_info_in_queue(ObTableRedefinitionTask& redef_task,
                                       ObDDLTaskQueue &ddl_task_queue) override;
-  int set_ret_code(const int ret_code);
 private:
   int ret_code_;
 };
@@ -256,6 +265,7 @@ public:
 
   int on_sstable_complement_job_reply(
       const common::ObTabletID &tablet_id,
+      const ObAddr &svr,
       const ObDDLTaskKey &task_key,
       const int64_t snapshot_version,
       const int64_t execution_id,
@@ -267,6 +277,11 @@ public:
       const ObDDLTaskKey &task_key,
       const int ret_code,
       const ObCurTraceId::TraceId &parent_task_trace_id);
+
+  int on_ddl_task_prepare(
+    const ObDDLTaskID &parent_task_id,
+    const int64_t task_id,
+    const ObCurTraceId::TraceId &parent_task_trace_id);
 
   int notify_update_autoinc_end(
       const ObDDLTaskKey &task_key,
@@ -291,6 +306,9 @@ public:
   int prepare_alter_table_arg(const ObPrepareAlterTableArgParam &param,
                               const ObTableSchema *target_table_schema,
                               obrpc::ObAlterTableArg &alter_table_arg);
+  int cache_auto_split_task(const obrpc::ObAutoSplitTabletBatchArg &arg,
+                            obrpc::ObAutoSplitTabletBatchRes &res);
+  int schedule_auto_split_task();
 private:
   class DDLIdling : public ObThreadIdling
   {
@@ -308,7 +326,11 @@ private:
   private:
     void runTimerTask() override;
   private:
+#ifdef ERRSIM
+    static const int64_t DDL_TASK_SCAN_PERIOD = 1000L * 1000L; // 1s
+#else
     static const int64_t DDL_TASK_SCAN_PERIOD = 60 * 1000L * 1000L; // 60s
+#endif
     ObDDLScheduler &ddl_scheduler_;
   };
 
@@ -321,7 +343,11 @@ private:
   private:
     void runTimerTask() override;
   private:
+#ifdef ERRSIM
+    static const int64_t DDL_TASK_CHECK_PERIOD = 1000L * 1000L; // 1s
+#else
     static const int64_t DDL_TASK_CHECK_PERIOD = 30 * 1000L * 1000L; // 30s
+#endif
     ObDDLScheduler &ddl_scheduler_;
   };
 private:
@@ -338,12 +364,52 @@ private:
                               const ObDDLTaskRecord &task_record);
   int create_build_index_task(
       common::ObISQLClient &proxy,
+      const share::ObDDLType &ddl_type,
+      const share::schema::ObTableSchema *data_table_schema,
+      const share::schema::ObTableSchema *index_schema,
+      const int64_t parallelism,
+      const int64_t parent_task_id,
+      const int64_t consumer_group_id,
+      const int32_t sub_task_trace_id,
+      const obrpc::ObCreateIndexArg *create_index_arg,
+      const share::ObDDLType task_type,
+      const uint64_t tenant_data_version,
+      ObIAllocator &allocator,
+      ObDDLTaskRecord &task_record,
+      const int64_t snapshot_version = 0);
+  int create_build_fts_index_task(
+      common::ObISQLClient &proxy,
+      const share::schema::ObTableSchema *data_table_schema,
+      const share::schema::ObTableSchema *index_schema,
+      const int64_t parallelism,
+      const int64_t parent_task_id,
+      const int64_t consumer_group_id,
+      const uint64_t tenant_data_version,
+      const obrpc::ObCreateIndexArg *create_index_arg,
+      ObIAllocator &allocator,
+      ObDDLTaskRecord &task_record,
+      const int64_t snapshot_version = 0);
+  int create_build_vec_ivf_index_task(
+      common::ObISQLClient &proxy,
+      const share::schema::ObTableSchema *data_table_schema,
+      const share::schema::ObTableSchema *index_schema,
+      const int64_t parallelism,
+      const int64_t parent_task_id,
+      const int64_t consumer_group_id,
+      const share::ObDDLType task_type,
+      const obrpc::ObCreateIndexArg *create_index_arg,
+      const uint64_t tenant_data_version,
+      ObIAllocator &allocator,
+      ObDDLTaskRecord &task_record);
+  int create_build_vec_index_task(
+      common::ObISQLClient &proxy,
       const share::schema::ObTableSchema *data_table_schema,
       const share::schema::ObTableSchema *index_schema,
       const int64_t parallelism,
       const int64_t parent_task_id,
       const int64_t consumer_group_id,
       const obrpc::ObCreateIndexArg *create_index_arg,
+      const uint64_t tenant_data_version,
       ObIAllocator &allocator,
       ObDDLTaskRecord &task_record);
   int create_constraint_task(
@@ -355,9 +421,18 @@ private:
       const obrpc::ObAlterTableArg *arg,
       const int64_t parent_task_id,
       const int64_t consumer_group_id,
+      const int32_t sub_task_trace_id,
       ObIAllocator &allocator,
       ObDDLTaskRecord &task_record);
-
+  int create_build_mview_task(
+      common::ObISQLClient &proxy,
+      const share::schema::ObTableSchema *mlog_schema,
+      const int64_t parallelism,
+      const int64_t parent_task_id,
+      const int64_t consumer_group_id,
+      const obrpc::ObMViewCompleteRefreshArg *mview_complete_refresh_arg,
+      ObIAllocator &allocator,
+      ObDDLTaskRecord &task_record);
   int create_table_redefinition_task(
       common::ObISQLClient &proxy,
       const share::ObDDLType &type,
@@ -365,8 +440,12 @@ private:
       const share::schema::ObTableSchema *dest_schema,
       const int64_t parallelism,
       const int64_t consumer_group_id,
+      const int64_t parent_task_id,
       const int64_t task_id,
+      const int32_t sub_task_trace_id,
       const obrpc::ObAlterTableArg *alter_table_arg,
+      const uint64_t tenant_data_version,
+      const bool ddl_need_retry_at_executor,
       ObIAllocator &allocator,
       ObDDLTaskRecord &task_record);
 
@@ -378,7 +457,9 @@ private:
       const int64_t parallelism,
       const int64_t consumer_group_id,
       const int64_t task_id,
+      const int32_t sub_task_trace_id,
       const obrpc::ObAlterTableArg *alter_table_arg,
+      const uint64_t tenant_data_version,
       ObIAllocator &allocator,
       ObDDLTaskRecord &task_record);
 
@@ -390,7 +471,9 @@ private:
       const int64_t parallelism,
       const int64_t consumer_group_id,
       const int64_t task_id,
+      const int32_t sub_task_trace_id,
       const obrpc::ObAlterTableArg *alter_table_arg,
+      const uint64_t tenant_data_version,
       ObIAllocator &allocator,
       ObDDLTaskRecord &task_record);
 
@@ -401,29 +484,107 @@ private:
       const int64_t schema_version,
       const int64_t consumer_group_id,
       const int64_t task_id,
+      const int32_t sub_task_trace_id,
       const obrpc::ObAlterTableArg *alter_table_arg,
+      ObIAllocator &allocator,
+      ObDDLTaskRecord &task_record);
+
+  int create_rebuild_index_task(
+      common::ObISQLClient &proxy,
+      const share::ObDDLType &ddl_type,
+      const ObTableSchema *index_schema,
+      const int64_t parallelism,
+      const int64_t parent_task_id,
+      const int64_t consumer_group_id,
+      const int32_t sub_task_trace_id,
+      const obrpc::ObRebuildIndexArg *rebuild_index_arg,
+      const uint64_t tenant_data_version,
       ObIAllocator &allocator,
       ObDDLTaskRecord &task_record);
 
   int create_drop_index_task(
       common::ObISQLClient &proxy,
+      const share::ObDDLType &ddl_type,
       const share::schema::ObTableSchema *index_schema,
       const int64_t parent_task_id,
       const int64_t consumer_group_id,
+      const int32_t sub_task_trace_id,
       const obrpc::ObDropIndexArg *drop_index_arg,
       ObIAllocator &allocator,
       ObDDLTaskRecord &task_record);
-  
+
+  int create_drop_fts_index_task(
+      common::ObISQLClient &proxy,
+      const share::schema::ObTableSchema *index_schema,
+      const int64_t schema_version,
+      const int64_t consumer_group_id,
+      const share::schema::ObTableSchema *rowkey_doc_schema,
+      const share::schema::ObTableSchema *doc_rowkey_schema,
+      const share::schema::ObTableSchema *domain_index_schema,
+      const share::schema::ObTableSchema *doc_word_schema,
+      const obrpc::ObDropIndexArg *drop_index_arg,
+      ObIAllocator &allocator,
+      ObDDLTaskRecord &task_record);
+
+  int create_drop_vec_ivf_index_task(
+      common::ObISQLClient &proxy,
+      const share::schema::ObTableSchema *index_schema,
+      const int64_t schema_version,
+      const int64_t consumer_group_id,
+      const share::ObDDLType task_type,
+      const share::schema::ObTableSchema *centroid_schema_,
+      const share::schema::ObTableSchema *cid_vector_schema_,
+      const share::schema::ObTableSchema *rowkey_cid_schema,
+      const share::schema::ObTableSchema *sq_meta_schema_,
+      const share::schema::ObTableSchema *pq_centroid_schema_,
+      const share::schema::ObTableSchema *pq_code_schema_,
+      const uint64_t tenant_data_version,
+      const obrpc::ObDropIndexArg *drop_index_arg,
+      ObIAllocator &allocator,
+      ObDDLTaskRecord &task_record);
+
+  int create_drop_vec_index_task(
+      common::ObISQLClient &proxy,
+      const share::schema::ObTableSchema *index_schema,
+      const int64_t schema_version,
+      const int64_t consumer_group_id,
+      const share::schema::ObTableSchema *vid_rowkey_schema_,
+      const share::schema::ObTableSchema *rowkey_vid_schema_,
+      const share::schema::ObTableSchema *domain_index_schema,
+      const share::schema::ObTableSchema *delta_buffer_schema_,
+      const share::schema::ObTableSchema *index_snapshot_data_schema_,
+      const uint64_t tenant_data_version,
+      const obrpc::ObDropIndexArg *drop_index_arg,
+      ObIAllocator &allocator,
+      ObDDLTaskRecord &task_record);
+
+  int create_drop_lob_task(
+      common::ObISQLClient &proxy,
+      const ObCreateDDLTaskParam &param,
+      const uint64_t aux_lob_meta_table_id,
+      ObDDLTaskRecord &task_record);
+
   int create_ddl_retry_task(
       common::ObISQLClient &proxy,
       const uint64_t tenant_id,
       const uint64_t object_id,
       const int64_t schema_version,
       const int64_t consumer_group_id,
+      const int32_t sub_task_trace_id,
       const share::ObDDLType &type,
       const obrpc::ObDDLArg *arg,
       ObIAllocator &allocator,
       ObDDLTaskRecord &task_record);
+
+int create_partition_split_task(
+    common::ObISQLClient &proxy,
+    const share::schema::ObTableSchema *table_schema,
+    const int64_t parallelism,
+    const int64_t parent_task_id,
+    const int64_t task_id,
+    const obrpc::ObPartitionSplitArg *partition_split_arg,
+    ObIAllocator &allocator,
+    ObDDLTaskRecord &task_record);
 
   int create_recover_restore_table_task(
       common::ObISQLClient &proxy,
@@ -433,25 +594,43 @@ private:
       const int64_t parallelism,
       const int64_t consumer_group_id,
       const int64_t task_id,
+      const int32_t sub_task_trace_id,
       const obrpc::ObAlterTableArg *alter_table_arg,
+      const uint64_t tenant_data_version,
       ObIAllocator &allocator,
       ObDDLTaskRecord &task_record);
 
+  int schedule_build_fts_index_task(
+    const ObDDLTaskRecord &task_record);
+  int schedule_build_vec_ivf_index_task(
+      const ObDDLTaskRecord &task_record);
+  int schedule_build_vec_index_task(
+      const ObDDLTaskRecord &task_record);
   int schedule_build_index_task(
       const ObDDLTaskRecord &task_record);
+  int schedule_build_mview_task(const ObDDLTaskRecord &task_record);
   int schedule_drop_primary_key_task(const ObDDLTaskRecord &task_record);
   int schedule_table_redefinition_task(const ObDDLTaskRecord &task_record);
   int schedule_constraint_task(const ObDDLTaskRecord &task_record);
   int schedule_column_redefinition_task(const ObDDLTaskRecord &task_record);
   int schedule_modify_autoinc_task(const ObDDLTaskRecord &task_record);
   int schedule_drop_index_task(const ObDDLTaskRecord &task_record);
+  int schedule_drop_vec_ivf_index_task(const ObDDLTaskRecord &task_record);
+  int schedule_drop_vec_index_task(const ObDDLTaskRecord &task_record);
+  int schedule_rebuild_index_task(const ObDDLTaskRecord &task_record);
+  int schedule_drop_fts_index_task(const ObDDLTaskRecord &task_record);
+  int schedule_drop_lob_task(const ObDDLTaskRecord &task_record);
   int schedule_ddl_retry_task(const ObDDLTaskRecord &task_record);
+  int schedule_partition_split_task(const ObDDLTaskRecord &task_record);
   int schedule_recover_restore_table_task(const ObDDLTaskRecord &task_record);
   int add_sys_task(ObDDLTask *task);
   int remove_sys_task(ObDDLTask *task);
   int add_task_to_longops_mgr(ObDDLTask *ddl_task);
   int remove_task_from_longops_mgr(ObDDLTask *ddl_task);
   int remove_ddl_task(ObDDLTask *ddl_task);
+  void add_event_info(const ObDDLTaskRecord &ddl_record, const ObString &ddl_event_stmt);
+  int check_conflict_with_upgrade(
+      const uint64_t tenant_id);
 
 private:
   static const int64_t TOTAL_LIMIT = 1024L * 1024L * 1024L;

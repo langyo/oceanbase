@@ -11,17 +11,10 @@
  */
 
 #define USING_LOG_PREFIX SQL_PC
-#include "sql/plan_cache/ob_cache_object.h"
-#include "sql/plan_cache/ob_cache_object_factory.h"
-#include "sql/plan_cache/ob_plan_cache.h"
-#include "share/schema/ob_schema_getter_guard.h"
+#include "ob_cache_object.h"
 #include "share/ob_truncated_string.h"
-#include "sql/engine/expr/ob_sql_expression.h"
-#include "sql/engine/ob_exec_context.h"
-#include "sql/engine/ob_physical_plan_ctx.h"
 #include "pl/ob_pl.h"
 
-#include <cstring>
 
 namespace oceanbase
 {
@@ -36,7 +29,7 @@ void ObParamInfo::reset()
   scale_ = 0;
   type_ = common::ObNullType;
   ext_real_type_ = common::ObNullType;
-  is_oracle_empty_string_ = false;
+  is_oracle_null_value_ = false;
   col_type_ = common::CS_TYPE_INVALID;
   precision_ = PRECISION_UNKNOWN_YET;
 }
@@ -46,7 +39,7 @@ OB_SERIALIZE_MEMBER(ObParamInfo,
                     scale_,
                     type_,
                     ext_real_type_,
-                    is_oracle_empty_string_,
+                    is_oracle_null_value_,  // FARM COMPAT WHITELIST
                     col_type_,
                     precision_);
 
@@ -79,8 +72,8 @@ int ObPlanCacheObject::set_params_info(const ParamStore &params)
     param_info.flag_ = params.at(i).get_param_flag();
     param_info.type_ = params.at(i).get_param_meta().get_type();
     param_info.col_type_ = params.at(i).get_collation_type();
-    if (ObSQLUtils::is_oracle_empty_string(params.at(i))) {
-      param_info.is_oracle_empty_string_ = true;
+    if (ObSQLUtils::is_oracle_null_with_normal_type(params.at(i))) {
+      param_info.is_oracle_null_value_ = true;
     }
     if (params.at(i).get_param_meta().get_type() != params.at(i).get_type()) {
       LOG_TRACE("differ in set_params_info",
@@ -88,15 +81,21 @@ int ObPlanCacheObject::set_params_info(const ParamStore &params)
                 K(params.at(i).get_type()),
                 K(common::lbt()));
     }
-    if (params.at(i).is_ext()) {
+    if (params.at(i).is_ext_sql_array()) {
       ObDataType data_type;
       if (OB_FAIL(ObSQLUtils::get_ext_obj_data_type(params.at(i), data_type))) {
         LOG_WARN("fail to get ext obj data type", K(ret));
       } else {
         param_info.ext_real_type_ = data_type.get_obj_type();
         param_info.scale_ = data_type.get_scale();
+        param_info.precision_ = data_type.get_precision();
       }
       LOG_DEBUG("ext params info", K(data_type), K(param_info), K(params.at(i)));
+    } else if (params.at(i).get_param_meta().is_ext() || params.at(i).is_user_defined_sql_type() || params.at(i).is_collection_sql_type()) {
+      param_info.scale_ = 0;
+      uint64_t udt_id = params.at(i).get_accuracy().get_accuracy();
+      *(reinterpret_cast<uint32 *>(&param_info.ext_real_type_)) = (udt_id >> 32) & UINT_MAX32;
+      *(reinterpret_cast<uint32 *>(&param_info.col_type_)) = (udt_id) & UINT_MAX32;
     } else {
       param_info.scale_ = params.at(i).get_scale();
       param_info.precision_ = params.at(i).get_precision();
@@ -171,14 +170,100 @@ int ObPlanCacheObject::check_pre_calc_cons(const bool is_ignore_stmt,
     is_match = false;
     ret = OB_SUCCESS;
   } else {
-    ObObjParam obj_param;
     for (int64_t i = 0; OB_SUCC(ret) && is_match && i < datum_params.count(); ++i) {
-      if (OB_FAIL(datum_params.at(i).to_objparam(obj_param, &exec_ctx.get_allocator()))) {
-        LOG_WARN("failed to obj param", K(ret));
-      } else if (OB_FAIL(pre_calc_con.check_is_match(obj_param, is_match))) {
+      if (OB_FAIL(pre_calc_con.check_is_match(datum_params.at(i), exec_ctx, is_match))) {
         LOG_WARN("failed to check is match", K(ret));
       } // else end
     } // for end
+  }
+  return ret;
+}
+
+// used for add plan
+int ObPlanCacheObject::match_pre_calc_cons(common::ObDList<ObPreCalcExprConstraint> &cached_cons,
+                                           const ObPlanCacheCtx &pc_ctx,
+                                           const bool is_ignore_stmt,
+                                           bool &is_matched)
+{
+  int ret = OB_SUCCESS;
+  is_matched = false;
+  const ObDList<ObPreCalcExprConstraint> *cur_cons = pc_ctx.sql_ctx_.all_pre_calc_constraints_;
+  if (OB_ISNULL(cur_cons)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("get unexpected null", K(pc_ctx.sql_ctx_.all_pre_calc_constraints_));
+  } else if (cached_cons.get_size() != cur_cons->get_size()) {
+    is_matched = false;
+  } else {
+    is_matched = true;
+    bool finish = false;
+    ObPreCalcExprConstraint *cached_con = cached_cons.get_first();
+    const ObPreCalcExprConstraint *cur_con = cur_cons->get_first();
+    while (!finish && is_matched && OB_SUCC(ret)) {
+      if (cached_cons.get_header() == cached_con || cur_cons->get_header() == cur_con) {
+        finish = true;
+        is_matched = (cached_cons.get_header() == cached_con) && (cur_cons->get_header() == cur_con);
+      } else if (OB_ISNULL(cached_con) || OB_ISNULL(cur_con)) {
+        is_matched = false;
+      } else if (OB_FAIL(check_pre_calc_cons(is_ignore_stmt, is_matched, *cached_con, pc_ctx.exec_ctx_))) {
+        LOG_WARN("failed to pre calculate expression and match constraint", K(ret));
+      } else if (!is_matched) {
+      } else if (OB_FAIL(is_same_pre_calc_cons(*cached_con, *cur_con, is_matched))) {
+        LOG_WARN("failed to check is same pre calc cons", K(ret));
+      } else if (!is_matched) {
+      } else {
+        cached_con = cached_con->get_next();
+        cur_con = cur_con->get_next();
+      }
+    }
+  }
+  return ret;
+}
+
+// check two pre calc expr constraint is same
+int ObPlanCacheObject::is_same_pre_calc_cons(const ObPreCalcExprConstraint &cons1,
+                                             const ObPreCalcExprConstraint &cons2,
+                                             bool &is_same)
+{
+  int ret = OB_SUCCESS;
+  is_same = false;
+  const ObIArray<ObExpr*> &rt_exprs1 = cons1.pre_calc_expr_info_.pre_calc_rt_exprs_;
+  const ObIArray<ObExpr*> &rt_exprs2 = cons2.pre_calc_expr_info_.pre_calc_rt_exprs_;
+  if (cons1.expect_result_ != cons2.expect_result_
+      || rt_exprs1.count() != rt_exprs2.count()) {
+    is_same = false;
+  } else {
+    is_same = true;
+    for (int64_t i = 0; is_same && OB_SUCC(ret) && i < rt_exprs1.count(); ++i) {
+      if (OB_FAIL(is_same_expr(rt_exprs1.at(i), rt_exprs2.at(i), is_same))) {
+        LOG_WARN("failed to check is is_same_expr", K(ret));
+      }
+    }
+  }
+  return ret;
+}
+
+// just recursively check ObExpr count and type now
+// todo: compare more informations for ObExpr tree
+int ObPlanCacheObject::is_same_expr(const ObExpr *expr1,
+                                    const ObExpr *expr2,
+                                    bool &is_same)
+{
+  int ret = OB_SUCCESS;
+  is_same = false;
+  if (NULL == expr1 || NULL == expr2) {
+    is_same = (expr1 == expr2);
+  } else if (expr1->type_ != expr2->type_ || expr1->arg_cnt_ != expr2->arg_cnt_) {
+    is_same = false;
+  } else if (T_QUESTIONMARK == expr1->type_) {
+    // check param_idx is same
+    is_same = expr1->extra_ == expr2->extra_;
+  } else {
+    is_same = true;
+    for (int64_t i = 0; is_same && OB_SUCC(ret) && i < expr1->arg_cnt_; ++i) {
+      if (OB_FAIL(SMART_CALL(is_same_expr(expr1->args_[i], expr2->args_[i], is_same)))) {
+        LOG_WARN("failed to smart call check is is_same_expr", K(ret));
+      }
+    }
   }
   return ret;
 }
@@ -345,7 +430,7 @@ int ObPlanCacheObject::type_to_name(const ObLibCacheNameSpace ns,
                                     common::ObString &type_name)
 {
   int ret = OB_SUCCESS;
-  const char* type_strs[] = {"NS_INVALID", "SQL_PLAN", "PROCEDURE", "FUNCTION", "ANONYMOUS", "TRIGGER", "PACKAGE", "NS_MAX"};
+  const char* type_strs[] = {"NS_INVALID", "SQL_PLAN", "PROCEDURE", "FUNCTION", "ANONYMOUS", "TRIGGER", "PACKAGE", "TABLEAPI", "CALLSTMT", "NS_MAX"};
   char *buf = NULL;
   if (ns <= NS_INVALID || ns >= NS_MAX) {
     ret = OB_INVALID_ARGUMENT;

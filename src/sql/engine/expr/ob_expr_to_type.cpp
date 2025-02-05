@@ -12,9 +12,7 @@
 
 #define USING_LOG_PREFIX SQL_ENG
 #include "sql/engine/expr/ob_expr_to_type.h"
-#include "sql/engine/expr/ob_datum_cast.h"
-#include "sql/session/ob_sql_session_info.h"
-#include "common/sql_mode/ob_sql_mode_utils.h"
+#include "src/sql/session/ob_sql_session_info.h"
 #include "sql/engine/expr/ob_expr_result_type_util.h"
 
 namespace oceanbase
@@ -96,7 +94,7 @@ int ObExprToType::calc_result_type_for_literal(ObExprResType &type, ObExprResTyp
     ObCollationType cast_coll_type = CS_TYPE_INVALID;
     bool nonstring_to_string = false;
     ObCastMode cast_mode = CM_NONE;
-    if (OB_FAIL(ObSQLUtils::get_default_cast_mode(type_ctx.get_session(), cast_mode))) {
+    if (FALSE_IT(ObSQLUtils::get_default_cast_mode(type_ctx.get_sql_mode(), cast_mode))) {
       LOG_WARN("failed to get default cast mode", K(ret));
     } else if ((!ob_is_string_type(type1.get_type())) && ob_is_string_or_lob_type(expect_type_)) {
       nonstring_to_string = true;
@@ -200,7 +198,8 @@ int ObExprToType::calc_result_type_for_column(ObExprResType &type,
     type.set_accuracy(ObAccuracy::MAX_ACCURACY2[get_compatibility_mode()][expect_type_]);
 
     if (ob_is_enumset_tc(type1.get_type())) {
-      ObObjType calc_type = enumset_calc_types_[OBJ_TYPE_TO_CLASS[expect_type_]];
+      // There is no need to check whether it is enumset with subschema
+      ObObjType calc_type = get_enumset_calc_type(expect_type_, OB_INVALID_INDEX);
       if (OB_UNLIKELY(ObMaxType == calc_type)) {
         ret = OB_ERR_UNEXPECTED;
         SQL_ENG_LOG(WARN, "invalid type of parameter ", K(expect_type_), K(ret));
@@ -240,6 +239,16 @@ int ObExprToType::cg_expr(ObExprCGCtx &expr_cg_ctx, const ObRawExpr &raw_expr,
   int ret = OB_ERR_UNEXPECTED;
   LOG_WARN("unexpected, new engine should not use to_type expr", K(ret));
   return  ret;
+}
+
+DEF_SET_LOCAL_SESSION_VARS(ObExprToType, raw_expr) {
+  int ret = OB_SUCCESS;
+  if (is_mysql_mode()) {
+    SET_LOCAL_SYSVAR_CAPACITY(2);
+    EXPR_ADD_LOCAL_SYSVAR(share::SYS_VAR_SQL_MODE);
+    EXPR_ADD_LOCAL_SYSVAR(share::SYS_VAR_COLLATION_CONNECTION);
+  }
+  return ret;
 }
 
 }

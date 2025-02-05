@@ -13,11 +13,8 @@
 #define USING_LOG_PREFIX SQL
 
 #include <gtest/gtest.h>
-//#include "lib/utility/ob_test_util.h"
-//#include "sql/engine/test_engine_util.h"
 #include "sql/ob_sql_init.h"
 #include "sql/engine/cmd/ob_load_data_impl.h"
-#include "sql/engine/cmd/ob_load_data_parser.h"
 
 static char *file_path = NULL;
 
@@ -97,7 +94,7 @@ TEST_F(TestParser, csv_parser)
       file_name = f_meta.file_name;
     }
 
-    ObFileReader reader;
+    oceanbase::common::ObFileReader reader;
     ASSERT_EQ(OB_SUCCESS, reader.open(file_name.c_str(), false));
     int64_t file_size = get_file_size(file_name.c_str());
     int64_t total_read_bytes = 0;
@@ -169,7 +166,7 @@ TEST_F(TestParser, general_parser)
       file_name = f_meta.file_name;
     }
 
-    ObFileReader reader;
+    oceanbase::common::ObFileReader reader;
     ASSERT_EQ(OB_SUCCESS, reader.open(file_name.c_str(), false));
     int64_t file_size = get_file_size(file_name.c_str());
     int64_t total_read_bytes = 0;
@@ -252,7 +249,7 @@ TEST_F(TestParser, general_parser_escape)
     file_name = f_meta.file_name;
   }
 
-  ObFileReader reader;
+  oceanbase::common::ObFileReader reader;
   ASSERT_EQ(OB_SUCCESS, reader.open(file_name.c_str(), false));
   int64_t file_size = get_file_size(file_name.c_str());
   int64_t total_read_bytes = 0;

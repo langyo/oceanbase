@@ -20,7 +20,7 @@
 #include "storage/blocksstable/ob_block_manager.h"
 #include "storage/blocksstable/index_block/ob_index_block_tree_cursor.h"
 #include "storage/blocksstable/ob_macro_block_reader.h"
-#include "storage/blocksstable/index_block/ob_index_block_macro_iterator.h"
+#include "storage/blocksstable/index_block/ob_index_block_dual_meta_iterator.h"
 #include "storage/blocksstable/ob_block_manager.h"
 
 namespace oceanbase
@@ -69,7 +69,7 @@ class ObIndexBlockMicroIterator
 {
 public:
   ObIndexBlockMicroIterator();
-  virtual ~ObIndexBlockMicroIterator() {}
+  virtual ~ObIndexBlockMicroIterator() { reset(); }
 
   int init(
       const blocksstable::ObMacroBlockDesc &macro_desc,
@@ -93,7 +93,7 @@ private:
   ObMacroBlockDataIterator data_iter_;
   blocksstable::ObDatumRange range_;
   blocksstable::ObMicroBlock micro_block_;
-  blocksstable::ObMacroBlockHandle macro_handle_;
+  blocksstable::ObStorageObjectHandle macro_handle_;
   blocksstable::ObCGRowKeyTransHelper rowkey_helper_;
   common::ObArenaAllocator allocator_;
   bool is_inited_;

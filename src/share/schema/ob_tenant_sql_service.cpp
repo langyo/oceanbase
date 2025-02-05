@@ -12,17 +12,9 @@
 
 #define USING_LOG_PREFIX SHARE_SCHEMA
 #include "ob_tenant_sql_service.h"
-#include "lib/oblog/ob_log.h"
-#include "lib/oblog/ob_log_module.h"
-#include "lib/string/ob_sql_string.h"
-#include "lib/mysqlclient/ob_isql_client.h"
-#include "share/ob_dml_sql_splicer.h"
-#include "share/inner_table/ob_inner_table_schema_constants.h"
-#include "share/schema/ob_schema_struct.h"
-#include "share/schema/ob_schema_service.h"
-#include "share/ob_zone_merge_table_operator.h"
-#include "share/ob_share_util.h" // for ObShareUtils
+#include "rootserver/tenant_snapshot/ob_tenant_snapshot_util.h"  // for ObTenantSnapshotUtil
 #include "sql/ob_sql_utils.h"
+#include "rootserver/ob_rs_job_table_operator.h"
 
 namespace oceanbase
 {
@@ -78,7 +70,10 @@ int ObTenantSqlService::alter_tenant(
     LOG_WARN("invalid tenant schema", K(tenant_schema), K(ret));
   } else if (OB_FAIL(sql::ObSQLUtils::is_charset_data_version_valid(tenant_schema.get_charset_type(),
                                                                     tenant_schema.get_tenant_id()))) {
-    LOG_WARN("failed to check charset data version valid", K(ret));
+    LOG_WARN("failed to check charset data version valid", K(tenant_schema.get_charset_type()), K(ret));
+  } else if (OB_FAIL(sql::ObSQLUtils::is_collation_data_version_valid(tenant_schema.get_collation_type(),
+                                                                      tenant_schema.get_tenant_id()))) {
+    LOG_WARN("failed to check charset data version valid", K(tenant_schema.get_collation_type()), K(ret));
   } else if (OB_FAIL(replace_tenant(tenant_schema, op, sql_client, ddl_stmt_str))) {
     LOG_WARN("replace_tenant failed", K(tenant_schema), K(op), K(ret));
   }
@@ -87,15 +82,25 @@ int ObTenantSqlService::alter_tenant(
 
 int ObTenantSqlService::delay_to_drop_tenant(
     const ObTenantSchema &tenant_schema,
-    ObISQLClient &sql_client,
+    ObMySQLTransaction &trans,
     const ObString *ddl_stmt_str)
 {
   int ret = OB_SUCCESS;
   const ObSchemaOperationType op = OB_DDL_DEL_TENANT_START;
+  rootserver::ObConflictCaseWithClone case_to_check(rootserver::ObConflictCaseWithClone::DELAY_DROP_TENANT);
+  uint64_t tenant_id_to_check_clone = tenant_schema.get_tenant_id();
   if (!tenant_schema.is_valid()) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid tenant schema", K(tenant_schema), K(ret));
-  } else if (OB_FAIL(replace_tenant(tenant_schema, op, sql_client, ddl_stmt_str))) {
+  } else if (!is_user_tenant(tenant_id_to_check_clone)) {
+    // sys tenant and meta tenant can not in clone procedure
+  } else if (OB_FAIL(rootserver::ObTenantSnapshotUtil::lock_status_for_tenant(trans, tenant_id_to_check_clone))) {
+    LOG_WARN("fail to lock __all_tenant for clone check", KR(ret), K(tenant_id_to_check_clone));
+  } else if (OB_FAIL(rootserver::ObTenantSnapshotUtil::check_tenant_not_in_cloning_procedure(tenant_id_to_check_clone, case_to_check))) {
+    LOG_WARN("fail to check whether tenant is cloning", KR(ret), K(tenant_id_to_check_clone), K(case_to_check));
+  }
+  if (OB_FAIL(ret)) {
+  } else if (OB_FAIL(replace_tenant(tenant_schema, op, trans, ddl_stmt_str))) {
     LOG_WARN("replace_tenant failed", K(tenant_schema), K(op), K(ret));
   }
   return ret;
@@ -155,6 +160,10 @@ int ObTenantSqlService::delete_tenant(
     }
   }
 
+  if (FAILEDx(RS_JOB_COMPLETE_ALL_JOB_FOR_DROPPING_TENANT(tenant_id, sql_client))) {
+    LOG_WARN("fail to complete all rs job for dropping tenant", KR(ret), K(tenant_id));
+  }
+
   if (OB_SUCC(ret)) {
     ObSchemaOperation delete_tenant_op;
     delete_tenant_op.tenant_id_ = tenant_id;
@@ -172,31 +181,6 @@ int ObTenantSqlService::delete_tenant(
   return ret;
 }
 
-int ObTenantSqlService::delete_tenant_content(
-    ObISQLClient &client,
-    const uint64_t tenant_id,
-    const char *table_name)
-{
-  int ret = OB_SUCCESS;
-  ObSqlString sql;
-  int64_t affected_rows = 0;
-  const uint64_t exec_tenant_id = ObSchemaUtils::get_exec_tenant_id(tenant_id);
-  if (OB_INVALID_ID == tenant_id) {
-    ret = OB_INVALID_ARGUMENT;
-    LOG_WARN("invalid tenant_id", K(tenant_id), K(ret));
-  } else if (OB_ISNULL(table_name)) {
-    ret = OB_INVALID_ARGUMENT;
-    LOG_WARN("table_name is null", K(ret));
-  } else if (OB_FAIL(sql.assign_fmt("DELETE FROM %s WHERE tenant_id = %lu",
-                                    table_name,
-                                    ObSchemaUtils::get_extract_tenant_id(exec_tenant_id, tenant_id)))) {
-    LOG_WARN("assign_fmt failed", K(ret));
-  } else if (OB_FAIL(client.write(exec_tenant_id, sql.ptr(), affected_rows))) {
-    LOG_WARN("execute sql failed", K(sql), K(ret));
-  }
-  return ret;
-}
-
 int ObTenantSqlService::replace_tenant(
     const ObTenantSchema &tenant_schema,
     const ObSchemaOperationType op,
@@ -208,8 +192,9 @@ int ObTenantSqlService::replace_tenant(
   char *zone_list_buf = NULL;
   if (!tenant_schema.is_valid()) {
     ret = OB_INVALID_ARGUMENT;
+    ObCStringHelper helper;
     LOG_WARN("tenant_schema is invalid", "tenant_schema",
-        to_cstring(tenant_schema), K(ret));
+        helper.convert(tenant_schema), K(ret));
   } else if (OB_DDL_ADD_TENANT != op
              && OB_DDL_ADD_TENANT_START != op
              && OB_DDL_ADD_TENANT_END != op

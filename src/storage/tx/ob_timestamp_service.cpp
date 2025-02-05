@@ -12,13 +12,9 @@
 
 #include "ob_timestamp_service.h"
 #include "ob_standby_timestamp_service.h"
-#include "ob_trans_event.h"
-#include "observer/ob_server_struct.h"
 #include "observer/ob_srv_network_frame.h"
 #include "ob_timestamp_access.h"
-#include "storage/tx_storage/ob_ls_map.h"
 #include "storage/tx_storage/ob_ls_service.h"
-#include "share/scn.h"
 
 namespace oceanbase
 {
@@ -33,6 +29,9 @@ int ObTimestampService::init(rpc::frame::ObReqTransport *req_transport)
   self_ = self;
   service_type_ = ServiceType::TimestampService;
   pre_allocated_range_ = TIMESTAMP_PREALLOCATED_RANGE;
+  ATOMIC_STORE(&last_gts_, 0);
+  ATOMIC_STORE(&last_request_ts_, 0);
+  ATOMIC_STORE(&check_gts_speed_lock_, 0);
   return rpc_.init(req_transport, self);
 }
 
@@ -46,6 +45,69 @@ int ObTimestampService::mtl_init(ObTimestampService *&timestamp_service)
   } else {
     ret = timestamp_service->init(req_transport);
   }
+  return ret;
+}
+
+// The interface for getting gts timestamp, actually a wrapper of ObIDService::get_number.
+//
+// For most cases, the gts service uses the machine clock's time as gts timestamp, which means
+// the gts service advances as fast as the machine clock. Howerver, when the gts service switches
+// leader, the new leader will pre-allocate a range of timestamps, and this can lead to the gts
+// timestamp becoming larger than the machine clock's time. Then the gts service will slow down to
+// wait the machine clock. But we don't want the gts service to advance too slowly(when the request
+// rate is low), since the observer may wait too long before the gts timestamp crosses log SCN.
+// So we periodically check the gts service's advancing speed, and if it's far slower than the
+// machine clock, we manually push the gts ahead.
+int ObTimestampService::get_timestamp(int64_t &gts)
+{
+  int ret = OB_SUCCESS;
+  int64_t unused_id;
+  // 100ms
+  const int64_t CHECK_INTERVAL = 100000000;
+  const int64_t current_time = ObClockGenerator::getClock() * 1000;
+  int64_t last_request_ts = ATOMIC_LOAD(&last_request_ts_);
+  int64_t time_delta = current_time - last_request_ts;
+
+  ret = get_number(1, current_time, gts, unused_id);
+
+  if (OB_SUCC(ret)) {
+    if ((last_request_ts == 0 || time_delta < 0) && ATOMIC_BCAS(&check_gts_speed_lock_, 0, 1)) {
+      last_request_ts = ATOMIC_LOAD(&last_request_ts_);
+      time_delta = current_time - last_request_ts;
+      // before, we only do a fast check, and we should check again after we get the lock
+      if (last_request_ts == 0 || time_delta < 0) {
+        ATOMIC_STORE(&last_request_ts_, current_time);
+        ATOMIC_STORE(&last_gts_, gts);
+      }
+      ATOMIC_STORE(&check_gts_speed_lock_, 0);
+    } else if (time_delta > CHECK_INTERVAL && ATOMIC_BCAS(&check_gts_speed_lock_, 0, 1)) {
+      last_request_ts = ATOMIC_LOAD(&last_request_ts_);
+      time_delta = current_time - last_request_ts;
+      // before, we only do a fast check, and we should check again after we get the lock
+      if (time_delta > CHECK_INTERVAL) {
+        const int64_t last_gts = ATOMIC_LOAD(&last_gts_);
+        const int64_t gts_delta = gts - last_gts;
+        const int64_t compensation_threshold = time_delta / 2;
+        const int64_t compensation_value = time_delta / 10;
+        // if the gts service advanced too slowly, then we add it up with `compensation_value`
+        if (time_delta - gts_delta > compensation_threshold) {
+          ret = get_number(compensation_value, current_time, gts, unused_id);
+          TRANS_LOG(WARN, "the gts service advanced too slowly", K(ret), K(current_time),
+              K(last_request_ts), K(time_delta), K(last_gts), K(gts), K(gts_delta),
+              K(compensation_value));
+        }
+        if (OB_SUCC(ret)) {
+          ATOMIC_STORE(&last_request_ts_, current_time);
+          ATOMIC_STORE(&last_gts_, gts);
+        }
+        TRANS_LOG(DEBUG, "check the gts service advancing speed", K(ret), K(current_time),
+            K(last_request_ts), K(time_delta), K(last_gts), K(gts), K(gts_delta),
+            K(compensation_value));
+      }
+      ATOMIC_STORE(&check_gts_speed_lock_, 0);
+    }
+  }
+
   return ret;
 }
 
@@ -66,12 +128,11 @@ int ObTimestampService::handle_request(const ObGtsRequest &request, ObGtsRpcResu
     const MonotonicTs srr = request.get_srr();
     const uint64_t tenant_id = request.get_tenant_id();
     const ObAddr &requester = request.get_sender();
-    int64_t end_id = 0;
     if (requester == self_) {
      // Go local call to get gts
      TRANS_LOG(DEBUG, "handle local gts request", K(requester));
      ret = handle_local_request_(request, result);
-    } else if (OB_FAIL(get_number(1, ObTimeUtility::current_time_ns(), gts, end_id))) {
+    } else if (OB_FAIL(get_timestamp(gts))) {
       if (EXECUTE_COUNT_PER_SEC(10)) {
         TRANS_LOG(WARN, "get timestamp failed", KR(ret));
       }
@@ -114,14 +175,27 @@ int ObTimestampService::handle_request(const ObGtsRequest &request, ObGtsRpcResu
   return ret;
 }
 
+#ifndef ERRSIM
+ERRSIM_POINT_DEF(EN_GTS_HANDLE_REQUEST)
+#endif
+
 int ObTimestampService::handle_local_request_(const ObGtsRequest &request, obrpc::ObGtsRpcResult &result)
 {
   int ret = OB_SUCCESS;
   int64_t gts = 0;
   const uint64_t tenant_id = request.get_tenant_id();
   const MonotonicTs srr = request.get_srr();
-  int64_t end_id = 0;
-  if (OB_FAIL(get_number(1, ObTimeUtility::current_time_ns(), gts, end_id))) {
+#ifndef ERRSIM
+  ret = EN_GTS_HANDLE_REQUEST;
+#endif
+  // the fisrt case for errsim
+  if (OB_SUCCESS != ret) {
+    TRANS_LOG(WARN, "errsim for gts handle local request", KR(ret));
+    int tmp_ret = OB_SUCCESS;
+    if (OB_SUCCESS != (tmp_ret = result.init(tenant_id, ret, srr, 0, 0))) {
+      TRANS_LOG(WARN, "gts result init failed", K(tmp_ret), K(request));
+    }
+  } else if (OB_FAIL(get_timestamp(gts))) {
     if (EXECUTE_COUNT_PER_SEC(10)) {
       TRANS_LOG(WARN, "get timestamp failed", KR(ret));
     }

@@ -63,6 +63,8 @@ protected:
     int64_t sub_part_id_;
     int64_t sub_part_idx_;
     PartitionType partition_type_;
+
+    common::ObString external_location_;
     TO_STRING_KV(K_(tenant_id),
                  K_(table_id),
                  K_(tablet_id),
@@ -78,7 +80,8 @@ protected:
                  K_(sub_part_num),
                  K_(sub_part_id),
                  K_(sub_part_idx),
-                 K_(partition_type));
+                 K_(partition_type),
+                 K_(external_location));
   };
   virtual int extract_part_info(PartInfo &part_info) = 0;
   virtual int convert_to_dml(const PartInfo &part_info, ObDMLSqlSplicer &dml) = 0;
@@ -318,6 +321,50 @@ private:
   DISALLOW_COPY_AND_ASSIGN(ObDropPartInfoHelper);
 };
 
+// update partition
+class ObUpdatePartHelper
+{
+public:
+  ObUpdatePartHelper(const ObPartitionSchema *ori_table,
+                     const ObPartitionSchema *upd_table,
+                     const int64_t schema_version,
+                     common::ObISQLClient &sql_client)
+      : ori_table_(ori_table),
+        upd_table_(upd_table),
+        schema_version_(schema_version),
+        sql_client_(sql_client) {}
+  virtual ~ObUpdatePartHelper() {}
+  int update_partition_info();
+private:
+  const ObPartitionSchema *ori_table_;
+  const ObPartitionSchema *upd_table_;
+  int64_t schema_version_;
+  common::ObISQLClient &sql_client_;
+  DISALLOW_COPY_AND_ASSIGN(ObUpdatePartHelper);
+};
+
+// split partition
+class ObAddSplitIncPartHelper
+{
+public:
+  ObAddSplitIncPartHelper(const ObPartitionSchema *ori_table,
+                          const ObPartitionSchema *inc_table,
+                          const int64_t schema_version,
+                          common::ObISQLClient &sql_client)
+      : ori_table_(ori_table),
+        inc_table_(inc_table),
+        schema_version_(schema_version),
+        sql_client_(sql_client) {}
+  virtual ~ObAddSplitIncPartHelper() {}
+  int add_split_partition_info();
+private:
+  const ObPartitionSchema *ori_table_;
+  const ObPartitionSchema *inc_table_;
+  int64_t schema_version_;
+  common::ObISQLClient &sql_client_;
+  DISALLOW_COPY_AND_ASSIGN(ObAddSplitIncPartHelper);
+};
+
 // add/truncate partition
 class ObAddIncPartHelper
 {
@@ -419,7 +466,7 @@ public:
         schema_version_(schema_version),
         sql_client_(sql_client) {}
   virtual ~ObRenameIncPartHelper() {}
-  int rename_partition_info();
+  int rename_partition_info(const bool update_part_idx);
 private:
   const ObPartitionSchema *ori_table_;
   const ObPartitionSchema *inc_table_;

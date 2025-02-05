@@ -29,6 +29,15 @@ class ObExprAutoincNextval : public ObFuncExprOperator
   OB_UNIS_VERSION_V(1);
 public:
   explicit  ObExprAutoincNextval(common::ObIAllocator &alloc);
+  ObExprAutoincNextval(
+      common::ObIAllocator &alloc,
+      ObExprOperatorType type,
+      const char *name,
+      int32_t param_num,
+      ObValidForGeneratedColFlag valid_for_generated_col,
+      int32_t dimension,
+      bool is_internal_for_mysql = false,
+      bool is_internal_for_oracle = false);
   virtual ~ObExprAutoincNextval();
 
   virtual int calc_result_typeN(ObExprResType &type,
@@ -55,6 +64,7 @@ private:
   static int generate_autoinc_value(const ObSQLSessionInfo &my_session,
                                     uint64_t &new_val,
                                     share::ObAutoincrementService &auto_service,
+                                    ObEvalCtx &ctx,
                                     share::AutoincParam *autoinc_param,
                                     ObPhysicalPlanCtx *plan_ctx);
 

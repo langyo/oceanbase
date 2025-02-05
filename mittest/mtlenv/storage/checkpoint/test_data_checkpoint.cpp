@@ -1,3 +1,6 @@
+// owner: gengli.wzy
+// owner group: transaction
+
 /**
  * Copyright (c) 2021 OceanBase
  * OceanBase CE is licensed under Mulan PubL v2.
@@ -10,17 +13,10 @@
  * See the Mulan PubL v2 for more details.
  */
 
-#include <gtest/gtest.h>
 #define protected public
 #define private public
-#include "storage/checkpoint/ob_freeze_checkpoint.h"
-#include "storage/checkpoint/ob_checkpoint_executor.h"
 #include "storage/ls/ob_ls.h"
-#include "storage/checkpoint/ob_data_checkpoint.h"
 #include "mtlenv/mock_tenant_module_env.h"
-#include "share/rc/ob_tenant_base.h"
-#include "storage/tx_storage/ob_ls_service.h"
-#include "logservice/ob_log_base_type.h"
 #include "storage/init_basic_struct.h"
 #include "storage/mock_ob_log_handler.h"
 
@@ -67,6 +63,7 @@ void ObTableHandleV2::reset()
       }
       table_ = nullptr;
       t3m_ = nullptr;
+      table_type_ = ObITable::TableType::MAX_TABLE_TYPE;
     }
   }
 }
@@ -107,9 +104,9 @@ public:
 
   bool ready_for_flush() { return ready_for_flush_; }
 
-  bool is_frozen_checkpoint() const { return is_frozen_; }
+  bool is_frozen_checkpoint() { return is_frozen_; }
 
-  bool is_active_checkpoint() const { return !is_frozen_; }
+  bool is_active_checkpoint() { return !is_frozen_; }
 
   ObTabletID get_tablet_id() const { return ObTabletID(111111111111); }
 
@@ -177,7 +174,7 @@ void TestDataCheckpoint::TearDown()
 void TestDataCheckpoint::SetUpTestCase()
 {
   EXPECT_EQ(OB_SUCCESS, MockTenantModuleEnv::get_instance().init());
-  ObServerCheckpointSlogHandler::get_instance().is_started_ = true;
+  SERVER_STORAGE_META_SERVICE.is_started_ = true;
 }
 
 void TestDataCheckpoint::TearDownTestCase()
@@ -218,7 +215,7 @@ TEST_F(TestDataCheckpoint, dlink_base)
   // for exist
   handle.reset();
   //ASSERT_EQ(OB_SUCCESS, ls->disable_palf(true));
-  ASSERT_EQ(OB_SUCCESS, MTL(ObLSService*)->remove_ls(ls_id, false));
+  ASSERT_EQ(OB_SUCCESS, MTL(ObLSService*)->remove_ls(ls_id));
 }
 
 TEST_F(TestDataCheckpoint, ls_freeze)
@@ -261,14 +258,6 @@ TEST_F(TestDataCheckpoint, ls_freeze)
 
   tmp.val_ = 2;
   ASSERT_EQ(OB_SUCCESS, checkpoint_executor->advance_checkpoint_by_flush(tmp));
-  ASSERT_EQ(OB_SUCCESS, ls->get_data_checkpoint()->flush(share::SCN::max_scn(), false));
-  usleep(60L * 1000L);  // 60ms
-  ASSERT_EQ(0, data_checkpoint->new_create_list_.checkpoint_list_.get_size());
-  ASSERT_EQ(1, data_checkpoint->active_list_.checkpoint_list_.get_size());
-  ASSERT_EQ(2, data_checkpoint->prepare_list_.checkpoint_list_.get_size());
-  ASSERT_EQ(true, data_checkpoint->ls_freeze_finished());
-
-  tmp.val_ = 4;
   ASSERT_EQ(OB_SUCCESS, checkpoint_executor->advance_checkpoint_by_flush(tmp));
   ASSERT_EQ(OB_SUCCESS, ls->get_data_checkpoint()->flush(share::SCN::max_scn(), false));
   usleep(60L * 1000L);  // 60ms
@@ -279,7 +268,7 @@ TEST_F(TestDataCheckpoint, ls_freeze)
   // for exist
   handle.reset();
   //ASSERT_EQ(OB_SUCCESS, ls->disable_palf(true));
-  ASSERT_EQ(OB_SUCCESS, MTL(ObLSService*)->remove_ls(ls_id, false));
+  ASSERT_EQ(OB_SUCCESS, MTL(ObLSService*)->remove_ls(ls_id));
 }
 
 }

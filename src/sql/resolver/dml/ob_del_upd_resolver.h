@@ -50,7 +50,8 @@ public:
   //set is json constraint type is strict or relax
   const static uint8_t IS_JSON_CONSTRAINT_RELAX = 1;
   const static uint8_t IS_JSON_CONSTRAINT_STRICT = 4;
-
+  inline bool is_resolve_insert_update() { return is_resolve_insert_update_;}
+  int recursive_search_sequence_expr(const ObRawExpr *default_expr);
 protected:
 
   int resolve_assignments(const ParseNode &parse_node,
@@ -101,6 +102,14 @@ protected:
     return common::OB_SUCCESS;
   }
 
+  virtual int mock_values_column_ref(const ObColumnRefRawExpr *column_ref,
+                                     ObInsertTableInfo &table_info)
+  {
+    UNUSED(column_ref);
+    UNUSED(table_info);
+    return common::OB_SUCCESS;
+  }
+
   // add for error logging
   int resolve_error_logging(const ParseNode *node);
   int resolve_err_log_table(const ParseNode *node);
@@ -125,15 +134,15 @@ protected:
   virtual int process_values_function(ObRawExpr *&expr);
   virtual int recursive_values_expr(ObRawExpr *&expr);
 
-  bool need_all_columns(const share::schema::ObTableSchema &table_schema, int64_t binlog_row_image);
+  bool need_all_columns(const share::schema::ObTableSchema &table_schema,
+                        const int64_t binlog_row_image);
 
   int add_all_columns_to_stmt(const TableItem &table_item,
                               common::ObIArray<ObColumnRefRawExpr*> &column_exprs);
   int add_all_columns_to_stmt_for_trigger(const TableItem &table_item,
                                           common::ObIArray<ObColumnRefRawExpr*> &column_exprs);
   int add_all_rowkey_columns_to_stmt(const TableItem &table_item,
-                                             common::ObIArray<ObColumnRefRawExpr*> &column_exprs);
-
+                                     common::ObIArray<ObColumnRefRawExpr*> &column_exprs);
   int add_index_related_columns_to_stmt(const TableItem &table_item,
                                         const uint64_t column_id,
                                         common::ObIArray<ObColumnRefRawExpr*> &column_exprs);
@@ -149,12 +158,13 @@ protected:
   // check the update view is key preserved
   int uv_check_key_preserved(const TableItem &table_item, bool &key_preserved);
 
-  int has_need_fired_trigger_on_view(const TableItem* view_item, bool &has);
+  int check_need_fired_trigger(const TableItem* table_item);
 
   int view_pullup_special_column_exprs();
   int view_pullup_part_exprs();
   int expand_record_to_columns(const ParseNode &record_node,
                                               ObIArray<ObRawExpr *> &value_list);
+  bool is_fk_parent_table(const common::ObIArray<ObForeignKeyInfo> &foreign_key_infos, const uint64_t table_id);
   int resolve_check_constraints(const TableItem* table_item,
                                 common::ObIArray<ObRawExpr*> &check_exprs);
   int resolve_view_check_exprs(uint64_t table_id,
@@ -168,6 +178,7 @@ protected:
                             ObIArray<ObRawExpr *> &base_columns);
   
   int view_pullup_column_ref_exprs_recursively(ObRawExpr *&expr,
+                                               uint64_t view_table_id,
                                                uint64_t base_table_id,
                                                const ObDMLStmt *stmt);
 
@@ -189,7 +200,9 @@ protected:
 
   int resolve_insert_columns(const ParseNode *node,
                              ObInsertTableInfo& table_info);
-  int resolve_insert_values(const ParseNode *node, ObInsertTableInfo& table_info);
+  int resolve_insert_values(const ParseNode *node,
+                            ObInsertTableInfo& table_info,
+                            common::ObIArray<uint64_t> &label_se_columns);
   int check_column_value_pair(common::ObArray<ObRawExpr*> *value_row,
                               ObInsertTableInfo& table_info,
                               const int64_t row_index,
@@ -224,6 +237,10 @@ protected:
   int add_select_items(ObSelectStmt &select_stmt, const ObIArray<SelectItem>& select_items);
   int add_select_list_for_set_stmt(ObSelectStmt &select_stmt);
   int add_all_lob_columns_to_stmt(const TableItem &table_item, ObIArray<ObColumnRefRawExpr*> &column_exprs);
+  int check_update_vector_col_with_vector_index(const ObTableSchema *table_schema,
+                                                ObSchemaGetterGuard *schema_guard,
+                                                const common::ObIArray<ObAssignment> &assigns,
+                                                bool &update_with_vector_index);
 protected:
   int generate_insert_table_info(const TableItem &table_item,
                                  ObInsertTableInfo &table_info,
@@ -232,7 +249,14 @@ protected:
   void set_is_oracle_tmp_table(bool is_temp_table) { is_oracle_tmp_table_ = is_temp_table; }
   void set_oracle_tmp_table_type(int64_t type) { oracle_tmp_table_type_ = type; }
   int add_new_sel_item_for_oracle_temp_table(ObSelectStmt &select_stmt);
-  int add_new_column_for_oracle_temp_table(uint64_t ref_table_id, uint64_t table_id = OB_INVALID_ID, ObDMLStmt *stmt = NULL);
+  int get_session_columns_for_oracle_temp_table(uint64_t ref_table_id,
+                                                uint64_t table_id,
+                                                ObDMLStmt *stmt,
+                                                ObColumnRefRawExpr *&session_id_expr,
+                                                ObColumnRefRawExpr *&session_create_time_expr);
+  int add_column_for_oracle_temp_table(uint64_t ref_table_id, uint64_t table_id, ObDMLStmt *stmt);
+  int add_column_for_oracle_temp_table(ObInsertTableInfo &table_info, ObDMLStmt *stmt);
+  int add_new_column_for_oracle_temp_table(uint64_t ref_table_id, uint64_t table_id, ObDMLStmt *stmt);
   int add_new_value_for_oracle_temp_table(ObIArray<ObRawExpr*> &value_row);
   int add_new_column_for_oracle_label_security_table(ObIArray<uint64_t>& the_missing_label_se_columns,
                                                      uint64_t ref_table_id,
@@ -251,13 +275,33 @@ protected:
                             ObIArray<ObColumnRefRawExpr*> &column_exprs);
   int replace_column_ref_for_check_constraint(ObInsertTableInfo& table_info, ObRawExpr *&expr);
   int add_default_sequence_id_to_stmt(const uint64_t table_id);
-  int recursive_search_sequence_expr(const ObRawExpr *default_expr);
   int check_need_match_all_params(const common::ObIArray<ObColumnRefRawExpr*> &value_desc, bool &need_match);
+  int build_autoinc_param(
+      const uint64_t table_id,
+      const ObTableSchema *table_schema,
+      const ObColumnSchemaV2 *column_schema,
+      const int64_t auto_increment_cache_size,
+      AutoincParam &param);
+  int resolve_json_partial_update_flag(ObIArray<ObTableAssignment> &table_assigns, ObStmtScope scope);
+  int mark_json_partial_update_flag(const ObColumnRefRawExpr *ref_expr, ObRawExpr *expr, int depth, bool &allow_json_partial_update);
+  int add_select_item_func(ObSelectStmt &select_stmt, ColumnItem &col);
+  int select_items_is_pk(const ObSelectStmt& select_stmt, bool &has_pk);
+  int build_domain_id_function_expr(
+      const ObInsertTableInfo& table_info,
+      const ObColumnSchemaV2 &col_schema,
+      const ObColumnRefRawExpr &column,
+      ObRawExpr *&func_expr);
+  int is_external_table_partition_column(const TableItem &table_item,
+                                         uint64_t column_id,
+                                         bool &is_part_column);
+
 private:
   common::hash::ObPlacementHashSet<uint64_t, 4229> insert_column_ids_;
   bool is_column_specify_;
   bool is_oracle_tmp_table_; //是否创建oracle的临时表
   int64_t oracle_tmp_table_type_;
+protected:
+  bool is_resolve_insert_update_;
 };
 
 } /* namespace sql */

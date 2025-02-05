@@ -13,8 +13,6 @@
 #define USING_LOG_PREFIX SQL_RESV
 
 #include "sql/resolver/ddl/ob_column_sequence_resolver.h"
-#include "sql/resolver/ddl/ob_sequence_stmt.h"
-#include "sql/resolver/ddl/ob_sequence_resolver.h"
 
 namespace oceanbase
 {
@@ -79,7 +77,8 @@ int ObColumnSequenceResolver::resolve_sequence_without_name(ObColumnSequenceStmt
         LOG_WARN("invalid option node type", K(node->type_), K(ret));
       } else {
         ObSequenceResolver<ObColumnSequenceStmt> resolver;
-        if (OB_FAIL(resolver.resolve_sequence_options(mystmt, node))) {
+        if (OB_FAIL(resolver.resolve_sequence_options(session_info_->get_effective_tenant_id(),
+                                                      mystmt, node))) {
           LOG_WARN("resolve sequence options failed", K(ret));
         }
       }

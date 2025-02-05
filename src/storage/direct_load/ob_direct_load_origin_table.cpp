@@ -12,10 +12,7 @@
 #define USING_LOG_PREFIX STORAGE
 
 #include "storage/direct_load/ob_direct_load_origin_table.h"
-#include "storage/tablet/ob_tablet.h"
-#include "storage/tx_storage/ob_ls_handle.h"
 #include "storage/tx_storage/ob_ls_service.h"
-#include "storage/ob_relative_table.h"
 
 namespace oceanbase
 {
@@ -25,6 +22,7 @@ using namespace common;
 using namespace blocksstable;
 using namespace share;
 using namespace share::schema;
+using namespace transaction;
 
 /**
  * ObDirectLoadOriginTableCreateParam
@@ -64,6 +62,7 @@ ObDirectLoadOriginTableMeta::~ObDirectLoadOriginTableMeta()
 ObDirectLoadOriginTable::ObDirectLoadOriginTable()
   : major_sstable_(nullptr), is_inited_(false)
 {
+  ddl_sstables_.set_tenant_id(MTL_ID());
 }
 
 ObDirectLoadOriginTable::~ObDirectLoadOriginTable()
@@ -101,6 +100,8 @@ int ObDirectLoadOriginTable::init(const ObDirectLoadOriginTableCreateParam &para
       meta_.ls_id_ = param.ls_id_;
       meta_.table_id_ = param.table_id_;
       meta_.tablet_id_ = param.tablet_id_;
+      meta_.tx_id_ = param.tx_id_;
+      meta_.tx_seq_ = param.tx_seq_;
       is_inited_ = true;
     }
   }
@@ -114,7 +115,7 @@ int ObDirectLoadOriginTable::prepare_tables()
   table_iter_.reset();
   if (OB_FAIL(table_iter_.set_tablet_handle(tablet_handle_))) {
     LOG_WARN("Failed to set tablet handle to tablet table iter", K(ret));
-  } else if (OB_FAIL(table_iter_.refresh_read_tables_from_tablet(INT64_MAX, false /*allow_not_ready*/))) {
+  } else if (OB_FAIL(table_iter_.refresh_read_tables_from_tablet(INT64_MAX, false /*allow_not_ready*/, false /*major_sstable_only*/, false /*need_split_src_table*/, false/*need_split_dst_table*/))) {
     LOG_WARN("fail to get read tables", KR(ret), K(tablet_handle_));
   }
   // find major sstable or ddl sstables
@@ -157,8 +158,11 @@ int ObDirectLoadOriginTable::prepare_tables()
   return ret;
 }
 
-int ObDirectLoadOriginTable::scan(const ObDatumRange &key_range,
-                                  ObIAllocator &allocator, ObIStoreRowIterator *&row_iter)
+int ObDirectLoadOriginTable::scan(
+    const ObDatumRange &key_range,
+    ObIAllocator &allocator,
+    ObDirectLoadIStoreRowIterator *&row_iter,
+    bool skip_read_lob)
 {
   int ret = OB_SUCCESS;
   if (IS_NOT_INIT) {
@@ -172,8 +176,10 @@ int ObDirectLoadOriginTable::scan(const ObDatumRange &key_range,
     if (OB_ISNULL(row_scanner = OB_NEWx(ObDirectLoadOriginTableScanner, (&allocator)))) {
       ret = OB_ALLOCATE_MEMORY_FAILED;
       LOG_WARN("fail to new ObDirectLoadOriginTableScanner", KR(ret));
-    } else if (OB_FAIL(row_scanner->init(this, key_range))) {
-      LOG_WARN("Fail to open row scanner", KR(ret), K(key_range), K(*this));
+    } else if (OB_FAIL(row_scanner->init(this, skip_read_lob))) {
+      LOG_WARN("Fail to init row scanner", KR(ret), K(*this));
+    } else if (OB_FAIL(row_scanner->open(key_range))) {
+      LOG_WARN("Fail to open row scanner", KR(ret), K(key_range));
     } else {
       row_iter = row_scanner;
     }
@@ -188,46 +194,93 @@ int ObDirectLoadOriginTable::scan(const ObDatumRange &key_range,
   return ret;
 }
 
+int ObDirectLoadOriginTable::rescan(
+    const ObDatumRange &key_range,
+    ObIStoreRowIterator *row_iter)
+{
+  int ret = OB_SUCCESS;
+  ObDirectLoadOriginTableScanner * row_iter_ptr = nullptr;
+  if (IS_NOT_INIT) {
+    ret = OB_NOT_INIT;
+    LOG_WARN("ObDirectLoadOriginTable not init", KR(ret), KP(this));
+  } else if (OB_UNLIKELY(!key_range.is_valid() || nullptr == row_iter)) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("Invalid argument", KR(ret), K(key_range), KP(row_iter));
+  } else if (OB_ISNULL(row_iter_ptr = static_cast<ObDirectLoadOriginTableScanner *>(row_iter))) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("get unexpected null", KR(ret));
+  } else if (OB_FAIL(row_iter_ptr->open(key_range))) {
+    LOG_WARN("fail to open ObDirectLoadOriginTableScanner", KR(ret), K(key_range));
+  }
+
+  return ret;
+}
+
 /**
  * ObDirectLoadOriginTableScanner
  */
 
 ObDirectLoadOriginTableScanner::ObDirectLoadOriginTableScanner()
-  : allocator_("TLD_OriSSTScan"), origin_table_(nullptr), schema_param_(allocator_), is_inited_(false)
+  : allocator_("TLD_OriSSTScan"),
+    stmt_allocator_("TLD_SOriSSTScan"),
+    origin_table_(nullptr),
+    schema_param_(stmt_allocator_),
+    is_inited_(false)
 {
+  allocator_.set_tenant_id(MTL_ID());
+  stmt_allocator_.set_tenant_id(MTL_ID());
+  col_ids_.set_tenant_id(MTL_ID());
 }
 
 ObDirectLoadOriginTableScanner::~ObDirectLoadOriginTableScanner()
 {
 }
 
-int ObDirectLoadOriginTableScanner::init(ObDirectLoadOriginTable *origin_table,
-                                         const ObDatumRange &query_range)
+int ObDirectLoadOriginTableScanner::init(ObDirectLoadOriginTable *origin_table, bool skip_read_lob)
 {
   int ret = OB_SUCCESS;
   if (IS_INIT) {
     ret = OB_INIT_TWICE;
     LOG_WARN("ObDirectLoadOriginIterator init twice", KR(ret), KP(this));
-  } else if (OB_UNLIKELY(nullptr == origin_table || !origin_table->is_valid() ||
-                         !query_range.is_valid() || !query_range.is_memtable_valid())) {
+  } else if (OB_UNLIKELY(nullptr == origin_table || !origin_table->is_valid())) {
     ret = OB_INVALID_ARGUMENT;
-    LOG_WARN("Invalid argument", KR(ret), KPC(origin_table), K(query_range));
+    LOG_WARN("Invalid argument", KR(ret), KPC(origin_table));
   } else {
     origin_table_ = origin_table;
-    allocator_.set_tenant_id(MTL_ID());
     if (OB_FAIL((init_table_access_param()))) {
       LOG_WARN("fail to init query range", KR(ret));
-    } else if (OB_FAIL(init_table_access_ctx())) {
+    } else if (OB_FAIL(init_table_access_ctx(skip_read_lob))) {
       LOG_WARN("fail to init table access param", KR(ret));
     } else if (OB_FAIL(init_get_table_param())) {
       LOG_WARN("fail to init get table param", KR(ret));
     } else if (OB_FAIL(
                  scan_merge_.init(table_access_param_, table_access_ctx_, get_table_param_))) {
       LOG_WARN("fail to init multi merge", KR(ret));
-    } else if (OB_FAIL(scan_merge_.open(query_range))) {
-      LOG_WARN("fail to open multi merge", KR(ret), K(query_range));
     } else {
+      row_flag_.uncontain_hidden_pk_ = false;
+      row_flag_.has_multi_version_cols_ = false;
+      row_flag_.has_delete_row_ = false;
+      column_count_ = col_ids_.count();
       is_inited_ = true;
+    }
+  }
+  return ret;
+}
+
+int ObDirectLoadOriginTableScanner::open(const ObDatumRange &query_range)
+{
+  int ret = OB_SUCCESS;
+  if (IS_NOT_INIT) {
+    ret = OB_NOT_INIT;
+    LOG_WARN("not init", KR(ret), KP(this));
+  } else if (OB_UNLIKELY(!query_range.is_valid() || !query_range.is_memtable_valid())) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("Invalid argument", KR(ret), K(query_range));
+  } else {
+    allocator_.reuse();
+    scan_merge_.reuse();
+    if (OB_FAIL(scan_merge_.open(query_range))) {
+      LOG_WARN("fail to open multi merge", KR(ret), K(query_range));
     }
   }
   return ret;
@@ -258,10 +311,18 @@ int ObDirectLoadOriginTableScanner::init_table_access_param()
   } else if (OB_FAIL(table_schema->get_store_column_count(store_column_count))) {
     LOG_WARN("fail to get store column count", KR(ret));
   }
-  for (int64_t i = 0; OB_SUCC(ret) && i < store_column_count; ++i) {
-    if (OB_FAIL(col_ids_.push_back(i))) {
+  // schema_param_里面的列顺序是 get_column_ids(column_ids, false/*no_virtual*/), 与存储顺序是一致的, 只需要把虚拟生成列跳过
+  for (int64_t i = 0; OB_SUCC(ret) && i < schema_param_.get_columns().count(); ++i) {
+    if (schema_param_.get_columns().at(i)->is_virtual_gen_col()) {
+      // skip
+    } else if (OB_FAIL(col_ids_.push_back(i))) {
       LOG_WARN("fail to push back col id", KR(ret), K(i));
     }
+  }
+  if (OB_FAIL(ret)) {
+  } else if (OB_UNLIKELY(col_ids_.count() != store_column_count)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected col ids", KR(ret), K(schema_param_.get_columns()), K(store_column_count), K(col_ids_));
   }
   if (OB_SUCC(ret)) {
     //TODO(jianming.cjq): check init_dml_access_param
@@ -270,16 +331,21 @@ int ObDirectLoadOriginTableScanner::init_table_access_param()
                                                           schema_param_,
                                                           &col_ids_))) {
       LOG_WARN("fail to init merge param", KR(ret));
+    } else if (GCTX.is_shared_storage_mode()) {
+      table_access_param_.iter_param_.table_scan_opt_.io_read_batch_size_ = 1024L * 1024L * 2L; // 2M
+      table_access_param_.iter_param_.table_scan_opt_.io_read_gap_size_ = 0;
     }
   }
   return ret;
 }
 
-int ObDirectLoadOriginTableScanner::init_table_access_ctx()
+int ObDirectLoadOriginTableScanner::init_table_access_ctx(bool skip_read_lob)
 {
   int ret = OB_SUCCESS;
   const uint64_t table_id = origin_table_->get_meta().table_id_;
   const ObTabletID &tablet_id = origin_table_->get_meta().tablet_id_;
+  const ObTransID &tx_id = origin_table_->get_meta().tx_id_;
+  const ObTxSEQ &tx_seq = origin_table_->get_meta().tx_seq_;
   const int64_t snapshot_version = ObTimeUtil::current_time_ns();
   ObQueryFlag query_flag(ObQueryFlag::Forward,
                          false /*daily_merge*/,
@@ -290,19 +356,24 @@ int ObDirectLoadOriginTableScanner::init_table_access_ctx()
                          false /*query_stat*/); //whole_macro_scan use false，otherwise query range is not overlap with sstable range will report error
   ObVersionRange trans_version_range;
   query_flag.multi_version_minor_merge_ = false;
+  if (skip_read_lob) {
+    query_flag.skip_read_lob_ = ObQueryFlag::OBSF_MASK_SKIP_READ_LOB;
+  }
   trans_version_range.multi_version_start_ = 0;
   trans_version_range.base_version_ = 0;
   trans_version_range.snapshot_version_ = snapshot_version;
   share::SCN snapshot_scn;
   if (OB_FAIL(snapshot_scn.convert_for_tx(snapshot_version))) {
     LOG_WARN("fail to convert scn", KR(ret));
-  } else if (OB_FAIL(store_ctx_.init_for_read(origin_table_->get_meta().ls_id_, INT64_MAX, -1,
+  } else if (OB_FAIL(store_ctx_.init_for_read(origin_table_->get_meta().ls_id_, tablet_id, INT64_MAX, -1,
                                        snapshot_scn))) {
     LOG_WARN("fail to init for read", KR(ret));
-  } else if (OB_FAIL(table_access_ctx_.init(query_flag, store_ctx_, allocator_, allocator_,
+  } else if (OB_FAIL(table_access_ctx_.init(query_flag, store_ctx_, allocator_, stmt_allocator_,
                                             trans_version_range))) {
     LOG_WARN("fail to init table access context", KR(ret));
   } else {
+    store_ctx_.mvcc_acc_ctx_.snapshot_.tx_id_ = tx_id;
+    store_ctx_.mvcc_acc_ctx_.snapshot_.scn_ = tx_seq;
     table_access_ctx_.lob_locator_helper_->update_lob_locator_ctx(table_id, tablet_id.id(), 0);
   }
   return ret;
@@ -313,7 +384,7 @@ int ObDirectLoadOriginTableScanner::init_get_table_param()
   int ret = OB_SUCCESS;
   if (OB_FAIL(get_table_param_.tablet_iter_.set_tablet_handle(origin_table_->get_tablet_handle()))) {
     LOG_WARN("Failed to set tablet handle to tablet table iter", K(ret));
-  } else if (OB_FAIL(get_table_param_.tablet_iter_.refresh_read_tables_from_tablet(INT64_MAX, false /*allow_not_ready*/))) {
+  } else if (OB_FAIL(get_table_param_.tablet_iter_.refresh_read_tables_from_tablet(INT64_MAX, false /*allow_not_ready*/, false /*major_sstable_only*/, false /*need_split_src_table*/, false /*need_split_dst_table*/))) {
     LOG_WARN("fail to copy table iter", KR(ret));
   }
   return ret;

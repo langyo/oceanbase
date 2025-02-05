@@ -27,6 +27,7 @@
 #include "rpc/obrpc/ob_rpc_proxy_macros.h"
 #include "rpc/obrpc/ob_rpc_processor.h"
 #include "rpc/obrpc/ob_rpc_opts.h"
+#include "lib/stat/ob_diagnostic_info_guard.h"
 
 namespace oceanbase
 {
@@ -119,7 +120,8 @@ public:
         max_process_handler_time_(0), compressor_type_(common::INVALID_COMPRESSOR),
         src_cluster_id_(common::OB_INVALID_CLUSTER_ID),
         dst_cluster_id_(common::OB_INVALID_CLUSTER_ID), init_(false),
-        active_(true), is_trace_time_(false), do_ratelimit_(false), is_bg_flow_(0), rcode_() {}
+        active_(true), is_trace_time_(false), do_ratelimit_(false),
+        do_detect_session_killed_(false), is_bg_flow_(0), rcode_() {}
   virtual ~ObRpcProxy() = default;
 
   int init(const rpc::frame::ObReqTransport *transport,
@@ -130,8 +132,11 @@ public:
   void destroy()                                { init_ = false; }
   bool is_inited() const                        { return init_; }
   void set_timeout(int64_t timeout)             { timeout_ = timeout; }
+  int64_t get_timeout() const                   { return timeout_; }
   void set_trace_time(const bool is_trace_time) { is_trace_time_ = is_trace_time; }
   void set_ratelimit(const bool do_ratelimit)   { do_ratelimit_ = do_ratelimit; }
+  void set_detect_session_killed(const bool do_detect)   { do_detect_session_killed_ = do_detect; }
+  bool is_detect_session_killed() const  { return do_detect_session_killed_; }
   void set_bg_flow(const int8_t is_bg_flow)    { is_bg_flow_ = is_bg_flow;}
   void set_max_process_handler_time(const uint32_t max_process_handler_time)
   { max_process_handler_time_ = max_process_handler_time; }
@@ -146,26 +151,26 @@ public:
   void set_compressor_type(const common::ObCompressorType &compressor_type) { compressor_type_ = compressor_type; }
   void set_dst_cluster(int64_t dst_cluster_id) { dst_cluster_id_ = dst_cluster_id; }
   void set_transport_impl(int transport_impl) { transport_impl_ = transport_impl; }
-  void set_result_code(const ObRpcResultCode retcode) {
+  void set_result_code(const ObRpcResultCode &retcode) {
     rcode_.rcode_ = retcode.rcode_;
     snprintf(rcode_.msg_, common::OB_MAX_ERROR_MSG_LEN, "%s", retcode.msg_);
     rcode_.warnings_.reset();
     rcode_.warnings_ = retcode.warnings_;
   }
-  void set_handle_attr(Handle* handle, const ObRpcPacketCode& pcode, const ObRpcOpts& opts, bool is_stream_next, int64_t session_id);
+  void set_handle_attr(Handle* handle, const ObRpcPacketCode& pcode, const ObRpcOpts& opts, bool is_stream_next, int64_t session_id, int64_t pkt_id, int64_t send_ts);
 
   bool need_increment_request_level(int pcode) const {
     return ((pcode > OB_SQL_PCODE_START && pcode < OB_SQL_PCODE_END)
             || pcode == OB_OUT_TRANS_LOCK_TABLE || pcode == OB_OUT_TRANS_UNLOCK_TABLE
             || pcode == OB_TABLE_LOCK_TASK
             || pcode == OB_HIGH_PRIORITY_TABLE_LOCK_TASK || pcode == OB_BATCH_TABLE_LOCK_TASK
-            || pcode == OB_HIGH_PRIORITY_BATCH_TABLE_LOCK_TASK
+            || pcode == OB_HIGH_PRIORITY_BATCH_TABLE_LOCK_TASK || pcode == OB_BATCH_REPLACE_TABLE_LOCK_TASK
             || pcode == OB_REGISTER_TX_DATA
             || pcode == OB_REFRESH_SYNC_VALUE || pcode == OB_CLEAR_AUTOINC_CACHE
             || pcode == OB_CLEAN_SEQUENCE_CACHE || pcode == OB_FETCH_TABLET_AUTOINC_SEQ_CACHE
             || pcode == OB_BATCH_GET_TABLET_AUTOINC_SEQ || pcode == OB_BATCH_SET_TABLET_AUTOINC_SEQ
             || pcode == OB_CALC_COLUMN_CHECKSUM_REQUEST || pcode == OB_REMOTE_WRITE_DDL_REDO_LOG
-            || pcode == OB_REMOTE_WRITE_DDL_COMMIT_LOG);
+            || pcode == OB_REMOTE_WRITE_DDL_COMMIT_LOG || pcode == OB_REMOTE_WRITE_DDL_FINISH_LOG || pcode == OB_REMOTE_WRITE_DDL_INC_COMMIT_LOG);
   }
 
   // when active is set as false, all RPC calls will simply return OB_INACTIVE_RPC_PROXY.
@@ -260,6 +265,7 @@ protected:
   bool active_;
   bool is_trace_time_;
   bool do_ratelimit_;
+  bool do_detect_session_killed_;
   int8_t is_bg_flow_;
   ObRpcResultCode rcode_;
 };
@@ -286,7 +292,9 @@ class Handle {
 
 public:
   Handle();
+  ~Handle();
   const common::ObAddr &get_dst_addr() const { return dst_; }
+  void reset_timeout();
 
 protected:
   bool has_more_;
@@ -298,7 +306,8 @@ protected:
   ObRpcPacketCode pcode_;
   bool do_ratelimit_;
   int8_t is_bg_flow_;
-
+  int64_t first_pkt_id_;
+  int64_t abs_timeout_ts_;
 private:
   DISALLOW_COPY_AND_ASSIGN(Handle);
 };
@@ -388,6 +397,11 @@ extern ObRpcProxy::NoneT None;
   inline CLS& ratelimit(const bool do_ratelimit)                        \
   {                                                                     \
     set_ratelimit(do_ratelimit);                                        \
+    return *this;                                                       \
+  }                                                                     \
+  inline CLS& detect_session_killed(const bool do_detect)               \
+  {                                                                     \
+    set_detect_session_killed(do_detect);                               \
     return *this;                                                       \
   }                                                                     \
   inline CLS& bg_flow(const uint32_t is_bg_flow)                        \

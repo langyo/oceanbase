@@ -35,6 +35,7 @@
 #include "share/rc/ob_tenant_base.h"
 #include "logservice/archiveservice/large_buffer_pool.h"
 #include "logservice/ob_log_external_storage_handler.h"       // ObLogExternalHandler
+#include "logservice/archiveservice/ob_archive_define.h"
 
 namespace oceanbase
 {
@@ -56,7 +57,7 @@ typedef const std::function<int(share::ObBackupDest &dest)> RefreshStorageInfoFu
 template<class LogEntryType>
 class ObRemoteLogIterator
 {
-  static const int64_t DEFAULT_SINGLE_READ_SIZE = 8 * palf::MAX_LOG_BUFFER_SIZE;
+  static const int64_t DEFAULT_SINGLE_READ_SIZE = 1L << 24; // 16MB
 public:
   // @param[in] get_source_func, an function to get the input log restore source
   // @param[in] update_source_func, an function to update location info the the log restore source,
@@ -85,6 +86,10 @@ public:
       archive::LargeBufferPool *buffer_pool,
       logservice::ObLogExternalStorageHandler *log_ext_handler,
       const int64_t single_read_size = DEFAULT_SINGLE_READ_SIZE);
+
+  // set user of the remote log iterator
+  // @param[in] user_type
+  int set_io_context(const palf::LogIOContext &io_ctx);
   // @brief used as local iterator, get one entry if not to end
   // @param[out] entry LogGroupEntry or LogEntry
   // @param[out] lsn entry start lsn

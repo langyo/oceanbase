@@ -12,14 +12,7 @@
 
 #define USING_LOG_PREFIX CLOG
 #include "ob_remote_log_writer.h"
-#include "lib/ob_errno.h"
-#include "lib/utility/ob_macro_utils.h"
-#include "lib/ob_define.h"
-#include "share/rc/ob_tenant_base.h"                    // mtl_alloc
-#include "storage/tx_storage/ob_ls_map.h"               // ObLSIterator
 #include "storage/tx_storage/ob_ls_service.h"           // ObLSService
-#include "ob_fetch_log_task.h"                          // ObFetchLogTask
-#include "ob_remote_fetch_log_worker.h"                 // ObRemoteFetchWorker
 #include "ob_log_restore_service.h"                     // ObLogRestoreService
 
 namespace oceanbase
@@ -134,7 +127,7 @@ void ObRemoteLogWriter::run1()
       int64_t end_tstamp = ObTimeUtility::current_time();
       int64_t wait_interval = THREAD_RUN_INTERVAL - (end_tstamp - begin_tstamp);
       if (wait_interval > 0) {
-        ob_usleep(wait_interval);
+        ob_usleep(wait_interval, true/*is_idle_sleep*/);
       }
     }
   }
@@ -192,6 +185,7 @@ int ObRemoteLogWriter::foreach_ls_(const ObLSID &id)
           LOG_WARN("get sorted task failed", K(ret), K(id));
         }
       } else if (NULL == task) {
+        LOG_TRACE("task is null", K(id));
         break;
       } else if (OB_FAIL(submit_entries_(*task))) {
         if (OB_RESTORE_LOG_TO_END != ret) {
@@ -223,6 +217,10 @@ int ObRemoteLogWriter::submit_entries_(ObFetchLogTask &task)
   int64_t size = 0;
   LSN lsn;
   const ObLSID id = task.id_;
+  const int64_t proposal_id = task.proposal_id_;
+  int64_t entry_size = 0;
+  LSN max_submit_lsn;
+  SCN max_submit_scn;
   while (OB_SUCC(ret) && ! has_set_stop()) {
     if (OB_FAIL(task.iter_.next(entry, lsn, buf, size))) {
       if (OB_ITER_END != ret) {
@@ -233,20 +231,38 @@ int ObRemoteLogWriter::submit_entries_(ObFetchLogTask &task)
     } else if (OB_UNLIKELY(! entry.check_integrity())) {
       ret = OB_INVALID_DATA;
       LOG_WARN("entry is invalid", K(entry), K(lsn), K(task));
+    } else if (! entry.check_compatibility()) {
+      ret = OB_EAGAIN;
+      if (REACH_TIME_INTERVAL(10 * 1000 * 1000)) {
+        LOG_ERROR("data version is not new enough to recover clog", KR(ret));
+      }
     } else if (task.cur_lsn_ > lsn) {
       LOG_INFO("repeated log, just skip", K(lsn), K(entry), K(task));
-    } else if (OB_FAIL(submit_log_(id, task.proposal_id_, lsn,
-            entry.get_scn(), buf, entry.get_serialize_size()))) {
+    } else if (FALSE_IT(entry_size = entry.get_serialize_size())) {
+    } else if (OB_FAIL(submit_log_(id, proposal_id, lsn,
+            entry.get_scn(), buf, entry_size))) {
       LOG_WARN("submit log failed", K(buf), K(entry), K(lsn), K(task));
     } else {
-      task.cur_lsn_ = lsn + entry.get_serialize_size();
+      task.cur_lsn_ = lsn + entry_size;
+      max_submit_lsn = lsn + entry_size;
+      max_submit_scn = entry.get_scn();
     }
   } // while
+
   if (OB_ITER_END == ret) {
     if (lsn.is_valid()) {
       LOG_INFO("submit_entries_ succ", K(id), K(lsn), K(entry.get_scn()), K(task));
     }
     ret = OB_SUCCESS;
+  }
+
+  if (max_submit_lsn.is_valid() && max_submit_scn.is_valid()) {
+    int tmp_ret = OB_SUCCESS;
+    if (OB_TMP_FAIL(update_max_fetch_info_(id, proposal_id, max_submit_lsn, max_submit_scn))) {
+      LOG_WARN("update max fetch info failed", K(id), K(proposal_id), K(max_submit_lsn), K(max_submit_scn));
+    } else {
+      LOG_INFO("update max fetch context succ", K(id), K(proposal_id), K(max_submit_lsn), K(max_submit_scn));
+    }
   }
   return ret;
 }
@@ -277,6 +293,20 @@ int ObRemoteLogWriter::submit_log_(const ObLSID &id,
 
   if (OB_ERR_UNEXPECTED == ret) {
     report_error_(id, ret, lsn, ObLogRestoreErrorContext::ErrorType::SUBMIT_LOG);
+  }
+  return ret;
+}
+
+int ObRemoteLogWriter::update_max_fetch_info_(const ObLSID &id,
+    const int64_t proposal_id,
+    const palf::LSN &lsn,
+    const share::SCN &scn)
+{
+  int ret = OB_SUCCESS;
+  GET_RESTORE_HANDLER_CTX(id) {
+    if (OB_FAIL(restore_handler->update_max_fetch_info(proposal_id, lsn, scn))) {
+      LOG_WARN("update max fetch info failed", K(id), K(proposal_id), K(lsn), K(scn));
+    }
   }
   return ret;
 }

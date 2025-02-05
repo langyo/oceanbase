@@ -36,20 +36,22 @@ class SubObjectMgr : public IBlockMgr
 {
   friend class ObTenantCtxAllocator;
 public:
-  SubObjectMgr(const bool for_logger, const int64_t tenant_id, const int64_t ctx_id,
-               const uint32_t ablock_size, const bool enable_dirty_list,
+  SubObjectMgr(ObTenantCtxAllocator &ta,
+               const bool enable_no_log,
+               const uint32_t ablock_size,
+               const bool enable_dirty_list,
                IBlockMgr *blk_mgr);
   virtual ~SubObjectMgr() {}
-  OB_INLINE void set_tenant_ctx_allocator(ObTenantCtxAllocator &allocator)
-  {
-    bs_.set_tenant_ctx_allocator(allocator);
-  }
   OB_INLINE void lock() { locker_.lock(); }
   OB_INLINE void unlock() { locker_.unlock(); }
   OB_INLINE bool trylock() { return locker_.trylock(); }
   OB_INLINE AObject *alloc_object(uint64_t size, const ObMemAttr &attr)
   {
     return os_.alloc_object(size, attr);
+  }
+  OB_INLINE AObject *realloc_object(AObject *obj,  const uint64_t size, const ObMemAttr &attr)
+  {
+    return os_.realloc_object(obj, size, attr);
   }
   void free_object(AObject *object);
   OB_INLINE ABlock *alloc_block(uint64_t size, const ObMemAttr &attr) override
@@ -65,11 +67,12 @@ public:
   {
     return bs_.check_has_unfree();
   }
-  OB_INLINE bool check_has_unfree(char *first_label)
+  OB_INLINE bool check_has_unfree(char *first_label, char *first_bt)
   {
-    return os_.check_has_unfree(first_label);
+    return os_.check_has_unfree(first_label, first_bt);
   }
 private:
+  ObTenantCtxAllocator &ta_;
 #ifndef ENABLE_SANITY
   lib::ObMutex mutex_;
 #else
@@ -85,6 +88,7 @@ private:
 class ObjectMgr final : public IBlockMgr
 {
   static const int N = 32;
+  friend class SubObjectMgr;
 public:
   struct Stat
   {
@@ -95,8 +99,11 @@ public:
     int64_t last_wash_ts_;
   };
 public:
-  ObjectMgr(ObTenantCtxAllocator &allocator, uint64_t tenant_id, uint64_t ctx_id,
-            uint32_t ablock_size, int parallel, bool enable_dirty_list,
+  ObjectMgr(ObTenantCtxAllocator &ta,
+            bool enable_no_log,
+            uint32_t ablock_size,
+            int parallel,
+            bool enable_dirty_list,
             IBlockMgr *blk_mgr);
   ~ObjectMgr();
   void reset();
@@ -113,13 +120,14 @@ public:
   int64_t sync_wash(int64_t wash_size) override;
   Stat get_stat();
   bool check_has_unfree();
-  bool check_has_unfree(char *first_label);
+  bool check_has_unfree(char *first_label, char *first_bt);
 private:
   SubObjectMgr *create_sub_mgr();
   void destroy_sub_mgr(SubObjectMgr *sub_mgr);
 
 public:
   ObTenantCtxAllocator &ta_;
+  bool enable_no_log_;
   uint32_t ablock_size_;
   int parallel_;
   bool enable_dirty_list_;
@@ -131,6 +139,67 @@ public:
   int64_t last_washed_size_;
 }; // end of class ObjectMgr
 
+class ObjectMgrV2 final : public IBlockMgr
+{
+  static const int BLOCK_SET_CNT = 8;
+  static const int OBJECT_SET_CNT = 64;
+  friend class SubObjectMgr;
+public:
+  struct Stat
+  {
+    int64_t hold_;
+    int64_t payload_;
+    int64_t used_;
+    int64_t last_washed_size_;
+    int64_t last_wash_ts_;
+  };
+  class BlockSetV2 {
+  public:
+    BlockSetV2()
+      : mutex_(common::ObLatchIds::ALLOC_BLOCK_LOCK),
+        locker_(mutex_)
+    {
+#ifndef ENABLE_SANITY
+      mutex_.enable_record_stat(false);
+#endif
+      bs_.set_locker(static_cast<ISetLocker*>(&locker_));
+    }
+    BlockSet *operator->() { return &bs_; }
+  private:
+#ifndef ENABLE_SANITY
+    lib::ObMutex mutex_;
+#else
+    lib::ObMutexV2 mutex_;
+#endif
+    SetLocker<decltype(mutex_)> locker_;
+    BlockSet bs_;
+  };
+public:
+  static int32_t idx()
+  {
+    static int64_t global_idx = 0;
+    static thread_local int idx = ATOMIC_FAA(&global_idx, 1);
+    return idx;
+  }
+  ObjectMgrV2(const int64_t tenant_id, const int64_t ctx_id);
+  AObject *alloc_object(uint64_t size, const ObMemAttr &attr)
+  {
+    return obj_sets_[idx() % OBJECT_SET_CNT].alloc_object(size, attr);
+  }
+  ABlock *alloc_block(uint64_t size, const ObMemAttr &attr);
+  void free_block(ABlock *block);
+  void print_usage() const;
+  int64_t sync_wash(int64_t wash_size = INT64_MAX);
+  Stat get_stat();
+  bool check_has_unfree();
+  void do_cleanup();
+
+public:
+  int64_t last_wash_ts_;
+  int64_t last_washed_size_;
+  BlockSetV2 blk_sets_[BLOCK_SET_CNT];
+  ObjectSetV2 obj_sets_[OBJECT_SET_CNT];
+}; // end of class ObjectMgrV2
 } // end of namespace lib
 } // end of namespace oceanbase
 

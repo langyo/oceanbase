@@ -14,7 +14,6 @@
 #include "ob_expr_compress.h"
 
 #include "sql/engine/ob_exec_context.h"
-#include "lib/compress/zlib/zlib_src/zlib.h"
 #include "sql/engine/expr/ob_expr_lob_utils.h"
 
 using namespace oceanbase::common;
@@ -49,7 +48,7 @@ int ObExprCompress::calc_result_type1(ObExprResType &type,
   type.set_varbinary();
   type.set_collation_level(CS_LEVEL_COERCIBLE);
   type1.set_calc_type(ObVarcharType);
-  OZ (aggregate_charsets_for_string_result(tmp_type, &type1, 1, type_ctx.get_coll_type()));
+  OZ (aggregate_charsets_for_string_result(tmp_type, &type1, 1, type_ctx));
   OX (type1.set_calc_collation_type(tmp_type.get_collation_type()));
   OX (type1.set_calc_collation_level(tmp_type.get_collation_level()));
   OZ (ObCharset::get_mbmaxlen_by_coll(tmp_type.get_collation_type(), mbmaxlen));
@@ -95,6 +94,13 @@ int ObExprCompress::eval_compress(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &e
   return ret;
 }
 
+DEF_SET_LOCAL_SESSION_VARS(ObExprCompress, raw_expr) {
+  int ret = OB_SUCCESS;
+  SET_LOCAL_SYSVAR_CAPACITY(1);
+  EXPR_ADD_LOCAL_SYSVAR(share::SYS_VAR_COLLATION_CONNECTION);
+  return ret;
+}
+
 ObExprUncompress::ObExprUncompress(ObIAllocator &alloc)
     : ObFuncExprOperator(alloc, T_FUN_SYS_UNCOMPRESS, N_UNCOMPRESS, 1, VALID_FOR_GENERATED_COL, NOT_ROW_DIMENSION)
 {
@@ -134,7 +140,8 @@ static int eval_uncompress_length(const ObExpr &expr,
 {
   int ret = OB_SUCCESS;
   if (str_val.empty()) {
-    expr_datum.set_string(ObString::make_empty_string());
+    orig_len = 0;
+    not_final = true;
   } else if (OB_UNLIKELY((str_val.length() <= COMPRESS_HEADER_LEN))) {
     expr_datum.set_null();
     LOG_USER_WARN(OB_ERR_ZLIB_DATA);
@@ -181,14 +188,18 @@ int ObExprUncompress::eval_uncompress(const ObExpr &expr, ObEvalCtx &ctx, ObDatu
       int64_t buf_size = 0;
       if (OB_FAIL(output_result.init(orig_len))) {
         LOG_WARN("init stringtext result failed");
-      } else if (OB_FAIL(output_result.get_reserved_buffer(buf, buf_size))) {
-        LOG_WARN("stringtext result reserve buffer failed");
-      } else if (OB_UNLIKELY(Z_OK != uncompress(reinterpret_cast<unsigned char*>(buf), &orig_len,
-          reinterpret_cast<const unsigned char*>(str_val.ptr() + COMPRESS_HEADER_LEN), str_val.length()))) {
-        expr_datum.set_null();
-        LOG_USER_WARN(OB_ERR_ZLIB_DATA);
-      } else if (OB_FAIL(output_result.lseek(orig_len, 0))) {
-        LOG_WARN("result lseek failed", K(ret));
+      } else if (orig_len > 0) {
+        if (OB_FAIL(output_result.get_reserved_buffer(buf, buf_size))) {
+          LOG_WARN("stringtext result reserve buffer failed");
+        } else if (OB_UNLIKELY(Z_OK != uncompress(reinterpret_cast<unsigned char*>(buf), &orig_len,
+            reinterpret_cast<const unsigned char*>(str_val.ptr() + COMPRESS_HEADER_LEN), str_val.length()))) {
+          expr_datum.set_null();
+          LOG_USER_WARN(OB_ERR_ZLIB_DATA);
+        } else if (OB_FAIL(output_result.lseek(orig_len, 0))) {
+          LOG_WARN("result lseek failed", K(ret));
+        } else {
+          output_result.set_result();
+        }
       } else {
         output_result.set_result();
       }

@@ -14,9 +14,6 @@
 #include "ob_ps_cache.h"
 #include "sql/plan_cache/ob_ps_sql_utils.h"
 #include "sql/plan_cache/ob_ps_cache_callback.h"
-#include "sql/resolver/cmd/ob_call_procedure_stmt.h"
-#include "sql/udr/ob_udr_mgr.h"
-#include "share/schema/ob_schema_getter_guard.h"
 #include "lib/rc/ob_rc.h"
 
 namespace oceanbase
@@ -48,18 +45,18 @@ ObPsCache::ObPsCache()
 
 void ObPsCache::destroy()
 {
+  TG_DESTROY(tg_id_);
   if (inited_) {
     // ps_stmt_id和ps_stmt_info创建时，会给其增加引用计数
     // 现在PsCache要析构了，对所有内部对象减去1,如果引用计数到0，会显式free内存
-    TG_DESTROY(tg_id_);
     cache_evict_all_ps();
-
-    if (NULL != mem_context_) {
-      DESTROY_CONTEXT(mem_context_);
-      mem_context_ = NULL;
-    }
     inited_ = false;
   }
+  if (NULL != mem_context_) {
+    DESTROY_CONTEXT(mem_context_);
+    mem_context_ = NULL;
+  }
+  tg_id_ = -1;
 }
 
 ObPsCache::~ObPsCache()
@@ -137,37 +134,24 @@ int ObPsCache::init(const int64_t hash_bucket,
   return ret;
 }
 
-//for close a session explicitly
-int ObPsCache::deref_ps_stmt(const ObPsStmtId stmt_id, bool erase_item/*=false*/)
+//only for close a session explicitly
+int ObPsCache::deref_ps_stmt(const ObPsStmtId stmt_id)
 {
   int ret = OB_SUCCESS;
   LOG_DEBUG("close ps stmt", K(stmt_id));
-  ObPsStmtInfoGuard guard;
-  if (OB_FAIL(get_stmt_info_guard(stmt_id, guard))) {
+  ObPsStmtInfo *ps_info = nullptr;
+  if (OB_FAIL(stmt_info_map_.get_refactored(stmt_id, ps_info))) {
      LOG_WARN("get stmt info guard failed", K(ret), K(stmt_id));
   } else {
-    ObPsStmtInfo *ps_info = guard.get_stmt_info();
     const ObPsSqlKey ps_sql_key = ps_info->get_sql_key();
     int tmp_ret = OB_SUCCESS;
-    if (erase_item) { // dec cached ref
-      if (OB_FAIL(erase_stmt_item(stmt_id, ps_sql_key))) {
-        LOG_WARN("fail to erase stmt", K(ret));
-      }
-    } else { // dec session ref
-      if (OB_ISNULL(ps_info->get_ps_item())) {
-        ret = OB_INVALID_ARGUMENT;
-        LOG_WARN("invalid argument", K(*ps_info));
-      } else {
-        ps_info->get_ps_item()->dec_ref_count_check_erase();
-      }
-    }
-
-    if (OB_SUCCESS != (tmp_ret = deref_stmt_info(stmt_id))) {
-      ret = tmp_ret; //previous ret ignore
-      LOG_WARN("deref stmt info failed", K(ret), K(stmt_id), K(ps_sql_key));
+    if (OB_ISNULL(ps_info->get_ps_item())) {
+      ret = OB_INVALID_ARGUMENT;
+      LOG_WARN("invalid argument", K(*ps_info));
     } else {
-      LOG_TRACE("deref stmt info success", K(stmt_id), K(ps_sql_key), K(ret));
+      ps_info->get_ps_item()->dec_ref_count();
     }
+    ps_info->dec_ref_count();
   }
   return ret;
 }
@@ -233,17 +217,16 @@ int ObPsCache::get_stmt_info_guard(const ObPsStmtId ps_stmt_id,
 //2.set stmt_id_map_返回OB_HASH_EXIST时，尝试从stmt_id_map_中获取stmt_item
 //  1）获取成功，返回stmt_item
 //  2) 报OB_HASH_NOT_EXIST, 则递归调get_or_add_stmt_item，尝试重新创建
-int ObPsCache::get_or_add_stmt_item(uint64_t db_id,
-                                    const ObString &ps_sql,
+int ObPsCache::get_or_add_stmt_item(const ObPsSqlKey &ps_key,
                                     const bool is_contain_tmp_tbl,
                                     ObPsStmtItem *&ps_item_value)
 {
   int ret = OB_SUCCESS;
   ObPsStmtId new_stmt_id = gen_new_ps_stmt_id();
   ObPsStmtItem tmp_item_value(new_stmt_id);
-  tmp_item_value.assign_sql_key(ObPsSqlKey(db_id,
-                                           is_contain_tmp_tbl ? new_stmt_id : OB_INVALID_ID,
-                                           ps_sql));
+  ObPsSqlKey tmp_ps_key = ps_key;
+  tmp_ps_key.inc_id_ = is_contain_tmp_tbl ? new_stmt_id : OB_INVALID_ID;
+  tmp_item_value.assign_sql_key(tmp_ps_key);
   //will deep copy
   ObPsStmtItem *new_item_value = NULL;
   //由于stmt_id_map_中的value是ObPsStmtItem的指针，因此这里需要copy整个内存
@@ -261,26 +244,26 @@ int ObPsCache::get_or_add_stmt_item(uint64_t db_id,
     }
   }
   if (OB_SUCC(ret)) {
-    const ObPsSqlKey ps_sql_key = new_item_value->get_sql_key();
+    const ObPsSqlKey inner_ps_key = new_item_value->get_sql_key();
     new_item_value->check_erase_inc_ref_count(); //inc ref count for ps cache, ignore ret;
-    ret = stmt_id_map_.set_refactored(ps_sql_key, new_item_value);
+    ret = stmt_id_map_.set_refactored(inner_ps_key, new_item_value);
     if (OB_SUCC(ret)) {
       //do nothing
-      LOG_INFO("add stmt item", K(ps_sql_key), K(*new_item_value));
+      LOG_INFO("add stmt item", K(inner_ps_key), K(*new_item_value));
       ps_item_value = new_item_value;
     } else if (OB_HASH_EXIST == ret) {
       ret = OB_SUCCESS;
       //may be other session has set
       //inc ref count
       ObPsStmtItem *tmp_item_value = NULL;
-      if (OB_FAIL(ref_stmt_item(ps_sql_key, tmp_item_value))) {
+      if (OB_FAIL(inner_ref_stmt_item(inner_ps_key, tmp_item_value))) {
         LOG_WARN("get stmt item failed", K(ret));
         if (OB_HASH_NOT_EXIST == ret) {//stmt item被删除，需要重新创建
-          if (OB_FAIL(get_or_add_stmt_item(db_id, ps_sql, is_contain_tmp_tbl, ps_item_value))) {
+          if (OB_FAIL(get_or_add_stmt_item(ps_key, is_contain_tmp_tbl, ps_item_value))) {
             LOG_WARN("fail to get or add stmt item", K(ret));
           }
         } else {
-          LOG_WARN("unexpected error", K(ret), K(ps_sql_key));
+          LOG_WARN("unexpected error", K(ret), K(inner_ps_key));
         }
       } else {
         if (OB_ISNULL(tmp_item_value)) {
@@ -322,8 +305,8 @@ int ObPsCache::get_or_add_stmt_item(uint64_t db_id,
 //   1) OB_SUCCESS: 成功获取ps_stmt_item
 //   2) OB_HASH_NOT_EXIST: a.stmt_id_map_中本身就不存在当前key b.开始key对应的引用计数为0，重试若干次后变为该错误码
 //   3) OB_EGAIN: 尝试了MAX_RETRY_CNT，ps_stmt_item的ref_count仍旧为0
-int ObPsCache::ref_stmt_item(const ObPsSqlKey &ps_sql_key,
-                             ObPsStmtItem *&ps_stmt_item)
+int ObPsCache::inner_ref_stmt_item(const ObPsSqlKey &ps_sql_key,
+                                   ObPsStmtItem *&ps_stmt_item)
 {
   int ret = OB_SUCCESS;
   int callback_ret = OB_SUCCESS;
@@ -365,35 +348,18 @@ int ObPsCache::ref_stmt_item(const ObPsSqlKey &ps_sql_key,
   return ret;
 }
 
-int ObPsCache::deref_stmt_item(const ObPsSqlKey &ps_sql_key)
+int ObPsCache::ref_stmt_item(const ObPsSqlKey &ps_sql_key, ObPsStmtItem *&stmt_item)
 {
   int ret = OB_SUCCESS;
-  ObPsStmtItemDerefAtomicOp op;
-  if (OB_FAIL(stmt_id_map_.read_atomic(ps_sql_key, op))) {
-    LOG_WARN("deref stmt item failed", K(ps_sql_key), K(ret));
-  } else if (op.get_ret() != OB_SUCCESS) {
-    ret = OB_ERR_UNEXPECTED;
-  }
-  return ret;
-}
-
-int ObPsCache::ref_stmt_item(const uint64_t db_id,
-                             const ObString &ps_sql,
-                             ObPsStmtItem *&stmt_item)
-{
-  int ret = OB_SUCCESS;
-  stmt_item = NULL;
-  if (ps_sql.empty()) {
+  stmt_item = nullptr;
+  if (ps_sql_key.ps_sql_.empty()) {
     ret = OB_INVALID_ARGUMENT;
-    LOG_WARN("empty sql", K(ret), K(ps_sql));
-  } else {
-    ObPsSqlKey ps_sql_key(db_id, ps_sql);
-    if (OB_FAIL(ref_stmt_item(ps_sql_key, stmt_item))) {
-      LOG_WARN_IGNORE_PS_NOTFOUND(ret, "ps item value not exist", K(ret), K(ps_sql_key));
-    } else if (OB_ISNULL(stmt_item)) {
-      ret = OB_ERR_UNEXPECTED;
-      LOG_WARN("get stmt id failed", K(ret));
-    }
+    LOG_WARN("empty sql", K(ret), K(ps_sql_key));
+  } else if (OB_FAIL(inner_ref_stmt_item(ps_sql_key, stmt_item))) {
+    LOG_WARN_IGNORE_PS_NOTFOUND(ret, "ps item value not exist", K(ret), K(ps_sql_key));
+  } else if (OB_ISNULL(stmt_item)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("get stmt id failed", K(ret));
   }
   return ret;
 }
@@ -492,7 +458,7 @@ int ObPsCache::erase_stmt_item(ObPsStmtId stmt_id, const ObPsSqlKey &ps_key)
         LOG_WARN("fail to erase stmt info", K(ps_key), K(ret));
       }
     } else {
-      ps_item->dec_ref_count_check_erase();
+      ps_item->dec_ref_count();
     }
   }
   return ret;
@@ -559,6 +525,7 @@ int ObPsCache::fill_ps_stmt_info(const ObResultSet &result,
     }
   }
   if (OB_SUCC(ret)) {
+    ps_stmt_info.set_is_prexecute(sql_ctx->is_pre_execute_);
     ps_stmt_info.set_question_mark_count(param_cnt);
     // only used when returning into
     ps_stmt_info.set_num_of_returning_into(returning_into_parm_num);
@@ -699,21 +666,6 @@ int ObPsCache::deref_stmt_info(const ObPsStmtId stmt_id)
   } else if (op.get_ret() != OB_SUCCESS) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("deref stmt info failed", K(ret));
-  } else if (op.is_erase()) {
-    if (OB_FAIL(stmt_info_map_.erase_refactored(stmt_id, &ps_info))) {
-      LOG_WARN("fail to erase stmt info", K(stmt_id), K(ret));
-    } else if (OB_ISNULL(ps_info)) {
-      LOG_INFO("ps info is null in map", K(stmt_id));
-      // do nothing
-    } else if (OB_ISNULL(allocator = ps_info->get_external_allocator())) {
-      ret = OB_INVALID_ARGUMENT;
-      LOG_WARN("invalid argument", K(allocator), K(ret));
-    } else {
-      LOG_INFO("free ps info", K(*ps_info), K(stmt_id));
-      ps_info->~ObPsStmtInfo();
-      allocator->free(ps_info);
-    }
-    LOG_INFO("erase stmt info", K(stmt_id), K(ret));
   }
   return ret;
 }
@@ -795,7 +747,7 @@ int ObPsCache::inner_cache_evict(bool is_evict_all)
       // evict expired ps
       for (int64_t i = 0; i < expired_stmt_ids.count(); ++i) { //ignore ret
         LOG_TRACE("ps close time", K(i), K(expired_stmt_ids.at(i).first), K(expired_stmt_ids.at(i).second));
-        if (OB_FAIL(deref_ps_stmt(expired_stmt_ids.at(i).first, true/*erase_stmt*/))) {
+        if (OB_FAIL(destroy_cached_ps(expired_stmt_ids.at(i).first))) {
           LOG_WARN("fail to evict ps stmt", K(ret),
                   K(expired_stmt_ids.at(i).first), K(expired_stmt_ids.count()));
         }
@@ -803,17 +755,17 @@ int ObPsCache::inner_cache_evict(bool is_evict_all)
       if (is_evict_all) {
         for (int64_t i = 0; i < closed_stmt_ids.count(); ++i) { //ignore ret
             LOG_TRACE("ps close time", K(i), K(closed_stmt_ids.at(i).first), K(closed_stmt_ids.at(i).second));
-            if (OB_FAIL(deref_ps_stmt(closed_stmt_ids.at(i).first, true/*erase_stmt*/))) {
+            if (OB_FAIL(destroy_cached_ps(closed_stmt_ids.at(i).first))) {
               LOG_WARN("fail to evict ps stmt", K(ret),
                       K(closed_stmt_ids.at(i).first), K(closed_stmt_ids.count()));
             }
           }
       } else {
         if (op.get_used_size() > get_mem_high()) {
-          std::sort(closed_stmt_ids.begin(), closed_stmt_ids.end(), PsTimeCmp());
+          lib::ob_sort(closed_stmt_ids.begin(), closed_stmt_ids.end(), PsTimeCmp());
           for (int64_t i = 0; i < closed_stmt_ids.count() / 2; ++i) { //ignore ret
             LOG_TRACE("ps close time", K(i), K(closed_stmt_ids.at(i).first), K(closed_stmt_ids.at(i).second));
-            if (OB_FAIL(deref_ps_stmt(closed_stmt_ids.at(i).first, true/*erase_stmt*/))) {
+            if (OB_FAIL(destroy_cached_ps(closed_stmt_ids.at(i).first))) {
               LOG_WARN("fail to evict ps stmt", K(ret),
                       K(closed_stmt_ids.at(i).first), K(closed_stmt_ids.count()));
             }
@@ -826,6 +778,45 @@ int ObPsCache::inner_cache_evict(bool is_evict_all)
   return ret;
 }
 
+int ObPsCache::destroy_cached_ps(const ObPsStmtId inner_stmt_id)
+{
+  int ret = OB_SUCCESS;
+  int tmp_ret = OB_SUCCESS;
+  ObPsStmtInfo *stmt_info = nullptr;
+  ObPsStmtInfoDestroyAtomicOp op;
+  LOG_INFO("start to evict ps from cache", K(inner_stmt_id));
+  if (OB_FAIL(stmt_info_map_.atomic_refactored(inner_stmt_id, op))) {
+    if (ret == OB_HASH_NOT_EXIST) {
+      ret = OB_SUCCESS;
+      LOG_INFO("ps stmt info has been erase by others", K(inner_stmt_id));
+    } else {
+      LOG_WARN("failed to get ps stmt info from stmt_info_map_", K(ret), K(inner_stmt_id));
+    }
+  } else if (OB_FAIL(op.get_ret())) {
+    LOG_WARN("failed to get ps stmt info from stmt_info_map_", K(ret), K(inner_stmt_id));
+  } else if (!op.marked_erase()) {
+    LOG_TRACE("can not be destroy", K(inner_stmt_id));
+  } else {
+    if (OB_FAIL(stmt_info_map_.erase_refactored(inner_stmt_id, &stmt_info))) {
+      LOG_WARN("failed to erase ps stmt info from stmt_info_map_", K(ret), K(inner_stmt_id));
+    } else if (OB_ISNULL(stmt_info)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("ps stmt info is NULL", K(ret), K(inner_stmt_id));
+    } else if (OB_SUCCESS != (tmp_ret = erase_stmt_item(inner_stmt_id, stmt_info->get_sql_key()))){
+      LOG_WARN("failed to erase stmt item", K(tmp_ret), K(inner_stmt_id));
+    }
+    if (OB_SUCC(ret)) {
+      ObIAllocator *info_alloc = nullptr;
+      if (OB_ISNULL(info_alloc = stmt_info->get_external_allocator())) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("allocator of ps stmt info is NULL", K(ret), K(inner_stmt_id));
+      } else {
+        info_alloc->free(stmt_info);
+      }
+    }
+  }
+  return ret;
+}
 
 void ObPsCache::dump_ps_cache()
 {

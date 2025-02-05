@@ -11,9 +11,6 @@
  */
 
 #include "ob_all_virtual_tablet_pointer_status.h"
-#include "share/ob_ls_id.h"
-#include "storage/meta_mem/ob_tenant_meta_mem_mgr.h"
-#include "observer/ob_server.h"
 
 using namespace oceanbase::common;
 using namespace oceanbase::storage;
@@ -146,6 +143,8 @@ int ObAllVirtualTabletPtr::process_curr_tenant(ObNewRow *&row)
     ls_id = key.ls_id_;
     tablet_id = key.tablet_id_;
     tablet_pointer = static_cast<const ObTabletPointer*>(ptr_hdl.get_resource_ptr());
+    ObTabletResidentInfo tablet_info = tablet_pointer->get_tablet_resident_info(key);
+
     const int64_t col_cnt = output_column_ids_.count();
     for (int64_t i = 0; OB_SUCC(ret) && i < col_cnt; i++) {
       const uint64_t col_id = output_column_ids_.at(i);
@@ -172,7 +171,7 @@ int ObAllVirtualTabletPtr::process_curr_tenant(ObNewRow *&row)
           cur_row_.cells_[i].set_int(tablet_id.id());
           break;
         case ADDRESS:
-          tablet_pointer->get_addr().to_string(address_, STR_LEN);
+          tablet_pointer->get_addr().to_string(address_, ADDR_STR_LEN);
           cur_row_.cells_[i].set_varchar(address_);
           cur_row_.cells_[i].set_collation_type(ObCharset::get_default_collation(ObCharset::get_default_charset()));
           break;
@@ -206,6 +205,12 @@ int ObAllVirtualTabletPtr::process_curr_tenant(ObNewRow *&row)
             cur_row_.cells_[i].set_varchar(old_chain_);
             cur_row_.cells_[i].set_collation_type(ObCharset::get_default_collation(ObCharset::get_default_charset()));
           }
+          break;
+        case DATA_OCCUPIED:
+          cur_row_.cells_[i].set_int(tablet_info.get_occupy_size());
+          break;
+        case DATA_REQUIRED:
+          cur_row_.cells_[i].set_int(tablet_info.get_required_size());
           break;
         default:
           ret = OB_ERR_UNEXPECTED;

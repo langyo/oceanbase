@@ -13,16 +13,7 @@
 #define USING_LOG_PREFIX SQL_ENG
 
 #include "ob_tenant_sql_memory_manager.h"
-#include "share/rc/ob_tenant_base.h"
-#include "share/inner_table/ob_inner_table_schema_constants.h"
-#include "share/system_variable/ob_system_variable_alias.h"
-#include "share/schema/ob_schema_getter_guard.h"
-#include "observer/omt/ob_tenant_config_mgr.h"
-#include "lib/alloc/alloc_func.h"
-#include "lib/rc/ob_rc.h"
-#include "observer/ob_server_struct.h"
 #include "sql/engine/px/ob_px_util.h"
-#include "share/cache/ob_kv_storecache.h"
 
 namespace oceanbase {
 
@@ -43,47 +34,33 @@ const int64_t ObSqlWorkAreaProfile::MIN_BOUND_SIZE[ObSqlWorkAreaType::MAX_TYPE] 
 
 int64_t ObSqlWorkAreaProfile::get_dop()
 {
-  return dop_;
+  return exec_info_.get_dop();
 }
 
 uint64_t ObSqlWorkAreaProfile::get_plan_id()
 {
-  return plan_id_;
+  return exec_info_.get_plan_id();
 }
 
 uint64_t ObSqlWorkAreaProfile::get_exec_id()
 {
-  return exec_id_;
+  return exec_info_.get_exec_id();
 }
 
 const char* ObSqlWorkAreaProfile::get_sql_id()
 {
-  return sql_id_;
+  return exec_info_.get_sql_id();
 }
 
 uint64_t ObSqlWorkAreaProfile::get_session_id()
 {
-  return session_id_;
+  return exec_info_.get_session_id();
 }
 
-int ObSqlWorkAreaProfile::set_exec_info(ObExecContext &exec_ctx)
-  {
-    int ret = OB_SUCCESS;
-    dop_ = ObPxSqcUtil::get_actual_worker_count(&exec_ctx);
-    plan_id_ = ObPxSqcUtil::get_plan_id(&exec_ctx);
-    exec_id_ = ObPxSqcUtil::get_exec_id(&exec_ctx);
-    session_id_ = ObPxSqcUtil::get_session_id(&exec_ctx);
-    ObPhysicalPlanCtx *plan_ctx = exec_ctx.get_physical_plan_ctx();
-    if (OB_NOT_NULL(plan_ctx) && OB_NOT_NULL(plan_ctx->get_phy_plan())) {
-      if (nullptr == plan_ctx->get_phy_plan()->get_sql_id()) {
-        sql_id_[0] = '\0';
-      } else {
-        memcpy(sql_id_, plan_ctx->get_phy_plan()->get_sql_id(), OB_MAX_SQL_ID_LENGTH);
-        sql_id_[OB_MAX_SQL_ID_LENGTH] = '\0';
-      }
-    }
-    return ret;
-  }
+uint64_t ObSqlWorkAreaProfile::get_db_id()
+{
+  return exec_info_.get_db_id();
+}
 
 ////////////////////////////////////////////////////////////////////////////////////
 int ObSqlWorkAreaIntervalStat::analyze_profile(
@@ -285,11 +262,12 @@ int ObTenantSqlMemoryManager::ObSqlWorkAreaCalcInfo::calculate_global_bound_size
   const bool auto_calc)
 {
   int ret = OB_SUCCESS;
+  int64_t error_sim = std::abs(OB_E(EventTable::EN_SQL_MEMORY_MRG_OPTION) 0);
   int64_t max_wa_size = wa_max_memory_size;
   // int64_t max_wa_size = wa_max_memory_size;
   // 最大占比6.25%（oracle 5%）
   // 这里改为按照8个并发来设置
-  int64_t max_bound_size = (max_wa_size >> 3);
+  int64_t max_bound_size = (0 == error_sim) ? (max_wa_size >> 3) : error_sim;
   profile_cnt_ = profile_cnt;
   int64_t avg_bound_size = (0 == profile_cnt_) ? max_bound_size : max_wa_size / profile_cnt_;
   int64_t best_interval_idx = -1;
@@ -326,12 +304,10 @@ int ObTenantSqlMemoryManager::ObSqlWorkAreaCalcInfo::calculate_global_bound_size
   return ret;
 }
 
-////////////////////////////////////////////////////////////////////////////////////
-int ObTenantSqlMemoryManager::mtl_init(ObTenantSqlMemoryManager *&sql_mem_mgr)
+int ObTenantSqlMemoryManager::mtl_new(ObTenantSqlMemoryManager *&sql_mem_mgr)
 {
   int ret = OB_SUCCESS;
   uint64_t tenant_id = MTL_ID();
-  sql_mem_mgr = nullptr;
   // 系统租户不创建
   if (OB_MAX_RESERVED_TENANT_ID < tenant_id) {
     sql_mem_mgr = OB_NEW(ObTenantSqlMemoryManager,
@@ -339,7 +315,19 @@ int ObTenantSqlMemoryManager::mtl_init(ObTenantSqlMemoryManager *&sql_mem_mgr)
     if (nullptr == sql_mem_mgr) {
       ret = OB_ALLOCATE_MEMORY_FAILED;
       LOG_WARN("failed to alloc tenant sql memory manager", K(ret));
-    } else if (OB_FAIL(sql_mem_mgr->allocator_.init(
+    }
+  }
+  return ret;
+}
+
+////////////////////////////////////////////////////////////////////////////////////
+int ObTenantSqlMemoryManager::mtl_init(ObTenantSqlMemoryManager *&sql_mem_mgr)
+{
+  int ret = OB_SUCCESS;
+  uint64_t tenant_id = MTL_ID();
+  // 系统租户不init
+  if (OB_MAX_RESERVED_TENANT_ID < tenant_id) {
+    if (OB_FAIL(sql_mem_mgr->allocator_.init(
               lib::ObMallocAllocator::get_instance(),
               OB_MALLOC_NORMAL_BLOCK_SIZE,
               ObMemAttr(tenant_id, "SqlMemMgr")))) {
@@ -521,13 +509,16 @@ int ObTenantSqlMemoryManager::get_work_area_size(
     increase(profile.get_cache_size());
     LOG_TRACE("trace drift size", K(drift_size_), K(global_bound_size_));
     if (need_manual_calc_bound()) {
-      ++manual_calc_cnt_;
-      if (OB_FAIL(calculate_global_bound_size(allocator, false))) {
-        LOG_WARN("failed to calculate global bound size", K(global_bound_size_));
-      } else {
-        profile.inc_calc_count();
-        LOG_TRACE("trace manual calc global bound size", K(global_bound_size_),
-          K(profile.get_one_pass_size()), K(drift_size_), K(mem_target_));
+      if (OB_SUCCESS == global_bound_update_lock_.try_wrlock(common::ObLatchIds::SQL_MEMORY_MGR_MUTEX_LOCK)) {
+        ++manual_calc_cnt_;
+        if (OB_FAIL(calculate_global_bound_size(allocator, false))) {
+          LOG_WARN("failed to calculate global bound size", K(global_bound_size_));
+        } else {
+          profile.inc_calc_count();
+          LOG_TRACE("trace manual calc global bound size", K(global_bound_size_),
+            K(profile.get_one_pass_size()), K(drift_size_), K(mem_target_));
+        }
+        global_bound_update_lock_.unlock();
       }
     }
     if (OB_FAIL(ret)) {
@@ -566,6 +557,7 @@ int ObTenantSqlMemoryManager::register_work_area_profile(ObSqlWorkAreaProfile &p
       } else if (OB_FAIL(profile_lists_[hash_val].register_work_area_profile(profile))) {
         LOG_WARN("failed to register work area profile", K(hash_val), K(profile));
       } else {
+        increase_profile_cnt();
         profile.active_time_ = ObTimeUtility::current_time();
       }
     }
@@ -584,17 +576,20 @@ int ObTenantSqlMemoryManager::update_work_area_profile(
     // delta_size maybe negative integer
     (ATOMIC_AAF(&drift_size_, delta_size));
     if (need_manual_by_drift()) {
-      int64_t pre_drift_size = drift_size_;
-      ++manual_calc_cnt_;
-      if (OB_ISNULL(allocator)) {
-        ret = OB_ERR_UNEXPECTED;
-        LOG_WARN("allocator is null", K(lbt()));
-      } else if (OB_FAIL(calculate_global_bound_size(allocator, false))) {
-        LOG_WARN("failed to calculate global bound size", K(global_bound_size_));
-      } else {
-        profile.inc_calc_count();
-        LOG_TRACE("trace manual calc global bound size by drift", K(global_bound_size_),
-          K(profile.get_one_pass_size()), K(drift_size_), K(mem_target_), K(pre_drift_size));
+      if (OB_SUCCESS == global_bound_update_lock_.try_wrlock(common::ObLatchIds::SQL_MEMORY_MGR_MUTEX_LOCK)) {
+        int64_t pre_drift_size = drift_size_;
+        ++manual_calc_cnt_;
+        if (OB_ISNULL(allocator)) {
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("allocator is null", K(lbt()));
+        } else if (OB_FAIL(calculate_global_bound_size(allocator, false))) {
+          LOG_WARN("failed to calculate global bound size", K(global_bound_size_));
+        } else {
+          profile.inc_calc_count();
+          LOG_TRACE("trace manual calc global bound size by drift", K(global_bound_size_),
+            K(profile.get_one_pass_size()), K(drift_size_), K(mem_target_), K(pre_drift_size));
+        }
+        global_bound_update_lock_.unlock();
       }
     }
   }
@@ -630,7 +625,7 @@ int ObTenantSqlMemoryManager::fill_workarea_stat(
     wa_stat.active_avg_time_ =
       (active_avg_time +
       (ObTimeUtility::current_time() - profile.get_active_time())) / wa_stat.get_total_executions();
-    wa_stat.last_temp_size_ = profile.get_dumped_size();
+    wa_stat.last_temp_size_ = profile.get_max_dumped_size();
     if (wa_stat.max_temp_size_ < wa_stat.last_temp_size_) {
       wa_stat.max_temp_size_ = wa_stat.last_temp_size_;
     }
@@ -719,6 +714,7 @@ int ObTenantSqlMemoryManager::new_and_fill_workarea_stat(
       wa_stat->workarea_key_.set_sql_id(profile.get_sql_id());
       wa_stat->workarea_key_.set_plan_id(profile.get_plan_id());
       wa_stat->workarea_key_.set_operator_id(profile.get_operator_id());
+      wa_stat->workarea_key_.set_database_id(profile.get_db_id());
       wa_stat->op_type_ = profile.get_operator_type();
       if (OB_FAIL(fill_workarea_stat(*wa_stat, profile))) {
         LOG_WARN("failed to fill workarea stat", K(ret));
@@ -746,10 +742,12 @@ int ObTenantSqlMemoryManager::new_and_fill_workarea_stat(
 int ObTenantSqlMemoryManager::collect_workarea_stat(ObSqlWorkAreaProfile &profile)
 {
   int ret = OB_SUCCESS;
-  if (profile.has_exec_ctx()) {
+  if (profile.has_exec_info() ||
+      profile.get_operator_type() == oceanbase::sql::PHY_PX_FIFO_RECEIVE) {
     ObSqlWorkAreaStat::WorkareaKey workarea_key(
       profile.get_plan_id(),
-      profile.get_operator_id());
+      profile.get_operator_id(),
+      profile.get_db_id());
     workarea_key.set_sql_id(profile.get_sql_id());
     bool need_insert = false;
     if (OB_FAIL(try_fill_workarea_stat(workarea_key, profile, need_insert))) {
@@ -807,6 +805,7 @@ int ObTenantSqlMemoryManager::unregister_work_area_profile(ObSqlWorkAreaProfile 
     } else if (OB_FAIL(profile_lists_[hash_val].unregister_work_area_profile(profile))) {
       LOG_WARN("failed to register work area profile", K(hash_val), K(profile));
     } else {
+      decrease_profile_cnt();
       if (enable_auto_memory_mgr_ && profile.get_auto_policy()) {
         decrease(profile.get_cache_size());
       }
@@ -826,6 +825,7 @@ int ObTenantSqlMemoryManager::get_max_work_area_size(
   int64_t &max_wa_memory_size, const bool auto_calc)
 {
   int ret = OB_SUCCESS;
+  const int64_t MIN_TENANT_MEMORY = 1;
   ObSchemaGetterGuard schema_guard;
   const ObSysVarSchema *var_schema = NULL;
   ObObj value;
@@ -852,13 +852,13 @@ int ObTenantSqlMemoryManager::get_max_work_area_size(
     int64_t tenant_work_area_max_size = tenant_max_memory_limit * pctg / 100;
     int64_t tenant_work_area_memory_hold =
       get_tenant_memory_hold(tenant_id_, common::ObCtxIds::WORK_AREA);
-    int64_t max_tenant_memory_size = tenant_max_memory_limit - tenant_memory_hold;
-    int64_t max_workarea_memory_size = tenant_work_area_max_size - tenant_work_area_memory_hold;
+    int64_t max_tenant_memory_size = std::max(MIN_TENANT_MEMORY,
+                                              tenant_max_memory_limit - tenant_memory_hold);
+    int64_t max_workarea_memory_size = std::max(MIN_TENANT_MEMORY,
+                                  tenant_work_area_max_size - tenant_work_area_memory_hold);
     int64_t washable_size = -2;
     int wash_ratio = 6; // valid value: [0-6]
-    if (max_workarea_memory_size > 0 &&
-        max_tenant_memory_size > 0 &&
-        max_workarea_memory_size > max_tenant_memory_size) {
+    if (max_workarea_memory_size > max_tenant_memory_size) {
       int tmp_ret = EVENT_CALL(EventTable::EN_AMM_WASH_RATIO);
       if (0 != tmp_ret) {
         wash_ratio = -tmp_ret;
@@ -893,9 +893,7 @@ int ObTenantSqlMemoryManager::get_max_work_area_size(
       }
     }
     // 取租户最大可用内存和ctx最大可用内存的最小值
-    int64_t remain_memory_size = max_tenant_memory_size > 0
-              ? min(max_workarea_memory_size, max_tenant_memory_size)
-              : max_tenant_memory_size;
+    int64_t remain_memory_size = min(max_workarea_memory_size, max_tenant_memory_size);
     int64_t total_alloc_size = sql_mem_callback_.get_total_alloc_size();
     double ratio = total_alloc_size * 1.0 / tenant_work_area_memory_hold;
     // 1 - x^3函数，表示随着hold内存越多，可用内存越少，同时alloc越多，可用内存越少
@@ -923,12 +921,14 @@ int ObTenantSqlMemoryManager::get_max_work_area_size(
     max_workarea_size_ = tenant_work_area_max_size;
     workarea_hold_size_ = tenant_work_area_memory_hold;
     max_auto_workarea_size_ = max_wa_memory_size;
-    if (0 > max_wa_memory_size) {
+    if (0 >= max_wa_memory_size) {
       max_wa_memory_size = 0;
       LOG_INFO("max work area is 0", K(tenant_max_memory_limit), K(total_alloc_size),
       K(tenant_work_area_memory_hold), K(tenant_work_area_max_size));
     }
-    if (auto_calc) {
+    if (auto_calc
+        || MIN_TENANT_MEMORY == max_tenant_memory_size
+        || MIN_TENANT_MEMORY == max_workarea_memory_size) {
       LOG_INFO("trace max work area", K(auto_calc), K(tenant_max_memory_limit), K(total_alloc_size),
         K(tenant_work_area_memory_hold), K(tenant_work_area_max_size), K(max_wa_memory_size),
         K(tmp_max_wa_memory_size), K(pre_mem_target), K(remain_memory_size), K(ratio),
@@ -1060,7 +1060,7 @@ int ObTenantSqlMemoryManager::count_profile_into_work_area_intervals(
       ObDList<ObSqlWorkAreaProfile> &profile_list = profile_lists_[i].get_profile_list();
       DLIST_FOREACH_X(profile, profile_list, OB_SUCC(ret)) {
         if (!profile->get_auto_policy()) {
-          // 没有使用auto的不作为统计之内
+          ++cur_profile_cnt;
         } else if (OB_FAIL(find_interval_index(profile->get_cache_size(), interval_idx, cache_size))) {
           LOG_WARN("failed to find interval index", K(*profile));
         } else {
@@ -1301,6 +1301,7 @@ int ObTenantSqlMemoryManager::get_all_active_workarea(
         profile_info.sql_exec_id_ = profile->get_exec_id();
         profile_info.set_sql_id(profile->get_sql_id());
         profile_info.session_id_ = profile->get_session_id();
+        profile_info.database_id_ = profile->get_db_id();
         if (OB_FAIL(wa_actives.push_back(profile_info))) {
           LOG_WARN("failed to push back profile", K(ret));
         }
@@ -1327,6 +1328,46 @@ int ObTenantSqlMemoryManager::get_workarea_memory_info(
   memory_info.manual_calc_cnt_ = manual_calc_cnt_;
   return ret;
 }
+
+ObSqlProfileExecInfo::ObSqlProfileExecInfo(ObExecContext *exec_ctx)
+{
+  dop_ = ObPxSqcUtil::get_actual_worker_count(exec_ctx);
+  plan_id_ = ObPxSqcUtil::get_plan_id(exec_ctx);
+  exec_id_ = ObPxSqcUtil::get_exec_id(exec_ctx);
+  session_id_ = ObPxSqcUtil::get_session_id(exec_ctx);
+  ObPhysicalPlanCtx *plan_ctx = exec_ctx->get_physical_plan_ctx();
+  if (OB_NOT_NULL(plan_ctx) && OB_NOT_NULL(plan_ctx->get_phy_plan())) {
+    disable_auto_mem_mgr_ = plan_ctx->get_phy_plan()->is_disable_auto_memory_mgr();
+    if (nullptr == plan_ctx->get_phy_plan()->get_sql_id()) {
+      sql_id_[0] = '\0';
+    } else {
+      memcpy(sql_id_, plan_ctx->get_phy_plan()->get_sql_id(), OB_MAX_SQL_ID_LENGTH);
+      sql_id_[OB_MAX_SQL_ID_LENGTH] = '\0';
+    }
+  }
+  my_session_ = exec_ctx->get_my_session();
+  if (OB_NOT_NULL(my_session_)) {
+    db_id_ = my_session_->get_database_id();
+  }
+}
+
+ObSqlProfileExecInfo::ObSqlProfileExecInfo(dtl::ObDtlLinkedBuffer *buffer) :
+  my_session_(nullptr)
+{
+  dop_ = buffer->get_dop();
+  plan_id_ = buffer->get_plan_id();
+  exec_id_ = buffer->get_exec_id();
+  session_id_ =  buffer->get_session_id();
+  db_id_ = buffer->get_database_id();
+  disable_auto_mem_mgr_ = buffer->get_disable_auto_mem_mgr();
+  if (*(buffer->get_sql_id()) == '\0') {
+    sql_id_[0] = '\0';
+  } else {
+    MEMCPY(sql_id_, buffer->get_sql_id(), OB_MAX_SQL_ID_LENGTH);
+    sql_id_[OB_MAX_SQL_ID_LENGTH] = '\0';
+  }
+}
+
 
 } // sql
 } // oceanbase

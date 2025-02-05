@@ -11,8 +11,6 @@
  */
 
 #include "ob_log_base_header.h"
-#include "lib/utility/ob_print_utils.h"         // Print*
-#include "lib/time/ob_time_utility.h"
 
 namespace oceanbase
 {
@@ -70,6 +68,15 @@ void ObLogBaseHeader::reset()
   replay_hint_ = 0;
 }
 
+void ObLogBaseHeader::set_compressed()
+{
+  flag_ = flag_ | PAYLOAD_IS_COMPRESSED;
+}
+
+bool ObLogBaseHeader::is_compressed() const
+{
+  return flag_ & PAYLOAD_IS_COMPRESSED;
+}
 bool ObLogBaseHeader::is_valid() const
 {
   return version_ > 0 && log_type_ > 0;

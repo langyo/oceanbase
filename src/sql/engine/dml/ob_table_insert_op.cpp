@@ -14,20 +14,6 @@
 
 #include "sql/engine/dml/ob_table_insert_op.h"
 #include "sql/engine/dml/ob_dml_service.h"
-#include "sql/engine/dml/ob_trigger_handler.h"
-#include "sql/engine/expr/ob_expr_calc_partition_id.h"
-#include "sql/engine/ob_physical_plan_ctx.h"
-#include "sql/engine/ob_physical_plan.h"
-#include "sql/engine/basic/ob_expr_values_op.h"
-#include "sql/session/ob_sql_session_info.h"
-#include "share/partition_table/ob_partition_location.h"
-#include "share/ob_autoincrement_service.h"
-#include "sql/engine/ob_exec_context.h"
-#include "lib/profile/ob_perf_event.h"
-#include "share/schema/ob_table_dml_param.h"
-#include "share/ob_tablet_autoincrement_service.h"
-#include "sql/engine/cmd/ob_table_direct_insert_service.h"
-#include "sql/engine/dml/ob_fk_checker.h"
 
 
 namespace oceanbase
@@ -174,8 +160,7 @@ OB_INLINE int ObTableInsertOp::open_table_for_each()
         //but single value insert in oracle allow the nested sql modify its insert table
         //clear the writing flag in table location before the trigger execution
         //see it:
-        primary_ins_rtdef.das_rtdef_.table_loc_->is_writing_ =
-            !(primary_ins_ctdef.is_single_value_ && lib::is_oracle_mode());
+        primary_ins_rtdef.das_rtdef_.table_loc_->is_writing_ = !(primary_ins_ctdef.is_single_value_);
       }
     }
   }
@@ -233,7 +218,6 @@ OB_INLINE int ObTableInsertOp::insert_row_to_das()
 {
   int ret = OB_SUCCESS;
   transaction::ObTxSEQ savepoint_no;
-  NG_TRACE(insert_start);
   // first get next row from child operator
   ObPhysicalPlanCtx *plan_ctx = GET_PHY_PLAN_CTX(ctx_);
   bool is_skipped = false;
@@ -303,9 +287,13 @@ OB_INLINE int ObTableInsertOp::insert_row_to_das()
   }
 
   if (OB_SUCC(ret)) {
-    plan_ctx->record_last_insert_id_cur_stmt();
+    bool is_ins_val_opt = ctx_.get_sql_ctx()->is_do_insert_batch_opt();
+    if (MY_SPEC.ab_stmt_id_ != nullptr && !is_ins_val_opt) {
+      plan_ctx->record_last_insert_id_cur_stmt_for_batch();
+    } else {
+      plan_ctx->record_last_insert_id_cur_stmt();
+    }
   }
-  NG_TRACE(insert_end);
   return ret;
 }
 
@@ -362,13 +350,18 @@ OB_INLINE int ObTableInsertOp::check_insert_affected_row()
         ret = OB_ERR_DEFENSIVE_CHECK;
         ObString func_name = ObString::make_string("check_insert_affected_row");
         LOG_USER_ERROR(OB_ERR_DEFENSIVE_CHECK, func_name.length(), func_name.ptr());
-        LOG_DBA_ERROR(OB_ERR_DEFENSIVE_CHECK, "msg", "Fatal Error!!! data table insert affected row is not match with index table", K(ret),
+        LOG_ERROR_RET(OB_ERR_DEFENSIVE_CHECK,
+                  "Fatal Error!!! data table insert affected row is not match with index table",
+                  K(ret),
                   "primary_affected_rows", pri_rtdef.das_rtdef_.affected_rows_,
                   "index_affected_rows", idx_rtdef.das_rtdef_.affected_rows_,
                   "primary_ins_ctdef", pri_ctdef,
                   "index_ins_ctdef", idx_ctdef,
                   "primary_ins_rtdef", pri_rtdef,
                   "index_ins_rtdef", idx_rtdef);
+        LOG_DBA_ERROR_V2(OB_SQL_INSERT_AFFECTED_ROW_FAIL, ret, "Attention!!!", "data table delete affected row is not match with index table "
+                  ", data table delete affected_rows is: ", pri_rtdef.das_rtdef_.affected_rows_,
+                  ", index table delete affected_rows is: ", idx_rtdef.das_rtdef_.affected_rows_);
       }
     }
     if (OB_SUCC(ret) && !pri_ctdef.das_ctdef_.is_ignore_) {
@@ -376,10 +369,14 @@ OB_INLINE int ObTableInsertOp::check_insert_affected_row()
         ret = OB_ERR_DEFENSIVE_CHECK;
         ObString func_name = ObString::make_string("check_insert_affected_row");
         LOG_USER_ERROR(OB_ERR_DEFENSIVE_CHECK, func_name.length(), func_name.ptr());
-        LOG_DBA_ERROR(OB_ERR_DEFENSIVE_CHECK, "msg", "Fatal Error!!! data table insert affected row is not match with found rows", K(ret),
+        LOG_ERROR_RET(OB_ERR_DEFENSIVE_CHECK, "Fatal Error!!! data table insert affected row is not match with found rows", K(ret),
                   "primary_affected_rows", pri_rtdef.das_rtdef_.affected_rows_,
+                  "primary_found_rows", pri_rtdef.cur_row_num_,
                   "primary_ins_ctdef", pri_ctdef,
                   "primary_ins_rtdef", pri_rtdef);
+       LOG_DBA_ERROR_V2(OB_SQL_INSERT_AFFECTED_ROW_FAIL, ret, "Attention!!!", "data table insert affected row is not match with found rows"
+                  ", primary_affected_rows is: ", pri_rtdef.das_rtdef_.affected_rows_,
+                  ", primary_get_rows is: ", pri_rtdef.cur_row_num_);
       }
     }
   }

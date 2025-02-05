@@ -12,10 +12,7 @@
 
 #include "observer/virtual_table/ob_mysql_proc_table.h"
 
-#include "share/schema/ob_schema_struct.h"
-#include "share/schema/ob_schema_getter_guard.h"
 #include "share/schema/ob_schema_printer.h"
-#include "common/sql_mode/ob_sql_mode_utils.h"
 #include "sql/session/ob_sql_session_info.h"
 
 using namespace oceanbase::common;
@@ -64,6 +61,7 @@ int ObMySQLProcTable::inner_get_next_row(common::ObNewRow *&row)
           const ObRoutineInfo *routine_info = NULL;
           sql::ObExecEnv exec_env;
           for (int64_t row_idx = 0; OB_SUCC(ret) && row_idx < routine_array.count(); ++row_idx) {
+            const ObDatabaseSchema *db_schema = NULL;
             exec_env.reset();
             if (OB_ISNULL(routine_info = routine_array.at(row_idx))) {
               ret = OB_ERR_UNEXPECTED;
@@ -71,6 +69,15 @@ int ObMySQLProcTable::inner_get_next_row(common::ObNewRow *&row)
             } else if (ROUTINE_PACKAGE_TYPE == routine_info->get_routine_type()
                        || ROUTINE_UDT_TYPE == routine_info->get_routine_type()) {
               // mysql compatible view, ignore oracle system package/udt routine
+              continue;
+            } else if (OB_FAIL(schema_guard_->get_database_schema(tenant_id_,
+                        routine_info->get_database_id(), db_schema))) {
+              SERVER_LOG(WARN, "Failed to get database schema", K_(tenant_id), K(routine_info->get_database_id()), K(ret));
+            } else if (OB_ISNULL(db_schema)) {
+              ret = OB_ERR_UNEXPECTED;
+              SERVER_LOG(WARN, "Database schema should not be NULL", K(ret));
+            } else if (db_schema->is_in_recyclebin()) {
+              // ignore is_in_recyclebin routine
               continue;
             } else if (OB_FAIL(exec_env.init(routine_info->get_exec_env()))) {
               SERVER_LOG(ERROR, "fail to load exec env", K(ret));
@@ -116,18 +123,8 @@ int ObMySQLProcTable::inner_get_next_row(common::ObNewRow *&row)
                 const uint64_t col_id = output_column_ids_.at(col_idx);
                 switch (col_id) {
                   case (DB): {
-                    const ObDatabaseSchema *db_schema = NULL;
-                    if (OB_FAIL(schema_guard_->get_database_schema(tenant_id_,
-                        routine_info->get_database_id(), db_schema))) {
-                      SERVER_LOG(WARN, "Failed to get database schema", K_(tenant_id),
-                                  K(routine_info->get_database_id()), K(ret));
-                    } else if (OB_ISNULL(db_schema)) {
-                      ret = OB_ERR_UNEXPECTED;
-                      SERVER_LOG(WARN, "Database schema should not be NULL", K(ret));
-                    } else {
-                      cells[col_idx].set_varchar(db_schema->get_database_name());
-                      cells[col_idx].set_collation_type(ObCharset::get_default_collation(ObCharset::get_default_charset()));
-                    }
+                    cells[col_idx].set_varchar(db_schema->get_database_name());
+                    cells[col_idx].set_collation_type(ObCharset::get_default_collation(ObCharset::get_default_charset()));
                     break;
                   }
                   case (DEFINER): {
@@ -136,6 +133,21 @@ int ObMySQLProcTable::inner_get_next_row(common::ObNewRow *&row)
                     break;
                   }
                   case (PARAM_LIST): {
+                    const ObColumnSchemaV2 *tmp_column_schema = NULL;
+                    bool type_is_lob = true;
+                    if (OB_ISNULL(table_schema_) ||
+                          OB_ISNULL(
+                              tmp_column_schema =
+                                  table_schema_->get_column_schema(col_id))) {
+                      ret = OB_ERR_UNEXPECTED;
+                      SERVER_LOG(WARN, "table or column schema is null",
+                                 KR(ret),
+                                 KP(table_schema_),
+                                 KP(tmp_column_schema));
+                    } else {
+                      type_is_lob = tmp_column_schema->get_meta_type().is_lob();
+                    }
+
                     if (nullptr != create_node) {
                       if (T_SP_CREATE != create_node->type_ && T_SF_CREATE != create_node->type_ && OB_ISNULL(create_node->children_[2])) {
                         ret = OB_ERR_UNEXPECTED;
@@ -156,8 +168,20 @@ int ObMySQLProcTable::inner_get_next_row(common::ObNewRow *&row)
                                        K(value_str));
                           }
                         }
-                        OX (cells[col_idx].set_varchar(value_str));
-                        OX (cells[col_idx].set_collation_type(ObCharset::get_default_collation(ObCharset::get_default_charset())));
+                        if (OB_FAIL(ret)) {
+                          // do nothing
+                        } else if (type_is_lob) {
+                          cells[col_idx].set_lob_value(ObLongTextType,
+                                                       value_str.ptr(),
+                                                       value_str.length());
+                          ObCollationType cs_type = tmp_column_schema->get_collation_type() == CS_TYPE_BINARY
+                                                     ? CS_TYPE_BINARY  // when this column is longblob
+                                                     : ObCharset::get_default_collation(ObCharset::get_default_charset()); // when this column is longtext
+                          cells[col_idx].set_collation_type(cs_type);
+                        } else {
+                          cells[col_idx].set_varchar(value_str);
+                          cells[col_idx].set_collation_type(ObCharset::get_default_collation(ObCharset::get_default_charset()));
+                        }
                       }
                     } else {
                       char *param_list_buf = NULL;
@@ -178,8 +202,19 @@ int ObMySQLProcTable::inner_get_next_row(common::ObNewRow *&row)
                           SERVER_LOG(WARN, "Generate table definition failed");
                         } else {
                           ObString value_str(static_cast<int32_t>(pos), static_cast<int32_t>(pos), param_list_buf);
-                          cells[col_idx].set_varchar(value_str);
-                          cells[col_idx].set_collation_type(ObCharset::get_default_collation(ObCharset::get_default_charset()));
+
+                          if (type_is_lob) {
+                            cells[col_idx].set_lob_value(ObLongTextType,
+                                                         value_str.ptr(),
+                                                         value_str.length());
+                            ObCollationType cs_type = tmp_column_schema->get_collation_type() == CS_TYPE_BINARY
+                                                     ? CS_TYPE_BINARY  // when this column is longblob
+                                                     : ObCharset::get_default_collation(ObCharset::get_default_charset()); // when this column is longtext
+                            cells[col_idx].set_collation_type(cs_type);
+                          } else {
+                            cells[col_idx].set_varchar(value_str);
+                            cells[col_idx].set_collation_type(ObCharset::get_default_collation(ObCharset::get_default_charset()));
+                          }
                         }
                       }
                     }
@@ -189,38 +224,55 @@ int ObMySQLProcTable::inner_get_next_row(common::ObNewRow *&row)
                     char *returns_buf = NULL;
                     int64_t returns_buf_size = OB_MAX_VARCHAR_LENGTH;
                     int64_t pos = 0;
+                    const ObColumnSchemaV2 *tmp_column_schema = NULL;
+                    bool type_is_lob = true;
+                    if (OB_ISNULL(table_schema_) ||
+                          OB_ISNULL(
+                              tmp_column_schema =
+                                  table_schema_->get_column_schema(col_id))) {
+                      ret = OB_ERR_UNEXPECTED;
+                      SERVER_LOG(WARN, "table or column schema is null",
+                                 KR(ret),
+                                 KP(table_schema_),
+                                 KP(tmp_column_schema));
+                    } else {
+                      type_is_lob = tmp_column_schema->get_meta_type().is_lob();
+                    }
+
                     if (OB_UNLIKELY(NULL == (returns_buf = static_cast<char *>(allocator_->alloc(returns_buf_size))))) {
                       ret = OB_ALLOCATE_MEMORY_FAILED;
                       SERVER_LOG(WARN, "fail to alloc returns_buf", K(ret));
                     } else {
                       if (routine_info->is_function()) {
-                        if (OB_FAIL(ob_sql_type_str(returns_buf,
-                                                    returns_buf_size,
-                                                    pos,
-                                                    routine_info->get_ret_type()->get_obj_type(),
-                                                    routine_info->get_ret_type()->get_length(),
-                                                    routine_info->get_ret_type()->get_precision(),
-                                                    routine_info->get_ret_type()->get_scale(),
-                                                    routine_info->get_ret_type()->get_collation_type()))) {
-                          SHARE_SCHEMA_LOG(WARN, "fail to get data type str", KPC(routine_info->get_ret_type()));
+                        if (OB_FAIL(ob_sql_type_str_with_coll(returns_buf,
+                                                              returns_buf_size,
+                                                              pos,
+                                                              routine_info->get_ret_type()->get_obj_type(),
+                                                              routine_info->get_ret_type()->get_length(),
+                                                              routine_info->get_ret_type()->get_precision(),
+                                                              routine_info->get_ret_type()->get_scale(),
+                                                              routine_info->get_ret_type()->get_collation_type(),
+                                                              *routine_info->get_ret_type_info()))) {
+                          SHARE_SCHEMA_LOG(WARN, "fail to get data type str with coll", KPC(routine_info->get_ret_type()));
                         }
                       } else {
-                        ObDataType ret_type;
-                        if (OB_FAIL(ob_sql_type_str(returns_buf,
-                                                    returns_buf_size,
-                                                    pos,
-                                                    ret_type.get_obj_type(),
-                                                    ret_type.get_length(),
-                                                    ret_type.get_precision(),
-                                                    ret_type.get_scale(),
-                                                    ret_type.get_collation_type()))) {
-                          SHARE_SCHEMA_LOG(WARN, "fail to get data type str", K(ret_type));
-                        }
+                        // proc no returns, fill empty.
                       }
                       if (OB_SUCC(ret)) {
                         ObString value_str(static_cast<int32_t>(pos), static_cast<int32_t>(pos), returns_buf);
-                        cells[col_idx].set_varchar(value_str);
-                        cells[col_idx].set_collation_type(ObCharset::get_default_collation(ObCharset::get_default_charset()));
+
+                        if (type_is_lob) {
+                          cells[col_idx].set_lob_value(ObLongTextType,
+                                                        value_str.ptr(),
+                                                        value_str.length());
+                          ObCollationType cs_type = tmp_column_schema->get_collation_type() == CS_TYPE_BINARY
+                                                    ? CS_TYPE_BINARY  // when this column is longblob
+                                                    : ObCharset::get_default_collation(ObCharset::get_default_charset()); // when this column is longtext
+                          cells[col_idx].set_collation_type(cs_type);
+                        } else {
+                          cells[col_idx].set_varchar(value_str);
+                          cells[col_idx].set_collation_type(ObCharset::get_default_collation(ObCharset::get_default_charset()));
+                        }
                       }
                     }
                     break;
@@ -293,6 +345,14 @@ int ObMySQLProcTable::inner_get_next_row(common::ObNewRow *&row)
                     }
                     break;
                   }
+                  case (CREATED):
+                  case (MODIFIED): {
+                    int64_t routine_time = OB_INVALID_TIMESTAMP;
+                    get_info_from_all_routine(col_id, routine_info, routine_time);
+                    cells[col_idx].set_timestamp(routine_time);
+                    cells[col_idx].set_collation_type(ObCharset::get_default_collation(ObCharset::get_default_charset()));
+                    break;
+                  }
 
 #define COLUMN_SET_WITH_TYPE(COL_NAME, TYPE, VALUE) \
 case (COL_NAME): {    \
@@ -307,8 +367,6 @@ case (COL_NAME): {    \
                   COLUMN_SET_WITH_TYPE(LANGUAGE, varchar, "SQL")
                   COLUMN_SET_WITH_TYPE(IS_DETERMINISTIC, varchar, routine_info->is_deterministic() ? "YES" : "NO")
                   COLUMN_SET_WITH_TYPE(SECURITY_TYPE, varchar, routine_info->is_invoker_right() ? "INVOKER" : "DEFINER")
-                  COLUMN_SET_WITH_TYPE(CREATED, timestamp, OB_INVALID_TIMESTAMP)
-                  COLUMN_SET_WITH_TYPE(MODIFIED, timestamp, OB_INVALID_TIMESTAMP)
                   COLUMN_SET_WITH_TYPE(COMMENT, varchar, routine_info->get_comment())
 
 #undef COLUMN_SET_WITH_TYPE
@@ -355,7 +413,9 @@ int ObMySQLProcTable::extract_create_node_from_routine_info(ObIAllocator &alloc,
 
   ParseResult parse_result;
   ObString routine_stmt;
-  pl::ObPLParser parser(alloc, sql::ObCharsets4Parser(), exec_env.get_sql_mode());
+  ObSQLMode sql_mode = exec_env.get_sql_mode();
+  sql_mode &= ~SMO_ORACLE;
+  pl::ObPLParser parser(alloc, sql::ObCharsets4Parser(), sql_mode);
   const ObString &routine_body = routine_info.get_routine_body();
   const char prefix[] = "CREATE\n";
   int64_t prefix_len = STRLEN(prefix);
@@ -392,6 +452,54 @@ int ObMySQLProcTable::extract_create_node_from_routine_info(ObIAllocator &alloc,
 
   return ret;
 }
+
+int ObMySQLProcTable::get_info_from_all_routine(const uint64_t col_id,
+                                                const ObRoutineInfo *routine_info,
+                                                int64_t &routine_time)
+{
+  int ret = OB_SUCCESS;
+  common::ObMySQLProxy *sql_proxy = GCTX.sql_proxy_;
+  if (OB_NOT_NULL(routine_info)) {
+    SMART_VAR(ObMySQLProxy::MySQLResult, res) {
+      common::sqlclient::ObMySQLResult *result = NULL;
+      const uint64_t exec_tenant_id = tenant_id_;
+      ObString col_name = col_id == CREATED ? "GMT_CREATE" : "GMT_MODIFIED";
+      const char *sql_str = "select %.*s from oceanbase.__all_routine where "
+                            " database_id = %ld and package_id = %ld "
+                            " and routine_id = %lu and subprogram_id = %ld";
+      ObSqlString sql;
+      if (OB_FAIL(sql.append_fmt(sql_str, col_name.length(), col_name.ptr(),
+                                routine_info->get_database_id() & 0xFFFFFFFF,
+                                routine_info->get_package_id(),
+                                routine_info->get_routine_id() & 0xFFFFFFFF,
+                                routine_info->get_subprogram_id()))) {
+        SERVER_LOG(WARN, "fail to append sql", K(sql_str), K(routine_info->get_database_id()),
+          K(routine_info->get_routine_id()), K(ret));
+      } else if (OB_ISNULL(sql_proxy)) {
+        ret = OB_ERR_UNEXPECTED;
+        SERVER_LOG(WARN, "data member is not init", K(ret));
+      } else if (OB_FAIL(sql_proxy->read(res, exec_tenant_id, sql.ptr()))) {
+        SERVER_LOG(WARN, "fail to read result", K(ret), K(sql));
+      } else if (OB_ISNULL(result = res.get_result())) {
+        ret = OB_ERR_UNEXPECTED;
+        SERVER_LOG(WARN, "result set from read is NULL", K(ret));
+      } else if (OB_SUCC(result->next())) {
+        const int64_t col_idx = 0;
+        const common::ObTimeZoneInfo *time_info = NULL;
+        ret = result->get_timestamp(col_idx, time_info, routine_time);
+      }
+
+      if (OB_LIKELY(OB_ITER_END == ret)) {
+        ret = OB_SUCCESS;
+        SERVER_LOG(INFO, "get null info from all_routine", K(col_name));
+      } else {
+        SERVER_LOG(WARN, "fail to fill table statstistics", K(ret));
+      }
+    }
+  }
+  return ret;
+}
+
 }
 }
 

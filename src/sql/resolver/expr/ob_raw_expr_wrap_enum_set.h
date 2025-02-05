@@ -51,6 +51,7 @@ public:
   int visit(ObWinFunRawExpr &expr);
   int visit(ObPseudoColumnRawExpr &expr);
   int visit(ObPlQueryRefRawExpr &expr);
+  int visit(ObMatchFunRawExpr &expr);
   bool skip_child();
 private:
   int visit_left_expr(ObOpRawExpr &expr, int64_t row_dimension,
@@ -75,6 +76,7 @@ private:
                            const common::ObObjType dest_type,
                            const bool is_same_need);
   int wrap_param_expr(ObIArray<ObRawExpr*> &param_exprs, ObObjType dest_typ);
+  static bool has_enumset_expr_need_wrap(const ObRawExpr &expr);
 private:
   ObDMLStmt *cur_stmt_;
   ObRawExprFactory &expr_factory_;

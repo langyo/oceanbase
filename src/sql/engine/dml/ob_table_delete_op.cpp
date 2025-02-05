@@ -11,13 +11,8 @@
  */
 
 #define USING_LOG_PREFIX SQL_ENG
-#include "common/ob_smart_call.h"
 #include "sql/engine/dml/ob_table_delete_op.h"
-#include "sql/session/ob_sql_session_info.h"
-#include "sql/executor/ob_task_executor_ctx.h"
 #include "sql/engine/dml/ob_dml_service.h"
-#include "sql/engine/dml/ob_trigger_handler.h"
-#include "sql/engine/expr/ob_expr_calc_partition_id.h"
 
 namespace oceanbase
 {
@@ -289,7 +284,7 @@ OB_INLINE int ObTableDeleteOp::delete_row_to_das()
     }
     if (OB_SUCC(ret)) {
       int64_t delete_rows = is_skipped ? 0 : 1;
-      if (OB_FAIL(merge_implict_cursor(0, 0, delete_rows, 0))) {
+      if (OB_FAIL(merge_implict_cursor(delete_rows, 0, 0, 0))) {
         LOG_WARN("merge implict cursor failed", K(ret));
       }
     }
@@ -347,10 +342,12 @@ int ObTableDeleteOp::check_delete_affected_row()
         ret = OB_ERR_DEFENSIVE_CHECK;
         ObString func_name = ObString::make_string("check_delete_affected_row");
         LOG_USER_ERROR(OB_ERR_DEFENSIVE_CHECK, func_name.length(), func_name.ptr());
-        LOG_DBA_ERROR(OB_ERR_DEFENSIVE_CHECK, "msg", "Fatal Error!!! data table delete affected row is not match with index table",
+        LOG_ERROR_RET(OB_ERR_DEFENSIVE_CHECK, "Fatal Error!!! data table delete affected row is not match with index table",
                   K(ret), K(primary_write_rows), K(index_write_rows),
                   KPC(primary_del_ctdef), K(primary_del_rtdef),
                   KPC(index_del_ctdef), K(index_del_rtdef));
+        LOG_DBA_ERROR_V2(OB_SQL_DELETE_AFFECTED_ROW_FAIL, ret, "Attention!!!", "data table delete affected row is not match with index table"
+                  ", data table delete affected_rows is: ", primary_write_rows, ", index table delete affected_rows is: ", index_write_rows);
       }
     }
     if (OB_SUCC(ret)) {
@@ -358,9 +355,12 @@ int ObTableDeleteOp::check_delete_affected_row()
         ret = OB_ERR_DEFENSIVE_CHECK;
         ObString func_name = ObString::make_string("check_delete_affected_row");
         LOG_USER_ERROR(OB_ERR_DEFENSIVE_CHECK, func_name.length(), func_name.ptr());
-        LOG_DBA_ERROR(OB_ERR_DEFENSIVE_CHECK, "msg", "Fatal Error!!! data table delete affected row is not match with found rows",
+        LOG_ERROR_RET(OB_ERR_DEFENSIVE_CHECK, "Fatal Error!!! data table delete affected row is not match with found rows",
                   K(ret), K(primary_write_rows), K(primary_del_rtdef.cur_row_num_),
                   KPC(primary_del_ctdef), K(primary_del_rtdef));
+        LOG_DBA_ERROR_V2(OB_SQL_DELETE_AFFECTED_ROW_FAIL, ret, "Attention!!!", "data table delete affected row is not match with index table"
+                  ", data table delete affected row is: ", primary_write_rows,
+                  ", data table found_rows is: ", primary_del_rtdef.cur_row_num_);
       }
     }
   }

@@ -81,11 +81,13 @@ public:
   LogConfigVersion();
   ~LogConfigVersion();
   void operator=(const LogConfigVersion &config_version);
+  static const int64_t CONFIG_VERSION_LEN = 128;
 
 public:
   int generate(const int64_t proposal_id, const int64_t config_seq);
   int inc_update_version(const int64_t proposal_id);
   bool is_valid() const;
+  bool is_initial_version() const;
   void reset();
   int64_t to_string(char *buf, const int64_t buf_len);
   bool operator==(const LogConfigVersion &config_version) const;
@@ -328,13 +330,17 @@ public:
   ~LogSnapshotMeta();
 
 public:
-  int generate(const LSN &lsn);
-  int generate(const LSN &lsn, const LogInfo &prev_log_info);
+  int generate(const LSN &base_lsn,
+               const LogInfo &prev_log_info,
+               const LSN &prev_log_tail_lsn);
   bool is_valid() const;
   void reset();
-  int get_prev_log_info(LogInfo &log_info) const;
+  int get_prev_log_info(const LSN &curr_lsn,
+                        LogInfo &log_info,
+                        LSN &tail_lsn) const;
   void operator=(const LogSnapshotMeta &log_snapshot_meta);
-  TO_STRING_KV(K_(version), K_(base_lsn), K_(prev_log_info));
+  int64_t get_version_() const;
+  TO_STRING_KV(K_(version), K_(base_lsn), K_(prev_log_info), K_(prev_log_tail_lsn));
   NEED_SERIALIZE_AND_DESERIALIZE;
 
   int64_t version_;
@@ -344,8 +350,10 @@ public:
   // By using this info, the dest ls does not need fetch prev log file
   // of base_lsn from the source ls.
   LogInfo prev_log_info_;
+  LSN prev_log_tail_lsn_;
 
-  static constexpr int64_t LOG_SNAPSHOT_META_VERSION = 1;
+  static const int64_t LOG_SNAPSHOT_META_VERSION;
+  static const int64_t LOG_SNAPSHOT_META_VERSION_V2;
 };
 
 struct LogReplicaPropertyMeta {

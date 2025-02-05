@@ -11,10 +11,6 @@
  */
 
 #include "palf_options.h"
-#include "lib/ob_errno.h"
-#include "lib/utility/ob_macro_utils.h"
-#include "log_define.h"
-#include <cstdint>
 
 namespace oceanbase
 {
@@ -25,6 +21,7 @@ void PalfOptions::reset()
   disk_options_.reset();
   compress_options_.reset();
   rebuild_replica_log_lag_threshold_ = 0;
+  enable_log_cache_ = false;
 }
 
 bool PalfOptions::is_valid() const

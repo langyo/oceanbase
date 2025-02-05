@@ -11,19 +11,14 @@
  */
 
 #define USING_LOG_PREFIX SHARE
+#include "rootserver/ob_root_service.h"
 #include "ob_backup_connectivity.h"
-#include "ob_backup_struct.h"
-#include "ob_backup_path.h"
-#include "share/backup/ob_backup_io_adapter.h"
-#include "share/ob_encryption_util.h"
-#include "rootserver/ob_rs_event_history_table_operator.h"
-#include "share/ob_srv_rpc_proxy.h"
-#include "share/backup/ob_backup_data_table_operator.h"
-#include "share/schema/ob_multi_version_schema_service.h"
+#include "lib/restore/ob_object_device.h"
 
-using namespace oceanbase;
-using namespace share;
-
+namespace oceanbase
+{
+namespace share
+{
 ObBackupConnectivityCheckManager::ObBackupConnectivityCheckManager()
   : is_inited_(false),
     tenant_id_(OB_INVALID_TENANT_ID),
@@ -62,7 +57,7 @@ int ObBackupConnectivityCheckManager::schedule_connectivity_check_(
     const share::ObBackupPath &path)
 {
   int ret = OB_SUCCESS;
-  // TODO(wenjinyu.wjy) in 4.3, this code logic needs to be rewritten. Since server_mgr needs to be removed, first comment the code
+  // TODO(mingqiao) in 4.3, this code logic needs to be rewritten. Since server_mgr needs to be removed, first comment the code
   // obrpc::ObCheckBackupConnectivityArg args;
   // args.tenant_id_ = tenant_id_;
   // common::ObArray<ObAddr> server_list;
@@ -202,7 +197,7 @@ int ObBackupConnectivityCheckManager::check_backup_dest_connectivity(
     LOG_WARN("failed to check oss/cos io permission", K(ret), K_(tenant_id), K(backup_dest)); 
   } else if (OB_FAIL(set_connectivity_check_path_(backup_dest, path))) {
     LOG_WARN("failed to get check file", K(ret), K_(tenant_id), K(backup_dest));
-  // TODO(wenjinyu.wjy) in 4.3, support check connectivity
+  // TODO(mingqiao) in 4.3, support check connectivity
   //} else if (OB_FAIL(schedule_connectivity_check_(backup_dest, path))) {
   //  LOG_WARN("failed to schedule connectivity check", K(ret), K_(tenant_id));
   } else if (OB_FAIL(set_last_check_time_(backup_dest))) {
@@ -326,7 +321,7 @@ int ObBackupCheckFile::compare_check_file_name_(
     ObDirPrefixEntryNameFilter prefix_op(d_entrys);
     if (OB_FAIL(prefix_op.init(check_file_prefix, static_cast<int32_t>(strlen(check_file_prefix))))) {
       LOG_WARN("failed to init dir prefix", K(ret), K(check_file_prefix), K_(tenant_id));
-    } else if (OB_FAIL(util.list_files(path.get_obstr(), backup_dest.get_storage_info(), prefix_op))) {
+    } else if (OB_FAIL(util.adaptively_list_files(path.get_obstr(), backup_dest.get_storage_info(), prefix_op))) {
       LOG_WARN("failed to list files", K(ret), K_(tenant_id));
     } else if (OB_FAIL(ObBackupStorageInfoOperator::get_check_file_name(
         *sql_proxy_, tenant_id_, backup_dest, check_file_name))) {
@@ -346,7 +341,7 @@ int ObBackupCheckFile::compare_check_file_name_(
           LOG_WARN("failed to set check file path", K(ret), K(path), K_(tmp_entry.name));
         } else {
           common::ObString uri(del_file_path);
-          if(OB_FAIL(util.del_file(uri, backup_dest.get_storage_info()))) {
+          if(OB_FAIL(util.adaptively_del_file(uri, backup_dest.get_storage_info()))) {
             LOG_WARN("failed to delete check file", K(ret), K_(tenant_id));
           }
         }
@@ -417,7 +412,10 @@ int ObBackupCheckFile::create_connectivity_check_file(
     } else if (OB_FAIL(store.init(backup_dest))) {
       LOG_WARN("failed to set buffer", K(ret), K_(tenant_id));
     } else if (OB_FAIL(store.write_check_file(path.get_ptr(), check_desc))) {
-      LOG_WARN("failed to set buffer", K(ret), K_(tenant_id));
+      if (OB_CHECKSUM_TYPE_NOT_SUPPORTED == ret) {
+        LOG_USER_ERROR(OB_CHECKSUM_TYPE_NOT_SUPPORTED, backup_dest.get_storage_info()->get_checksum_type_str());
+      }
+      LOG_WARN("failed to write check file", K(ret), K(path), K(check_desc));
     } else {
       is_new_create = true;
       FLOG_INFO("[BACKUP_DEST_CHECK] succeed to create new check file", K(path), K(is_match));
@@ -451,7 +449,7 @@ int ObBackupCheckFile::delete_permission_check_file(const ObBackupDest &backup_d
     ObDirPrefixEntryNameFilter prefix_op(d_entrys);
     if (OB_FAIL(prefix_op.init(check_file_prefix, static_cast<int32_t>(strlen(check_file_prefix))))) {
       LOG_WARN("failed to init dir prefix", K(ret), K(check_file_prefix), K_(tenant_id));
-    } else if (OB_FAIL(util.list_files(path.get_obstr(), backup_dest.get_storage_info(), prefix_op))) {
+    } else if (OB_FAIL(util.adaptively_list_files(path.get_obstr(), backup_dest.get_storage_info(), prefix_op))) {
       LOG_WARN("failed to list files", K(ret), K_(tenant_id));
     } else {
       char del_file_path[OB_MAX_BACKUP_PATH_LENGTH];
@@ -466,7 +464,7 @@ int ObBackupCheckFile::delete_permission_check_file(const ObBackupDest &backup_d
           LOG_WARN("failed to set delete file path", K(ret), K(path), K_(tmp_entry.name));
         } else {
           common::ObString uri(del_file_path);
-          if(OB_FAIL(util.del_file(uri, backup_dest.get_storage_info()))) {
+          if(OB_FAIL(util.adaptively_del_file(uri, backup_dest.get_storage_info()))) {
             LOG_WARN("failed to delete permission check file", K(ret), K_(tenant_id));
           }
         }
@@ -478,17 +476,21 @@ int ObBackupCheckFile::delete_permission_check_file(const ObBackupDest &backup_d
 
 int ObBackupCheckFile::get_permission_check_file_path_(
     const ObBackupDest &backup_dest,
-    bool is_appender,
+    const ObStorageAccessType access_type,
     share::ObBackupPath &path)
 {
   int ret = OB_SUCCESS;
   int64_t check_time_s = ObTimeUtility::current_time() / 1000/ 1000;
   char buff[OB_BACKUP_MAX_TIME_STR_LEN] = { 0 };
-  const char *prefix = is_appender ? "append" : "put";
+  const char *prefix = nullptr;
   int64_t pos = 0;
   if (!is_inited_) {
     ret = OB_NOT_INIT;
     LOG_WARN("backup check file not init", K(ret));
+  } else if (ObStorageAccessType::OB_STORAGE_ACCESS_MAX_TYPE <= access_type) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid access type", K(ret), K(access_type));
+  } else if (OB_FALSE_IT(prefix = get_storage_access_type_str(access_type))) {
   } else if (OB_FAIL(get_check_file_path(backup_dest, path))) {
     LOG_WARN("failed to get check file path", K(ret), K(backup_dest));
   } else if (OB_FAIL(backup_time_to_strftime(check_time_s, buff, sizeof(buff), pos, 'T'/* concat */))) {
@@ -524,22 +526,23 @@ int ObBackupCheckFile::check_appender_permission_(const ObBackupDest &backup_des
   if (!is_inited_) {
     ret = OB_NOT_INIT;
     LOG_WARN("backup check file not init", K(ret));
-  } else if (OB_FAIL(get_permission_check_file_path_(backup_dest, true/*is_appender*/, path))) {
+  } else if (OB_FAIL(get_permission_check_file_path_(backup_dest, ObStorageAccessType::OB_STORAGE_ACCESS_APPENDER, path))) {
       LOG_WARN("failed to get permission check file path", K(ret), K_(tenant_id), K(backup_dest)); 
   } else if (OB_FAIL(util.set_access_type(&iod_opts, true/*is_appender*/, DEFAULT_OPT_ARG_NUM))) {
     LOG_WARN("fail to set access type");
   } else if (OB_FAIL(util.set_append_strategy(&iod_opts, is_data_file, epoch, DEFAULT_OPT_ARG_NUM))) {
     LOG_WARN("fail to set append strategy");
-  } else if (OB_FAIL(util.get_and_init_device(device_handle, backup_dest.get_storage_info(), path.get_obstr()))) {
+  } else if (OB_FAIL(util.get_and_init_device(device_handle, backup_dest.get_storage_info(), path.get_obstr(),
+                                              ObStorageIdMod::get_default_id_mod()))) {
     LOG_WARN( "fail to get device", K(ret));
   } else if (OB_FAIL(device_handle->open(path.get_ptr(), -1/* flag */, 0/* mode */, fd, &iod_opts))) { // flag=-1 and mode=0 are invalid, because oss/cos unused flag and mode;
     LOG_WARN("fail to open file", K(ret), K(path.get_ptr()));
   } else if (OB_FAIL(databuff_printf(data, sizeof(data), "tenant(%lu) appender writer at %ld", tenant_id_, ObTimeUtility::current_time()))) {
     LOG_WARN("fail to set data", K(ret), K(path.get_ptr()));
-  } else if (OB_FAIL(device_handle->write(fd, data, strlen(data),  write_size))) {
+  } else if (OB_FAIL(device_handle->pwrite(fd, 0, strlen(data), data, write_size))) {
     LOG_WARN("fail to write file", K(ret), K(path.get_ptr()), K(data));
-  } else if (OB_FAIL(util.del_file(path.get_obstr(), backup_dest.get_storage_info()))) {
-    LOG_WARN("failed to del file", K(ret));
+  } else if (OB_FAIL(util.adaptively_del_file(path.get_obstr(), backup_dest.get_storage_info()))) {
+    LOG_WARN("failed to del file", K(ret), K(path));
   }
 
   if (OB_SUCCESS != (tmp_ret = util.close_device_and_fd(device_handle, fd))) {
@@ -550,13 +553,56 @@ int ObBackupCheckFile::check_appender_permission_(const ObBackupDest &backup_des
   return ret;
 }
 
+int ObBackupCheckFile::check_multipart_upload_permission_(const ObBackupDest &backup_dest)
+{
+  int ret = OB_SUCCESS;
+  int tmp_ret = OB_SUCCESS;
+  ObBackupIoAdapter util;
+  ObStorageAccessType access_type = OB_STORAGE_ACCESS_MULTIPART_WRITER;
+  int64_t write_size = 0;
+  int64_t offset = 0;
+  ObIODevice *device_handle = NULL;
+  ObIOFd fd;
+  const static int64_t BUF_LENGTH = 64;
+  char data[BUF_LENGTH];
+  ObBackupPath path;
+  if (!is_inited_) {
+    ret = OB_NOT_INIT;
+    LOG_WARN("backup check file not init", K(ret));
+  } else if (OB_FAIL(get_permission_check_file_path_(backup_dest, access_type, path))) {
+    LOG_WARN("failed to get permission check file path", K(ret), K_(tenant_id), K(backup_dest));
+  } else if (OB_FAIL(util.open_with_access_type(device_handle, fd, backup_dest.get_storage_info(),
+             path.get_obstr(), access_type, ObStorageIdMod::get_default_id_mod()))) {
+    LOG_WARN("fail to open device or fd", K(ret), K(backup_dest), K(path));
+  } else if (OB_FAIL(databuff_printf(data, sizeof(data), "tenant(%lu) multipart writer at %ld", tenant_id_, ObTimeUtility::current_time()))) {
+    LOG_WARN("fail to set data", K(ret), K(path.get_ptr()));
+  } else if (OB_FAIL(device_handle->pwrite(fd, offset, strlen(data), data, write_size))) {
+    LOG_WARN("fail to write file", K(ret), K(path.get_ptr()), K(data));
+  } else if (OB_FAIL(device_handle->complete(fd))) {
+    STORAGE_LOG(WARN, "fail to complete multipart upload", K(ret), K(device_handle), K(fd));
+  } else if (OB_FAIL(util.del_file(path.get_obstr(), backup_dest.get_storage_info()))) {
+    LOG_WARN("failed to del file", K(ret));
+  }
+
+  if (OB_FAIL(ret)) {
+    if (OB_NOT_NULL(device_handle) && OB_TMP_FAIL(device_handle->abort(fd))) {
+      ret = COVER_SUCC(tmp_ret);
+      STORAGE_LOG(WARN, "fail to abort multipart upload", K(ret), K(tmp_ret), K(device_handle), K(fd));
+    }
+  }
+  if (OB_TMP_FAIL(util.close_device_and_fd(device_handle, fd))) {
+    ret = COVER_SUCC(tmp_ret);
+    STORAGE_LOG(WARN, "fail to close device and fd", K(ret), K(tmp_ret), K(device_handle), K(fd));
+  }
+  return ret;
+}
+
 bool ObBackupCheckFile::is_permission_error_(const int32_t result) 
 { 
   int ret = OB_SUCCESS;
   bool is_permission = false;
   if (OB_IO_ERROR == result
-      || OB_OSS_ERROR == result
-      || OB_COS_ERROR == result) {
+      || OB_OBJECT_STORAGE_IO_ERROR == result) {
     is_permission = true; 
   }
   return is_permission;
@@ -582,7 +628,7 @@ int ObBackupCheckFile::check_io_permission(const ObBackupDest &backup_dest)
   } else if (!backup_dest.is_valid()) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("backup dest is valid", K(ret), K_(tenant_id)); 
-  } else if (OB_FAIL(get_permission_check_file_path_(backup_dest, false/*is_appender*/, path))) {
+  } else if (OB_FAIL(get_permission_check_file_path_(backup_dest, ObStorageAccessType::OB_STORAGE_ACCESS_OVERWRITER, path))) {
       LOG_WARN("failed to get permission check file path", K(ret), K_(tenant_id));
   } else if (OB_FAIL(generate_format_desc_(backup_dest, check_desc))) {
     LOG_WARN("failed to set buffer", K(ret), K_(tenant_id));
@@ -590,35 +636,36 @@ int ObBackupCheckFile::check_io_permission(const ObBackupDest &backup_dest)
     LOG_WARN("failed to set buffer", K(ret), K_(tenant_id));
   } else if (OB_FAIL(store.write_check_file(path.get_ptr(), check_desc))) {
     if (is_permission_error_(ret)) {
+      ret = OB_BACKUP_PERMISSION_DENIED;
       ROOTSERVICE_EVENT_ADD("connectivity_check", "permission check", 
           "tenant_id", tenant_id_, "error_code", ret, "comment", "write single file");
-      ret = OB_BACKUP_PERMISSION_DENIED;
     }
     LOG_WARN("failed to write single file", K(ret), K_(tenant_id), K(backup_dest));
   } else if (FALSE_IT(write_ok = true)
-      || OB_FAIL(util.get_file_length(path.get_obstr(), backup_dest.get_storage_info(), file_len))) {
+      || OB_FAIL(util.adaptively_get_file_length(path.get_obstr(), backup_dest.get_storage_info(), file_len))) {
     if (is_permission_error_(ret)) { 
+      ret = OB_BACKUP_PERMISSION_DENIED;
       ROOTSERVICE_EVENT_ADD("connectivity_check", "permission check", 
           "tenant_id", tenant_id_, "error_code", ret, "comment", "get file length");
-      ret = OB_BACKUP_PERMISSION_DENIED;
     }
     LOG_WARN("failed to get file length", K(ret));
   } else if (OB_ISNULL(buf = reinterpret_cast<char*>(allocator.alloc(file_len)))) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
     LOG_WARN("failed to alloc buf", K(ret), K(file_len));
-  } else if (OB_FAIL(util.read_single_file(path.get_obstr(), backup_dest.get_storage_info(), buf, file_len, read_size))) {
+  } else if (OB_FAIL(util.adaptively_read_single_file(path.get_obstr(), backup_dest.get_storage_info(),
+                     buf, file_len, read_size, ObStorageIdMod::get_default_id_mod()))) {
     if (is_permission_error_(ret)) {
+      ret = OB_BACKUP_PERMISSION_DENIED;
       ROOTSERVICE_EVENT_ADD("connectivity_check", "permission check", 
           "tenant_id", tenant_id_, "error_code", ret, "comment", "read single file");
-      ret = OB_BACKUP_PERMISSION_DENIED;
     }
     LOG_WARN("failed to read single file", K(ret));
   }
-  if (write_ok && (OB_SUCCESS != (tmp_ret = util.del_file(path.get_obstr(), backup_dest.get_storage_info())))) {
+  if (write_ok && (OB_SUCCESS != (tmp_ret = util.adaptively_del_file(path.get_obstr(), backup_dest.get_storage_info())))) {
     if (is_permission_error_(tmp_ret)) {
+      tmp_ret = OB_BACKUP_PERMISSION_DENIED;
       ROOTSERVICE_EVENT_ADD("connectivity_check", "permission check", 
           "tenant_id", tenant_id_, "error_code", tmp_ret, "comment", "delete file");
-      tmp_ret = OB_BACKUP_PERMISSION_DENIED;
     }
     ret = (OB_SUCCESS == ret) ? tmp_ret : ret;
     LOG_WARN("failed to del file", K(tmp_ret), K(ret), K(path), K(backup_dest));
@@ -626,11 +673,18 @@ int ObBackupCheckFile::check_io_permission(const ObBackupDest &backup_dest)
   if (OB_FAIL(ret)) {
   } else if (OB_FAIL(check_appender_permission_(backup_dest))){
     if (is_permission_error_(ret)) {
+      ret = OB_BACKUP_PERMISSION_DENIED;
       ROOTSERVICE_EVENT_ADD("connectivity_check", "permission check",
           "tenant_id", tenant_id_, "error_code", ret, "comment", "appender write");
-      ret = OB_BACKUP_PERMISSION_DENIED;
     }
     LOG_WARN("failed to appender permission", K(ret));
+  } else if (OB_FAIL(check_multipart_upload_permission_(backup_dest))) {
+    if (is_permission_error_(ret)) {
+      ret = OB_BACKUP_PERMISSION_DENIED;
+      ROOTSERVICE_EVENT_ADD("connectivity_check", "permission check",
+          "tenant_id", tenant_id_, "error_code", ret, "comment", "multipart upload write");
+    }
+    LOG_WARN("failed to check multipart permission", K(ret), K(backup_dest));
   }
 
   return ret;
@@ -672,7 +726,7 @@ int ObBackupDestCheck::check_check_file_exist_(
   bool need_retry = true;
   is_exist = false;
   while (retry_times--) {
-    if (OB_FAIL(util.is_exist(path.get_obstr(), backup_dest.get_storage_info(), is_exist))) {
+    if (OB_FAIL(util.adaptively_is_exist(path.get_obstr(), backup_dest.get_storage_info(), is_exist))) {
       LOG_WARN("failed to check is_exist", K(ret), K(path), K(backup_dest), K(retry_times));
       ob_usleep(1 * 1000 * 1000L); // 1s 
       continue;
@@ -727,7 +781,9 @@ int ObBackupStorageInfoOperator::insert_backup_storage_info(
     const uint64_t tenant_id,
     const ObBackupDest &backup_dest,
     const ObBackupDestType::TYPE &dest_type,
-    const int64_t dest_id)
+    const int64_t dest_id,
+    const int64_t max_iops,
+    const int64_t max_bandwidth)
 {
   int ret = OB_SUCCESS;
   ObSqlString sql;
@@ -735,9 +791,15 @@ int ObBackupStorageInfoOperator::insert_backup_storage_info(
   int64_t affected_rows = 0;
   char *root_path = NULL;
   char authorization[OB_MAX_BACKUP_AUTHORIZATION_LENGTH] = { 0 };
+  uint64_t compat_version = 0;
   if (OB_INVALID_ID == tenant_id || !backup_dest.is_valid()) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid arguments", K(ret), K(tenant_id), K(backup_dest));
+  } else if (OB_FAIL(GET_MIN_DATA_VERSION(gen_meta_tenant_id(tenant_id), compat_version))) {
+    LOG_WARN("failed to get min data version", K(ret), K(tenant_id));
+  } else if (compat_version < DATA_VERSION_4_3_3_0) {
+    ret = OB_NOT_SUPPORTED;
+    LOG_WARN("in compat, can't read/write inner table", K(ret), K(compat_version));
   } else if (OB_FAIL(backup_dest.get_storage_info()->get_authorization_info(authorization, sizeof(authorization)))) {
     LOG_WARN("fail to set authorization", K(ret), K(tenant_id));
   } else if (OB_FAIL(dml.add_pk_column(OB_STR_TENANT_ID, tenant_id))
@@ -746,7 +808,9 @@ int ObBackupStorageInfoOperator::insert_backup_storage_info(
       || OB_FAIL(dml.add_column(OB_STR_DEST_ID, dest_id))
       || OB_FAIL(dml.add_column(OB_STR_DEST_TYPE, ObBackupDestType::get_str(dest_type))) 
       || OB_FAIL(dml.add_column(OB_STR_BACKUP_DEST_AUTHORIZATION, authorization))
-      || OB_FAIL(dml.add_column(OB_STR_BACKUP_DEST_EXTENSION, backup_dest.get_storage_info()->extension_))) {
+      || OB_FAIL(dml.add_column(OB_STR_BACKUP_DEST_EXTENSION, backup_dest.get_storage_info()->extension_))
+      || OB_FAIL(dml.add_column(OB_STR_MAX_IOPS, max_iops))
+      || OB_FAIL(dml.add_column(OB_STR_MAX_BANDWIDTH, max_bandwidth))) {
     LOG_WARN("fail to fill backup dest info", K(ret));
   } else if (OB_FAIL(dml.splice_insert_update_sql(OB_ALL_BACKUP_STORAGE_INFO_TNAME, sql))) {
     LOG_WARN("failed to splice insert update sql", K(ret));
@@ -758,7 +822,6 @@ int ObBackupStorageInfoOperator::insert_backup_storage_info(
   } else {
     LOG_INFO("succ insert/update backup storage info", K(sql), K(tenant_id), K(backup_dest));
   }
-
   return ret;
 }
 
@@ -786,6 +849,29 @@ int ObBackupStorageInfoOperator::remove_backup_storage_info(
   return ret;
 }
 
+int ObBackupStorageInfoOperator::remove_backup_storage_info(
+    common::ObISQLClient &proxy,
+    const uint64_t tenant_id,
+    const ObBackupDestType::TYPE &backup_dest_type)
+{
+  int ret = OB_SUCCESS;
+  ObSqlString sql;
+  int64_t affected_rows = 0;
+
+  if (OB_INVALID_ID == tenant_id || !ObBackupDestType::is_valid(backup_dest_type)) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid arguments", K(ret), K(tenant_id), K(backup_dest_type));
+  } else if (OB_FAIL(sql.assign_fmt("DELETE FROM %s WHERE tenant_id = %lu "
+      "AND dest_type = '%s'", OB_ALL_BACKUP_STORAGE_INFO_TNAME,
+      tenant_id, ObBackupDestType::get_str(backup_dest_type)))) {
+    LOG_WARN("failed to assign sql", K(ret), K(tenant_id));
+  } else if (OB_FAIL(proxy.write(gen_meta_tenant_id(tenant_id), sql.ptr(), affected_rows))) {
+    LOG_WARN("fail to execute sql", K(ret));
+  } else {
+    LOG_INFO("succ delete backup storage info", K(sql), K(tenant_id), K(affected_rows), K(backup_dest_type));
+  }
+  return ret;
+}
 
 int ObBackupStorageInfoOperator::update_backup_authorization(
     common::ObISQLClient &proxy,
@@ -813,9 +899,48 @@ int ObBackupStorageInfoOperator::update_backup_authorization(
     LOG_WARN("fail to execute sql", K(ret), K(sql));
   } else if (1 != affected_rows) {
     ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("error unexpected, invalid affected rows", K(ret), K(affected_rows));
+    LOG_WARN("error unexpected, invalid affected rows", K(ret), K(sql), K(tenant_id), K(affected_rows));
   } else {
     LOG_INFO("update backup authorization in storage info", K(sql), K(tenant_id), K(backup_dest));
+  }
+  return ret;
+}
+
+int ObBackupStorageInfoOperator::update_backup_dest_attribute(
+    common::ObISQLClient &proxy,
+    const uint64_t tenant_id,
+    const share::ObBackupDest &backup_dest,
+    const int64_t max_iops,
+    const int64_t max_bandwidth)
+{
+  int ret = OB_SUCCESS;
+  ObSqlString sql;
+  ObDMLSqlSplicer dml;
+  int64_t affected_rows = 0;
+  uint64_t compat_version = 0;
+  if (OB_INVALID_ID == tenant_id || !backup_dest.is_valid()) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid arguments", K(ret), K(backup_dest));
+  } else if (OB_FAIL(GET_MIN_DATA_VERSION(gen_meta_tenant_id(tenant_id), compat_version))) {
+    LOG_WARN("failed to get min data version", K(ret), K(tenant_id));
+  } else if (compat_version < DATA_VERSION_4_3_3_0) {
+    ret = OB_NOT_SUPPORTED;
+    LOG_WARN("in compat, can't read/write inner table", K(ret), K(compat_version));
+  } else if (OB_FAIL(dml.add_pk_column(OB_STR_TENANT_ID, gen_user_tenant_id(tenant_id)))
+      || OB_FAIL(dml.add_pk_column(OB_STR_PATH, backup_dest.get_root_path().ptr()))
+      || OB_FAIL(dml.add_pk_column(OB_STR_BACKUP_DEST_ENDPOINT, backup_dest.get_storage_info()->endpoint_))
+      || OB_FAIL(dml.add_column(OB_STR_MAX_IOPS, max_iops))
+      || OB_FAIL(dml.add_column(OB_STR_MAX_BANDWIDTH, max_bandwidth))) {
+    LOG_WARN("failed to fill on item", K(ret), K(backup_dest));
+  } else if (OB_FAIL(dml.splice_update_sql(OB_ALL_BACKUP_STORAGE_INFO_TNAME, sql))) {
+    LOG_WARN("failed to splice insert update sql", K(ret), K(backup_dest));
+  } else if (OB_FAIL(proxy.write(gen_meta_tenant_id(tenant_id), sql.ptr(), affected_rows))) {
+    LOG_WARN("fail to execute sql", K(ret), K(sql));
+  } else if (0 != affected_rows && 1 != affected_rows) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("error unexpected, invalid affected rows", K(ret), K(affected_rows));
+  } else {
+    LOG_INFO("update backup attribute in storage info", K(sql), K(tenant_id), K(backup_dest));
   }
   return ret;
 }
@@ -922,6 +1047,82 @@ int ObBackupStorageInfoOperator::get_dest_id(
         LOG_WARN("error unexpected, query result must not be NULL", K(ret));
       } else if (OB_SUCC(result->next())) {
         EXTRACT_INT_FIELD_MYSQL(*result, OB_STR_DEST_ID, dest_id, int64_t);
+      } else if (OB_ITER_END == ret) {
+        ret = OB_ENTRY_NOT_EXIST;
+        LOG_WARN("no exist row", K(ret), K(sql));
+      } else {
+        LOG_WARN("fail to get next row", K(ret));
+      }
+    }
+  }
+  return ret;
+}
+
+int ObBackupStorageInfoOperator::get_restore_dest_id(
+    common::ObISQLClient &proxy,
+    const uint64_t tenant_id,
+    const ObBackupDestType::TYPE &backup_dest_type,
+    int64_t &dest_id)
+{
+  int ret = OB_SUCCESS;
+  ObSqlString sql;
+  dest_id = 0;
+
+  if (OB_INVALID_ID == tenant_id || !ObBackupDestType::is_valid(backup_dest_type)) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid argument", K(ret), K(tenant_id), K(backup_dest_type));
+  } else if (OB_FAIL(sql.assign_fmt(
+      "SELECT %s FROM %s WHERE tenant_id = %lu AND dest_type = '%s'",
+      OB_STR_DEST_ID, OB_ALL_BACKUP_STORAGE_INFO_TNAME,
+      tenant_id, ObBackupDestType::get_str(backup_dest_type)))) {
+    LOG_WARN("fail to assign sql", K(ret), K(tenant_id));
+  } else {
+    SMART_VAR(ObMySQLProxy::MySQLResult, res) {
+      sqlclient::ObMySQLResult *result = NULL;
+      if (OB_FAIL(proxy.read(res, gen_meta_tenant_id(tenant_id), sql.ptr()))) {
+        LOG_WARN("fail to execute sql", K(ret), K(sql));
+      } else if (OB_ISNULL(result = res.get_result())) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("error unexpected, query result must not be NULL", K(ret));
+      } else if (OB_SUCC(result->next())) {
+        EXTRACT_INT_FIELD_MYSQL(*result, OB_STR_DEST_ID, dest_id, int64_t);
+      } else if (OB_ITER_END == ret) {
+        ret = OB_ENTRY_NOT_EXIST;
+        LOG_WARN("no exist row", K(ret), K(sql));
+      } else {
+        LOG_WARN("fail to get next row", K(ret));
+      }
+    }
+  }
+  return ret;
+}
+
+int ObBackupStorageInfoOperator::get_restore_shared_storage_limit(const common::ObTrafficControl::ObStorageKey &storage_key, int64_t &max_iops, int64_t &max_bandwidth)
+{
+  int ret = OB_SUCCESS;
+  common::ObISQLClient &proxy = GCTX.root_service_->get_sql_proxy();
+  const uint64_t dest_id = storage_key.get_storage_id();
+  const uint64_t tenant_id = storage_key.get_tenant_id();
+  ObSqlString sql;
+  if (OB_INVALID_ID == tenant_id) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid argument", K(ret), K(tenant_id));
+  } else if (OB_FAIL(sql.assign_fmt(
+      "SELECT %s FROM %s WHERE tenant_id = %lu AND dest_id = '%lu'",
+      OB_STR_MAX_IOPS_AND_MAX_BANDWIDTH, OB_ALL_BACKUP_STORAGE_INFO_TNAME,
+      tenant_id, dest_id))) {
+    LOG_WARN("fail to assign sql", K(ret), K(tenant_id));
+  } else {
+    SMART_VAR(ObMySQLProxy::MySQLResult, res) {
+      sqlclient::ObMySQLResult *result = NULL;
+      if (OB_FAIL(proxy.read(res, gen_meta_tenant_id(tenant_id), sql.ptr()))) {
+        LOG_WARN("fail to execute sql", K(ret), K(sql));
+      } else if (OB_ISNULL(result = res.get_result())) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("error unexpected, query result must not be NULL", K(ret));
+      } else if (OB_SUCC(result->next())) {
+        EXTRACT_INT_FIELD_MYSQL(*result, OB_STR_MAX_IOPS, max_iops, int64_t);
+        EXTRACT_INT_FIELD_MYSQL(*result, OB_STR_MAX_BANDWIDTH, max_bandwidth, int64_t);
       } else if (OB_ITER_END == ret) {
         ret = OB_ENTRY_NOT_EXIST;
         LOG_WARN("no exist row", K(ret), K(sql));
@@ -1068,6 +1269,5 @@ int ObBackupStorageInfoOperator::get_backup_dest(
   }
   return ret;
 }
-
-
-
+}//share
+}//oceanbase

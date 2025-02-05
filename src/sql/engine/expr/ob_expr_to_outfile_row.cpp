@@ -13,12 +13,7 @@
 #define USING_LOG_PREFIX SQL_ENG
 
 #include "sql/engine/expr/ob_expr_to_outfile_row.h"
-#include <string.h>
-#include "lib/oblog/ob_log.h"
-#include "objit/common/ob_item_type.h"
-#include "sql/session/ob_sql_session_info.h"
 #include "sql/engine/ob_exec_context.h"
-#include "share/ob_lob_access_utils.h"
 
 using namespace oceanbase::common;
 
@@ -181,7 +176,7 @@ int ObExprToOutfileRow::to_outfile_str(const ObExpr &expr, ObEvalCtx &ctx, ObDat
           const ObObjMeta &obj_meta = expr.args_[i]->obj_meta_;
           ObObj obj;
           OZ(v.to_obj(obj, obj_meta, expr.args_[i]->obj_datum_map_));
-          if (!ob_is_text_tc(obj_meta.get_type())) {
+          if (!obj_meta.is_lob_storage()) {
             OZ(print_field(buf, buf_len, pos, obj, *out_info));
           } else { // text tc
             ObEvalCtx::TempAllocGuard tmp_alloc_g(ctx);

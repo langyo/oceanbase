@@ -12,13 +12,7 @@
 
 #define USING_LOG_PREFIX SERVER
 #include "obmp_stmt_reset.h"
-#include "rpc/ob_request.h"
-#include "rpc/obmysql/ob_mysql_util.h"
-#include "rpc/obmysql/ob_mysql_packet.h"
 #include "sql/plan_cache/ob_ps_cache.h"
-#include "sql/plan_cache/ob_prepare_stmt_struct.h"
-#include "sql/session/ob_sql_session_info.h"
-#include "observer/mysql/obmp_utils.h"
 #include "observer/mysql/obmp_stmt_send_piece_data.h"
 
 namespace oceanbase
@@ -68,6 +62,8 @@ int ObMPStmtReset::process()
   } else if (OB_ISNULL(session)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("session is NULL or invalid", K(ret), K(session));
+  } else if (OB_FAIL(process_kill_client_session(*session))) {
+    LOG_WARN("client session has been killed", K(ret));
   } else if (FALSE_IT(session->set_txn_free_route(pkt.txn_free_route()))) {
   } else if (OB_FAIL(process_extra_info(*session, pkt, need_response_error))) {
     LOG_WARN("fail get process extra info", K(ret));
@@ -76,11 +72,12 @@ int ObMPStmtReset::process()
   } else if (OB_FAIL(update_transmission_checksum_flag(*session))) {
     LOG_WARN("update transmisson checksum flag failed", K(ret));
   } else {
-    ObPieceCache *piece_cache = static_cast<ObPieceCache*>(session->get_piece_cache());
+    ObPieceCache *piece_cache = session->get_piece_cache();
     int64_t param_num = 0;
     THIS_WORKER.set_session(session);
     ObSQLSessionInfo::LockGuard lock_guard(session->get_query_lock());
     LOG_TRACE("close ps stmt or cursor", K_(stmt_id), K(session->get_sessid()));
+    session->init_use_rich_format();
 
     // get stmt info
     if (OB_NOT_NULL(session->get_ps_cache())) {

@@ -11,23 +11,8 @@
  */
 
 #define USING_LOG_PREFIX SQL_OPT
-#include "sql/optimizer/ob_del_upd_log_plan.h"
-#include "sql/resolver/dml/ob_insert_stmt.h"
 #include "ob_log_insert.h"
-#include "lib/container/ob_se_array.h"
-#include "lib/container/ob_se_array_iterator.h"
-#include "sql/ob_phy_table_location.h"
-#include "sql/code_generator/ob_expr_generator_impl.h"
-#include "sql/ob_sql_utils.h"
-#include "sql/optimizer/ob_log_plan.h"
-#include "sql/optimizer/ob_select_log_plan.h"
 #include "sql/optimizer/ob_log_table_scan.h"
-#include "sql/optimizer/ob_log_exchange.h"
-#include "sql/engine/expr/ob_expr_column_conv.h"
-#include "sql/optimizer/ob_log_sort.h"
-#include "sql/rewrite/ob_transform_utils.h"
-#include "sql/optimizer/ob_insert_log_plan.h"
-#include "common/ob_smart_call.h"
 
 using namespace oceanbase;
 using namespace sql;
@@ -143,6 +128,10 @@ int ObLogInsert::get_plan_item_info(PlanText &plan_text,
       } else { /* Do nothing */ }
       BUF_PRINTF(")");
     } else { /* Do nothing */ }
+
+    if (OB_SUCC(ret) && get_das_dop() > 0) {
+      ret = BUF_PRINTF(", das_dop=%ld", this->get_das_dop());
+    }
     END_BUF_PRINT(plan_item.special_predicates_,
                   plan_item.special_predicates_len_);
   }
@@ -181,6 +170,23 @@ int ObLogInsert::get_op_exprs(ObIArray<ObRawExpr*> &all_exprs)
   return ret;
 }
 
+int ObLogInsert::is_my_fixed_expr(const ObRawExpr *expr, bool &is_fixed)
+{
+  int ret = OB_SUCCESS;
+  if (OB_FAIL(is_dml_fixed_expr(expr, get_index_dml_infos(), is_fixed))) {
+    LOG_WARN("failed to check is my fixed expr", K(ret));
+  } else if (is_fixed) {
+    // do nothing
+  } else if (OB_FAIL(is_dml_fixed_expr(expr, get_replace_index_dml_infos(), is_fixed))) {
+    LOG_WARN("failed to check is my fixed expr", K(ret));
+  } else if (is_fixed) {
+    // do nothing
+  } else if (OB_FAIL(is_dml_fixed_expr(expr, get_insert_up_index_dml_infos(), is_fixed))) {
+    LOG_WARN("failed to check is my fixed expr", K(ret));
+  }
+  return ret;
+}
+
 int ObLogInsert::compute_sharding_info()
 {
   int ret = OB_SUCCESS;
@@ -188,7 +194,7 @@ int ObLogInsert::compute_sharding_info()
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("get unexpected null", K(ret));
   } else if (NULL != get_sharding()) {
-    is_partition_wise_ = true;
+    //do nothing
   } else if (is_multi_part_dml()) {
     strong_sharding_ = get_plan()->get_optimizer_context().get_local_sharding();
   } else if (OB_FAIL(ObLogDelUpd::compute_sharding_info())) {
@@ -309,7 +315,7 @@ int ObLogInsert::inner_est_cost(double child_card, double &op_cost)
     ObOptimizerContext &opt_ctx = get_plan()->get_optimizer_context();
     if (OB_FAIL(ObOptEstCost::cost_insert(cost_info, 
                                           op_cost, 
-                                          opt_ctx.get_cost_model_type()))) {
+                                          opt_ctx))) {
       LOG_WARN("failed to get insert cost", K(ret));
     }
   }
@@ -557,6 +563,61 @@ int ObLogInsert::inner_replace_op_exprs(ObRawExprReplacer &replacer)
           }
         }
       }
+    }
+  }
+  return ret;
+}
+
+// set plain insert flag : insert into values(..); // value num is n (n >= 1);
+int ObLogInsert::is_plain_insert(bool &is_plain_insert)
+{
+  int ret = OB_SUCCESS;
+  const ObInsertStmt *insert_stmt = nullptr;
+  is_plain_insert = false;
+  if (OB_ISNULL(get_stmt()) || OB_UNLIKELY(!get_stmt()->is_insert_stmt())) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("get unexpected null", K(ret));
+  } else if (FALSE_IT(insert_stmt = static_cast<const ObInsertStmt *>(get_stmt()))) {
+
+  } else {
+    is_plain_insert = (!insert_stmt->value_from_select()
+                        && !insert_stmt->is_insert_up()
+                        && insert_stmt->get_subquery_exprs().empty()
+                        && !insert_stmt->is_replace());
+  }
+
+  return ret;
+}
+
+int ObLogInsert::is_insertup_or_replace_values(bool &is)
+{
+  int ret = OB_SUCCESS;
+  const ObInsertStmt *insert_stmt = nullptr;
+  is = false;
+  if (OB_ISNULL(get_stmt()) || OB_UNLIKELY(!get_stmt()->is_insert_stmt())) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("get unexpected null", K(ret));
+  } else if (FALSE_IT(insert_stmt = static_cast<const ObInsertStmt *>(get_stmt()))) {
+
+  } else if (insert_stmt->is_insert_up() || insert_stmt->is_replace()) {
+    is = (!insert_stmt->value_from_select() && insert_stmt->get_subquery_exprs().empty());
+  }
+
+  return ret;
+}
+int ObLogInsert::op_is_update_pk_with_dop(bool &is_update)
+{
+  int ret = OB_SUCCESS;
+  is_update = false;
+  if (!index_dml_infos_.empty()) {
+    IndexDMLInfo *index_dml_info = index_dml_infos_.at(0);
+    if (OB_ISNULL(index_dml_info)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("unexpected nullptr", K(ret), K(index_dml_infos_));
+    } else if (!is_pdml_update_split_) {
+      // is_update = false;
+    } else if (index_dml_info->is_update_primary_key_ && (is_pdml() || get_das_dop() > 1)) {
+      is_update = true;
     }
   }
   return ret;

@@ -13,15 +13,8 @@
 #define USING_LOG_PREFIX RPC_OBMYSQL
 
 #include "observer/mysql/obsm_handler.h"
-#include "lib/oblog/ob_log.h"
-#include "lib/stat/ob_session_stat.h"
 #include "lib/random/ob_mysql_random.h"
-#include "rpc/obmysql/ob_mysql_handler.h"
 #include "rpc/obmysql/packet/ompk_handshake.h"
-#include "sql/session/ob_sql_session_mgr.h"
-#include "sql/session/ob_sql_session_info.h"
-#include "rpc/obmysql/obsm_struct.h"
-#include "observer/ob_server_struct.h"
 #include "observer/ob_srv_task.h"
 #include "observer/omt/ob_tenant.h"
 
@@ -163,12 +156,12 @@ int ObSMHandler::on_disconnect(easy_connection_t *c)
                  "proxy_sessid", conn->proxy_sessid_);
       } else {
         sess_info->set_session_state(sql::SESSION_KILLED);
-        sess_info->set_shadow(true);
+        sess_info->set_mark_killed(true);
+        conn->has_service_name_ = false;
       }
     }
     LOG_INFO("kill and revert session", K(conn->sessid_),
-             "proxy_sessid", conn->proxy_sessid_, "server_id", GCTX.server_id_,
-             K(tmp_ret), K(eret));
+             "proxy_sessid", conn->proxy_sessid_, K(tmp_ret), K(eret));
   }
   return eret;
 }
@@ -244,14 +237,18 @@ int ObSMHandler::on_close(easy_connection_t *c)
       } else if (is_need_clear) {
         if (OB_UNLIKELY(OB_FAIL(gctx_.session_mgr_->mark_sessid_unused(conn->sessid_)))) {
           LOG_ERROR("fail to mark sessid unused", K(ret), K(conn->sessid_),
-                    "proxy_sessid", conn->proxy_sessid_, "server_id", GCTX.server_id_);
+              "proxy_sessid", conn->proxy_sessid_);
         } else {
-          LOG_INFO("mark sessid unused", K(conn->sessid_),
-                  "proxy_sessid", conn->proxy_sessid_, "server_id", GCTX.server_id_);
+          LOG_INFO("mark sessid unused", K(conn->sessid_), "proxy_sessid", conn->proxy_sessid_);
         }
       } else {/*do nothing*/}
     }
 
+    if (OB_NOT_NULL(conn) && OB_NOT_NULL(conn->di_)) {
+      common::ObLocalDiagnosticInfo::dec_ref(conn->di_);
+      common::ObLocalDiagnosticInfo::return_diagnostic_info(conn->di_);
+      conn->di_ = nullptr;
+    }
     //unlock tenant
     if (OB_LIKELY(NULL != conn->tenant_ && conn->is_tenant_locked_)) {
       conn->tenant_->unlock(*conn->handle_);
@@ -266,7 +263,6 @@ int ObSMHandler::on_close(easy_connection_t *c)
              "sessid", conn->sessid_,
              "proxy_sessid", conn->proxy_sessid_,
              "tenant_id", conn->tenant_id_,
-             "server_id", gctx_.server_id_,
              "from_proxy", conn->is_proxy_,
              "from_java_client", conn->is_java_client_,
              "c/s protocol", get_cs_protocol_type_name(conn->get_cs_protocol_type()),
