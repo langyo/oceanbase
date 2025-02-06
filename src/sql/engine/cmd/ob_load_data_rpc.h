@@ -26,10 +26,6 @@
 
 namespace oceanbase
 {
-namespace observer
-{
-struct ObGlobalContext;
-}
 
 namespace sql {
 class ObLoadbuffer;
@@ -236,6 +232,7 @@ public:
     }
     return ret;
   }
+  TO_STRING_KV(KP(ptr_value_));
 
 private:
   union {
@@ -534,7 +531,6 @@ protected:
   int process();
 private:
   const observer::ObGlobalContext &gctx_;
-  share::schema::ObSchemaGetterGuard schema_guard_;
 };
 
 class ObRpcLoadDataShuffleTaskCallBack

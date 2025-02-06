@@ -15,8 +15,6 @@
 #include "rootserver/freeze/ob_major_freeze_helper.h"
 #include "share/ob_freeze_info_proxy.h"
 #include "share/location_cache/ob_location_service.h"
-#include "share/schema/ob_multi_version_schema_service.h"
-#include "share/ob_tenant_info_proxy.h"
 #include "src/observer/ob_srv_network_frame.h"
 
 namespace oceanbase
@@ -59,7 +57,7 @@ int ObMajorFreezeHelper::major_freeze(
   } else if (OB_FAIL(get_freeze_info(param, freeze_info_array))) {
     LOG_WARN("fail to get tenant id", KR(ret), K(param));
   } else if (!freeze_info_array.empty()) { // may be empty due to skipping restore and standby tenants
-    if (OB_FAIL(do_major_freeze(*param.transport_, freeze_info_array, merge_results))) {
+    if (OB_FAIL(do_major_freeze(*param.transport_, param.freeze_reason_, freeze_info_array, merge_results))) {
       LOG_WARN("fail to do major freeze", KR(ret), K(freeze_info_array));
     }
   }
@@ -75,6 +73,12 @@ int ObMajorFreezeHelper::tablet_major_freeze(const ObTabletMajorFreezeParam &par
   } else if (OB_UNLIKELY(nullptr == GCTX.location_service_ || nullptr == GCTX.net_frame_)) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid GCTX", KR(ret));
+  } else if (GCTX.is_shared_storage_mode()) {
+    ret = OB_NOT_SUPPORTED;
+    LOG_WARN("not support tablet major freeze cmd in shared storage mode", KR(ret));
+  } else if (!GCONF.enable_major_freeze) {
+    ret = OB_MAJOR_FREEZE_NOT_ALLOW;
+    LOG_WARN("enable_major_freeze is off, refuse to to major_freeze", K(param), KR(ret));
   } else {
     LOG_INFO("tablet major freeze", K(ret), K(param));
     const int64_t start_time = ObTimeUtility::fast_current_time();
@@ -299,6 +303,7 @@ int ObMajorFreezeHelper::get_specific_tenant_freeze_info(
 
 int ObMajorFreezeHelper::do_major_freeze(
     const rpc::frame::ObReqTransport &transport,
+    const ObMajorFreezeReason freeze_reason,
     const ObIArray<obrpc::ObSimpleFreezeInfo> &freeze_info_array,
     ObIArray<int> &merge_results)
 {
@@ -311,10 +316,12 @@ int ObMajorFreezeHelper::do_major_freeze(
     const int64_t tenant_count = freeze_info_array.count();
     for (int i = 0; (i < tenant_count) && OB_SUCC(ret); ++i) {
       const uint64_t tenant_id = freeze_info_array.at(i).tenant_id_;
-      if (OB_FAIL(do_one_tenant_major_freeze(transport, freeze_info_array.at(i)))) {
+      if (OB_FAIL(do_one_tenant_major_freeze(transport, freeze_reason, freeze_info_array.at(i)))) {
         if ((OB_MAJOR_FREEZE_NOT_FINISHED != ret) && (OB_FROZEN_INFO_ALREADY_EXIST != ret)) {
           final_ret = ret;
-          LOG_WARN("fail do tenant major freeze", KR(ret), K(tenant_count), "freeze_info", freeze_info_array.at(i));
+          LOG_WARN("fail do tenant major freeze", KR(ret), K(tenant_count),
+            "freeze_reason", major_freeze_reason_to_str(freeze_reason),
+            "freeze_info", freeze_info_array.at(i));
         }
       }
 
@@ -324,7 +331,6 @@ int ObMajorFreezeHelper::do_major_freeze(
         LOG_WARN("fail to push back", KR(ret), K(tenant_id), K(tenant_count));
       }
     }
-
     ret = final_ret;
   }
 
@@ -333,17 +339,18 @@ int ObMajorFreezeHelper::do_major_freeze(
 
 int ObMajorFreezeHelper::do_one_tenant_major_freeze(
   const rpc::frame::ObReqTransport &transport,
+  const ObMajorFreezeReason freeze_reason,
   const obrpc::ObSimpleFreezeInfo &freeze_info)
 {
   int ret = OB_SUCCESS;
-  if (!freeze_info.is_valid()) {
+  if (OB_UNLIKELY(!freeze_info.is_valid() || !is_valid_major_freeze_reason(freeze_reason))) {
     ret = OB_INVALID_ARGUMENT;
-    LOG_WARN("invalid argument", KR(ret), K(freeze_info));
+    LOG_WARN("invalid argument", KR(ret), K(freeze_info), K(freeze_reason));
   } else {
     const int64_t launch_start_time = ObTimeUtility::current_time();
     obrpc::ObMajorFreezeRpcProxy proxy;
     ObAddr leader;
-    obrpc::ObMajorFreezeRequest req(freeze_info);
+    obrpc::ObMajorFreezeRequest req(freeze_info, freeze_reason);
     obrpc::ObMajorFreezeResponse resp;
     uint64_t tenant_id = freeze_info.tenant_id_;
 
@@ -364,16 +371,18 @@ int ObMajorFreezeHelper::do_one_tenant_major_freeze(
       bool major_freeze_done = false;
 
       for (int64_t i = 0; OB_SUCC(ret) && (!major_freeze_done) && (i < MAX_RETRY_COUNT); ++i) {
+        const int64_t timeout_us = MAX(GCONF.rpc_timeout * 5, MAX_PROCESS_TIME_US); // timeout >= 10s
         if (OB_FAIL(GCTX.location_service_->get_leader_with_retry_until_timeout(GCONF.cluster_id,
                     tenant_id, share::SYS_LS, leader))) {
           LOG_WARN("fail to get ls locaiton leader", KR(ret), K(tenant_id));
         } else if (OB_FAIL(proxy.to(leader)
                                 .trace_time(true)
-                                .max_process_handler_time(MAX_PROCESS_TIME_US)
+                                .timeout(timeout_us)
                                 .by(tenant_id)
                                 .dst_cluster_id(GCONF.cluster_id)
                                 .major_freeze(req, resp))) {
-          LOG_WARN("tenant_major_freeze rpc failed", KR(ret), K(tenant_id), K(leader), K(freeze_info));
+          LOG_WARN("tenant_major_freeze rpc failed", KR(ret), K(tenant_id), K(leader),
+                   K(freeze_info), K(timeout_us));
         } else if (FALSE_IT(ret = resp.err_code_)) {
         } else if (OB_FAIL(ret)) {
           if (OB_LEADER_NOT_EXIST == ret || OB_EAGAIN == ret) {
@@ -397,7 +406,6 @@ int ObMajorFreezeHelper::do_one_tenant_major_freeze(
           major_freeze_done = true;
         }
       }
-
       if (OB_SUCC(ret) && !major_freeze_done) {
         ret = OB_EAGAIN;
         LOG_WARN("fail to retry major freeze cuz switching role", KR(ret), K(MAX_RETRY_COUNT));
@@ -509,7 +517,7 @@ int ObMajorFreezeHelper::do_one_tenant_admin_merge(
           LOG_WARN("fail to get ls locaiton leader", KR(ret), K(tenant_id));
         } else if (OB_FAIL(proxy.to(leader)
                                 .trace_time(true)
-                                .max_process_handler_time(MAX_PROCESS_TIME_US)
+                                .timeout(THIS_WORKER.get_timeout_remain())
                                 .by(tenant_id)
                                 .dst_cluster_id(GCONF.cluster_id)
                                 .tenant_admin_merge(req, resp))) {

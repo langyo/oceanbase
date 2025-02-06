@@ -13,10 +13,7 @@
 #define USING_LOG_PREFIX SQL_RESV
 #include "sql/resolver/ddl/ob_drop_dblink_resolver.h"
 
-#include "sql/ob_sql_utils.h"
-#include "sql/resolver/ob_stmt_resolver.h"
 #include "sql/resolver/ddl/ob_drop_dblink_stmt.h"
-#include "sql/session/ob_sql_session_info.h"
 
 namespace oceanbase
 {
@@ -43,6 +40,9 @@ int ObDropDbLinkResolver::resolve(const ParseNode &parse_tree)
       || OB_UNLIKELY(node->num_child_ != DBLINK_NODE_COUNT)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("invalid parse tree", K(ret));
+  } else if (!GCONF.enable_dblink) {
+    ret = OB_OP_NOT_ALLOW;
+    LOG_WARN("dblink is disabled", K(ret));
   } else if (OB_ISNULL(session_info_)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("session info should not be null", K(ret));

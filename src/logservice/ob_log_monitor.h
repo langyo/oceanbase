@@ -80,6 +80,13 @@ public:
                                const common::ObRole &curr_role,
                                const palf::ObReplicaState &curr_state,
                                const char *extra_info = NULL) override final;
+  int record_parent_child_change_event(const int64_t palf_id,
+                                       const bool is_register, /* true: register; false; retire; */
+                                       const bool is_parent,   /* true: parent; false: child; */
+                                       const common::ObAddr &server,
+                                       const common::ObRegion &region,
+                                       const int64_t register_time_us,
+                                       const char *extra_info = NULL) override final;
   // =========== PALF Event Reporting ===========
 public:
   // =========== PALF Performance Statistic ===========
@@ -90,6 +97,7 @@ public:
   // =========== Arbitration Event Reporting ===========
   int record_degrade_event(const int64_t palf_id, const char *degraded_list, const char *reasons) override final;
   int record_upgrade_event(const int64_t palf_id, const char *upgraded_list, const char *reasons) override final;
+  int record_election_silent_event(const bool is_silent, const int64_t palf_id) override final;
   // =========== Arbitration Event Reporting ===========
 #endif
 private:
@@ -112,7 +120,9 @@ private:
     ADVANCE_BASE_INFO,
     REBUILD,
     FLASHBACK,
-    TRUNCATE
+    TRUNCATE,
+    ENTER_ELECTION_SILENT,
+    EXIT_ELECTION_SILENT
   };
 
   const char *type_to_string_(const EventType &event) const
@@ -149,6 +159,10 @@ private:
       CHECK_LOG_EVENT_TYPE_STR(REBUILD);
       CHECK_LOG_EVENT_TYPE_STR(FLASHBACK);
       CHECK_LOG_EVENT_TYPE_STR(TRUNCATE);
+      case (EventType::ENTER_ELECTION_SILENT):
+        return "ENTER ELECTION SILENT";
+      case (EventType::EXIT_ELECTION_SILENT):
+        return "EXIT ELECTION SILENT";
       default:
         return "UNKNOWN";
     }

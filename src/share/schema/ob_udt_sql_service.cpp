@@ -12,14 +12,7 @@
 
 #define USING_LOG_PREFIX SHARE_SCHEMA
 #include "ob_udt_sql_service.h"
-#include "lib/oblog/ob_log.h"
-#include "lib/oblog/ob_log_module.h"
-#include "lib/string/ob_sql_string.h"
-#include "lib/mysqlclient/ob_mysql_proxy.h"
-#include "share/ob_dml_sql_splicer.h"
-#include "ob_udt_info.h"
-#include "share/inner_table/ob_inner_table_schema_constants.h"
-#include "pl/ob_pl_stmt.h"
+#include "src/sql/resolver/expr/ob_raw_expr.h"
 
 namespace oceanbase
 {
@@ -173,7 +166,7 @@ int ObUDTSqlService::drop_udt(const ObUDTTypeInfo &udt_info,
     opt.op_type_ = is_object_body ? OB_DDL_DROP_UDT_BODY : OB_DDL_DROP_UDT;
     opt.schema_version_ = new_schema_version;
     opt.ddl_stmt_str_ = (NULL != ddl_stmt_str) ? *ddl_stmt_str : ObString();
-    if (OB_FAIL(log_operation(opt, sql_client))) {
+    if (OB_SUCC(ret) && OB_FAIL(log_operation(opt, sql_client))) {
       LOG_WARN("Failed to log operation", K(ret));
     }
   }
@@ -552,7 +545,7 @@ int ObUDTSqlService::del_udt_objects_in_udt(common::ObISQLClient &sql_client,
                       obj_ti.at(1)->get_type(),
                       new_schema_version), udt_info);
   } else {
-    CK (0 < obj_ti.count() && 2 >= obj_ti.count());
+    CK (0 <= obj_ti.count() && 2 >= obj_ti.count());
     for (int64_t i = 0; OB_SUCC(ret) && i < obj_ti.count(); ++i) {
       OZ (del_udt_object(sql_client, 
                       udt_info, 

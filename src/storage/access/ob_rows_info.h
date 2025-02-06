@@ -59,14 +59,15 @@ public:
   static const int MAX_ROW_KEYS_ON_STACK = 16;
   using ObRowkeyAndLockStates = common::ObSEArray<ObMarkedRowkeyAndLockState, MAX_ROW_KEYS_ON_STACK>;
   using ObPermutation = common::ObSEArray<uint32_t, MAX_ROW_KEYS_ON_STACK>;
-  explicit ObRowsInfo();
+  ObRowsInfo();
   ~ObRowsInfo();
+  void reset();
   OB_INLINE bool is_valid() const
   {
     return is_inited_ && exist_helper_.is_valid() && delete_count_ >= 0
         && rowkeys_.count() >= delete_count_ && OB_NOT_NULL(rows_);
   }
-  OB_INLINE int32_t get_rowkey_cnt() const
+  OB_INLINE int64_t get_rowkey_cnt() const
   {
     return rowkeys_.count();
   }
@@ -89,10 +90,11 @@ public:
     return delete_count_ == rowkeys_.count();
   }
   int init(
+      const ObColDescIArray &column_descs,
       const ObRelativeTable &table,
       ObStoreCtx &store_ctx,
       const ObITableReadInfo &rowkey_read_info);
-  int check_duplicate(ObStoreRow *rows, const int64_t row_count, ObRelativeTable &table);
+  int check_duplicate(blocksstable::ObDatumRow *rows, const int64_t row_count, ObRelativeTable &table, bool check_dup = true);
   blocksstable::ObDatumRowkey& get_duplicate_rowkey()
   {
     return min_key_;
@@ -168,6 +170,11 @@ public:
   {
     rowkeys_[idx].marked_rowkey_.mark_row_non_existent();
   }
+  inline bool is_row_checked(const int64_t idx) const
+  {
+    const blocksstable::ObMarkedRowkey &marked_rowkey = rowkeys_[idx].marked_rowkey_;
+    return marked_rowkey.is_checked();
+  }
   inline bool is_row_skipped(const int64_t idx) const
   {
     const blocksstable::ObMarkedRowkey &marked_rowkey = rowkeys_[idx].marked_rowkey_;
@@ -197,13 +204,14 @@ public:
   void return_exist_iter(ObStoreRowIterator *exist_iter);
   void reuse_scan_mem_allocator() { scan_mem_allocator_.reuse(); }
   ObTableAccessContext &get_access_context() { return exist_helper_.table_access_context_; }
-  bool is_inited() const { return is_inited_; }
   TO_STRING_KV(K_(rowkeys), K_(permutation), K_(min_key), K_(delete_count), K_(conflict_rowkey_idx), K_(error_code),
                K_(exist_helper));
 public:
-  struct ExistHelper final {
+  struct ExistHelper final
+  {
     ExistHelper();
     ~ExistHelper();
+    void reset();
     int init(
         const ObRelativeTable &table,
         ObStoreCtx &store_ctx,
@@ -215,6 +223,7 @@ public:
     ObTableIterParam table_iter_param_;
     ObTableAccessContext table_access_context_;
     bool is_inited_;
+    DISALLOW_COPY_AND_ASSIGN(ExistHelper);
   };
 private:
   struct RowsCompare {
@@ -257,18 +266,37 @@ private:
 public:
   ObRowkeyAndLockStates rowkeys_;
   ObPermutation permutation_;
-  ObStoreRow *rows_;
+  blocksstable::ObDatumRow *rows_;
   ExistHelper exist_helper_;
   ObTabletID tablet_id_;
 private:
   const blocksstable::ObStorageDatumUtils *datum_utils_;
   blocksstable::ObDatumRowkey min_key_;
+  const ObColDescIArray *col_descs_;
   int64_t conflict_rowkey_idx_;
-  int64_t error_code_;
+  int error_code_;
   int64_t delete_count_;
   int16_t rowkey_column_num_;
   bool is_inited_;
   DISALLOW_COPY_AND_ASSIGN(ObRowsInfo);
+};
+
+struct ObRowKeysInfo
+{
+  OB_INLINE bool is_rowkey_not_exist(const int64_t idx) const
+  {
+    return row_states_->at(idx) == ObSSTableRowState::NOT_EXIST;
+  }
+  OB_INLINE void set_rowkey_not_exist(const int64_t idx)
+  {
+    row_states_->at(idx) = ObSSTableRowState::NOT_EXIST;
+  }
+  OB_INLINE const blocksstable::ObDatumRowkey &get_rowkey(const int64_t idx) const
+  {
+    return rowkeys_->at(idx);
+  }
+  const common::ObIArray<blocksstable::ObDatumRowkey> *rowkeys_;
+  common::ObIArray<int8_t> *row_states_;
 };
 
 } // namespace storage

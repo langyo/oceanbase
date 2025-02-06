@@ -68,6 +68,7 @@ struct ObKVCachePair
       : magic_(KVPAIR_MAGIC_NUM), size_(0), key_(NULL), value_(NULL)
   {
   }
+  TO_STRING_KV(K_(magic), K_(size), KP_(key), KP_(value));
 };
 
 enum ObKVCachePolicy
@@ -160,7 +161,7 @@ struct ObKVCacheInstKey
     return !(*this == other);
   }
   inline bool is_valid() const { return cache_id_ >= 0 && cache_id_ < MAX_CACHE_NUM
-      && tenant_id_ < (uint64_t) OB_DEFAULT_TENANT_COUNT; }
+      && tenant_id_ != OB_INVALID_ID; }
   inline void reset()
   {
     tenant_id_ = OB_INVALID_ID;
@@ -176,6 +177,7 @@ public:
   void reset();
   bool is_valid_;
   int64_t priority_;
+  int64_t mem_limit_pct_;
   char cache_name_[MAX_CACHE_NAME_LENGTH];
 };
 
@@ -187,6 +189,10 @@ public:
   double get_hit_ratio() const;
   inline void set_hold_size(const int64_t hold_size) { ATOMIC_STORE(&hold_size_, hold_size); }
   inline int64_t get_hold_size() const { return ATOMIC_LOAD(&hold_size_); }
+  inline int64_t get_memory_limit_pct()
+  {
+    return ATOMIC_LOAD(&config_->mem_limit_pct_);
+  }
   void reset();
   TO_STRING_KV(KP_(config), K_(kv_cnt), K_(store_size), K_(map_size), K_(lru_mb_cnt),
       K_(lfu_mb_cnt), K_(base_mb_score), K_(hold_size));

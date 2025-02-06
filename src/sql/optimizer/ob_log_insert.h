@@ -29,6 +29,7 @@ public:
   ObLogInsert(ObDelUpdLogPlan &plan)
       : ObLogDelUpd(plan),
         is_replace_(false),
+        is_overwrite_(false),
         insert_up_(false),
         is_insert_select_(false),
         append_table_id_(0),
@@ -49,7 +50,16 @@ public:
   {
     return is_replace_;
   }
+  void set_overwrite(bool overwrite)
+  {
+    is_overwrite_ = overwrite;
+  }
+  bool is_overwrite() const
+  {
+    return is_overwrite_;
+  }
   virtual int get_op_exprs(ObIArray<ObRawExpr*> &all_exprs) override;
+  virtual int is_my_fixed_expr(const ObRawExpr *expr, bool &is_fixed) override;
   void set_insert_up(bool insert_up)
   {
     insert_up_ = insert_up;
@@ -111,6 +121,9 @@ public:
   virtual int inner_replace_op_exprs(ObRawExprReplacer &replacer) override;
   virtual int get_plan_item_info(PlanText &plan_text,
                                 ObSqlPlanItem &plan_item) override;
+  int is_plain_insert(bool &is_plain_insert);
+  int is_insertup_or_replace_values(bool &is);
+  virtual int op_is_update_pk_with_dop(bool &is_update) override;
 protected:
   int get_constraint_info_exprs(ObIArray<ObRawExpr*> &all_exprs);
   virtual int generate_rowid_expr_for_trigger() override;
@@ -118,6 +131,7 @@ protected:
   virtual int generate_multi_part_partition_id_expr() override;
 protected:
   bool is_replace_;
+  bool is_overwrite_;
   common::ObArray<IndexDMLInfo *, common::ModulePageAllocator, true> index_replace_infos_;
   // for insert_up update caluse
   common::ObArray<IndexDMLInfo *, common::ModulePageAllocator, true> index_upd_infos_;

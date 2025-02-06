@@ -12,13 +12,8 @@
 
 #define USING_LOG_PREFIX SQL_DTL
 #include "ob_dtl.h"
-#include "lib/oblog/ob_log.h"
-#include "sql/dtl/ob_dtl_channel.h"
 #include "sql/dtl/ob_dtl_rpc_channel.h"
-#include "sql/dtl/ob_dtl_flow_control.h"
 #include "sql/dtl/ob_dtl_local_channel.h"
-#include "observer/ob_server_struct.h"
-#include "ob_dtl_interm_result_manager.h"
 #include "sql/dtl/ob_dtl_channel_watcher.h"
 
 using namespace oceanbase::lib;
@@ -473,12 +468,12 @@ int ObDtl::new_channel(uint64_t tenant_id, uint64_t chid, const ObAddr &peer,
     if (is_local) {
       chan = static_cast<ObDtlChannel *> (ob_malloc(sizeof(ObDtlLocalChannel), ObMemAttr(tenant_id, "SqlDtlChan")));
       if (nullptr != chan) {
-        new (chan) ObDtlLocalChannel(tenant_id, chid, peer);
+        new (chan) ObDtlLocalChannel(tenant_id, chid, peer, ObDtlChannel::DtlChannelType::LOCAL_CHANNEL);
       }
     } else {
       chan = static_cast<ObDtlChannel *> (ob_malloc(sizeof(ObDtlRpcChannel), ObMemAttr(tenant_id, "SqlDtlChan")));
       if (nullptr != chan) {
-        new (chan) ObDtlRpcChannel(tenant_id, chid, peer);
+        new (chan) ObDtlRpcChannel(tenant_id, chid, peer, ObDtlChannel::DtlChannelType::RPC_CHANNEL);
       }
     }
     if (nullptr == chan) {

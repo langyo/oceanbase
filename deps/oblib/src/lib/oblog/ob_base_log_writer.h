@@ -19,6 +19,7 @@
 
 #include "lib/ob_define.h"
 #include "lib/utility/ob_macro_utils.h"
+#include "lib/atomic/ob_atomic.h"
 
 namespace oceanbase
 {
@@ -87,7 +88,11 @@ public:
   bool has_stopped() const { return has_stopped_; }
   virtual int64_t get_queued_item_cnt() const
   {
-    return log_item_push_idx_ - log_item_pop_idx_;
+    return ATOMIC_LOAD(&log_item_push_idx_) - ATOMIC_LOAD(&log_item_pop_idx_);
+  }
+  bool is_queue_full()
+  {
+    return get_queued_item_cnt() >= log_cfg_.max_buffer_item_cnt_;
   }
 protected:
   void flush_log();
@@ -96,6 +101,7 @@ private:
   static void *flush_log_thread(void *arg);
   void do_flush_log();
   bool need_flush();
+  virtual void drop_log_items(ObIBaseLogItem **items, const int64_t item_cnt);
 
 protected:
   bool has_stopped_;

@@ -12,20 +12,12 @@
 
 #define USING_LOG_PREFIX STORAGE
 
-#include "lib/ob_errno.h"
-#include "lib/objectpool/ob_server_object_pool.h"
-#include "logservice/leader_coordinator/ob_failure_detector.h"
-#include "share/ob_ls_id.h"
+#include "ob_access_service.h"
 #include "storage/ob_query_iterator_factory.h"
 #include "storage/access/ob_table_scan_iterator.h"
-#include "storage/tx_storage/ob_access_service.h"
 #include "storage/tx_storage/ob_ls_service.h"
 #include "storage/tx_storage/ob_tenant_freezer.h"
-#include "storage/tablelock/ob_table_lock_rpc_struct.h"
-#include "storage/tablet/ob_tablet.h"
-#include "storage/access/ob_dml_param.h"
-#include "share/schema/ob_table_dml_param.h"
-#include "share/stat/ob_opt_stat_monitor_manager.h"
+#include "src/sql/engine/ob_exec_context.h"
 namespace oceanbase
 {
 using namespace common;
@@ -34,9 +26,48 @@ using namespace logservice::coordinator;
 namespace storage
 {
 
+void ObStoreCtxGuard::reset()
+{
+  int ret = OB_SUCCESS;
+  static const int64_t WARN_TIME_US = 5 * 1000 * 1000;
+  if (IS_INIT) {
+    if (OB_NOT_NULL(handle_.get_ls())) {
+      if (ctx_.is_valid() && OB_FAIL(handle_.get_ls()->revert_store_ctx(ctx_))) {
+        LOG_WARN("revert transaction context fail", K(ret), K_(ls_id));
+      }
+      handle_.reset();
+    }
+    const int64_t guard_used_us = ObClockGenerator::getClock() - init_ts_;
+    if (guard_used_us >= WARN_TIME_US) {
+      LOG_WARN_RET(OB_ERR_TOO_MUCH_TIME, "guard used too much time", K(guard_used_us), K_(ls_id), K(lbt()));
+    }
+    ctx_.reset();
+    ls_id_.reset();
+    is_inited_ = false;
+  }
+}
+
+int ObStoreCtxGuard::init(const share::ObLSID &ls_id)
+{
+  int ret = OB_SUCCESS;
+  if (IS_INIT) {
+    ret = OB_INIT_TWICE;
+    LOG_WARN("init twice", K(ret));
+  } else if (OB_UNLIKELY(!ls_id.is_valid())) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid argument(s)", K(ret), K(ls_id));
+  } else {
+    ls_id_ = ls_id;
+    ctx_.reset();
+    ctx_.ls_id_ = ls_id;
+    is_inited_ = true;
+    init_ts_ = ObClockGenerator::getClock();
+  }
+  return ret;
+}
+
 ObAccessService::ObAccessService()
   : is_inited_(false),
-    tenant_id_(OB_INVALID_ID),
     ls_svr_(nullptr)
 {}
 
@@ -48,26 +79,22 @@ ObAccessService::~ObAccessService()
 int ObAccessService::mtl_init(ObAccessService* &access_service)
 {
   int ret = OB_SUCCESS;
-  uint64_t tenant_id = MTL_ID();
 
-  return access_service->init(tenant_id, MTL(ObLSService*));
+  return access_service->init(MTL(ObLSService*));
 }
 
 int ObAccessService::init(
-    const uint64_t tenant_id,
     ObLSService *ls_service)
 {
   int ret = OB_SUCCESS;
   if (IS_INIT) {
     ret = OB_INIT_TWICE;
-    LOG_WARN("access service has been inited", K(ret), K_(tenant_id));
-  } else if (OB_UNLIKELY(!is_valid_tenant_id(tenant_id))
-             || OB_ISNULL(ls_service)) {
+    LOG_WARN("access service has been inited", K(ret));
+  } else if (OB_ISNULL(ls_service)) {
     ret = OB_INVALID_ARGUMENT;
-    LOG_WARN("invalid argument", K(ret), K(tenant_id), KP(ls_service));
+    LOG_WARN("invalid argument", K(ret), KP(ls_service));
   } else {
     ls_svr_ = ls_service;
-    tenant_id_ = tenant_id;
     is_inited_ = true;
   }
   return ret;
@@ -77,14 +104,8 @@ void ObAccessService::destroy()
 {
   if (IS_INIT) {
     ls_svr_ = nullptr;
-    tenant_id_ = OB_INVALID_ID;
     is_inited_ = false;
   }
-}
-
-void ObAccessService::stop()
-{
-  destroy();
 }
 
 int ObAccessService::check_tenant_out_of_memstore_limit_(bool &is_out_of_mem)
@@ -101,11 +122,16 @@ int ObAccessService::check_tenant_out_of_memstore_limit_(bool &is_out_of_mem)
   return ret;
 }
 
-int ObAccessService::check_data_disk_full_(bool &is_full)
+int ObAccessService::check_data_disk_full_(
+    const share::ObLSID &ls_id,
+    bool &is_full)
 {
   int ret = OB_SUCCESS;
+  const uint64_t tenant_id = MTL_ID();
   ObFailureDetector* detector = MTL(ObFailureDetector*);
-  if (OB_ISNULL(detector)) {
+  if (!is_user_tenant(tenant_id) || ls_id.is_sys_ls()) {
+    is_full = false;
+  } else if (OB_ISNULL(detector)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("mtl module detector is null", K(ret), KP(detector));
   } else {
@@ -140,6 +166,7 @@ int ObAccessService::pre_check_lock(
                                                 param.expired_time_, /*timeout*/
                                                 tx_desc,
                                                 snapshot,
+                                                0,/*branch_id*/
                                                 write_flag,
                                                 ctx_guard))) {
     LOG_WARN("fail to check query allowed", K(ret), K(ls_id));
@@ -177,6 +204,7 @@ int ObAccessService::lock_obj(
                                                 param.expired_time_, /*timeout*/
                                                 tx_desc,
                                                 snapshot,
+                                                0, /*branch_id*/
                                                 write_flag,
                                                 ctx_guard))) {
     LOG_WARN("fail to check query allowed", K(ret), K(ls_id));
@@ -215,6 +243,7 @@ int ObAccessService::unlock_obj(
                                                 param.expired_time_, /*timeout*/
                                                 tx_desc,
                                                 snapshot,
+                                                0,/*branch_id*/
                                                 write_flag,
                                                 ctx_guard))) {
     LOG_WARN("fail to check query allowed", K(ret), K(ls_id));
@@ -227,15 +256,65 @@ int ObAccessService::unlock_obj(
   return ret;
 }
 
+int ObAccessService::replace_obj_lock(
+    const share::ObLSID &ls_id,
+    transaction::ObTxDesc &tx_desc,
+    const transaction::tablelock::ObReplaceLockParam &lock_param)
+{
+  int ret = OB_SUCCESS;
+  ObStoreCtxGuard ctx_guard;
+  ObLS *ls = nullptr;
+  int64_t user_specified_snapshot = transaction::ObTransVersion::INVALID_TRANS_VERSION;
+  transaction::ObTxReadSnapshot snapshot;
+  snapshot.init_none_read();
+  concurrent_control::ObWriteFlag write_flag;
+  write_flag.set_is_table_lock();
+
+  if (IS_NOT_INIT) {
+    ret = OB_NOT_INIT;
+    LOG_WARN("ob access service is not running.", K(ret));
+  } else if (OB_UNLIKELY(!ls_id.is_valid())
+             || OB_UNLIKELY(!tx_desc.is_valid())
+             || OB_UNLIKELY(!lock_param.is_valid())) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid argument",
+             K(ret),
+             K(ls_id),
+             K(tx_desc),
+             K(lock_param),
+             K(ls_id.is_valid()),
+             K(tx_desc.is_valid()),
+             K(lock_param.is_valid()));
+  } else if (OB_FAIL(get_write_store_ctx_guard_(ls_id,
+                                                lock_param.expired_time_, /*timeout*/
+                                                tx_desc,
+                                                snapshot,
+                                                0,/*branch_id*/
+                                                write_flag,
+                                                ctx_guard))) {
+    LOG_WARN("fail to check query allowed", K(ret), K(ls_id));
+  } else if (OB_ISNULL(ls = ctx_guard.get_ls_handle().get_ls())) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_ERROR("ls should not be null", K(ret), KP(ls));
+  } else {
+    ret = ls->replace_lock(ctx_guard.get_store_ctx(), lock_param);
+  }
+  return ret;
+}
+
 int ObAccessService::table_scan(
     ObVTableScanParam &vparam,
     ObNewRowIterator *&result)
 {
   ACTIVE_SESSION_FLAG_SETTER_GUARD(in_storage_read);
   int ret = OB_SUCCESS;
+  DISABLE_SQL_MEMLEAK_GUARD;
   const share::ObLSID &ls_id = vparam.ls_id_;
   const common::ObTabletID &data_tablet_id = vparam.tablet_id_;
+  GET_DIAGNOSTIC_INFO->get_ash_stat().tablet_id_ = data_tablet_id.id();
+  ACTIVE_SESSION_RETRY_DIAG_INFO_SETTER(ls_id_, ls_id.id());
   ObTableScanIterator *iter = nullptr;
+  ObTabletHandle tablet_handle;
   ObLS *ls = nullptr;
   ObLSTabletService *tablet_service = nullptr;
   ObTableScanParam &param = static_cast<ObTableScanParam &>(vparam);
@@ -266,6 +345,7 @@ int ObAccessService::table_scan(
                                          data_tablet_id,
                                          access_type,
                                          param,
+                                         tablet_handle,
                                          iter->get_ctx_guard(),
                                          user_specified_snapshot_scn))) {
     if (OB_TABLET_NOT_EXIST != ret) {
@@ -278,7 +358,7 @@ int ObAccessService::table_scan(
   } else if (OB_ISNULL(tablet_service = ls->get_tablet_svr())) {
     ret = OB_ERR_UNEXPECTED;
     LOG_ERROR("tablet service should not be null.", K(ret), K(ls_id));
-  } else if (OB_FAIL(tablet_service->table_scan(iter->get_ctx_guard().get_tablet_handle(), *iter, param))) {
+  } else if (OB_FAIL(tablet_service->table_scan(tablet_handle, *iter, param))) {
     if (OB_TABLET_NOT_EXIST != ret) {
       LOG_WARN("Fail to scan table, ", K(ret), K(ls_id), K(param));
     }
@@ -295,6 +375,7 @@ int ObAccessService::table_rescan(
   ACTIVE_SESSION_FLAG_SETTER_GUARD(in_storage_read);
   int ret = OB_SUCCESS;
   ObTableScanParam &param = static_cast<ObTableScanParam &>(vparam);
+  ObTabletHandle tablet_handle;
   if (IS_NOT_INIT) {
     ret = OB_NOT_INIT;
     LOG_WARN("ob access service is not running.", K(ret));
@@ -312,6 +393,8 @@ int ObAccessService::table_rescan(
     ObTableScanIterator *iter =  static_cast<ObTableScanIterator*>(result);
     const share::ObLSID &ls_id = vparam.ls_id_;
     const common::ObTabletID &data_tablet_id = vparam.tablet_id_;
+    GET_DIAGNOSTIC_INFO->get_ash_stat().tablet_id_ = data_tablet_id.id();
+    ACTIVE_SESSION_RETRY_DIAG_INFO_SETTER(ls_id_, ls_id.id());
     ObLS *ls = nullptr;
     ObLSTabletService *tablet_service = nullptr;
     ObStoreAccessType access_type = param.scan_flag_.is_read_latest() ?
@@ -326,6 +409,7 @@ int ObAccessService::table_rescan(
                                     data_tablet_id,
                                     access_type,
                                     param, /*scan_param*/
+                                    tablet_handle,
                                     iter->get_ctx_guard(),
                                     user_specified_snapshot_scn))) {
       if (OB_TABLET_NOT_EXIST != ret) {
@@ -338,7 +422,7 @@ int ObAccessService::table_rescan(
     } else if (OB_ISNULL(tablet_service = ls->get_tablet_svr())) {
       ret = OB_ERR_UNEXPECTED;
       LOG_ERROR("tablet service should not be null.", K(ret), K(ls_id));
-    } else if (OB_FAIL(tablet_service->table_rescan(iter->get_ctx_guard().get_tablet_handle(), param, result))) {
+    } else if (OB_FAIL(tablet_service->table_rescan(tablet_handle, param, result))) {
       if (OB_TABLET_NOT_EXIST != ret) {
         LOG_WARN("Fail to scan table, ", K(ret), K(result), K(ls_id), K(param));
       }
@@ -348,12 +432,39 @@ int ObAccessService::table_rescan(
   }
   return ret;
 }
+int ObAccessService::get_write_store_ctx_guard(
+    const share::ObLSID &ls_id,
+    const int64_t timeout,
+    transaction::ObTxDesc &tx_desc,
+    const transaction::ObTxReadSnapshot &snapshot,
+    const int16_t branch_id,
+    ObStoreCtxGuard &ctx_guard,
+    const transaction::ObTxSEQ &spec_seq_no)
+{
+  int ret = OB_SUCCESS;
+  ObLS *ls = nullptr;
+  // the write_flag is for tablet and does not need to be set here, just use default value,
+  // it will be set by dml param in check_write_allowed_ when doing dml operations
+  concurrent_control::ObWriteFlag default_write_flag;
+  if (IS_NOT_INIT) {
+    ret = OB_NOT_INIT;
+    LOG_WARN("ob access service is not running.", K(ret));
+  } else if (OB_UNLIKELY(!ls_id.is_valid() || !tx_desc.is_valid() || !snapshot.is_valid())) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid argument", K(ret), K(ls_id), K(tx_desc), K(snapshot));
+  } else if (OB_FAIL(get_write_store_ctx_guard_(
+      ls_id, timeout, tx_desc, snapshot, branch_id, default_write_flag, ctx_guard, spec_seq_no))) {
+    LOG_WARN("fail to get write store ctx gurad", K(ret), K(ls_id), K(tx_desc));
+  }
+  return ret;
+}
 
 int ObAccessService::get_write_store_ctx_guard_(
     const share::ObLSID &ls_id,
     const int64_t timeout,
     transaction::ObTxDesc &tx_desc,
     const transaction::ObTxReadSnapshot &snapshot,
+    const int16_t branch_id,
     const concurrent_control::ObWriteFlag write_flag,
     ObStoreCtxGuard &ctx_guard,
     const transaction::ObTxSEQ &spec_seq_no)
@@ -367,11 +478,12 @@ int ObAccessService::get_write_store_ctx_guard_(
     LOG_WARN("get log stream failed.", K(ret), K(ls_id));
   } else if (OB_ISNULL(ls = ctx_guard.get_ls_handle().get_ls())) {
     ret = OB_ERR_UNEXPECTED;
-    LOG_ERROR("ls should not be null", K(ret), K(ls_id), K_(tenant_id));
+    LOG_ERROR("ls should not be null", K(ret), K(ls_id));
   } else {
     ObStoreCtx &ctx = ctx_guard.get_store_ctx();
     ctx.ls_ = ls;
     ctx.timeout_ = timeout;
+    ctx.branch_ = branch_id;
     if (OB_FAIL(ls->get_write_store_ctx(tx_desc, snapshot, write_flag, ctx, spec_seq_no))) {
       LOG_WARN("can not get write store ctx", K(ret), K(ls_id), K(snapshot), K(tx_desc));
     }
@@ -382,33 +494,47 @@ int ObAccessService::get_write_store_ctx_guard_(
   return ret;
 }
 
-int ObAccessService::get_source_ls_tx_table_guard_(ObStoreCtxGuard &ctx_guard)
+int ObAccessService::get_source_ls_tx_table_guard_(
+  const ObTabletHandle &tablet_handle,
+  ObStoreCtxGuard &ctx_guard)
 {
   int ret = OB_SUCCESS;
   ObTabletCreateDeleteMdsUserData user_data;
-  ObTablet *tablet = nullptr;
-  if (OB_ISNULL(tablet = ctx_guard.get_tablet_handle().get_obj())) {
+  const ObTablet *tablet = nullptr;
+  mds::MdsWriter unused_writer;// will be removed later
+  mds::TwoPhaseCommitState trans_stat;// will be removed later
+  share::SCN unused_trans_version;// will be removed later
+  ObStoreCtx &ctx = ctx_guard.get_store_ctx();
+
+  if (OB_ISNULL(tablet = tablet_handle.get_obj())) {
     ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("tablet should not be NULL", K(ret), KPC(tablet));
-  } else if (!tablet->get_tablet_meta().has_transfer_table()) {
+    LOG_WARN("tablet should not be NULL", K(ret), KPC(tablet), K(tablet_handle));
+  } else if (OB_LIKELY(!tablet->get_tablet_meta().has_transfer_table())) {
     // do nothing
-  } else if (OB_FAIL(tablet->ObITabletMdsInterface::get_tablet_status(share::SCN::max_scn(), user_data, ObTabletCommon::DEFAULT_GET_TABLET_DURATION_US))) {
+  } else if (OB_FAIL(tablet->get_latest(user_data,
+      unused_writer, trans_stat, unused_trans_version))) {
     LOG_WARN("failed to get tablet status", K(ret), KPC(tablet), K(user_data));
+  } else if (mds::TwoPhaseCommitState::ON_COMMIT != trans_stat && ctx.is_write()) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("tablet in transfer but user data is uncommit, unexpected", K(ret), K(trans_stat), K(user_data));
   } else if (ObTabletStatus::TRANSFER_IN != user_data.tablet_status_ || !user_data.transfer_ls_id_.is_valid()) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("tablet status is unexpected", K(ret), K(user_data));
+  } else if (ctx_guard.get_store_ctx().mvcc_acc_ctx_.get_tx_table_guards().is_src_valid()) {
+    // The main tablet and local index tablets use the same mvcc_acc_ctx, if the src_tx_table_guard
+    // has been set, you do not need to set it again and must skip start_request_for_transfer,
+    // because it only call end_request_for_transfer once when revert store ctx.
+    ObTxTableGuards &tx_table_guards = ctx_guard.get_store_ctx().mvcc_acc_ctx_.get_tx_table_guards();
+    if (OB_UNLIKELY(tx_table_guards.src_ls_handle_.get_ls()->get_ls_id() != user_data.transfer_ls_id_)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_ERROR("main tablet and local index tablet must have same src ls", K(ret), K(tx_table_guards), K(user_data));
+    }
   } else {
     ObLS *src_ls = nullptr;
-    ObLSService *ls_service = nullptr;
+    ObLSService *ls_service = MTL(ObLSService*);
     ObLSHandle ls_handle;
     ObTxTableGuard src_tx_table_guard;
-    if (!user_data.transfer_ls_id_.is_valid()) {
-      ret = OB_ERR_UNEXPECTED;
-      LOG_WARN("table type is unexpected", K(ret), K(user_data));
-    } else if (OB_ISNULL(ls_service = MTL(ObLSService*))) {
-      ret = OB_ERR_UNEXPECTED;
-      LOG_WARN("failed to get ObLSService from MTL", K(ret), KP(ls_service));
-    } else if (OB_FAIL(ls_service->get_ls(user_data.transfer_ls_id_, ls_handle, ObLSGetMod::HA_MOD))) {
+    if (OB_FAIL(ls_service->get_ls(user_data.transfer_ls_id_, ls_handle, ObLSGetMod::HA_MOD))) {
       LOG_WARN("failed to get ls", K(ret), K(user_data));
     } else if (OB_ISNULL(src_ls = ls_handle.get_ls())) {
       ret = OB_ERR_UNEXPECTED;
@@ -418,10 +544,11 @@ int ObAccessService::get_source_ls_tx_table_guard_(ObStoreCtxGuard &ctx_guard)
     } else if (!user_data.transfer_scn_.is_valid() || !src_tx_table_guard.is_valid()) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("transfer_scn or source ls tx_table_guard is invalid", K(ret), K(src_tx_table_guard), K(user_data));
+    } else if (OB_FAIL(src_ls->get_tx_svr()->start_request_for_transfer())) {
+      LOG_WARN("start request for transfer failed", KR(ret), K(user_data));
     } else {
       ObStoreCtx &ctx = ctx_guard.get_store_ctx();
-      ctx.mvcc_acc_ctx_.set_src_tx_table_guard(src_tx_table_guard);
-      ctx.mvcc_acc_ctx_.set_transfer_scn(user_data.transfer_scn_);
+      ctx.mvcc_acc_ctx_.set_src_tx_table_guard(src_tx_table_guard, ls_handle);
       LOG_DEBUG("succ get src tx table guard", K(ret), K(src_ls->get_ls_id()), K(src_tx_table_guard), K(user_data));
     }
   }
@@ -434,26 +561,41 @@ int ObAccessService::construct_store_ctx_other_variables_(
     const common::ObTabletID &tablet_id,
     const int64_t timeout,
     const share::SCN &snapshot,
+    ObTabletHandle &tablet_handle,
     ObStoreCtxGuard &ctx_guard)
 {
   int ret = OB_SUCCESS;
   const share::ObLSID &ls_id = ls.get_ls_id();
   ObLSTabletService *tablet_service = ls.get_tablet_svr();
-  ObLSTabletService::AllowToReadMgr::AllowToReadInfo read_info;
   if (OB_ISNULL(tablet_service)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_ERROR("tablet service should not be null.", K(ret), K(ls_id));
-  } else if (OB_FAIL(tablet_service->check_allow_to_read(read_info))) {
+  } else if (OB_FAIL(tablet_service->check_allow_to_read())) {
     if (OB_REPLICA_NOT_READABLE == ret) {
       LOG_WARN("replica unreadable", K(ret), K(ls_id), K(tablet_id));
     } else {
       LOG_ERROR("failed to check allow to read", K(ret), K(ls_id), K(tablet_id));
     }
   } else if (OB_FAIL(tablet_service->get_tablet_with_timeout(
-      tablet_id, ctx_guard.get_tablet_handle(), timeout, ObMDSGetTabletMode::READ_READABLE_COMMITED, snapshot))) {
+      tablet_id, tablet_handle, timeout, ObMDSGetTabletMode::READ_READABLE_COMMITED, snapshot))) {
     LOG_WARN("failed to check and get tablet", K(ret), K(ls_id), K(tablet_id), K(timeout), K(snapshot));
-  } else if (OB_FAIL(get_source_ls_tx_table_guard_(ctx_guard))) {
+  } else if (OB_FAIL(get_source_ls_tx_table_guard_(tablet_handle, ctx_guard))) {
     LOG_WARN("failed to get src ls tx table guard", K(ret), K(ls_id), K(tablet_id));
+  }
+  if (OB_TABLET_IS_SPLIT_SRC == ret) {
+    ObArray<ObTabletID> tmp_tablet_ids;
+    bool has_active_memtable = false;
+    if (OB_FAIL(tmp_tablet_ids.push_back(tablet_id))) {
+      LOG_WARN("failed to push back", K(ret));
+    } else if (OB_FAIL(ls.check_tablet_no_active_memtable(tmp_tablet_ids, has_active_memtable))) {
+      LOG_WARN("check tablet has active memtable failed", K(ret), K(tablet_id));
+    } else if (OB_UNLIKELY(has_active_memtable)) {
+      ret = OB_SCHEMA_EAGAIN;
+      LOG_WARN("split src tablet has active memtable, retry", K(ret), K(tablet_id));
+    } else if (OB_FAIL(tablet_service->get_tablet_with_timeout(
+            tablet_id, tablet_handle, timeout, ObMDSGetTabletMode::READ_ALL_COMMITED, share::SCN::max_scn()))) {
+      LOG_WARN("failed to check and get tablet", K(ret), K(ls_id), K(tablet_id), K(timeout), K(snapshot));
+    }
   }
   return ret;
 }
@@ -467,6 +609,7 @@ int ObAccessService::check_read_allowed_(
     const common::ObTabletID &tablet_id,
     const ObStoreAccessType access_type,
     const ObTableScanParam &scan_param,
+    ObTabletHandle &tablet_handle,
     ObStoreCtxGuard &ctx_guard,
     SCN user_specified_snapshot)
 {
@@ -480,7 +623,7 @@ int ObAccessService::check_read_allowed_(
     LOG_WARN("get log stream failed.", K(ret), K(ls_id));
   } else if (OB_ISNULL(ls = ctx_guard.get_ls_handle().get_ls())) {
     ret = OB_ERR_UNEXPECTED;
-    LOG_ERROR("ls should not be null", K(ret), K(ls_id), K_(tenant_id));
+    LOG_ERROR("ls should not be null", K(ret), K(ls_id));
   } else {
     ObStoreCtx &ctx = ctx_guard.get_store_ctx();
     ctx.ls_ = ls;
@@ -508,7 +651,8 @@ int ObAccessService::check_read_allowed_(
       } else if (OB_FAIL(ls->get_read_store_ctx(scan_param.snapshot_,
                                                 read_latest,
                                                 scan_param.tx_lock_timeout_,
-                                                ctx))) {
+                                                ctx,
+                                                scan_param.trans_desc_))) {
         LOG_WARN("get read store ctx fail", K(ret), K(read_latest), K(scan_param.snapshot_), K(ls_id));
       }
       if (OB_FAIL(ret)) {
@@ -541,9 +685,26 @@ int ObAccessService::check_read_allowed_(
       }
     }
     if (OB_FAIL(ret)) {
+      if (OB_LS_NOT_EXIST == ret) {
+        int tmp_ret = OB_SUCCESS;
+        bool is_dropped = false;
+        schema::ObMultiVersionSchemaService *schema_service = GCTX.schema_service_;
+        if (OB_ISNULL(schema_service)) {
+          tmp_ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("schema_service is nullptr", "tmp_ret", tmp_ret);
+        } else if (OB_SUCCESS != (tmp_ret = schema_service->check_if_tenant_has_been_dropped(MTL_ID(), is_dropped))) {
+          LOG_WARN("check if tenant has been dropped fail", "tmp_ret", tmp_ret);
+        } else {
+          ret = is_dropped ? OB_TENANT_HAS_BEEN_DROPPED : ret;
+        }
+      }
     } else if (OB_FAIL(construct_store_ctx_other_variables_(*ls, tablet_id, scan_param.timeout_,
-         ctx.mvcc_acc_ctx_.get_snapshot_version(), ctx_guard))) {
-      LOG_WARN("failed to check replica allow to read", K(ret), K(tablet_id), "timeout", scan_param.timeout_);
+         ctx.mvcc_acc_ctx_.get_snapshot_version(), tablet_handle, ctx_guard))) {
+      if (OB_SNAPSHOT_DISCARDED == ret && scan_param.fb_snapshot_.is_valid()) {
+        ret = OB_TABLE_DEFINITION_CHANGED;
+      } else {
+        LOG_WARN("failed to check replica allow to read", K(ret), K(tablet_id), "timeout", scan_param.timeout_);
+      }
     }
   }
   return ret;
@@ -560,7 +721,9 @@ int ObAccessService::check_write_allowed_(
     const common::ObTabletID &tablet_id,
     const ObStoreAccessType access_type,
     const ObDMLBaseParam &dml_param,
+    const int64_t lock_wait_timeout_ts,
     transaction::ObTxDesc &tx_desc,
+    ObTabletHandle &tablet_handle,
     ObStoreCtxGuard &ctx_guard)
 {
   int ret = OB_SUCCESS;
@@ -571,35 +734,47 @@ int ObAccessService::check_write_allowed_(
   ObLockParam lock_param;
   const ObTableLockMode lock_mode = ROW_EXCLUSIVE;
   const ObTableLockOpType lock_op_type = IN_TRANS_DML_LOCK;
-  const ObTableLockOwnerID lock_owner(0);
-  const bool is_try_lock = false;
+  ObTableLockOwnerID lock_owner;
+  lock_owner.set_default();
   const bool is_deadlock_avoid_enabled = false;
+  bool is_try_lock = lock_wait_timeout_ts <= 0;
+  const int64_t abs_timeout_ts = MIN(lock_wait_timeout_ts, tx_desc.get_expire_ts());
+  bool enable_table_lock = true;
+  ret = OB_E(EventTable::EN_ENABLE_TABLE_LOCK) OB_SUCCESS;
+  if (OB_ERR_UNEXPECTED == ret) {
+    enable_table_lock = false;
+    ret = OB_SUCCESS;
+  }
   if (OB_FAIL(check_tenant_out_of_memstore_limit_(is_out_of_mem))) {
-    LOG_WARN("fail to check tenant out of mem limit", K(ret), K_(tenant_id));
+    LOG_WARN("fail to check tenant out of mem limit", K(ret));
   } else if (is_out_of_mem && !tablet_id.is_inner_tablet()) {
     ret = OB_TENANT_OUT_OF_MEM;
-    LOG_WARN("this tenant is already out of memstore limit", K(ret), K_(tenant_id));
-  } else if (OB_FAIL(check_data_disk_full_(is_disk_full))) {
+    LOG_WARN("this tenant is already out of memstore limit", K(ret));
+  } else if (OB_FAIL(check_data_disk_full_(ls_id, is_disk_full))) {
     LOG_WARN("fail to check data disk full", K(ret));
   } else if (is_disk_full) {
-    ret = OB_SERVER_OUTOF_DISK_SPACE;
+    ret = OB_USER_OUTOF_DATA_DISK_SPACE;
     LOG_WARN("data disk full, you should not do io now", K(ret));
-  } else if (OB_FAIL(get_write_store_ctx_guard_(ls_id,
-                                                dml_param.timeout_,
-                                                tx_desc,
-                                                dml_param.snapshot_,
-                                                dml_param.write_flag_,
-                                                ctx_guard,
-                                                dml_param.spec_seq_no_))) {
-    LOG_WARN("get write store ctx failed", K(ret), K(ls_id), K(dml_param), K(tx_desc));
-  } else if (FALSE_IT(ctx_guard.get_store_ctx().tablet_id_ = tablet_id)) {
   } else if (OB_ISNULL(ls = ctx_guard.get_ls_handle().get_ls())) {
     ret = OB_ERR_UNEXPECTED;
-    LOG_ERROR("ls should not be null", K(ret), K(ls_id), K_(tenant_id));
+    LOG_ERROR("ls should not be null", K(ret), K(ls_id));
   } else {
-    // TODO: this may confuse user, because of txn timeout won't notify user proactively
-    int64_t lock_expired_ts = MIN(dml_param.timeout_, tx_desc.get_expire_ts());
-    if (OB_FAIL(get_lock_id(tablet_id, lock_id))) {
+    ObStoreCtx &store_ctx = ctx_guard.get_store_ctx();
+    store_ctx.tablet_id_ = tablet_id;
+    store_ctx.timeout_ = abs_timeout_ts;
+    store_ctx.mvcc_acc_ctx_.set_write_flag(dml_param.write_flag_);
+    store_ctx.mvcc_acc_ctx_.set_abs_lock_timeout_ts(abs_timeout_ts);
+    store_ctx.tablet_stat_.reset();
+
+    const int64_t lock_expired_ts = MIN(dml_param.timeout_, tx_desc.get_expire_ts());
+    const ObTableSchemaParam &schema_param = dml_param.table_param_->get_data_table();
+    const bool is_local_index_table = schema_param.is_index_table() && schema_param.is_index_local_storage();
+
+    if (!enable_table_lock) {
+      // do nothing
+    } else if (is_local_index_table) {
+      // skip table lock
+    } else if (OB_FAIL(get_lock_id(tablet_id, lock_id))) {
       LOG_WARN("get lock id failed", K(ret), K(tablet_id));
     } else if (OB_FAIL(lock_param.set(lock_id,
                                       lock_mode,
@@ -608,11 +783,15 @@ int ObAccessService::check_write_allowed_(
                                       dml_param.schema_version_,
                                       is_deadlock_avoid_enabled,
                                       is_try_lock,
+                                      // we can not use abs_timeout_ts here,
+                                      // because we may meet select-for-update nowait,
+                                      // and abs_timeout_ts is 0. We will judge
+                                      // timeout before meet lock conflict in tablelock,
+                                      // so it will lead to incorrect error
                                       lock_expired_ts))) {
       LOG_WARN("get lock param failed", K(ret), K(lock_id));
-    } // When locking the table, the tablet is not detected to be deleted.
-    else if (!dml_param.is_direct_insert()
-        && OB_FAIL(ls->lock(ctx_guard.get_store_ctx(), lock_param))) {
+    // When locking the table, the tablet is not detected to be deleted.
+    } else if (OB_FAIL(ls->lock(ctx_guard.get_store_ctx(), lock_param))) {
       LOG_WARN("lock tablet failed", K(ret), K(lock_param));
     } else {
       // do nothing
@@ -621,11 +800,8 @@ int ObAccessService::check_write_allowed_(
   // After locking the table, it can prevent the tablet from being deleted.
   // It is necessary to obtain the tablet handle after locking the table to avoid operating the deleted tablet.
   if (OB_SUCC(ret) && OB_FAIL(construct_store_ctx_other_variables_(*ls, tablet_id, dml_param.timeout_,
-      share::SCN::max_scn(), ctx_guard))) {
+      share::SCN::max_scn(), tablet_handle, ctx_guard))) {
     LOG_WARN("failed to check replica allow to read", K(ret), K(tablet_id));
-  }
-  if (OB_FAIL(ret)) {
-    ctx_guard.reset();
   }
   return ret;
 }
@@ -636,14 +812,18 @@ int ObAccessService::delete_rows(
     transaction::ObTxDesc &tx_desc,
     const ObDMLBaseParam &dml_param,
     const common::ObIArray<uint64_t> &column_ids,
-    common::ObNewRowIterator *row_iter,
+    blocksstable::ObDatumRowIterator *row_iter,
     int64_t &affected_rows)
 {
   ACTIVE_SESSION_FLAG_SETTER_GUARD(in_storage_write);
+  GET_DIAGNOSTIC_INFO->get_ash_stat().tablet_id_ = tablet_id.id();
+  ACTIVE_SESSION_RETRY_DIAG_INFO_SETTER(ls_id_, ls_id.id());
   int ret = OB_SUCCESS;
-  ObStoreCtxGuard ctx_guard;
+  DISABLE_SQL_MEMLEAK_GUARD;
   ObLS *ls = nullptr;
   ObLSTabletService *tablet_service = nullptr;
+  // Attention!!! This handle is only used for ObLSTabletService, will be reset inside ObLSTabletService.
+  ObTabletHandle tablet_handle;
   if (IS_NOT_INIT) {
     ret = OB_NOT_INIT;
     LOG_WARN("ob access service is not running.", K(ret));
@@ -660,28 +840,24 @@ int ObAccessService::delete_rows(
                                           tablet_id,
                                           ObStoreAccessType::MODIFY,
                                           dml_param,
+                                          dml_param.timeout_,
                                           tx_desc,
-                                          ctx_guard))) {
+                                          tablet_handle,
+                                          *dml_param.store_ctx_guard_))) {
     LOG_WARN("fail to check query allowed", K(ret), K(ls_id), K(tablet_id));
-  } else if (OB_ISNULL(ls = ctx_guard.get_ls_handle().get_ls())) {
+  } else if (OB_ISNULL(ls = dml_param.store_ctx_guard_->get_ls_handle().get_ls())) {
     ret = OB_ERR_UNEXPECTED;
     LOG_ERROR("ls should not be null", K(ret), KP(ls));
   } else if (OB_ISNULL(tablet_service = ls->get_tablet_svr())) {
     ret = OB_ERR_UNEXPECTED;
     LOG_ERROR("tablet service should not be null.", K(ret), K(ls_id));
   } else {
-    ret = tablet_service->delete_rows(ctx_guard.get_tablet_handle(),
-                                      ctx_guard.get_store_ctx(),
+    ret = tablet_service->delete_rows(tablet_handle,
+                                      dml_param.store_ctx_guard_->get_store_ctx(),
                                       dml_param,
                                       column_ids,
                                       row_iter,
                                       affected_rows);
-    if (OB_SUCC(ret)) {
-      int tmp_ret = audit_tablet_opt_dml_stat(dml_param,
-                                              tablet_id,
-                                              ObOptDmlStatType::TABLET_OPT_DELETE_STAT,
-                                              affected_rows);
-    }
   }
   return ret;
 }
@@ -692,14 +868,17 @@ int ObAccessService::put_rows(
     transaction::ObTxDesc &tx_desc,
     const ObDMLBaseParam &dml_param,
     const common::ObIArray<uint64_t> &column_ids,
-    common::ObNewRowIterator *row_iter,
+    blocksstable::ObDatumRowIterator *row_iter,
     int64_t &affected_rows)
 {
   ACTIVE_SESSION_FLAG_SETTER_GUARD(in_storage_write);
+  GET_DIAGNOSTIC_INFO->get_ash_stat().tablet_id_ = tablet_id.id();
+  ACTIVE_SESSION_RETRY_DIAG_INFO_SETTER(ls_id_, ls_id.id());
   int ret = OB_SUCCESS;
-  ObStoreCtxGuard ctx_guard;
   ObLS *ls = nullptr;
   ObLSTabletService *tablet_service = nullptr;
+  // Attention!!! This handle is only used for ObLSTabletService, will be reset inside ObLSTabletService.
+  ObTabletHandle tablet_handle;
   if (IS_NOT_INIT) {
     ret = OB_NOT_INIT;
     LOG_WARN("ob access service is not running.", K(ret));
@@ -716,28 +895,24 @@ int ObAccessService::put_rows(
                                           tablet_id,
                                           ObStoreAccessType::MODIFY,
                                           dml_param,
+                                          dml_param.timeout_,
                                           tx_desc,
-                                          ctx_guard))) {
+                                          tablet_handle,
+                                          *dml_param.store_ctx_guard_))) {
     LOG_WARN("fail to check query allowed", K(ret), K(ls_id), K(tablet_id));
-  } else if (OB_ISNULL(ls = ctx_guard.get_ls_handle().get_ls())) {
+  } else if (OB_ISNULL(ls = dml_param.store_ctx_guard_->get_ls_handle().get_ls())) {
     ret = OB_ERR_UNEXPECTED;
     LOG_ERROR("ls should not be null", K(ret), KP(ls));
   } else if (OB_ISNULL(tablet_service = ls->get_tablet_svr())) {
     ret = OB_ERR_UNEXPECTED;
     LOG_ERROR("tablet service should not be null.", K(ret), K(ls_id));
   } else {
-    ret = tablet_service->put_rows(ctx_guard.get_tablet_handle(),
-                                   ctx_guard.get_store_ctx(),
+    ret = tablet_service->put_rows(tablet_handle,
+                                   dml_param.store_ctx_guard_->get_store_ctx(),
                                    dml_param,
                                    column_ids,
                                    row_iter,
                                    affected_rows);
-    if (OB_SUCC(ret)) {
-      int tmp_ret = audit_tablet_opt_dml_stat(dml_param,
-                                              tablet_id,
-                                              ObOptDmlStatType::TABLET_OPT_UPDATE_STAT,
-                                              affected_rows);
-    }
   }
   return ret;
 }
@@ -748,14 +923,18 @@ int ObAccessService::insert_rows(
     transaction::ObTxDesc &tx_desc,
     const ObDMLBaseParam &dml_param,
     const common::ObIArray<uint64_t> &column_ids,
-    common::ObNewRowIterator *row_iter,
+    blocksstable::ObDatumRowIterator *row_iter,
     int64_t &affected_rows)
 {
   ACTIVE_SESSION_FLAG_SETTER_GUARD(in_storage_write);
+  GET_DIAGNOSTIC_INFO->get_ash_stat().tablet_id_ = tablet_id.id();
+  ACTIVE_SESSION_RETRY_DIAG_INFO_SETTER(ls_id_, ls_id.id());
   int ret = OB_SUCCESS;
-  ObStoreCtxGuard ctx_guard;
+  DISABLE_SQL_MEMLEAK_GUARD;
   ObLS *ls = nullptr;
   ObLSTabletService *tablet_service = nullptr;
+  // Attention!!! This handle is only used for ObLSTabletService, will be reset inside ObLSTabletService.
+  ObTabletHandle tablet_handle;
   if (IS_NOT_INIT) {
     ret = OB_NOT_INIT;
     LOG_WARN("ob access service is not running.", K(ret));
@@ -772,28 +951,24 @@ int ObAccessService::insert_rows(
                                           tablet_id,
                                           ObStoreAccessType::MODIFY,
                                           dml_param,
+                                          dml_param.timeout_,
                                           tx_desc,
-                                          ctx_guard))) {
+                                          tablet_handle,
+                                          *dml_param.store_ctx_guard_))) {
     LOG_WARN("fail to check query allowed", K(ret), K(ls_id), K(tablet_id));
-  } else if (OB_ISNULL(ls = ctx_guard.get_ls_handle().get_ls())) {
+  } else if (OB_ISNULL(ls = dml_param.store_ctx_guard_->get_ls_handle().get_ls())) {
     ret = OB_ERR_UNEXPECTED;
     LOG_ERROR("ls should not be null", K(ret), KP(ls));
   } else if (OB_ISNULL(tablet_service = ls->get_tablet_svr())) {
     ret = OB_ERR_UNEXPECTED;
     LOG_ERROR("tablet service should not be null.", K(ret), K(ls_id));
   } else {
-    ret = tablet_service->insert_rows(ctx_guard.get_tablet_handle(),
-                                      ctx_guard.get_store_ctx(),
+    ret = tablet_service->insert_rows(tablet_handle,
+                                      dml_param.store_ctx_guard_->get_store_ctx(),
                                       dml_param,
                                       column_ids,
                                       row_iter,
                                       affected_rows);
-    if (OB_SUCC(ret) && !dml_param.is_direct_insert()) {
-      int tmp_ret = audit_tablet_opt_dml_stat(dml_param,
-                                              tablet_id,
-                                              ObOptDmlStatType::TABLET_OPT_INSERT_STAT,
-                                              affected_rows);
-    }
   }
   return ret;
 }
@@ -805,16 +980,20 @@ int ObAccessService::insert_row(
     const ObDMLBaseParam &dml_param,
     const common::ObIArray<uint64_t> &column_ids,
     const common::ObIArray<uint64_t> &duplicated_column_ids,
-    const common::ObNewRow &row,
+    blocksstable::ObDatumRow &row,
     const ObInsertFlag flag,
     int64_t &affected_rows,
-    common::ObNewRowIterator *&duplicated_rows)
+    blocksstable::ObDatumRowIterator *&duplicated_rows)
 {
   ACTIVE_SESSION_FLAG_SETTER_GUARD(in_storage_write);
+  GET_DIAGNOSTIC_INFO->get_ash_stat().tablet_id_ = tablet_id.id();
+  ACTIVE_SESSION_RETRY_DIAG_INFO_SETTER(ls_id_, ls_id.id());
   int ret = OB_SUCCESS;
-  ObStoreCtxGuard ctx_guard;
+  DISABLE_SQL_MEMLEAK_GUARD;
   ObLS *ls = nullptr;
   ObLSTabletService *tablet_service = nullptr;
+  // Attention!!! This handle is only used for ObLSTabletService, will be reset inside ObLSTabletService.
+  ObTabletHandle tablet_handle;
   if (IS_NOT_INIT) {
     ret = OB_NOT_INIT;
     LOG_WARN("ob access service is not running.", K(ret));
@@ -832,18 +1011,20 @@ int ObAccessService::insert_row(
                                           tablet_id,
                                           ObStoreAccessType::MODIFY,
                                           dml_param,
+                                          dml_param.timeout_,
                                           tx_desc,
-                                          ctx_guard))) {
+                                          tablet_handle,
+                                          *dml_param.store_ctx_guard_))) {
     LOG_WARN("fail to check query allowed", K(ret), K(ls_id), K(tablet_id));
-  } else if (OB_ISNULL(ls = ctx_guard.get_ls_handle().get_ls())) {
+  } else if (OB_ISNULL(ls = dml_param.store_ctx_guard_->get_ls_handle().get_ls())) {
     ret = OB_ERR_UNEXPECTED;
     LOG_ERROR("ls should not be null", K(ret), KP(ls));
   } else if (OB_ISNULL(tablet_service = ls->get_tablet_svr())) {
     ret = OB_ERR_UNEXPECTED;
     LOG_ERROR("tablet service should not be null.", K(ret), K(ls_id));
   } else {
-    ret = tablet_service->insert_row(ctx_guard.get_tablet_handle(),
-                                     ctx_guard.get_store_ctx(),
+    ret = tablet_service->insert_row(tablet_handle,
+                                     dml_param.store_ctx_guard_->get_store_ctx(),
                                      dml_param,
                                      column_ids,
                                      duplicated_column_ids,
@@ -851,19 +1032,15 @@ int ObAccessService::insert_row(
                                      flag,
                                      affected_rows,
                                      duplicated_rows);
-    if (OB_SUCC(ret)) {
-      int tmp_ret = audit_tablet_opt_dml_stat(dml_param,
-                                              tablet_id,
-                                              ObOptDmlStatType::TABLET_OPT_INSERT_STAT,
-                                              affected_rows);
-    }
   }
   return ret;
 }
 
-int ObAccessService::revert_insert_iter(common::ObNewRowIterator *iter)
+int ObAccessService::revert_insert_iter(blocksstable::ObDatumRowIterator *iter)
 {
   ACTIVE_SESSION_FLAG_SETTER_GUARD(in_storage_write);
+  GET_DIAGNOSTIC_INFO->get_ash_stat().tablet_id_ = 0;
+  ACTIVE_SESSION_RETRY_DIAG_INFO_SETTER(ls_id_, 0);
   int ret = OB_SUCCESS;
   if (OB_LIKELY(nullptr != iter)) {
     ObQueryIteratorFactory::free_insert_dup_iter(iter);
@@ -878,14 +1055,18 @@ int ObAccessService::update_rows(
     const ObDMLBaseParam &dml_param,
     const common::ObIArray<uint64_t> &column_ids,
     const common::ObIArray< uint64_t> &updated_column_ids,
-    common::ObNewRowIterator *row_iter,
+    blocksstable::ObDatumRowIterator *row_iter,
     int64_t &affected_rows)
 {
   ACTIVE_SESSION_FLAG_SETTER_GUARD(in_storage_write);
+  GET_DIAGNOSTIC_INFO->get_ash_stat().tablet_id_ = tablet_id.id();
+  ACTIVE_SESSION_RETRY_DIAG_INFO_SETTER(ls_id_, ls_id.id());
   int ret = OB_SUCCESS;
-  ObStoreCtxGuard ctx_guard;
+  DISABLE_SQL_MEMLEAK_GUARD;
   ObLS *ls = nullptr;
   ObLSTabletService *tablet_service = nullptr;
+  // Attention!!! This handle is only used for ObLSTabletService, will be reset inside ObLSTabletService.
+  ObTabletHandle tablet_handle;
   if (IS_NOT_INIT) {
     ret = OB_NOT_INIT;
     LOG_WARN("ob access service is not running.", K(ret));
@@ -902,29 +1083,25 @@ int ObAccessService::update_rows(
                                           tablet_id,
                                           ObStoreAccessType::MODIFY,
                                           dml_param,
+                                          dml_param.timeout_,
                                           tx_desc,
-                                          ctx_guard))) {
+                                          tablet_handle,
+                                          *dml_param.store_ctx_guard_))) {
     LOG_WARN("fail to check query allowed", K(ret), K(ls_id), K(tablet_id));
-  } else if (OB_ISNULL(ls = ctx_guard.get_ls_handle().get_ls())) {
+  } else if (OB_ISNULL(ls = dml_param.store_ctx_guard_->get_ls_handle().get_ls())) {
     ret = OB_ERR_UNEXPECTED;
     LOG_ERROR("ls should not be null", K(ret), KP(ls));
   } else if (OB_ISNULL(tablet_service = ls->get_tablet_svr())) {
     ret = OB_ERR_UNEXPECTED;
     LOG_ERROR("tablet service should not be null.", K(ret), K(ls_id));
   } else {
-    ret = tablet_service->update_rows(ctx_guard.get_tablet_handle(),
-                                      ctx_guard.get_store_ctx(),
+    ret = tablet_service->update_rows(tablet_handle,
+                                      dml_param.store_ctx_guard_->get_store_ctx(),
                                       dml_param,
                                       column_ids,
                                       updated_column_ids,
                                       row_iter,
                                       affected_rows);
-    if (OB_SUCC(ret)) {
-      int tmp_ret = audit_tablet_opt_dml_stat(dml_param,
-                                              tablet_id,
-                                              ObOptDmlStatType::TABLET_OPT_UPDATE_STAT,
-                                              affected_rows);
-    }
   }
   return ret;
 }
@@ -936,14 +1113,19 @@ int ObAccessService::lock_rows(
     const ObDMLBaseParam &dml_param,
     const int64_t abs_lock_timeout,
     const ObLockFlag lock_flag,
-    common::ObNewRowIterator *row_iter,
+    blocksstable::ObDatumRowIterator *row_iter,
     int64_t &affected_rows)
 {
   ACTIVE_SESSION_FLAG_SETTER_GUARD(in_storage_write);
+  GET_DIAGNOSTIC_INFO->get_ash_stat().tablet_id_ = tablet_id.id();
+  ACTIVE_SESSION_RETRY_DIAG_INFO_SETTER(ls_id_, ls_id.id());
   int ret = OB_SUCCESS;
-  ObStoreCtxGuard ctx_guard;
+  DISABLE_SQL_MEMLEAK_GUARD;
   ObLS *ls = nullptr;
   ObLSTabletService *tablet_service = nullptr;
+  // Attention!!! This handle is only used for ObLSTabletService, will be reset inside ObLSTabletService.
+  ObTabletHandle tablet_handle;
+  int64_t lock_wait_timeout_ts = get_lock_wait_timeout_(abs_lock_timeout, dml_param.timeout_);
   if (IS_NOT_INIT) {
     ret = OB_NOT_INIT;
     LOG_WARN("ob access service is not running.", K(ret));
@@ -959,20 +1141,21 @@ int ObAccessService::lock_rows(
                                           tablet_id,
                                           ObStoreAccessType::ROW_LOCK,
                                           dml_param,
+                                          lock_wait_timeout_ts,
                                           tx_desc,
-                                          ctx_guard))) {
+                                          tablet_handle,
+                                          *dml_param.store_ctx_guard_))) {
     LOG_WARN("fail to check query allowed", K(ret), K(ls_id), K(tablet_id));
-  } else if (OB_ISNULL(ls = ctx_guard.get_ls_handle().get_ls())) {
+  } else if (OB_ISNULL(ls = dml_param.store_ctx_guard_->get_ls_handle().get_ls())) {
     ret = OB_ERR_UNEXPECTED;
     LOG_ERROR("ls should not be null", K(ret), KP(ls));
   } else if (OB_ISNULL(tablet_service = ls->get_tablet_svr())) {
     ret = OB_ERR_UNEXPECTED;
     LOG_ERROR("tablet service should not be null.", K(ret), K(ls_id));
   } else {
-    ret = tablet_service->lock_rows(ctx_guard.get_tablet_handle(),
-                                    ctx_guard.get_store_ctx(),
+    ret = tablet_service->lock_rows(tablet_handle,
+                                    dml_param.store_ctx_guard_->get_store_ctx(),
                                     dml_param,
-                                    abs_lock_timeout,
                                     lock_flag,
                                     false,
                                     row_iter,
@@ -987,14 +1170,18 @@ int ObAccessService::lock_row(
     transaction::ObTxDesc &tx_desc,
     const ObDMLBaseParam &dml_param,
     const int64_t abs_lock_timeout,
-    const common::ObNewRow &row,
+    blocksstable::ObDatumRow &row,
     const ObLockFlag lock_flag)
 {
   ACTIVE_SESSION_FLAG_SETTER_GUARD(in_storage_write);
+  GET_DIAGNOSTIC_INFO->get_ash_stat().tablet_id_ = tablet_id.id();
+  ACTIVE_SESSION_RETRY_DIAG_INFO_SETTER(ls_id_, ls_id.id());
   int ret = OB_SUCCESS;
-  ObStoreCtxGuard ctx_guard;
   ObLS *ls = nullptr;
   ObLSTabletService *tablet_service = nullptr;
+  // Attention!!! This handle is only used for ObLSTabletService, will be reset inside ObLSTabletService.
+  ObTabletHandle tablet_handle;
+  int64_t lock_wait_timeout_ts = get_lock_wait_timeout_(abs_lock_timeout, dml_param.timeout_);
   if (IS_NOT_INIT) {
     ret = OB_NOT_INIT;
     LOG_WARN("ob access service is not running.", K(ret));
@@ -1010,20 +1197,21 @@ int ObAccessService::lock_row(
                                           tablet_id,
                                           ObStoreAccessType::ROW_LOCK,
                                           dml_param,
+                                          lock_wait_timeout_ts,
                                           tx_desc,
-                                          ctx_guard))) {
+                                          tablet_handle,
+                                          *dml_param.store_ctx_guard_))) {
     LOG_WARN("fail to check query allowed", K(ret), K(ls_id), K(tablet_id));
-  } else if (OB_ISNULL(ls = ctx_guard.get_ls_handle().get_ls())) {
+  } else if (OB_ISNULL(ls = dml_param.store_ctx_guard_->get_ls_handle().get_ls())) {
     ret = OB_ERR_UNEXPECTED;
     LOG_ERROR("ls should not be null", K(ret), KP(ls));
   } else if (OB_ISNULL(tablet_service = ls->get_tablet_svr())) {
     ret = OB_ERR_UNEXPECTED;
     LOG_ERROR("tablet service should not be null.", K(ret), K(ls_id));
   } else {
-    ret = tablet_service->lock_row(ctx_guard.get_tablet_handle(),
-                                    ctx_guard.get_store_ctx(),
+    ret = tablet_service->lock_row(tablet_handle,
+                                    dml_param.store_ctx_guard_->get_store_ctx(),
                                     dml_param,
-                                    abs_lock_timeout,
                                     row,
                                     lock_flag,
                                     false);
@@ -1034,7 +1222,8 @@ int ObAccessService::lock_row(
 int ObAccessService::estimate_row_count(
     const ObTableScanParam &param,
     const ObTableScanRange &scan_range,
-    ObIArray<ObEstRowCountRecord> &est_records,
+    const int64_t timeout_us,
+    common::ObIArray<ObEstRowCountRecord> &est_records,
     int64_t &logical_row_count,
     int64_t &physical_row_count) const
 {
@@ -1053,10 +1242,10 @@ int ObAccessService::estimate_row_count(
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("ls is unexpected null", K(ret));
   } else if (OB_FAIL(ls->get_tablet_svr()->estimate_row_count(
-              param, scan_range, est_records,
-              logical_row_count, physical_row_count))) {
+      param, scan_range, timeout_us, est_records,
+      logical_row_count, physical_row_count))) {
     if (OB_TABLET_NOT_EXIST != ret) {
-      LOG_WARN("failed to estimate row count", K(ret), K(param));
+      LOG_WARN("failed to estimate row count", K(ret), K(param), K(scan_range), K(timeout_us));
     }
   }
   return ret;
@@ -1065,6 +1254,7 @@ int ObAccessService::estimate_row_count(
 int ObAccessService::estimate_block_count_and_row_count(
     const share::ObLSID &ls_id,
     const common::ObTabletID &tablet_id,
+    const int64_t timeout_us,
     int64_t &macro_block_count,
     int64_t &micro_block_count,
     int64_t &sstable_row_count,
@@ -1087,9 +1277,11 @@ int ObAccessService::estimate_block_count_and_row_count(
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("ls is unexpected null", K(ret));
   } else if (OB_FAIL(ls->get_tablet_svr()->estimate_block_count_and_row_count(
-              tablet_id, macro_block_count, micro_block_count, sstable_row_count,
-              memtable_row_count, cg_macro_cnt_arr, cg_micro_cnt_arr))) {
-    LOG_WARN("failed to estimate block count and row count", K(ret), K(ls_id), K(tablet_id));
+      tablet_id, timeout_us,
+      macro_block_count, micro_block_count,
+      sstable_row_count, memtable_row_count,
+      cg_macro_cnt_arr, cg_micro_cnt_arr))) {
+    LOG_WARN("failed to estimate block count and row count", K(ret), K(ls_id), K(tablet_id), K(timeout_us));
   }
   return ret;
 }
@@ -1097,6 +1289,7 @@ int ObAccessService::estimate_block_count_and_row_count(
 int ObAccessService::get_multi_ranges_cost(
     const share::ObLSID &ls_id,
     const common::ObTabletID &tablet_id,
+    const int64_t timeout_us,
     const common::ObIArray<common::ObStoreRange> &ranges,
     int64_t &total_size)
 {
@@ -1116,11 +1309,11 @@ int ObAccessService::get_multi_ranges_cost(
     LOG_WARN("get log stream failed", K(ret), K(ls_id));
   } else if (OB_ISNULL(ls = ls_handle.get_ls())) {
     ret = OB_ERR_UNEXPECTED;
-    LOG_ERROR("ls hould not be null", K(ret), K(ls_id), K_(tenant_id));
+    LOG_ERROR("ls hould not be null", K(ret), K(ls_id));
   } else if (OB_ISNULL(tablet_service = ls->get_tablet_svr())) {
     ret = OB_ERR_UNEXPECTED;
     LOG_ERROR("tablet service should not be null", K(ret), K(ls_id));
-  } else if (OB_FAIL(tablet_service->get_multi_ranges_cost(tablet_id, ranges, total_size))) {
+  } else if (OB_FAIL(tablet_service->get_multi_ranges_cost(tablet_id, timeout_us, ranges, total_size))) {
     LOG_WARN("Fail to get multi ranges cost", K(ret), K(ls_id), K(tablet_id));
   }
   return ret;
@@ -1129,6 +1322,8 @@ int ObAccessService::get_multi_ranges_cost(
 int ObAccessService::reuse_scan_iter(const bool switch_param, ObNewRowIterator *iter)
 {
   ACTIVE_SESSION_FLAG_SETTER_GUARD(in_storage_read);
+  GET_DIAGNOSTIC_INFO->get_ash_stat().tablet_id_ = 0;
+  ACTIVE_SESSION_RETRY_DIAG_INFO_SETTER(ls_id_, 0);
   int ret = OB_SUCCESS;
   if (IS_NOT_INIT) {
     ret = OB_NOT_INIT;
@@ -1152,6 +1347,8 @@ int ObAccessService::reuse_scan_iter(const bool switch_param, ObNewRowIterator *
 int ObAccessService::revert_scan_iter(ObNewRowIterator *iter)
 {
   ACTIVE_SESSION_FLAG_SETTER_GUARD(in_storage_read);
+  GET_DIAGNOSTIC_INFO->get_ash_stat().tablet_id_ = 0;
+  ACTIVE_SESSION_RETRY_DIAG_INFO_SETTER(ls_id_, 0);
   int ret = OB_SUCCESS;
   NG_TRACE(S_revert_iter_begin);
   if (IS_NOT_INIT) {
@@ -1177,9 +1374,10 @@ int ObAccessService::revert_scan_iter(ObNewRowIterator *iter)
 int ObAccessService::split_multi_ranges(
     const share::ObLSID &ls_id,
     const common::ObTabletID &tablet_id,
+    const int64_t timeout_us,
     const ObIArray<ObStoreRange> &ranges,
     const int64_t expected_task_count,
-    ObIAllocator &allocator,
+    common::ObIAllocator &allocator,
     ObArrayArray<ObStoreRange> &multi_range_split_array)
 {
   int ret = OB_SUCCESS;
@@ -1198,93 +1396,14 @@ int ObAccessService::split_multi_ranges(
     LOG_WARN("get log stream failed", K(ret), K(ls_id));
   } else if (OB_ISNULL(ls = ls_handle.get_ls())) {
     ret = OB_ERR_UNEXPECTED;
-    LOG_ERROR("ls hould not be null", K(ret), K(ls_id), K_(tenant_id));
+    LOG_ERROR("ls hould not be null", K(ret), K(ls_id));
   } else if (OB_ISNULL(tablet_service = ls->get_tablet_svr())) {
     ret = OB_ERR_UNEXPECTED;
     LOG_ERROR("tablet service should not be null", K(ret), K(ls_id));
   } else if (OB_FAIL(tablet_service->split_multi_ranges(
-      tablet_id, ranges, expected_task_count, allocator, multi_range_split_array))) {
+      tablet_id, timeout_us, ranges,
+      expected_task_count, allocator, multi_range_split_array))) {
     LOG_WARN("Fail to split multi ranges", K(ret), K(ls_id), K(tablet_id));
-  }
-  return ret;
-}
-
-void ObAccessService::ObStoreCtxGuard::reset()
-{
-  int ret = OB_SUCCESS;
-  static const int64_t WARN_TIME_US = 5 * 1000 * 1000;
-  if (IS_INIT) {
-    if (OB_NOT_NULL(handle_.get_ls())) {
-      if (ctx_.is_valid() && OB_FAIL(handle_.get_ls()->revert_store_ctx(ctx_))) {
-        LOG_WARN("revert transaction context fail", K(ret), K_(ls_id));
-      }
-      handle_.reset();
-    }
-    const int64_t guard_used_us = ObClockGenerator::getClock() - init_ts_;
-    if (guard_used_us >= WARN_TIME_US) {
-      LOG_WARN_RET(OB_ERR_TOO_MUCH_TIME, "guard used too much time", K(guard_used_us), K_(ls_id), K(lbt()));
-    }
-    ls_id_.reset();
-    tablet_handle_.reset();
-    is_inited_ = false;
-  }
-}
-
-
-int ObAccessService::ObStoreCtxGuard::init(const share::ObLSID &ls_id)
-{
-  int ret = OB_SUCCESS;
-  if (IS_INIT) {
-    ret = OB_INIT_TWICE;
-    LOG_WARN("init twice", K(ret));
-  } else if (OB_UNLIKELY(!ls_id.is_valid())) {
-    ret = OB_INVALID_ARGUMENT;
-    LOG_WARN("invalid argument(s)", K(ret), K(ls_id));
-  } else {
-    ls_id_ = ls_id;
-    ctx_.reset();
-    ctx_.ls_id_ = ls_id;
-    is_inited_ = true;
-    init_ts_ = ObClockGenerator::getClock();
-  }
-  return ret;
-}
-
-int ObAccessService::audit_tablet_opt_dml_stat(
-    const ObDMLBaseParam &dml_param,
-    const common::ObTabletID &tablet_id,
-    const ObOptDmlStatType dml_stat_type,
-    const int64_t affected_rows)
-{
-  int ret = OB_SUCCESS;
-  //static __thread int64_t last_access_ts = 0;
-  //if (!GCONF.enable_defensive_check() && ObClockGenerator::getClock() - last_access_ts < 1000000) {
-    // do nothing
-  if (OB_ISNULL(dml_param.table_param_)) {
-    ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("get unexpected null", K(ret), K(dml_param.table_param_));
-  } else if (dml_stat_type == ObOptDmlStatType::TABLET_OPT_INSERT_STAT ||
-             dml_stat_type == ObOptDmlStatType::TABLET_OPT_UPDATE_STAT ||
-             dml_stat_type == ObOptDmlStatType::TABLET_OPT_DELETE_STAT) {
-    ObOptDmlStat dml_stat;
-    dml_stat.tenant_id_ = tenant_id_;
-    dml_stat.table_id_ = dml_param.table_param_->get_data_table().get_table_id();
-    dml_stat.tablet_id_ = tablet_id.id();
-    if (dml_stat_type == ObOptDmlStatType::TABLET_OPT_INSERT_STAT) {
-      dml_stat.insert_row_count_ = affected_rows;
-    } else if (dml_stat_type == ObOptDmlStatType::TABLET_OPT_UPDATE_STAT) {
-      dml_stat.update_row_count_ = affected_rows;
-    } else {
-      dml_stat.delete_row_count_ = affected_rows;
-    }
-    if (MTL(ObOptStatMonitorManager*) != NULL) {
-      if (OB_FAIL(MTL(ObOptStatMonitorManager*)->update_local_cache(dml_stat))) {
-        LOG_WARN("failed to update local cache", K(ret));
-      } else {
-        LOG_TRACE("succeed to update dml stat local cache", K(dml_stat));
-      }
-    }
-    //last_access_ts = ObClockGenerator::getClock();
   }
   return ret;
 }

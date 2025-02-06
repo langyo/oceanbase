@@ -10,15 +10,8 @@
  * See the Mulan PubL v2 for more details.
  */
 
-#include "share/ob_occam_time_guard.h"
 #include "election_priority_impl.h"
-#include "lib/list/ob_dlist.h"
-#include "lib/lock/ob_spin_lock.h"
-#include "lib/ob_errno.h"
-#include "lib/utility/serialization.h"
 #include "logservice/leader_coordinator/common_define.h"
-#include "share/ob_cluster_version.h"
-#include "lib/utility/ob_print_utils.h"
 
 namespace oceanbase
 {
@@ -285,7 +278,9 @@ int64_t ElectionPriorityImpl::to_string(char *buf, const int64_t buf_len) const
     ret = OB_ERR_UNEXPECTED;
     COORDINATOR_LOG(ERROR, "can't get closest priority from tuple", KR(ret), K(MTL_ID()), K(*this), K(GET_MIN_CLUSTER_VERSION()));
   } else {
-    databuff_printf(buf, buf_len, pos, "{priority:%s}", common::to_cstring(*functor.get_closest_priority()));
+    databuff_printf(buf, buf_len, pos, "{priority:");
+    databuff_printf(buf, buf_len, pos, *functor.get_closest_priority());
+    databuff_printf(buf, buf_len, pos, "}");
   }
   return pos;
 }

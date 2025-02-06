@@ -14,7 +14,6 @@
 
 #include "sql/engine/expr/ob_expr_field.h"
 
-#include "sql/engine/expr/ob_expr_equal.h"
 #include "sql/session/ob_sql_session_info.h"
 
 namespace oceanbase
@@ -117,11 +116,13 @@ int ObExprField::calc_result_typeN(ObExprResType &type,
       type.set_precision(3);
       //calc comparison collation,etc
       type.set_scale(DEFAULT_SCALE_FOR_INTEGER);
-      if (ob_is_string_type(type.get_calc_type())) {
-        ret = aggregate_charsets_for_comparison(type, types_stack, param_num, type_ctx.get_coll_type());
-      }
+      OZ (aggregate_charsets_for_comparison(type,
+                                            types_stack,
+                                            param_num,
+                                            type_ctx));
       if (OB_SUCC(ret) && !types_stack[0].is_null()) {
         for (int64_t i = 0; OB_SUCC(ret) && i < param_num; ++i) {
+          types_stack[i].set_calc_type(type.get_type());
           types_stack[i].set_calc_meta(type.get_calc_meta());
           types_stack[i].set_calc_accuracy(types_stack[0].get_accuracy());
           if (type.get_calc_meta().is_decimal_int()) {
@@ -197,6 +198,13 @@ int ObExprField::eval_field(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &expr_da
       }
     }
   }
+  return ret;
+}
+
+DEF_SET_LOCAL_SESSION_VARS(ObExprField, raw_expr) {
+  int ret = OB_SUCCESS;
+  SET_LOCAL_SYSVAR_CAPACITY(1);
+  EXPR_ADD_LOCAL_SYSVAR(share::SYS_VAR_COLLATION_CONNECTION);
   return ret;
 }
 

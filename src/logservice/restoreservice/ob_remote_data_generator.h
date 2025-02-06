@@ -53,7 +53,7 @@ struct RemoteDataBuffer
   LSN cur_lsn_;
   LSN end_lsn_;
   palf::MemoryStorage mem_storage_;
-  palf::PalfIterator<palf::MemoryIteratorStorage, LogEntryType> iter_;
+  palf::PalfIterator<LogEntryType> iter_;
 
   RemoteDataBuffer() { reset(); }
   ~RemoteDataBuffer() { reset(); }
@@ -153,12 +153,21 @@ public:
   virtual int advance_step_lsn(const palf::LSN &lsn) = 0;
   bool is_valid() const;
   bool is_fetch_to_end() const;
+  int set_io_context(const palf::LogIOContext &io_ctx) { io_ctx_ = io_ctx; return OB_SUCCESS; }
   TO_STRING_KV(K_(tenant_id), K_(id), K_(start_lsn), K_(next_fetch_lsn), K_(end_scn),
       K_(end_lsn), K_(to_end));
 
 protected:
   int process_origin_data_(char *origin_buf, const int64_t origin_buf_size, char *buf, int64_t &buf_size);
   int update_next_fetch_lsn_(const palf::LSN &lsn);
+  int read_file_(const ObString &base,
+    const share::ObBackupStorageInfo *storage_info,
+    const share::ObLSID &id,
+    const int64_t file_id,
+    const int64_t offset,
+    char *data,
+    const int64_t data_len,
+    int64_t &data_size);
 
 protected:
   uint64_t tenant_id_;
@@ -169,6 +178,7 @@ protected:
   LSN end_lsn_;
   bool to_end_;
   logservice::ObLogExternalStorageHandler *log_ext_handler_;
+  palf::LogIOContext io_ctx_;
 
 private:
   DISALLOW_COPY_AND_ASSIGN(RemoteDataGenerator);
@@ -287,14 +297,7 @@ private:
       const int64_t file_id,
       const int64_t file_offset,
       int64_t &size);
-  int read_file_(const ObString &base,
-    const share::ObBackupStorageInfo *storage_info,
-    const share::ObLSID &id,
-    const int64_t file_id,
-    const int64_t offset,
-    char *data,
-    const int64_t data_len,
-    int64_t &real_read_size);
+
 private:
   share::SCN pre_scn_;
   // base_lsn_ is the start_lsn from the archive file, while the next_fetch_lsn_ is the start_lsn to fetch,
@@ -322,42 +325,28 @@ public:
       const ObLSID &id,
       const LSN &start_lsn,
       const LSN &end_lsn,
-      const DirArray &array,
+      ObLogRawPathPieceContext *rawpath_ctx,
       const share::SCN &end_scn,
-      const int64_t piece_index,
-      const int64_t min_file_id,
-      const int64_t max_file_id,
       logservice::ObLogExternalStorageHandler *log_ext_handler);
 
   virtual ~RawPathDataGenerator();
   int next_buffer(palf::LSN &lsn, char *&buf, int64_t &buf_size);
-  int update_max_lsn(const palf::LSN &lsn) { UNUSED(lsn); return common::OB_SUCCESS; }
-  int advance_step_lsn(const palf::LSN &lsn) override { UNUSED(lsn); return common::OB_SUCCESS;}
+  int update_max_lsn(const palf::LSN &lsn);
+  int advance_step_lsn(const palf::LSN &lsn) override;
 
-  INHERIT_TO_STRING_KV("RemoteDataGenerator", RemoteDataGenerator, K_(array), K_(data_len),
-      K_(file_id), K_(base_lsn), K_(index), K_(min_file_id), K_(max_file_id));
+  INHERIT_TO_STRING_KV("RemoteDataGenerator", RemoteDataGenerator, K_(rawpath_ctx), K_(data_len), K_(base_lsn));
 
 private:
   int fetch_log_from_dest_();
-  int cal_lsn_to_file_id_(const LSN &lsn);
-  int list_dir_files_(const ObString &uri, const share::ObBackupStorageInfo *storage_info,
-      int64_t &min_file_id, int64_t &max_file_id);
   int read_file_(const ObString &prefix, const share::ObBackupStorageInfo *storage_info, const int64_t file_id);
   int extract_archive_file_header_();
-  int locate_precise_piece_();
-  bool piece_index_match_() const;
 
 private:
-  DirArray array_;
+  ObLogRawPathPieceContext *rawpath_ctx_;
   int64_t data_len_;
   char data_[MAX_DATA_BUF_LEN];
-
-  int64_t file_id_;
   LSN base_lsn_;
 
-  int64_t index_;
-  int64_t min_file_id_;
-  int64_t max_file_id_;
 private:
   DISALLOW_COPY_AND_ASSIGN(RawPathDataGenerator);
 };

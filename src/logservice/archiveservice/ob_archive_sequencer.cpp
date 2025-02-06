@@ -11,19 +11,12 @@
  */
 
 #include "ob_archive_sequencer.h"
-#include "lib/ob_define.h"
-#include "lib/ob_errno.h"
-#include "lib/utility/ob_macro_utils.h"
 #include "ob_ls_mgr.h"                    // ObArchiveLSMgr
 #include "logservice/ob_log_service.h"    // ObLogService
-#include "ob_archive_define.h"            // ArchiveWorkStation
-#include "ob_ls_task.h"                   // ObLSArchiveTask
 #include "ob_archive_task.h"              // ObArchiveLogFetchTask
 #include "ob_archive_fetcher.h"           // ObArchiveFetcher
 #include "ob_archive_round_mgr.h"         // ObArchiveRoundMgr
-#include "logservice/palf_handle_guard.h" // PalfHandleGuard
-#include "share/backup/ob_archive_struct.h"
-#include <cstdint>
+#include "lib/ash/ob_active_session_guard.h"
 
 namespace oceanbase
 {
@@ -143,6 +136,7 @@ void ObArchiveSequencer::run1()
       int64_t end_tstamp = ObTimeUtility::current_time();
       int64_t wait_interval = THREAD_RUN_INTERVAL - (end_tstamp - begin_tstamp);
       if (wait_interval > 0) {
+        common::ObBKGDSessInActiveGuard inactive_guard;
         seq_cond_.timedwait(wait_interval);
       }
     }
@@ -285,17 +279,26 @@ int GenFetchTaskFunctor::generate_log_fetch_task_(const ObLSID &id,
 {
   int ret = OB_SUCCESS;
   ObArchiveLogFetchTask *tmp_task = NULL;
-  palf::PalfHandleGuard palf_handle;
   share::SCN scn;
+  ObLSService *ls_service = MTL(ObLSService*);
+  ObLSHandle ls_handle;
+  ObLS *ls = NULL;
+  ObLogHandler *log_handler = NULL;
   task = NULL;
 
-  if (OB_ISNULL(tmp_task = archive_fetcher_->alloc_log_fetch_task())) {
+  if (OB_ISNULL(ls_service)) {
+    ret = OB_ERR_UNEXPECTED;
+    ARCHIVE_LOG(WARN, "ls_service is NULL", K(ret), K(id), KP(ls_service));
+  } else if (OB_ISNULL(tmp_task = archive_fetcher_->alloc_log_fetch_task())) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
     ARCHIVE_LOG(WARN, "alloc log fetch task failed", K(ret), K(id));
-  } else if (OB_FAIL(log_service_->open_palf(id, palf_handle))) {
-    ARCHIVE_LOG(WARN, "open_palf failed", K(id));
-  } else if (OB_FAIL(palf_handle.locate_by_lsn_coarsely(start_lsn, scn))) {
-    ARCHIVE_LOG(WARN, "locate by lsn failed", K(id), K(start_lsn));
+  } else if (OB_FAIL(ls_service->get_ls(id, ls_handle, ObLSGetMod::ARCHIVE_MOD))) {
+    ARCHIVE_LOG(WARN, "get_ls failed", K(ret), K(id));
+  } else if (OB_ISNULL(ls = ls_handle.get_ls()) || OB_ISNULL(log_handler = ls->get_log_handler())) {
+    ret = OB_ERR_UNEXPECTED;
+    ARCHIVE_LOG(WARN, "ls or log_handle is NULL", K(ret), K(id), KP(ls), KP(log_handler));
+  } else if (OB_FAIL(log_handler->locate_by_lsn_coarsely(start_lsn, scn))) {
+    ARCHIVE_LOG(WARN, "locate_by_lsn_coarsely failed", K(ret), K(id), KP(ls), KP(log_handler));
   } else if (OB_FAIL(tmp_task->init(tenant_id_, id, station, scn, start_lsn, end_lsn))) {
     ARCHIVE_LOG(WARN, "log fetch task init failed", K(ret), K(id), K(station));
   } else {
@@ -312,10 +315,9 @@ int GenFetchTaskFunctor::generate_log_fetch_task_(const ObLSID &id,
     int tmp_ret = OB_CLOG_RECYCLE_BEFORE_ARCHIVE;
     ObArchiveInterruptReason reason;
     reason.set(ObArchiveInterruptReason::Factor::LOG_RECYCLE, lbt(), tmp_ret);
-    LOG_DBA_ERROR(OB_CLOG_RECYCLE_BEFORE_ARCHIVE, "msg", "observer clog is recycled "
-        "before archive, check if archive speed is less than clog writing speed "
-        "or archive device is full or archive device is not healthy",
-        "ret", tmp_ret);
+    LOG_DBA_ERROR_V2(OB_LOG_RECYCLE_BEFORE_ARCHIVE, tmp_ret, "msg", "observer clog is recycled "
+        "before archive.", "[suggesstion] check if archive speed is less than clog writing speed "
+        "or archive device is full or archive device is not healthy");
     ls_mgr_->mark_fatal_error(id, station.get_round(), reason);
   }
   return ret;

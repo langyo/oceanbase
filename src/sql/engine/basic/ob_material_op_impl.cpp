@@ -13,17 +13,13 @@
 #define USING_LOG_PREFIX SQL_ENG
 
 #include "ob_material_op_impl.h"
-#include "sql/engine/ob_operator.h"
-#include "sql/engine/ob_tenant_sql_memory_manager.h"
-#include "storage/blocksstable/encoding/ob_encoding_query_util.h"
-#include "lib/container/ob_iarray.h"
 
 namespace oceanbase
 {
 using namespace common;
 namespace sql
 {
-ObMaterialOpImpl::ObMaterialOpImpl(ObMonitorNode &op_monitor_info, ObSqlWorkAreaProfile &profile)
+ObMaterialOpImpl::ObMaterialOpImpl(ObMonitorNode &op_monitor_info)
 : inited_(false),
   got_first_row_(false),
   tenant_id_(OB_INVALID_ID),
@@ -32,8 +28,8 @@ ObMaterialOpImpl::ObMaterialOpImpl(ObMonitorNode &op_monitor_info, ObSqlWorkArea
   datum_store_(ObModIds::OB_HASH_NODE_GROUP_ROWS),
   datum_store_it_(),
   eval_ctx_(nullptr),
-  profile_(profile),
-  sql_mem_processor_(profile, op_monitor_info),
+  profile_(ObSqlWorkAreaType::HASH_WORK_AREA),
+  sql_mem_processor_(profile_, op_monitor_info),
   input_rows_(OB_INVALID_ID),
   input_width_(OB_INVALID_ID),
   op_type_(PHY_INVALID),
@@ -53,8 +49,8 @@ void ObMaterialOpImpl::reset()
 {
   sql_mem_processor_.unregister_profile();
   io_event_observer_ = nullptr;
-  datum_store_.reset();
   datum_store_it_.reset();
+  datum_store_.reset();
   got_first_row_ = false;
   inited_ = false;
   // can not destroy mem_entify here, the memory may hold by %iter_ or %datum_store_

@@ -11,7 +11,6 @@
  */
 
 #include "ob_cdc_rpc_processor.h"
-#include "share/rc/ob_tenant_base.h"
 #include "logservice/ob_log_service.h"
 
 namespace oceanbase
@@ -98,6 +97,25 @@ int ObCdcLSFetchMissingLogP::process()
   }
 
   // rewrite ret for rpc framework
+  return OB_SUCCESS;
+}
+
+int ObCdcFetchRawLogP::process()
+{
+  int ret = OB_SUCCESS;
+
+  const ObCdcFetchRawLogReq &req = arg_;
+  ObCdcFetchRawLogResp &resp = result_;
+  cdc::ObCdcService *cdc_service = nullptr;
+  if (OB_FAIL(__get_cdc_service(rpc_pkt_->get_tenant_id(), cdc_service))) {
+    EXTLOG_LOG(ERROR, "__get_cdc_service failed", KR(ret));
+  } else if (OB_ISNULL(cdc_service)) {
+    ret = OB_ERR_UNEXPECTED;
+    EXTLOG_LOG(ERROR, "cdc_service is null", KR(ret));
+  } else {
+    set_result_compress_type(req.get_compressor_type());
+    ret = cdc_service->fetch_raw_log(req, resp, get_send_timestamp(), get_receive_timestamp());
+  }
   return OB_SUCCESS;
 }
 

@@ -12,18 +12,9 @@
 
 #define USING_LOG_PREFIX SQL_ENG
 #include "sql/engine/cmd/ob_partition_executor_utils.h"
-#include "share/object/ob_obj_cast.h"
-#include "lib/mysqlclient/ob_mysql_proxy.h"
-#include "share/ob_common_rpc_proxy.h"
+#include "sql/engine/ob_exec_context.h"
 #include "sql/resolver/ddl/ob_create_table_stmt.h"
 #include "sql/resolver/ddl/ob_create_tablegroup_stmt.h"
-#include "sql/resolver/ddl/ob_create_index_stmt.h"
-#include "sql/engine/ob_exec_context.h"
-#include "sql/engine/ob_physical_plan.h"
-#include "sql/session/ob_sql_session_info.h"
-#include "sql/code_generator/ob_expr_generator_impl.h"
-#include "sql/parser/ob_parser.h"
-#include "sql/ob_sql_utils.h"
 
 namespace oceanbase
 {
@@ -37,22 +28,35 @@ int ObPartitionExecutorUtils::calc_values_exprs(
     ObExecContext &ctx,
     ObCreateTableStmt &stmt) {
   int ret = OB_SUCCESS;
-  ObTableSchema &table_schema = stmt.get_create_table_arg().schema_;
-  ObPartitionLevel level = table_schema.get_part_level();
-  if (PARTITION_LEVEL_ONE == level) {
-    if (OB_FAIL(calc_values_exprs(ctx, stmt::T_CREATE_TABLE, table_schema, stmt, false))) {
-      LOG_WARN("fail to calc_values_exprs", K(ret));
-    }
-  } else if (PARTITION_LEVEL_TWO == level) {
-    if (OB_FAIL(calc_values_exprs(ctx, stmt::T_CREATE_TABLE, table_schema, stmt, false))) {
-      LOG_WARN("fail to calc_values_exprs", K(ret));
-    } else if (OB_FAIL(calc_values_exprs(ctx, stmt::T_CREATE_TABLE, table_schema, stmt, true))) {
-      LOG_WARN("fail to calc_values_exprs", K(ret));
+  ObArray<ObTableSchema *> table_schema_array;
+
+  if (OB_FAIL(table_schema_array.push_back(&(stmt.get_create_table_arg().schema_)))) {
+    LOG_WARN("fail to push back schema", KR(ret));
+  }
+  for (int64_t i = 0; OB_SUCC(ret) && i < stmt.get_create_table_arg().mv_ainfo_.count(); i ++) {
+    if (OB_FAIL(table_schema_array.push_back(&(stmt.get_create_table_arg().mv_ainfo_.at(i).container_table_schema_)))) {
+      LOG_WARN("fail to push back schema", KR(ret));
     }
   }
-  if (OB_SUCC(ret) && table_schema.is_partitioned_table()) {
-    if (OB_FAIL(sort_list_paritition_if_need(table_schema))) {
-      LOG_WARN("failed to sort list partition if need", K(ret));
+
+  for (int64_t i = 0; OB_SUCC(ret) && i < table_schema_array.count(); i ++) {
+    ObTableSchema &table_schema = *(table_schema_array.at(i));
+    ObPartitionLevel level = table_schema.get_part_level();
+    if (PARTITION_LEVEL_ONE == level) {
+      if (OB_FAIL(calc_values_exprs(ctx, stmt::T_CREATE_TABLE, table_schema, stmt, false))) {
+        LOG_WARN("fail to calc_values_exprs", K(ret));
+      }
+    } else if (PARTITION_LEVEL_TWO == level) {
+      if (OB_FAIL(calc_values_exprs(ctx, stmt::T_CREATE_TABLE, table_schema, stmt, false))) {
+        LOG_WARN("fail to calc_values_exprs", K(ret));
+      } else if (OB_FAIL(calc_values_exprs(ctx, stmt::T_CREATE_TABLE, table_schema, stmt, true))) {
+        LOG_WARN("fail to calc_values_exprs", K(ret));
+      }
+    }
+    if (OB_SUCC(ret) && table_schema.is_partitioned_table()) {
+      if (OB_FAIL(sort_list_paritition_if_need(table_schema))) {
+        LOG_WARN("failed to sort list partition if need", K(ret));
+      }
     }
   }
   return ret;
@@ -365,7 +369,7 @@ int ObPartitionExecutorUtils::cast_list_expr_to_obj(
                                   ? subpartition_array[i]->list_row_values_
                                   : partition_array[i]->list_row_values_;
           InnerPartListVectorCmp part_list_vector_op;
-          std::sort(list_row_values.begin(),  list_row_values.end(), part_list_vector_op);
+          lib::ob_sort(list_row_values.begin(),  list_row_values.end(), part_list_vector_op);
           if (OB_FAIL(part_list_vector_op.get_ret())) {
             LOG_WARN("fail to sort list row values", K(ret));
           }
@@ -379,7 +383,7 @@ int ObPartitionExecutorUtils::cast_list_expr_to_obj(
     // 不在这里排序一级list分区是因为对于非模板化二级分区，排序后会导致partition array与
     // individual_subpart_values_exprs对应不上。
     if (is_subpart) {
-      std::sort(subpartition_array,
+      lib::ob_sort(subpartition_array,
                 subpartition_array + array_count,
                 ObBasePartition::list_part_func_layout);
     }
@@ -622,12 +626,13 @@ int ObPartitionExecutorUtils::check_increasing_range_value(T **array,
       LOG_WARN("Empty partition", K(i), K(ret));
     } else {
       bool is_increasing = true;
+      bool need_check_maxvalue = false;
       rowkey_cur = &array[i]->get_high_bound_val();
       if (rowkey_cur->get_obj_cnt() != rowkey_last->get_obj_cnt()) {
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("get invalid object count", K(*rowkey_cur), K(*rowkey_last), K(ret));
       } else {
-        for (int64_t j = 0; j < rowkey_cur->get_obj_cnt() && is_increasing && OB_SUCC(ret); j++) {
+        for (int64_t j = 0; j < rowkey_cur->get_obj_cnt() && OB_SUCC(ret); j++) {
           if (!ObSQLUtils::is_same_type_for_compare(rowkey_cur->get_obj_ptr()[j].get_meta(),
                                                     rowkey_last->get_obj_ptr()[j].get_meta())
               && !rowkey_cur->get_obj_ptr()[j].is_max_value()
@@ -636,16 +641,31 @@ int ObPartitionExecutorUtils::check_increasing_range_value(T **array,
             LOG_WARN("partiton value should have same meta info", K(ret), K(*rowkey_cur), K(*rowkey_last), K(j));
           } else if (rowkey_cur->get_obj_ptr()[j].is_max_value() &&
                      rowkey_last->get_obj_ptr()[j].is_max_value()) {
-            is_increasing = false;
+            need_check_maxvalue = true;
           }
         }
       }
-      if (OB_SUCC(ret) && is_increasing) {
+      if (OB_SUCC(ret)) {
         if (*rowkey_cur <= *rowkey_last) {
           is_increasing = false;
         } else {
-          rowkey_last = rowkey_cur;
-          last_part = cur_part;
+          if (OB_UNLIKELY(need_check_maxvalue)) {
+            for (int64_t j = 0; j < rowkey_cur->get_obj_cnt() && is_increasing && OB_SUCC(ret); j++) {
+              if (rowkey_cur->get_obj_ptr()[j].is_max_value() &&
+                  rowkey_last->get_obj_ptr()[j].is_max_value()) {
+                is_increasing = false;
+              } else if (0 != rowkey_cur->get_obj_ptr()[j].check_collation_free_and_compare(rowkey_last->get_obj_ptr()[j])) {
+                //  p0 (1, maxvalue), p1 (2, maxvalue) is allowed
+                //  p0 (1, maxvalue), p1 (1, maxvalue) is not allowed
+                //  p0 (maxvalue, 1), p1 (maxvalue, 2) is not allowed
+                break;
+              }
+            }
+          }
+          if (is_increasing) {
+            rowkey_last = rowkey_cur;
+            last_part = cur_part;
+          }
         }
       }
       if (OB_SUCC(ret) && !is_increasing) {
@@ -777,11 +797,14 @@ int ObPartitionExecutorUtils::expr_cal_and_cast_with_check_varchar_len(
   const ObCollationType fun_collation_type = dst_res_type.get_collation_type();
   if (OB_FAIL(ObSQLUtils::wrap_expr_ctx(stmt_type, ctx, ctx.get_allocator(), expr_ctx))) {
     LOG_WARN("Failed to wrap expr ctx", K(ret));
+  } else if (OB_FAIL(ObSQLUtils::get_default_cast_mode(ctx.get_my_session()->get_stmt_type(),
+                                                  ctx.get_my_session(), expr_ctx.cast_mode_))) {
+    LOG_WARN("get_default_cast_mode failed", K(ret));
   } else {
     //CREATE TABLE t1 (a date) PARTITION BY RANGE (TO_DAYS(a)) (PARTITION p311 VALUES LESS THAN (TO_DAYS('abc')))
     //TO_DAYS('abc')跟mysql兼容，不论session中设置的cast_mode是什么，这里都需要为WARN_ON_FAIL
     //因为abc是无效参数，让to_days返回NULL
-    expr_ctx.cast_mode_ = CM_WARN_ON_FAIL; //always set to WARN_ON_FAIL to allow calculate
+    expr_ctx.cast_mode_ |= CM_WARN_ON_FAIL; //always set to WARN_ON_FAIL to allow calculate
     EXPR_SET_CAST_CTX_MODE(expr_ctx);
     ObNewRow tmp_row;
     RowDesc row_desc;
@@ -843,6 +866,9 @@ int ObPartitionExecutorUtils::expr_cal_and_cast_with_check_varchar_len(
         cast_ctx.res_accuracy_ = &res_acc;
         if (is_list_part) {
           cast_ctx.cast_mode_ |= CM_COLUMN_CONVERT;
+        } else if (!lib::is_oracle_mode()) {
+          // range columns in mysql mode
+          cast_ctx.cast_mode_ |= CM_COLUMN_CONVERT;
         }
       }
       //cast_ctx.dest_collation_ = temp_obj.get_collation_type();
@@ -853,6 +879,17 @@ int ObPartitionExecutorUtils::expr_cal_and_cast_with_check_varchar_len(
           ret = OB_ERR_UNEXPECTED;
           LOG_WARN("succ to cast obj, but out_val_ptr is NULL", K(ret),
                    K(expected_obj_type), K(fun_expr_type), K(temp_obj));
+        } else if (!lib::is_oracle_mode() && !is_list_part && ObDecimalIntType == expected_obj_type) {
+          // range columns in mysql mode
+          cast_ctx.cast_mode_ &= ~CM_WARN_ON_FAIL;
+          if (OB_FAIL(common::obj_accuracy_check(cast_ctx, dst_res_type.get_accuracy(), fun_collation_type, tmp_out_obj, tmp_out_obj, out_val_ptr))) {
+            LOG_WARN("obj_accuracy_check", K(ret));
+            if (ret == OB_ERR_DATA_TOO_LONG) {
+               ret = OB_ERR_DATA_TOO_LONG_IN_PART_CHECK;
+            }
+          } else {
+            value_obj = *out_val_ptr;
+          }
         } else {
           if (lib::is_oracle_mode() && OB_FAIL(common::obj_accuracy_check(cast_ctx, dst_res_type.get_accuracy(), fun_collation_type, tmp_out_obj, tmp_out_obj, out_val_ptr))) {
             LOG_WARN("obj_accuracy_check", K(ret));
@@ -954,7 +991,7 @@ int ObPartitionExecutorUtils::cast_range_expr_to_obj(
           ObObjType fun_expr_type = expr->get_data_type();
           // 对于tablegroup分区语法而言，由于缺乏column type信息，需要校验同列的value的类型是否一致
           if (fun_expr_type_array.count() < j + 1) {
-            if (fun_expr_type_array.push_back(fun_expr_type)) {
+            if (OB_FAIL(fun_expr_type_array.push_back(fun_expr_type))) {
               LOG_WARN("array push back fail", K(ret), K(j), "count", fun_expr_type_array.count());
             }
           } else if (fun_expr_type_array.at(j) == ObMaxType) {
@@ -972,7 +1009,7 @@ int ObPartitionExecutorUtils::cast_range_expr_to_obj(
               LOG_WARN("array push back fail", K(ret));
             } else {
               if (fun_expr_type_array.count() < j + 1) {
-                if (fun_expr_type_array.push_back(ObMaxType)) {
+                if (OB_FAIL(fun_expr_type_array.push_back(ObMaxType))) {
                   LOG_WARN("array push back fail", K(ret), K(j), "count", fun_expr_type_array.count());
                 }
               }
@@ -1163,7 +1200,7 @@ int ObPartitionExecutorUtils::cast_list_expr_to_obj(
                                     ? subpartition_array[i]->list_row_values_
                                     : partition_array[i]->list_row_values_;
             InnerPartListVectorCmp part_list_vector_op;
-            std::sort(list_row_values.begin(), list_row_values.end(), part_list_vector_op);
+            lib::ob_sort(list_row_values.begin(), list_row_values.end(), part_list_vector_op);
             if (OB_FAIL(part_list_vector_op.get_ret())) {
               LOG_WARN("fail to sort list row values", K(ret));
             }
@@ -1176,11 +1213,11 @@ int ObPartitionExecutorUtils::cast_list_expr_to_obj(
     const int64_t array_count = list_values_exprs.count();
     // TODO(yibo) tablegroup 支持二级分区异构后，一级分区的排序也要延迟处理
     if (is_subpart) {
-      std::sort(subpartition_array,
+      lib::ob_sort(subpartition_array,
                 subpartition_array + array_count,
                 ObBasePartition::list_part_func_layout);
     } else {
-      std::sort(partition_array,
+      lib::ob_sort(partition_array,
                 partition_array + array_count,
                 ObBasePartition::list_part_func_layout);
     }
@@ -1383,7 +1420,7 @@ int ObPartitionExecutorUtils::sort_list_paritition_if_need(ObTableSchema &table_
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("get unexpected null", K(ret));
     } else {
-      std::sort(partition_array,
+      lib::ob_sort(partition_array,
                 partition_array + array_count,
                 ObBasePartition::list_part_func_layout);
     }

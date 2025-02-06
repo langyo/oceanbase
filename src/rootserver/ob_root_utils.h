@@ -36,7 +36,6 @@ namespace schema
 {
 class ObMultiVersionSchemaService;
 class ObTableSchema;
-class ObLocality;
 class ObSchemaGetterGuard;
 }
 }
@@ -80,6 +79,7 @@ enum ObResourceType
   RES_CPU = 0,
   RES_MEM = 1,
   RES_LOG_DISK = 2,
+  RES_DATA_DISK = 3,
   RES_MAX
 };
 
@@ -132,10 +132,11 @@ public:
           } else {
             const double factor = assigned / capacity;
             weights[res_type] += factor;
+            ObCStringHelper helper;
             _RS_LOG(INFO, "server resource weight factor: "
                 "[%ld/%ld] server=%s, resource=%s, assigned=%.6g, capacity=%.6g, factor=%.6g, weight=%.6g",
                 i, servers.count(),
-                to_cstring(server_resource.get_server()),
+                helper.convert(server_resource.get_server()),
                 resource_type_to_str(res_type),
                 assigned,
                 capacity,
@@ -394,35 +395,6 @@ public:
   }
 };
 
-class ObLocalityTaskHelp
-{
-public:
-  ObLocalityTaskHelp() {}
-  virtual ~ObLocalityTaskHelp() {}
-  static int filter_logonly_task(
-      const common::ObIArray<share::ObResourcePoolName> &pools,
-      ObUnitManager &unit_mgr,
-      common::ObIArray<share::ObZoneReplicaAttrSet> &zone_locality);
-
-  static int filter_logonly_task(
-      const uint64_t tenant_id,
-      ObUnitManager &unit_manager,
-      share::schema::ObSchemaGetterGuard &schema_guard,
-      common::ObIArray<share::ObZoneReplicaAttrSet> &zone_locality);
-
-  static int alloc_logonly_replica(
-      ObUnitManager &unit_manager,
-      const common::ObIArray<share::ObResourcePoolName> &pools,
-      const common::ObIArray<share::ObZoneReplicaAttrSet> &zone_locality,
-      ObPartitionAddr &partition_addr);
-
-  static int get_logonly_task_with_logonly_unit(
-      const uint64_t tenant_id,
-      ObUnitManager &unit_mgr,
-      share::schema::ObSchemaGetterGuard &schema_guard,
-      common::ObIArray<share::ObZoneReplicaAttrSet> &zone_locality);
-};
-
 enum PaxosReplicaNumberTaskType
 {
   NOP_PAXOS_REPLICA_NUMBER = 0,
@@ -655,6 +627,18 @@ public:
       const uint64_t tenant_id,
       const int64_t rs_job_id,
       const ObRsJobType rs_job_type);
+  // wait the given ls's end_scn be larger than or equal to sys_ls_target_scn
+  // @params[in]: sys_ls_target_scn
+  // @params[in]: log_ls_svr
+  // @params[in]: ls
+  // @ret OB_SUCCESS user_ls_sync_scn >= sys_ls_sync_scn
+  // @ret OB_NOT_MASTER the current replica is not leader, no need to wait.
+  //                    the rpc sender need to find the new leader and send rpc again
+  // @ret other error code			failure
+  static int wait_user_ls_sync_scn_locally(
+      const share::SCN &sys_ls_target_scn,
+      logservice::ObLogService *log_ls_svr,
+      storage::ObLS &ls);
 
   template<class T>
       static int check_left_f_in_primary_zone(ObZoneManager &zone_mgr,
@@ -685,6 +669,11 @@ public:
       const obrpc::ObNotifySwitchLeaderArg::SwitchLeaderComment &comment);
   static int check_tenant_ls_balance(uint64_t tenant_id, int &check_ret);
 
+  template<typename T>
+  static int copy_array(const common::ObIArray<T> &src_array,
+                        const int64_t start_pos,
+                        const int64_t end_pos,
+                        common::ObIArray<T> &dst_array);
 };
 
 template<class T>
@@ -700,6 +689,33 @@ bool ObRootUtils::is_subset(const common::ObIArray<T> &superset_array,
     }
   }
   return bret;
+}
+
+template<typename T>
+int ObRootUtils::copy_array(
+    const common::ObIArray<T> &src_array,
+    const int64_t start_pos,
+    const int64_t end_pos,
+    common::ObIArray<T> &dst_array)
+{
+  int ret = common::OB_SUCCESS;
+  dst_array.reset();
+  if (OB_UNLIKELY(start_pos < 0 || start_pos > end_pos || end_pos > src_array.count())) {
+    ret = common::OB_INVALID_ARGUMENT;
+    COMMON_LOG(WARN, "invalid start_pos/end_pos", KR(ret),
+               K(start_pos), K(end_pos), "src_array_cnt", src_array.count());
+  } else if (start_pos == end_pos) {
+    // do nothing
+  } else if (OB_FAIL(dst_array.reserve(end_pos - start_pos))) {
+    COMMON_LOG(WARN, "fail to reserve array", KR(ret), "cnt", end_pos - start_pos);
+  } else {
+    for (int64_t i = start_pos; OB_SUCC(ret) && i < end_pos; i++) {
+      if (OB_FAIL(dst_array.push_back(src_array.at(i)))) {
+        COMMON_LOG(WARN, "fail to push back", KR(ret), K(i));
+      }
+    } // end for
+  }
+  return ret;
 }
 
 class ObClusterInfoGetter

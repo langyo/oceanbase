@@ -10,12 +10,8 @@
  * See the Mulan PubL v2 for more details.
  */
 
-#include "storage/tablet/ob_full_tablet_creator.h"
-#include "storage/tablet/ob_tablet_persister.h"
-#include "storage/ls/ob_ls_tablet_service.h"
-#include "storage/ls/ob_ls.h"
-#include "storage/tx_storage/ob_ls_service.h"
-#include "storage/meta_mem/ob_tenant_meta_mem_mgr.h"
+#include "ob_full_tablet_creator.h"
+#include "src/storage/tx_storage/ob_ls_map.h"
 
 #define USING_LOG_PREFIX STORAGE
 
@@ -111,7 +107,7 @@ int ObFullTabletCreator::throttle_tablet_creation()
       break;
     } else {
       need_wait = true;
-      if (REACH_TENANT_TIME_INTERVAL(log_timeout)) {
+      if (REACH_THREAD_TIME_INTERVAL(log_timeout)) {
         const int64_t wait_create_tablets_cnt = ATOMIC_LOAD(&wait_create_tablets_cnt_);
         LOG_WARN("prepare create tablet timeout",
             K_(created_tablets_cnt), K(wait_create_tablets_cnt), K(limit_size),
@@ -136,7 +132,6 @@ int ObFullTabletCreator::create_tablet(ObTabletHandle &tablet_handle)
       ObArenaAllocator, (&tiny_allocator_), mstx_mem_ctx_->get_malloc_allocator(), page_size))) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
     LOG_WARN("fail to new arena allocator", K(ret));
-  /* TODO(zhuixin.gsy) rm these set_xx after merge master*/
   } else if (FALSE_IT(allocator->set_label("MSTXAllocator"))) {
   } else if (FALSE_IT(allocator->set_tenant_id(MTL_ID()))) {
   } else if (FALSE_IT(allocator->set_ctx_id(ObCtxIds::DEFAULT_CTX_ID))) {

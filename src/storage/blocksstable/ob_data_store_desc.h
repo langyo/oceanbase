@@ -14,16 +14,16 @@
 #include "storage/blocksstable/ob_datum_row.h"
 #include "storage/blocksstable/ob_sstable_macro_block_header.h"
 #include "storage/blocksstable/ob_block_sstable_struct.h"
+#include "storage/compaction/ob_compaction_memory_context.h"
 #include "common/ob_tablet_id.h"
 #include "common/ob_store_format.h"
 #include "share/ob_ls_id.h"
 #include "share/scn.h"
+
 namespace oceanbase
 {
 namespace storage {
-struct ObSSTableMergeInfo;
 struct ObStorageColumnGroupSchema;
-struct ObSSTableMergeInfo;
 }
 namespace share
 {
@@ -32,6 +32,16 @@ namespace schema
 class ObMergeSchema;
 }
 }
+
+/*
+  ObStaticDataStoreDesc : record static info
+  ObColDataStoreDesc : record column related info
+  ObDataStoreDesc : ObStaticDataStoreDesc & ObColDataStoreDesc ptr
+  ObWholeDataStoreDesc : ObStaticDataStoreDesc & ObColDataStoreDesc object
+
+  for compaction, ObDataStoreDesc will record a common ObStaticDataStoreDesc ptr and a special ObColDataStoreDesc object for each table/cg
+  for other situation, use ObWholeDataStoreDesc instead of ObDataStoreDesc
+*/
 namespace blocksstable {
 class ObSSTableIndexBuilder;
 struct ObSSTableBasicMeta;
@@ -39,25 +49,33 @@ struct ObSSTableBasicMeta;
 struct ObStaticDataStoreDesc
 {
 public:
-  ObStaticDataStoreDesc(const bool is_ddl = false);
+  ObStaticDataStoreDesc();
   ~ObStaticDataStoreDesc() { reset(); }
   int init(
+    const bool is_ddl,
     const share::schema::ObMergeSchema &merge_schema,
     const share::ObLSID &ls_id,
     const common::ObTabletID tablet_id,
+    const int64_t tablet_transfer_seq,
     const compaction::ObMergeType merge_type,
     const int64_t snapshot_version,
     const share::SCN &end_scn,
-    const int64_t cluster_version);
+    const int64_t cluster_version,
+    const compaction::ObExecMode exec_mode,
+    const bool micro_index_clustered,
+    const bool need_submit_io = true,
+    const uint64_t encoding_granularity = 0);
   bool is_valid() const;
   void reset();
   int assign(const ObStaticDataStoreDesc &desc);
   TO_STRING_KV(
       K_(ls_id),
       K_(tablet_id),
+      K_(tablet_transfer_seq),
       "merge_type", merge_type_to_str(merge_type_),
       K_(snapshot_version),
       K_(end_scn),
+      "exec_mode", exec_mode_to_str(exec_mode_),
       K_(is_ddl),
       K_(compressor_type),
       K_(macro_block_size),
@@ -67,19 +85,25 @@ public:
       K_(encrypt_id),
       K_(master_key_id),
       KPHEX_(encrypt_key, sizeof(encrypt_key_)),
-      K_(major_working_cluster_version));
+      K_(major_working_cluster_version),
+      K_(micro_index_clustered),
+      K_(progressive_merge_round),
+      K_(need_submit_io),
+      K_(encoding_granularity));
 private:
   OB_INLINE int init_encryption_info(const share::schema::ObMergeSchema &merge_schema);
   OB_INLINE void init_block_size(const share::schema::ObMergeSchema &merge_schema);
   static const int64_t DEFAULT_RESERVE_PERCENT = 90;
   static const int64_t MIN_RESERVED_SIZE = 1024; //1KB;
   static const ObCompressorType DEFAULT_MINOR_COMPRESSOR_TYPE = ObCompressorType::LZ4_COMPRESSOR;
+  bool operator==(const ObStaticDataStoreDesc &other) const; // for unittest
 public:
-  bool is_ddl_;
+  bool is_ddl_; // only used to print ERROR or WARN log
   compaction::ObMergeType merge_type_;
   ObCompressorType compressor_type_;
   share::ObLSID ls_id_;
   ObTabletID tablet_id_;
+  int64_t tablet_transfer_seq_;
   int64_t macro_block_size_;
   int64_t macro_store_size_; //macro_block_size_ * reserved_percent
   int64_t micro_block_size_limit_;
@@ -94,6 +118,12 @@ public:
   int64_t encrypt_id_;
   int64_t master_key_id_;
   char encrypt_key_[share::OB_MAX_TABLESPACE_ENCRYPT_KEY_LENGTH];
+  compaction::ObExecMode exec_mode_;
+  bool micro_index_clustered_;
+  // For ddl redo log for cs replica, leader write only macro block data in memory but do not flush to disk.
+  // indicate whether to submit io to write maroc block data to disk.
+  bool need_submit_io_;
+  uint64_t encoding_granularity_;
 };
 
 // ObColDataStoreDesc is same for every parallel task
@@ -108,11 +138,13 @@ struct ObColDataStoreDesc
   int init(
     const bool is_major,
     const share::schema::ObMergeSchema &merge_schema,
-    const uint16_t table_cg_idx);
+    const uint16_t table_cg_idx,
+    const int64_t major_working_cluster_version);
   int init(const bool is_major,
           const share::schema::ObMergeSchema &merge_schema,
           const storage::ObStorageColumnGroupSchema &cg_schema,
-          const uint16_t table_cg_idx);
+          const uint16_t table_cg_idx,
+          const int64_t major_working_cluster_version);
   // be carefule to cal mock function
   int mock_valid_col_default_checksum_array(int64_t column_cnt);
   OB_INLINE int add_col_desc(const ObObjMeta meta, int64_t col_idx);
@@ -124,9 +156,11 @@ struct ObColDataStoreDesc
                K_(col_default_checksum_array), K_(agg_meta_array));
 
 private:
+  // simplified do not generate skip index, do not init agg_meta_array
   int generate_skip_index_meta(
       const share::schema::ObMergeSchema &schema,
-      const storage::ObStorageColumnGroupSchema *cg_schema);
+      const storage::ObStorageColumnGroupSchema *cg_schema,
+      const int64_t major_working_cluster_version);
   void fresh_col_meta(const share::schema::ObMergeSchema &merge_schema);
   int gene_col_default_checksum_array(
       const share::schema::ObMergeSchema &merge_schema);
@@ -134,7 +168,10 @@ private:
       const share::schema::ObMergeSchema &merge_schema);
   int init_col_default_checksum_array(
       const int64_t column_cnt);
-  int generate_single_cg_skip_index_meta(const storage::ObStorageColumnGroupSchema &cg_schema);
+  int generate_single_cg_skip_index_meta(
+    const ObSkipIndexColumnAttr &skip_idx_attr_by_user,
+    const storage::ObStorageColumnGroupSchema &cg_schema,
+    const int64_t major_working_cluster_version);
   int add_col_desc_from_cg_schema(
     const share::schema::ObMergeSchema &merge_schema,
     const storage::ObStorageColumnGroupSchema &cg_schema);
@@ -177,6 +214,19 @@ public:
     is_force_flat_store_type_ = true;
   }
   bool is_store_type_valid() const;
+  OB_INLINE bool is_for_index_or_meta() const
+  {
+    return data_store_type_ == ObMacroBlockCommonHeader::SSTableIndex ||
+           data_store_type_ == ObMacroBlockCommonHeader::SSTableMacroMeta;
+  }
+  OB_INLINE bool is_for_index() const
+  {
+    return data_store_type_ == ObMacroBlockCommonHeader::SSTableIndex;
+  }
+  OB_INLINE bool is_for_meta() const
+  {
+    return data_store_type_ == ObMacroBlockCommonHeader::SSTableMacroMeta;
+  }
   OB_INLINE bool is_major_merge_type() const { return compaction::is_major_merge_type(get_merge_type()); }
   OB_INLINE bool is_major_or_meta_merge_type() const { return compaction::is_major_or_meta_merge_type(get_merge_type()); }
   OB_INLINE bool is_use_pct_free() const { return get_macro_block_size() != get_macro_store_size(); }
@@ -210,6 +260,7 @@ public:
   {
     return use_old_version_macro_header() ? col_desc_->row_column_count_ : col_desc_->rowkey_column_count_;
   }
+  bool micro_index_clustered() const;
   int update_basic_info_from_macro_meta(const ObSSTableBasicMeta &meta);
   /* GET FUNC */
   #define STORE_DESC_DEFINE_POINT_FUNC(var_type, desc, var_name) \
@@ -224,6 +275,7 @@ public:
   STATIC_DESC_FUNC(compaction::ObMergeType, merge_type);
   STATIC_DESC_FUNC(const share::ObLSID&, ls_id);
   STATIC_DESC_FUNC(const ObTabletID&, tablet_id);
+  STATIC_DESC_FUNC(int64_t, tablet_transfer_seq);
   STATIC_DESC_FUNC(int64_t, progressive_merge_round);
   STATIC_DESC_FUNC(int64_t, schema_version);
   STATIC_DESC_FUNC(int64_t, snapshot_version);
@@ -234,6 +286,8 @@ public:
   STATIC_DESC_FUNC(ObCompressorType, compressor_type);
   STATIC_DESC_FUNC(int64_t, major_working_cluster_version);
   STATIC_DESC_FUNC(const char *, encrypt_key);
+  STATIC_DESC_FUNC(compaction::ObExecMode, exec_mode);
+  STATIC_DESC_FUNC(bool, need_submit_io);
   COL_DESC_FUNC(bool, is_row_store);
   COL_DESC_FUNC(uint16_t, table_cg_idx);
   COL_DESC_FUNC(int64_t, row_column_count);
@@ -251,7 +305,6 @@ public:
   OB_INLINE int64_t get_encrypt_key_size() const { return sizeof(static_desc_->encrypt_key_); }
   OB_INLINE int64_t get_micro_block_size() const { return micro_block_size_; }
   OB_INLINE common::ObRowStoreType get_row_store_type() const { return row_store_type_; }
-  OB_INLINE bool need_pre_warm() const { return need_pre_warm_; }
   static const int64_t MIN_MICRO_BLOCK_SIZE = 4 * 1024; //4KB
   // emergency magic table id is 10000
   static const uint64_t EMERGENCY_TENANT_ID_MAGIC = 0;
@@ -263,10 +316,10 @@ public:
       "row_store_type", ObStoreFormat::get_row_store_name(row_store_type_),
       KPC_(col_desc),
       K_(encoder_opt),
-      KP_(merge_info),
       KP_(sstable_index_builder),
       K_(need_pre_warm),
       K_(need_build_hash_index_for_micro_block),
+      K_(data_store_type),
       K_(micro_block_size));
 
 private:
@@ -283,8 +336,9 @@ public:
   int64_t micro_block_size_;
   ObRowStoreType row_store_type_;
   ObMicroBlockEncoderOpt encoder_opt_; // binding to row_store_type_
-  storage::ObSSTableMergeInfo *merge_info_;
   ObSSTableIndexBuilder *sstable_index_builder_;
+  // we can use `data_store_type_` to distinguish data_macro or meta_macro in macro writer
+  ObMacroBlockCommonHeader::MacroBlockType data_store_type_;
   bool need_pre_warm_;
   bool is_force_flat_store_type_;
   bool need_build_hash_index_for_micro_block_;
@@ -294,8 +348,8 @@ private:
 
 struct ObWholeDataStoreDesc
 {
-  ObWholeDataStoreDesc(bool is_ddl = false)
-    : static_desc_(is_ddl),
+  ObWholeDataStoreDesc()
+    : static_desc_(),
       col_desc_(),
       desc_()
   {}
@@ -312,17 +366,23 @@ struct ObWholeDataStoreDesc
     const storage::ObStorageColumnGroupSchema *cg_schema = nullptr,
     const uint16_t table_cg_idx = 0);
   int init(
+    const bool is_ddl,
     const share::schema::ObMergeSchema &merge_schema,
     const share::ObLSID &ls_id,
     const common::ObTabletID tablet_id,
     const compaction::ObMergeType merge_type,
     const int64_t snapshot_version,
     const int64_t cluster_version,
+    const bool micro_index_clustered,
+    const int64_t tablet_transfer_seq,
     const share::SCN &end_scn = share::SCN::invalid_scn(),
     const storage::ObStorageColumnGroupSchema *cg_schema = nullptr,
-    const uint16_t table_cg_idx = 0);
+    const uint16_t table_cg_idx = 0,
+    const compaction::ObExecMode exec_mode = compaction::ObExecMode::EXEC_MODE_LOCAL,
+    const bool need_submit_io = true);
   int gen_index_store_desc(const ObDataStoreDesc &data_desc);
   int assign(const ObDataStoreDesc &desc);
+  int assign(const ObWholeDataStoreDesc &desc);
   ObStaticDataStoreDesc &get_static_desc() { return static_desc_; }
   ObColDataStoreDesc &get_col_desc() {return col_desc_; }
   ObDataStoreDesc &get_desc() { return desc_; }

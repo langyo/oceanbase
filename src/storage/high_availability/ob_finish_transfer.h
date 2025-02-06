@@ -23,6 +23,7 @@
 #include "lib/lock/ob_thread_cond.h"
 #include "share/transfer/ob_transfer_info.h"
 #include "share/ob_balance_define.h"
+#include "storage/ob_storage_async_rpc.h"
 
 namespace oceanbase {
 namespace storage {
@@ -111,18 +112,11 @@ private:
   // @param[in]: server addr
   // @param[in]: dest_ls_scn
   // @param[in]: current scn
-  // @param[bool]: check passed
+  // @param[in]: timeout_ctx
+  // @param[in/out]: finished_addr_list
   int check_all_ls_replica_replay_scn_(const share::ObTransferTaskID &task_id, const uint64_t tenant_id,
-      const share::ObLSID &ls_id, const common::ObArray<common::ObAddr> &member_addr_list, const share::SCN &finish_scn,
-      const int64_t quorum, bool &check_passed);
-
-  // param[in]: tenant_id,
-  // param[in]: ls_id
-  // param[in]: server addr
-  // param[in]: finish_scn
-  // param[out]: is the check passed
-  int inner_check_ls_replay_scn_(const share::ObTransferTaskID &task_id, const uint64_t tenant_id,
-      const share::ObLSID &ls_id, const common::ObAddr &addr, const share::SCN &finish_scn, bool &passed_scn);
+      const share::ObLSID &ls_id, const common::ObIArray<common::ObAddr> &total_addr_list, const share::SCN &finish_scn,
+      ObTimeoutCtx &timeout_ctx, common::ObIArray<common::ObAddr> &finished_addr_list);
 
 private:
   /* helper functions */
@@ -168,7 +162,8 @@ private:
   // @param[in]: start_scn
   // @param[in]: tablet_list
   // @param[out]: transfer_out_info
-  int build_tx_finish_transfer_in_info_(const share::ObLSID &src_ls_id, const share::ObLSID &dest_ls_id,
+  int build_tx_finish_transfer_in_info_(const share::ObTransferTaskID &task_id, const share::ObLSID &src_ls_id,
+      const share::ObLSID &dest_ls_id,
       const share::SCN &start_scn, const common::ObArray<share::ObTransferTabletInfo> &tablet_list,
       ObTXFinishTransferInInfo &transfer_out_info);
 
@@ -178,7 +173,8 @@ private:
   // @param[in]: finish_scn
   // @param[in]: tablet_list
   // @param[out]: transfer_out_info
-  int build_tx_finish_transfer_out_info_(const share::ObLSID &src_ls_id, const share::ObLSID &dest_ls_id,
+  int build_tx_finish_transfer_out_info_(const share::ObTransferTaskID &task_id, const share::ObLSID &src_ls_id,
+      const share::ObLSID &dest_ls_id,
       const share::SCN &finish_scn, const common::ObArray<share::ObTransferTabletInfo> &tablet_list,
       ObTXFinishTransferOutInfo &transfer_out_info);
 
@@ -207,20 +203,6 @@ private:
   int report_result_(const share::ObTransferTaskID &task_id, const int64_t result, obrpc::ObSrvRpcProxy *rs_rpc_proxy);
 
 private:
-  /*rpc section*/
-  int fetch_ls_replay_scn_(const share::ObTransferTaskID &task_id, const int64_t cluster_id,
-      const common::ObAddr &server_addr, const uint64_t tenant_id, const share::ObLSID &ls_id, share::SCN &finish_scn);
-
-  // post check if logical sstable has been replaced
-  // @param[in]: cluster_id
-  // @param[in]: server_addr
-  // @param[in]: tenant_id
-  // @param[in]: ls_id
-  // @param[out] backfill completed
-  int post_check_logical_table_replaced_request_(const int64_t cluster_id, const common::ObAddr &server_addr,
-      const uint64_t tenant_id, const share::ObLSID &dest_ls_id,
-      const common::ObIArray<share::ObTransferTabletInfo> &tablet_list, bool &backfill_completed);
-
   // check self is leader
   // @param[in]: ls_id
   // @param[out]: is_leader
@@ -280,14 +262,27 @@ private:
   int record_server_event_(
       const int32_t result,
       const bool is_ready,
-      const int64_t round) const;
+      const int64_t round,
+      const share::SCN &start_scn) const;
   int write_server_event_(
       const int32_t result,
       const ObSqlString &extra_info,
       const share::ObTransferStatus &status) const;
 
+  void process_perf_diagnose_info_(
+      const ObStorageHACostItemName name,
+      const int64_t start_ts,
+      const int64_t tablet_count,
+      const int64_t round, const bool is_report) const;
+
+  void process_perf_diagnose_info_(
+      const ObStorageHACostItemName name,
+      const int64_t round,
+      const bool is_report) const;
+
 private:
-  static const int64_t DEFAULT_WAIT_INTERVAL_US = 10 * 1000;        // 10ms
+  static const int64_t DEFAULT_WAIT_INTERVAL_US = 10_ms;
+  static const int64_t TASK_EXECUTE_LONG_WARNING_THRESHOLD = 60_min;
 
 private:
   bool is_inited_;
@@ -298,6 +293,9 @@ private:
   mutable lib::ObMutex mutex_;
   common::ObThreadCond cond_;
   common::ObMySQLProxy *sql_proxy_;
+  int64_t round_;
+  share::ObStorageHACostItemName diagnose_result_msg_;
+  uint64_t data_version_;
   DISALLOW_COPY_AND_ASSIGN(ObTxFinishTransfer);
 };
 

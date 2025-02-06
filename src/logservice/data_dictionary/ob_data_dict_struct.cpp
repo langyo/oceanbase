@@ -15,9 +15,7 @@
 
 #include "ob_data_dict_struct.h"
 
-#include "common/rowkey/ob_rowkey_info.h"
 #include "share/schema/ob_column_schema.h"
-#include "share/schema/ob_table_schema.h"
 #include "share/schema/ob_table_param.h"
 
 #define DEFINE_DESERIALIZE_DATA_DICT(TypeName) \
@@ -228,7 +226,7 @@ DEFINE_EQUAL(ObDictMetaHeader)
   return is_equal;
 }
 
-ObDictTenantMeta::ObDictTenantMeta(ObIAllocator *allocator) : allocator_(allocator)
+ObDictTenantMeta::ObDictTenantMeta(ObIAllocator *allocator) : allocator_(allocator), tenant_name_()
 {
   reset();
 }
@@ -237,7 +235,7 @@ void ObDictTenantMeta::reset()
 {
   tenant_id_ = OB_INVALID_TENANT_ID;
   schema_version_ = OB_INVALID_VERSION;
-  if (nullptr != tenant_name_.ptr()) {
+  if (nullptr != allocator_ && nullptr != tenant_name_.ptr()) {
     allocator_->free(tenant_name_.ptr());
   }
   tenant_name_.reset();
@@ -436,7 +434,7 @@ int ObDictTenantMeta::init_with_ls_info(
   return ret;
 }
 
-ObDictDatabaseMeta::ObDictDatabaseMeta(ObIAllocator *allocator) : allocator_(allocator)
+ObDictDatabaseMeta::ObDictDatabaseMeta(ObIAllocator *allocator) : allocator_(allocator), database_name_()
 {
   reset();
 }
@@ -446,7 +444,7 @@ void ObDictDatabaseMeta::reset()
   tenant_id_ = OB_INVALID_TENANT_ID;
   database_id_ = OB_INVALID_ID;
   schema_version_ = OB_INVALID_TIMESTAMP;
-  if (nullptr != database_name_.ptr()) {
+  if (nullptr != allocator_ && nullptr != database_name_.ptr()) {
     allocator_->free(database_name_.ptr());
  }
   database_name_.reset();
@@ -588,7 +586,7 @@ int ObDictDatabaseMeta::assign_(DATABASE_SCHEMA &database_schema)
 }
 
 ObDictColumnMeta::ObDictColumnMeta(ObIAllocator *allocator)
-  : allocator_(allocator)
+  : allocator_(allocator), column_name_(), local_session_vars_(allocator)
 {
   reset();
 }
@@ -596,7 +594,7 @@ ObDictColumnMeta::ObDictColumnMeta(ObIAllocator *allocator)
 void ObDictColumnMeta::reset()
 {
   column_id_ = OB_INVALID_ID;
-  if (column_name_.ptr() != nullptr) {
+  if (nullptr != allocator_ && column_name_.ptr() != nullptr) {
     allocator_->free(column_name_.ptr());
     column_name_.reset();
   }
@@ -614,6 +612,8 @@ void ObDictColumnMeta::reset()
   column_ref_ids_.reset();
   udt_set_id_ = 0;
   sub_type_ = 0;
+  srs_id_ = 0;
+  local_session_vars_.reset();
 }
 
 DEFINE_EQUAL(ObDictColumnMeta)
@@ -633,7 +633,9 @@ DEFINE_EQUAL(ObDictColumnMeta)
       orig_default_value_,
       cur_default_value_,
       udt_set_id_,
-      sub_type_
+      sub_type_,
+      srs_id_,
+      local_session_vars_
       );
   IS_OBARRAY_EQUAL(extended_type_info_);
   IS_OBARRAY_EQUAL(column_ref_ids_);
@@ -662,7 +664,9 @@ DEFINE_SERIALIZE(ObDictColumnMeta)
       extended_type_info_,
       column_ref_ids_,
       udt_set_id_,
-      sub_type_);
+      sub_type_,
+      srs_id_,
+      local_session_vars_);
   }
 
   return ret;
@@ -714,6 +718,14 @@ DEFINE_DESERIALIZE_DATA_DICT(ObDictColumnMeta)
           DDLOG(WARN, "deserialize sub_type failed", KR(ret));
         }
       }
+      if (OB_SUCC(ret) && header.get_version() > 3) {
+        // srs_id_ and local_session_vars are serialized when version >= 4
+        if (OB_FAIL(NS_::decode(buf, data_len, pos, srs_id_))) {
+          DDLOG(WARN, "deserialize srs_id failed", KR(ret));
+        } else if (OB_FAIL(NS_::decode(buf, data_len, pos, local_session_vars_))) {
+          DDLOG(WARN, "deserialize local_session_var failed", KR(ret));
+        }
+      }
     }
   }
 
@@ -739,7 +751,9 @@ DEFINE_GET_SERIALIZE_SIZE(ObDictColumnMeta)
       extended_type_info_,
       column_ref_ids_,
       udt_set_id_,
-      sub_type_);
+      sub_type_,
+      srs_id_,
+      local_session_vars_);
   return len;
 }
 
@@ -774,6 +788,8 @@ int ObDictColumnMeta::assign_(COLUMN_META &column_schema)
     DDLOG(WARN, "assign extended_type_info failed", KR(ret), K(column_schema), KPC(this));
   } else if (OB_FAIL(column_schema.get_cascaded_column_ids(column_ref_ids_))) {
     DDLOG(WARN, "get_cascaded_column_ids failed", KR(ret), K(column_schema));
+  } else if (OB_FAIL(local_session_vars_.deep_copy(column_schema.get_local_session_var()))) {
+    DDLOG(WARN, "copy_local_session_vars failed", KR(ret), K(column_schema), KPC(this));
   } else {
     column_id_ = column_schema.get_column_id();
     rowkey_position_ = column_schema.get_rowkey_position();
@@ -790,6 +806,7 @@ int ObDictColumnMeta::assign_(COLUMN_META &column_schema)
     collation_type_ = column_schema.get_collation_type();
     udt_set_id_ = column_schema.get_udt_set_id();
     sub_type_ = column_schema.get_sub_data_type();
+    srs_id_ = column_schema.get_srs_id();
   }
 
   return ret;
@@ -859,7 +876,12 @@ int64_t ObDictColumnMeta::get_data_length() const
   return share::schema::ObColumnSchemaV2::get_data_length(accuracy_, meta_type_);
 }
 
-ObDictTableMeta::ObDictTableMeta(ObIAllocator *allocator) : allocator_(allocator)
+ObDictTableMeta::ObDictTableMeta(ObIAllocator *allocator)
+  : allocator_(allocator),
+    table_name_(),
+    column_count_(0),
+    rowkey_column_count_(0),
+    index_column_count_(0)
 {
   reset();
 }
@@ -870,8 +892,10 @@ void ObDictTableMeta::reset()
   database_id_ = OB_INVALID_ID;
   table_id_ = OB_INVALID_ID;
   schema_version_ = OB_INVALID_TIMESTAMP;
-  allocator_->free(table_name_.ptr());
-  table_name_.reset();
+  if (nullptr != allocator_ && table_name_.ptr() != nullptr) {
+    allocator_->free(table_name_.ptr());
+    table_name_.reset();
+  }
   name_case_mode_ = common::OB_NAME_CASE_INVALID;
   table_type_ = schema::ObTableType::USER_TABLE;
   table_mode_.reset();
@@ -882,17 +906,11 @@ void ObDictTableMeta::reset()
   aux_lob_piece_tid_ = OB_INVALID_ID;
   max_used_column_id_ = OB_INVALID_ID;
   column_id_arr_order_by_table_def_.reset();
-  column_count_ = 0;
-  allocator_->free(col_metas_);
-  col_metas_ = nullptr;
-  rowkey_column_count_ = 0;
-  allocator_->free(rowkey_cols_);
-  rowkey_cols_ = nullptr;
   unique_index_tid_arr_.reset();
   index_type_ = schema::ObIndexType::INDEX_TYPE_IS_NOT;
-  index_column_count_ = 0;
-  allocator_->free(index_cols_);
-  index_cols_ = nullptr;
+  free_column_info_();
+  free_rowkey_info_();
+  free_index_info_();
   data_table_id_ = OB_INVALID_ID;
   association_table_id_ = OB_INVALID_ID;
 }
@@ -1413,6 +1431,51 @@ int ObDictTableMeta::build_column_id_arr_(const share::schema::ObTableSchema &ta
   }
 
   return ret;
+}
+
+void ObDictTableMeta::free_index_info_()
+{
+  if (OB_NOT_NULL(allocator_) && OB_NOT_NULL(index_cols_)) {
+    for (int i = 0; i < index_column_count_; i++) {
+      common::ObIndexColumn *index_col = index_cols_ + i;
+      if (OB_NOT_NULL(index_col)) {
+        index_col->~ObIndexColumn();
+      }
+    }
+    allocator_->free(index_cols_);
+    index_cols_ = nullptr;
+    index_column_count_ = 0;
+  }
+}
+
+void ObDictTableMeta::free_rowkey_info_()
+{
+  if (OB_NOT_NULL(allocator_) && OB_NOT_NULL(rowkey_cols_)) {
+    for (int i = 0; i < rowkey_column_count_; i++) {
+      common::ObRowkeyColumn *rowkey_col = rowkey_cols_ + i;
+      if (OB_NOT_NULL(rowkey_col)) {
+        rowkey_col->~ObIndexColumn();
+      }
+    }
+    allocator_->free(rowkey_cols_);
+    rowkey_cols_ = nullptr;
+    rowkey_column_count_ = 0;
+  }
+}
+
+void ObDictTableMeta::free_column_info_()
+{
+  if (OB_NOT_NULL(allocator_) && OB_NOT_NULL(col_metas_)) {
+    for (int i = 0; i < column_count_; i++) {
+      ObDictColumnMeta *col_meta = col_metas_ + i;
+      if (OB_NOT_NULL(col_meta)) {
+        col_meta->~ObDictColumnMeta();
+      }
+    }
+    allocator_->free(col_metas_);
+    col_metas_ = nullptr;
+    column_count_ = 0;
+  }
 }
 
 int ObDictTableMeta::get_rowkey_info(ObRowkeyInfo &rowkey_info) const

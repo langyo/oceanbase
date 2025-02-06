@@ -26,14 +26,14 @@ public:
   ObSingleMerge();
   virtual ~ObSingleMerge();
   int open(const blocksstable::ObDatumRowkey &rowkey);
-  virtual void reset();
+  virtual void reset() override;
   virtual void reuse() override;
+  virtual void reclaim() override;
 protected:
   virtual int calc_scan_range() override;
   virtual int construct_iters() override;
   virtual int is_range_valid() const override;
   virtual int inner_get_next_row(blocksstable::ObDatumRow &row);
-  virtual void collect_merge_stat(ObTableStoreStat &stat) const override;
 private:
   virtual int get_table_row(const int64_t table_idx,
                             const common::ObIArray<ObITable *> &tables,
@@ -46,6 +46,14 @@ private:
                                      bool &final_result,
                                      bool &have_uncommited_row,
                                      bool &need_update_fuse_cache);
+  int get_normal_table_scan_row(const int64_t read_snapshot_version,
+                                const int64_t multi_version_start,
+                                const bool enable_fuse_row_cache,
+                                bool &have_uncommited_row,
+                                bool &need_update_fuse_cache);
+  int get_mview_table_scan_row(const bool enable_fuse_row_cache,
+                               bool &have_uncommited_row,
+                               bool &need_update_fuse_cache);
 private:
   static const int64_t SINGLE_GET_FUSE_ROW_CACHE_PUT_COUNT_THRESHOLD = 50;
   const blocksstable::ObDatumRowkey *rowkey_;

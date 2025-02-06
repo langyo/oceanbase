@@ -18,9 +18,6 @@
 
 #include "storage/ob_partition_range_spliter.h"
 #include "storage/compaction/ob_tablet_merge_ctx.h"
-#include "share/rc/ob_tenant_base.h"
-#include "storage/meta_mem/ob_tenant_meta_mem_mgr.h"
-#include "storage/blocksstable/index_block/ob_sstable_sec_meta_iterator.h"
 
 namespace oceanbase
 {
@@ -29,8 +26,15 @@ namespace storage
 using namespace blocksstable;
 using namespace common;
 
+class ObTenantMetaMemMgr;
+
 void ObCompactionBufferWriter::reset()
 {
+}
+
+int ObTenantMetaMemMgr::fetch_tenant_config()
+{
+  return OB_SUCCESS;
 }
 
 static int get_number(const char *str, const char *&endpos, int64_t &num)
@@ -686,7 +690,7 @@ void TestPartitionIncrementalRangeSliter::SetUp()
   oceanbase::ObClusterVersion::get_instance().update_data_version(DATA_CURRENT_VERSION);
   if (!is_inited_) {
     int ret = OB_SUCCESS;
-    OB_SERVER_BLOCK_MGR.super_block_.body_.macro_block_size_ = 1;
+    OB_STORAGE_OBJECT_MGR.super_block_.body_.macro_block_size_ = 1;
 
     ObTenantMetaMemMgr *t3m = OB_NEW(ObTenantMetaMemMgr, ObModIds::TEST, tenant_id_);
     ret = t3m->init();

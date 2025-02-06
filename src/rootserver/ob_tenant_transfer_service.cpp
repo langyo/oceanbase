@@ -13,24 +13,16 @@
 #define USING_LOG_PREFIX BALANCE_TRANSFER
 
 #include "rootserver/ob_tenant_transfer_service.h"
-#include "observer/ob_server_struct.h" //GCTX
-#include "lib/mysqlclient/ob_mysql_proxy.h" // ObISqlClient, SMART_VAR
-#include "lib/utility/ob_tracepoint.h" // ERRSIM_POINT_DEF
-#include "share/ls/ob_ls_info.h" // MemberList
 #include "share/transfer/ob_transfer_task_operator.h" // ObTransferTaskOperator
-#include "share/schema/ob_multi_version_schema_service.h"  // ObMultiSchemaService
 #include "share/schema/ob_part_mgr_util.h" // ObPartitionSchemaIter
 #include "share/tablet/ob_tablet_to_ls_operator.h" // ObTabletToLSOperator
-#include "share/ob_rpc_struct.h" // ObStartTransferTaskArg
-#include "share/ob_balance_define.h" // ObBalanceTaskID
-#include "share/location_cache/ob_location_service.h"   // location_service_
-#include "share/ob_srv_rpc_proxy.h" // srv_rpc_proxy_
-#include "storage/ob_common_id_utils.h" // ObCommonIDUtils
+#include "share/ob_global_merge_table_operator.h" // ObGlobalMergeTableOperator
+#include "share/ob_zone_merge_info.h" // ObGlobalMergeInfo
+#include "share/ob_freeze_info_proxy.h" // ObFreezeInfoProxy
+#include "share/ob_global_stat_proxy.h" // ObGlobalStatProxy
 #include "storage/tablelock/ob_table_lock_service.h" // ObTableLockService
-#include "observer/ob_inner_sql_connection.h" // ObInnerSQLConnection
 #include "storage/ddl/ob_ddl_lock.h" // ObDDLLock
 #include "storage/tablelock/ob_lock_inner_connection_util.h"
-//#include "storage/high_availability/ob_transfer_struct.h"
 
 namespace oceanbase
 {
@@ -162,8 +154,9 @@ int ObTenantTransferService::process_task_(const ObTransferTask::TaskStatus &tas
       LOG_WARN("fail to process init task", KR(ret), K(task_stat));
     }
   } else if (task_stat.get_status().is_finish_status()) {
+    ObTransferTask transfer_task;//no used
     if (OB_FAIL(try_clear_transfer_task(
-        task_stat.get_task_id(),
+        task_stat.get_task_id(), transfer_task,
         all_part_list,
         finished_part_list))) {
       LOG_WARN("fail to process finish task", KR(ret), K(task_stat));
@@ -187,6 +180,7 @@ int ObTenantTransferService::process_init_task_(const ObTransferTaskID task_id)
   ObTransferPartList lock_conflict_part_list;
   ObDisplayTabletList table_lock_tablet_list;
   ObTimeoutCtx ctx;
+  bool need_wait = false;
 
   const int64_t start_time = ObTimeUtil::current_time();
   TTS_INFO("start to process init task", K(task_id), K(start_time));
@@ -215,6 +209,23 @@ int ObTenantTransferService::process_init_task_(const ObTransferTaskID task_id)
     ret = OB_STATE_NOT_MATCH;
     LOG_WARN("task status is not init", KR(ret), K(task));
   } else if (FALSE_IT(ObCurTraceId::set(task.get_trace_id()))) {
+  } else if (OB_FAIL(check_if_need_wait_due_to_last_failure_(*sql_proxy_, task, need_wait))) {
+    LOG_WARN("check if need wait due to last failure failed", KR(ret), K(task), K(need_wait));
+  } else if (need_wait) {
+    result_comment = WAIT_DUE_TO_LAST_FAILURE;
+    ret = OB_NEED_RETRY;
+    TTS_INFO("last task failed, need to process task later",
+        KR(ret), K_(tenant_id), K(task), "result_comment", transfer_task_comment_to_str(result_comment));
+#ifdef OB_BUILD_SHARED_STORAGE
+  } else if (GCTX.is_shared_storage_mode()
+      && OB_FAIL(lock_and_check_tenant_merge_status_(trans, need_wait))) {
+    LOG_WARN("lock and check tenant merge status failed", KR(ret));
+  } else if (need_wait) {
+    result_comment = WAIT_FOR_MAJOR_COMPACTION;
+    ret = OB_NEED_WAIT;
+    TTS_INFO("tenant is merging, need wait",
+        KR(ret), K_(tenant_id), K(task), "result_comment", transfer_task_comment_to_str(result_comment));
+#endif
   } else if (OB_FAIL(check_ls_member_list_(
       *sql_proxy_,
       task.get_src_ls(),
@@ -305,6 +316,64 @@ int ObTenantTransferService::process_init_task_(const ObTransferTaskID task_id)
   return ret;
 }
 
+int ObTenantTransferService::check_if_need_wait_due_to_last_failure_(
+    common::ObISQLClient &sql_proxy,
+    const ObTransferTask &task,
+    bool &need_wait)
+{
+  int ret = OB_SUCCESS;
+  need_wait = false;
+  ObTransferTask last_task;
+  int64_t finish_time = OB_INVALID_TIMESTAMP;
+  if (IS_NOT_INIT) {
+    ret = OB_NOT_INIT;
+    LOG_WARN("not init", KR(ret));
+  } else if (OB_UNLIKELY(!task.is_valid())) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid task", KR(ret), K(task));
+  } else {
+    int64_t wait_interval = 60 * 1000 * 1000L; // default 1m
+    {
+      omt::ObTenantConfigGuard tenant_config(TENANT_CONF(tenant_id_));
+      if (tenant_config.is_valid()) {
+        wait_interval = tenant_config->_transfer_task_retry_interval;
+      }
+    } // release guard
+    if (OB_FAIL(ret)) {
+    } else if (0 == wait_interval) {
+      need_wait = false;
+    } else if (OB_FAIL(ObTransferTaskOperator::get_last_task_by_balance_task_id(
+        sql_proxy,
+        tenant_id_,
+        task.get_balance_task_id(),
+        last_task,
+        finish_time))) {
+      if (OB_ENTRY_NOT_EXIST == ret) {
+        ret = OB_SUCCESS;
+        need_wait = false;
+      } else {
+        LOG_WARN("get last task by balance task id failed",
+            KR(ret), K(tenant_id_), K(task), K(last_task));
+      }
+    } else if (OB_UNLIKELY(!last_task.is_valid())) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("last task should be valid", KR(ret), K(task), K(last_task));
+    } else if (ObTimeUtil::current_time() - finish_time < wait_interval) {
+      if (last_task.get_status().is_failed_status()) { // last failed
+        need_wait = true;
+      } else if (last_task.get_tablet_list().empty()
+          && !last_task.get_lock_conflict_part_list().empty()) { // all part conflicted
+        need_wait = true;
+      }
+    }
+    if (need_wait) {
+      LOG_TRACE("last task failed, need wait", KR(ret),
+          K(task), K(last_task), K(finish_time), K(wait_interval));
+    }
+  }
+  return ret;
+}
+
 ERRSIM_POINT_DEF(EN_TENANT_TRANSFER_CHECK_LS_MEMBER_LIST_NOT_SAME);
 
 // 1.check leader member_lists of src_ls and dest_ls are same
@@ -386,8 +455,6 @@ int ObTenantTransferService::get_member_lists_by_inner_sql_(
   } else {
     SMART_VAR(ObISQLClient::ReadResult, result) {
       ObSqlString sql;
-      ObString src_ls_member_list_str;
-      ObString dest_ls_member_list_str;
       common::sqlclient::ObMySQLResult *res = NULL;
       if (OB_FAIL(sql.assign_fmt(
           "SELECT PAXOS_MEMBER_LIST FROM %s WHERE TENANT_ID = %lu AND ROLE = 'LEADER'"
@@ -404,44 +471,55 @@ int ObTenantTransferService::get_member_lists_by_inner_sql_(
       } else if (OB_ISNULL(res = result.get_result())) {
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("get mysql result failed", KR(ret), K(sql));
-      } else if (OB_FAIL(res->next())) {
-        LOG_WARN("next failed, neither src_ls nor dest_ls was found", KR(ret), K_(tenant_id), K(src_ls), K(dest_ls));
-      } else if (OB_FAIL(res->get_varchar("PAXOS_MEMBER_LIST", src_ls_member_list_str))) {
-        LOG_WARN("fail to get PAXOS_MEMBER_LIST", KR(ret), K_(tenant_id), K(src_ls), K(dest_ls));
-      } else if (OB_FAIL(res->next())) {
-        LOG_WARN("next failed, src_ls or dest_ls not found", KR(ret), K_(tenant_id), K(src_ls), K(dest_ls));
-      } else if (OB_FAIL(res->get_varchar("PAXOS_MEMBER_LIST", dest_ls_member_list_str))) {
-        LOG_WARN("fail to get PAXOS_MEMBER_LIST", KR(ret), K_(tenant_id), K(src_ls), K(dest_ls));
-      } else if (OB_FAIL(ObLSReplica::text2member_list(
-          to_cstring(src_ls_member_list_str),
-          src_ls_member_list))) {
-        LOG_WARN("text2member_list failed", KR(ret), K_(tenant_id), K(src_ls), K(src_ls_member_list_str));
-      } else if (OB_FAIL(ObLSReplica::text2member_list(
-          to_cstring(dest_ls_member_list_str),
-          dest_ls_member_list))) {
-        LOG_WARN("text2member_list failed", KR(ret), K_(tenant_id), K(dest_ls), K(dest_ls_member_list_str));
+      } else if (OB_FAIL(construct_ls_member_list_(*res, src_ls_member_list))) {
+        LOG_WARN("construct src ls member list failed", KR(ret), K_(tenant_id), K(src_ls));
+      } else if (OB_FAIL(construct_ls_member_list_(*res, dest_ls_member_list))) {
+        LOG_WARN("construct dest ls member list failed", KR(ret), K_(tenant_id), K(dest_ls));
       }
       // double check sql result
       if (OB_FAIL(ret)) {
         if (OB_UNLIKELY(OB_ITER_END == ret)) { // read less than two rows
           ret = OB_LEADER_NOT_EXIST;
           LOG_WARN("leader of src_ls or dest_ls not found", KR(ret), K_(tenant_id), K(src_ls),
-              K(dest_ls), K(src_ls_member_list_str), K(dest_ls_member_list_str));
+              K(dest_ls), K(src_ls_member_list), K(dest_ls_member_list));
         } else {
           LOG_WARN("get ls member_list from inner table failed", KR(ret), K_(tenant_id),
-              K(src_ls), K(dest_ls), K(src_ls_member_list_str), K(dest_ls_member_list_str));
+              K(src_ls), K(dest_ls), K(src_ls_member_list), K(dest_ls_member_list));
         }
       } else if (OB_SUCC(res->next())) { // make sure read only two rows
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("read too much ls from inner table", KR(ret), K_(tenant_id),
-            K(src_ls), K(dest_ls), K(src_ls_member_list_str), K(dest_ls_member_list_str), K(sql));
+            K(src_ls), K(dest_ls), K(src_ls_member_list), K(dest_ls_member_list), K(sql));
       } else if (OB_UNLIKELY(OB_ITER_END != ret)) {
         LOG_WARN("next failed", KR(ret), K_(tenant_id), K(src_ls), K(dest_ls),
-            K(sql), K(src_ls_member_list_str), K(dest_ls_member_list_str));
+            K(sql), K(src_ls_member_list), K(dest_ls_member_list));
       } else {
         ret = OB_SUCCESS;
       }
     } // end SMART_VAR
+  }
+  return ret;
+}
+
+int ObTenantTransferService::construct_ls_member_list_(
+    sqlclient::ObMySQLResult &res,
+    ObLSReplica::MemberList &ls_member_list)
+{
+  int ret = OB_SUCCESS;
+  ls_member_list.reset();
+  ObString ls_member_list_str;
+  const char *ls_member_list_ptr = NULL;
+  ObCStringHelper helper;
+  if (OB_FAIL(res.next())) {
+    LOG_WARN("next failed", KR(ret));
+  } else if (OB_FAIL(res.get_varchar("PAXOS_MEMBER_LIST", ls_member_list_str))) {
+    LOG_WARN("fail to get PAXOS_MEMBER_LIST", KR(ret));
+  } else if (OB_FAIL(helper.convert(ls_member_list_str, ls_member_list_ptr))) {
+    LOG_WARN("convert ls_member_list", KR(ret), K(ls_member_list_str));
+  } else if (OB_FAIL(ObLSReplica::text2member_list(
+      ls_member_list_ptr,
+      ls_member_list))) {
+    LOG_WARN("text2member_list failed", KR(ret), K(ls_member_list_str));
   }
   return ret;
 }
@@ -461,7 +539,7 @@ int ObTenantTransferService::lock_table_and_part_(
   int ret = OB_SUCCESS;
   DEBUG_SYNC(BEFORE_TRANSFER_LOCK_TABLE_AND_PART);
   tablet_ids.reset();
-  lock_owner_id = OB_INVALID_INDEX;
+  lock_owner_id.reset();
   ObTransferPartList ordered_part_list;
   ObArenaAllocator allocator;
   const int64_t start_time = ObTimeUtility::current_time();
@@ -484,7 +562,7 @@ int ObTenantTransferService::lock_table_and_part_(
     part_list.reset();
     ObSimpleTableSchemaV2 *table_schema = NULL;
     ObTransferPartInfo::Compare cmp;
-    std::sort(ordered_part_list.begin(), ordered_part_list.end(), cmp);
+    lib::ob_sort(ordered_part_list.begin(), ordered_part_list.end(), cmp);
 
     ARRAY_FOREACH(ordered_part_list, idx) {
       ObLSID ls_id;
@@ -496,6 +574,11 @@ int ObTenantTransferService::lock_table_and_part_(
       const ObObjectID part_object_id = part_info.part_object_id();
       bool is_not_exist = false;
       bool is_lock_conflict = false;
+      bool exceed_tablet_count_threshold = false;
+      ObArenaAllocator related_table_allocator;
+      related_table_allocator.set_tenant_id(tenant_id_);
+      ObArray<ObSimpleTableSchemaV2 *> related_table_schemas;
+
       if (OB_NOT_NULL(table_schema) && table_schema->get_table_id() == table_id) {
         // use previous table_schema
       } else if (OB_FAIL(get_latest_table_schema_(allocator, table_id, table_schema))) {
@@ -520,7 +603,8 @@ int ObTenantTransferService::lock_table_and_part_(
           tablet_id,
           part_idx,
           subpart_idx))) {
-        if (OB_TRY_LOCK_ROW_CONFLICT == ret || OB_ERR_EXCLUSIVE_LOCK_CONFLICT == ret) {
+        // Table lock service converts some error codes that can be retried to OB_EAGAIN since 4_2_1_5
+        if (OB_TRY_LOCK_ROW_CONFLICT == ret || OB_ERR_EXCLUSIVE_LOCK_CONFLICT == ret || OB_EAGAIN == ret) {
           is_lock_conflict = true;
           TTS_INFO("lock conflict when adding in_trans lock",
               KR(ret), K(part_info), K(tablet_id), K(part_idx), K(subpart_idx), K(is_not_exist));
@@ -560,6 +644,18 @@ int ObTenantTransferService::lock_table_and_part_(
       } else if (OB_ISNULL(table_schema)) {
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("table schema should not be null", KR(ret), K(part_info), K(tablet_id));
+      } else if (OB_FAIL(get_related_table_schemas_(*table_schema, related_table_allocator, related_table_schemas))) {
+        LOG_WARN("get related table schemas failed", KR(ret), KPC(table_schema));
+      } else if (OB_FAIL(check_tablet_count_by_threshold_(
+          tablet_ids,
+          related_table_schemas.count() + 1/*data_table*/,
+          exceed_tablet_count_threshold))) {
+        LOG_WARN("check tablet count by threshold failed", KR(ret), "tablet_ids_count", tablet_ids.count(),
+            "related_table_count", related_table_schemas.count());
+      } else if (!tablet_ids.empty() && exceed_tablet_count_threshold) { // contain at least one part
+        LOG_TRACE("exceed tablet count threshold", KR(ret), "tablet_ids_count", tablet_ids.count(),
+            "related_table_count", related_table_schemas.count());
+        break;
       } else if (OB_FAIL(add_out_trans_lock_(trans, lock_owner_id, *table_schema, part_info, tablet_id))) {
         LOG_WARN("add out trans table and online ddl lock failed",
             KR(ret), K(lock_owner_id), K(part_info), K(tablet_id));
@@ -569,7 +665,7 @@ int ObTenantTransferService::lock_table_and_part_(
         LOG_WARN("record need move table lock tablet failed", KR(ret), K(tablet_id), K(table_lock_tablet_list));
       } else if (OB_FAIL(tablet_ids.push_back(tablet_id))) {
         LOG_WARN("push back failed", KR(ret), K(tablet_id), K(tablet_ids), K(part_info));
-      } else if (OB_FAIL(generate_related_tablet_ids_(*table_schema, part_idx, subpart_idx, tablet_ids))) {
+      } else if (OB_FAIL(generate_related_tablet_ids_(related_table_schemas, part_idx, subpart_idx, tablet_ids))) {
         LOG_WARN("generate related tablet_ids failed", KR(ret),
             "table_id", table_schema->get_table_id(), K(part_idx), K(subpart_idx), K(tablet_ids));
       }
@@ -585,10 +681,10 @@ int ObTenantTransferService::lock_table_and_part_(
         }
       }
 
-      // Try to limit the number of tablet_list to TABLET_COUNT_THRESHOLD_IN_A_TRANSFER.
-      // This is not a precise limit. In the worst case, there will be
-      // TABLET_COUNT_THRESHOLD_IN_A_TRANSFER + 128(max index number) + 2(lob tablet number) tablets in tablet_list.
-      if (OB_SUCC(ret) && tablet_ids.count() > TABLET_COUNT_THRESHOLD_IN_A_TRANSFER) {
+      if (FAILEDx(check_tablet_count_by_threshold_(tablet_ids, 1, exceed_tablet_count_threshold))) {
+        LOG_WARN("check tablet count by threshold failed", KR(ret), "tablet_ids_count", tablet_ids.count());
+      } else if (exceed_tablet_count_threshold) {
+        LOG_TRACE("reach tablet count threshold", KR(ret), "tablet_ids_count", tablet_ids.count());
         break;
       }
     } // end ARRAY_FOREACH
@@ -662,6 +758,7 @@ int ObTenantTransferService::add_table_lock_(
         LOG_WARN("lock partition failed", KR(ret), K(part_lock_arg));
       }
     } else if (PARTITION_LEVEL_TWO == table_schema.get_part_level()) {
+      part_lock_arg.is_sub_part_ = true;
       if (OB_FAIL(ObInnerConnectionLockUtil::lock_subpartition(tenant_id_, part_lock_arg, conn))) {
         LOG_WARN("lock subpartition failed", KR(ret), K(part_lock_arg));
       }
@@ -833,36 +930,27 @@ int ObTenantTransferService::record_need_move_table_lock_tablet_(
   return ret;
 }
 
+// part_idx and subpart_idx may be invalid for non-part table
 int ObTenantTransferService::generate_related_tablet_ids_(
-    share::schema::ObSimpleTableSchemaV2 &table_schema,
+    const ObIArray<ObSimpleTableSchemaV2 *> &related_table_schemas,
     const int64_t part_idx,
     const int64_t subpart_idx,
     common::ObIArray<ObTabletID> &tablet_ids)
 {
   int ret = OB_SUCCESS;
-  ObArray<ObSimpleTableSchemaV2 *> related_table_schemas;
-  ObArenaAllocator allocator;
-  const uint64_t table_id = table_schema.get_table_id();
   const int64_t start_time = ObTimeUtility::current_time();
   if (IS_NOT_INIT || OB_ISNULL(sql_proxy_)) {
     ret = OB_NOT_INIT;
     LOG_WARN("not init", KR(ret));
-  } else if (FALSE_IT(allocator.set_tenant_id(tenant_id_))) {
-  } else if (table_schema.is_global_index_table()) {
-    // skip get related tables
-  } else if (OB_UNLIKELY(! need_balance_table(table_schema))) {
-    ret = OB_INVALID_ARGUMENT;
-    LOG_WARN("only get related tables for user table and other need balance table", KR(ret),
-        K(table_id), K(table_schema));
-  } else if (OB_FAIL(get_related_table_schemas_(*sql_proxy_, table_schema, allocator, related_table_schemas))) {
-    LOG_WARN("fail to get related table schemas", KR(ret), K_(tenant_id), K(table_id));
+  } else if (related_table_schemas.empty()) {
+    // skip
   } else {
     ARRAY_FOREACH(related_table_schemas, idx) {
       ObSimpleTableSchemaV2 *related_table_schema = related_table_schemas.at(idx);
       ObTabletID related_tablet_id;
       if (OB_ISNULL(related_table_schema)) {
         ret = OB_ERR_UNEXPECTED;
-        LOG_WARN("related table schema is null", KR(ret), "primary_table", table_id);
+        LOG_WARN("related table schema is null", KR(ret));
       } else if (OB_FAIL(get_tablet_by_partition_idx_(
           *related_table_schema,
           part_idx,
@@ -874,7 +962,7 @@ int ObTenantTransferService::generate_related_tablet_ids_(
         LOG_WARN("fail to push back", KR(ret), K(related_tablet_id), K(tablet_ids));
       }
     }
-    TTS_INFO("get related tablet_ids", KR(ret), K(table_id), "related_table_count",
+    TTS_INFO("gen related tablet_ids", KR(ret), "related_table_count",
         related_table_schemas.count(), K(part_idx), K(subpart_idx), K(tablet_ids),
         "cost_time", ObTimeUtility::current_time() - start_time);
   }
@@ -925,7 +1013,6 @@ int ObTenantTransferService::generate_tablet_list_(
 }
 
 int ObTenantTransferService::get_related_table_schemas_(
-    common::ObISQLClient &sql_proxy,
     ObSimpleTableSchemaV2 &table_schema,
     ObArenaAllocator &allocator,
     ObArray<ObSimpleTableSchemaV2 *> &related_table_schemas)
@@ -939,7 +1026,15 @@ int ObTenantTransferService::get_related_table_schemas_(
   ObSchemaService *schema_service = NULL;
   const uint64_t primary_table_id = table_schema.get_table_id();
   ObArray<ObAuxTableMetaInfo> related_infos;
-  if (OB_ISNULL(GCTX.schema_service_)
+  if (IS_NOT_INIT || OB_ISNULL(sql_proxy_)) {
+    ret = OB_NOT_INIT;
+    LOG_WARN("not init", KR(ret));
+  } else if (table_schema.is_global_index_table()) {
+    // skip get related tables
+  } else if (OB_UNLIKELY(!need_balance_table(table_schema))) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("not need balance table", KR(ret), K(table_schema));
+  } else if (OB_ISNULL(GCTX.schema_service_)
       || OB_ISNULL(schema_service = GCTX.schema_service_->get_schema_service())) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("GCTX.schema_service_ is null", KR(ret));
@@ -948,7 +1043,7 @@ int ObTenantTransferService::get_related_table_schemas_(
       tenant_id_,
       table_schema.get_table_id(),
       schema_version,
-      sql_proxy,
+      *sql_proxy_,
       related_infos))) {
     LOG_WARN("fail to fetch_aux_tables", KR(ret), K_(tenant_id),
         K(primary_table_id), K(schema_status), K(related_table_ids), K(schema_version));
@@ -1072,14 +1167,13 @@ int ObTenantTransferService::generate_transfer_task(
     const ObLSID &dest_ls,
     const ObTransferPartList &part_list,
     const ObBalanceTaskID balance_task_id,
-    ObTransferTaskID &task_id)
+    ObTransferTask &task)
 {
   int ret = OB_SUCCESS;
-  task_id.reset();
 
-  if (IS_NOT_INIT) {
+  if (IS_NOT_INIT || OB_ISNULL(sql_proxy_)) {
     ret = OB_NOT_INIT;
-    LOG_WARN("not init", KR(ret));
+    LOG_WARN("not init", KR(ret), KP(sql_proxy_));
   } else if (OB_UNLIKELY(!src_ls.is_valid()
       || !dest_ls.is_valid()
       || part_list.empty()
@@ -1087,16 +1181,20 @@ int ObTenantTransferService::generate_transfer_task(
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid args", KR(ret), K(src_ls), K(dest_ls), K(part_list), K(balance_task_id));
   } else {
-    ObTransferTask task;
+    task.reset();
+    ObTransferTaskID task_id;
     ObCurTraceId::TraceId trace_id;
     trace_id.init(GCONF.self_addr_);
     ObTransferStatus status(ObTransferStatus::INIT);
     ObTransferPartList transfer_part_list;
-    const int64_t part_count = min(PART_COUNT_IN_A_TRANSFER, part_list.count());
+    const int64_t part_count = min(get_tablet_count_threshold_(), part_list.count());
+    uint64_t data_version = 0;
     if (OB_FAIL(transfer_part_list.reserve(part_count))) {
       LOG_WARN("reserve failed", KR(ret), K(part_count));
-    } else if (OB_FAIL(ObCommonIDUtils::gen_unique_id(tenant_id_, task_id))) {
-      LOG_WARN("gen_unique_id failed", KR(ret), K(task_id), K_(tenant_id));
+    } else if (OB_FAIL(ObShareUtil::fetch_current_data_version(*sql_proxy_, tenant_id_, data_version))) { // can not use trans
+      LOG_WARN("fetch current data version failed", KR(ret), K(tenant_id_));
+    } else if (OB_FAIL(ObTransferTaskOperator::generate_transfer_task_id(trans, tenant_id_, task_id))) {
+      LOG_WARN("fail to generate transfer task id", KR(ret), K_(tenant_id));
     } else {
       // process from the back of part_list makes it easier to remove when task is done
       for (int64_t i = part_list.count() - 1; OB_SUCC(ret) && (i >= part_list.count() - part_count); --i) {
@@ -1104,9 +1202,18 @@ int ObTenantTransferService::generate_transfer_task(
           LOG_WARN("push back failed", KR(ret), K(i), K(part_list), K(transfer_part_list));
         }
       }
-      if (FAILEDx(task.init(task_id, src_ls, dest_ls, transfer_part_list, status, trace_id, balance_task_id))) {
+      if (FAILEDx(task.init(
+          task_id,
+          src_ls,
+          dest_ls,
+          transfer_part_list,
+          status,
+          trace_id,
+          balance_task_id,
+          data_version))) {
         LOG_WARN("init transfer task failed", KR(ret), K(task_id), K(src_ls),
-          K(dest_ls), K(transfer_part_list), K(status), K(trace_id), K(balance_task_id));
+          K(dest_ls), K(transfer_part_list), K(status), K(trace_id),
+          K(balance_task_id), K(data_version));
       } else if (OB_FAIL(ObTransferTaskOperator::insert(trans, tenant_id_, task))) {
         LOG_WARN("insert failed", KR(ret), K_(tenant_id), K(task));
       }
@@ -1115,7 +1222,8 @@ int ObTenantTransferService::generate_transfer_task(
   return ret;
 }
 
-int ObTenantTransferService::try_cancel_transfer_task(const ObTransferTaskID task_id)
+int ObTenantTransferService::try_cancel_transfer_task(
+    const ObTransferTaskID task_id)
 {
   int ret = OB_SUCCESS;
   ObMySQLTransaction trans;
@@ -1206,12 +1314,12 @@ int ObTenantTransferService::try_cancel_transfer_task(const ObTransferTaskID tas
 
 int ObTenantTransferService::try_clear_transfer_task(
     const ObTransferTaskID task_id,
+    ObTransferTask &task,
     share::ObTransferPartList &all_part_list,
     share::ObTransferPartList &finished_part_list)
 {
   int ret = OB_SUCCESS;
   DEBUG_SYNC(BEFORE_PROCESS_BALANCE_TASK_TRANSFER_END);
-  ObTransferTask task;
   if (OB_FAIL(unlock_and_clear_task_(task_id, task))) {
     if (OB_ENTRY_NOT_EXIST == ret) {
       int64_t create_time = OB_INVALID_TIMESTAMP;
@@ -1352,7 +1460,7 @@ int ObTenantTransferService::unlock_table_and_part_(
     ObSimpleTableSchemaV2 *table_schema = NULL;
     const int64_t timeout_us = GCONF.internal_sql_execute_timeout;
     ObTransferPartInfo::Compare cmp;
-    std::sort(ordered_part_list.begin(), ordered_part_list.end(), cmp);
+    lib::ob_sort(ordered_part_list.begin(), ordered_part_list.end(), cmp);
 
     ARRAY_FOREACH(ordered_part_list, idx) {
       ObTabletID tablet_id;
@@ -1447,6 +1555,7 @@ int ObTenantTransferService::unlock_table_lock_(
         LOG_WARN("unlock partition failed", KR(ret), K(unlock_part_arg));
       }
     } else if (PARTITION_LEVEL_TWO == table_schema.get_part_level()) {
+      unlock_part_arg.is_sub_part_ = true;
       if (OB_FAIL(ObInnerConnectionLockUtil::unlock_subpartition(tenant_id_, unlock_part_arg, conn))) {
         LOG_WARN("unlock subpartition failed", KR(ret), K(unlock_part_arg));
       }
@@ -1476,17 +1585,31 @@ int ObTenantTransferService::notify_storage_transfer_service_(
   } else if (OB_ISNULL(GCTX.location_service_) || OB_ISNULL(GCTX.srv_rpc_proxy_)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("GCTX has null ptr", KR(ret), K(task_id), K_(tenant_id));
-  } else if (OB_FAIL(GCTX.location_service_->get_leader_with_retry_until_timeout(
-      GCONF.cluster_id,
-      tenant_id_,
-      src_ls,
-      leader_addr))) { // default 1s timeout
-    LOG_WARN("get leader failed", KR(ret), K(task_id),
-        "cluster_id", GCONF.cluster_id.get_value(), K_(tenant_id), K(src_ls), K(leader_addr));
-  } else if (OB_FAIL(GCTX.srv_rpc_proxy_->to(leader_addr).by(tenant_id_).start_transfer_task(arg))) {
-    LOG_WARN("send rpc failed", KR(ret), K(task_id), K(src_ls), K(leader_addr), K(arg));
+  } else {
+    const int64_t RETRY_CNT_LIMIT = 10;
+    int64_t retry_cnt = 0;
+    do {
+      if (OB_FAIL(ret)) {
+        ob_usleep(1_s);
+        ret = OB_SUCCESS;
+      }
+      if (FAILEDx(GCTX.location_service_->get_leader_with_retry_until_timeout(
+          GCONF.cluster_id,
+          tenant_id_,
+          src_ls,
+          leader_addr))) { // default 1s timeout
+        LOG_WARN("get leader failed", KR(ret), K(task_id), "cluster_id", GCONF.cluster_id.get_value(),
+            K_(tenant_id), K(src_ls), K(leader_addr));
+      } else if (OB_FAIL(GCTX.srv_rpc_proxy_->to(leader_addr)
+                                              .by(tenant_id_)
+                                              .group_id(share::OBCG_TRANSFER)
+                                              .start_transfer_task(arg))) {
+        LOG_WARN("send rpc failed", KR(ret), K(task_id), K(src_ls), K(leader_addr), K(arg), K(retry_cnt));
+      }
+    } while (OB_FAIL(ret) && ++retry_cnt <= RETRY_CNT_LIMIT);
+    TTS_INFO("send rpc to storage finished", KR(ret),
+        K(task_id), K(src_ls), K(leader_addr), K(arg), K(retry_cnt));
   }
-  TTS_INFO("send rpc to storage finished", KR(ret), K(task_id), K(src_ls), K(leader_addr), K(arg));
   return ret;
 }
 
@@ -1619,8 +1742,8 @@ int ObTenantTransferService::update_comment_for_expected_errors_(
     LOG_WARN("invalid task_id", KR(ret), K(task_id));
   } else if (OB_TRANS_TIMEOUT == err || OB_TIMEOUT == err) {
     actual_comment = TRANSACTION_TIMEOUT;
-  } else if (OB_NEED_RETRY == err) {
-    if (WAIT_FOR_MEMBER_LIST != result_comment && INACTIVE_SERVER_IN_MEMBER_LIST != result_comment) {
+  } else if (OB_NEED_RETRY == err || OB_NEED_WAIT == err) {
+    if (result_comment < EMPTY_COMMENT || result_comment >= MAX_COMMENT) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("unexpected comment with err", KR(ret), K(err), K(result_comment));
     } else {
@@ -1637,6 +1760,77 @@ int ObTenantTransferService::update_comment_for_expected_errors_(
       task_id,
       actual_comment))) {
     LOG_WARN("update comment failed", KR(ret), K_(tenant_id), K(task_id), K(actual_comment));
+  }
+  return ret;
+}
+
+int64_t ObTenantTransferService::get_tablet_count_threshold_() const
+{
+  const int64_t DEFAULT_TABLET_COUNT_THRESHOLD = 100;
+  int64_t tablet_count_threshold = DEFAULT_TABLET_COUNT_THRESHOLD;
+  if (is_valid_tenant_id(tenant_id_)) {
+    omt::ObTenantConfigGuard tenant_config(TENANT_CONF(tenant_id_));
+    tablet_count_threshold = tenant_config.is_valid()
+        ? tenant_config->_transfer_task_tablet_count_threshold
+        : DEFAULT_TABLET_COUNT_THRESHOLD;
+  }
+  return tablet_count_threshold;
+}
+
+#ifdef OB_BUILD_SHARED_STORAGE
+int ObTenantTransferService::lock_and_check_tenant_merge_status_(
+    ObMySQLTransaction &trans,
+    bool &need_wait)
+{
+  int ret = OB_SUCCESS;
+  need_wait = false;
+  SCN snapshot_gc_scn;
+  ObGlobalMergeInfo merge_info;
+  ObFreezeInfo max_frozen_status;
+  ObFreezeInfoProxy freeze_info_proxy(tenant_id_);
+  if (IS_NOT_INIT || OB_ISNULL(sql_proxy_)) {
+    ret = OB_NOT_INIT;
+    LOG_WARN("not init", KR(ret), KP(sql_proxy_));
+  } else if (OB_FAIL(ObGlobalStatProxy::select_snapshot_gc_scn_for_update(
+      trans,
+      tenant_id_,
+      snapshot_gc_scn))) { // lock snapshot_gc_ts to ensure that freeze_info has not changed
+    LOG_WARN("select snapshot_gc_scn for update failed", KR(ret), K(tenant_id_));
+  } else if (OB_FAIL(freeze_info_proxy.get_max_freeze_info(*sql_proxy_, max_frozen_status))) {
+    LOG_WARN("fail to get freeze info with max frozen_scn", KR(ret), K(tenant_id_));
+  } else if (OB_FAIL(ObGlobalMergeTableOperator::load_global_merge_info(
+      *sql_proxy_,
+      tenant_id_,
+      merge_info))) {
+    LOG_WARN("fail to get global merge info", KR(ret), K(tenant_id_));
+  } else if (max_frozen_status.frozen_scn_ != merge_info.frozen_scn()
+      || merge_info.frozen_scn() != merge_info.global_broadcast_scn()
+      || merge_info.frozen_scn() != merge_info.last_merged_scn()) {
+    need_wait = true;
+    TTS_INFO("tenant needs merge or in merge process, can not do transfer",
+        K(tenant_id_), K(need_wait), K(merge_info), K(max_frozen_status));
+  }
+  return ret;
+}
+#endif
+
+// Try to limit the number of tablet_list to _transfer_task_tablet_count_threshold.
+// In the worst case, there will be OB_MAX_TRANSFER_BINDING_TABLET_CNT tablets in tablet_list.
+int ObTenantTransferService::check_tablet_count_by_threshold_(
+    const ObIArray<ObTabletID> &tablet_ids,
+    const int64_t new_tablet_cnt,
+    bool &exceed_threshold)
+{
+  int ret = OB_SUCCESS;
+  exceed_threshold = false;
+  if (OB_UNLIKELY(tablet_ids.count() > OB_MAX_TRANSFER_BINDING_TABLET_CNT)) {
+    exceed_threshold = true;
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("too many tablets in a transfer task",
+        KR(ret), K(new_tablet_cnt), "tablet_ids_count", tablet_ids.count(),
+        "tablet_count_limit", OB_MAX_TRANSFER_BINDING_TABLET_CNT);
+  } else {
+    exceed_threshold = (tablet_ids.count() + new_tablet_cnt > get_tablet_count_threshold_());
   }
   return ret;
 }

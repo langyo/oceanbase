@@ -10,7 +10,6 @@
  * See the Mulan PubL v2 for more details.
  */
 #define USING_LOG_PREFIX STORAGE
-#include "lib/stat/ob_diagnose_info.h"
 #include "ob_cg_sstable_row_getter.h"
 
 namespace oceanbase
@@ -39,6 +38,8 @@ void ObCGGetter::reset()
 void ObCGGetter::reuse()
 {
   is_inited_ = false;
+  sstable_ = nullptr;
+  table_wrapper_.reset();
   is_same_data_block_ = false;
   prefetcher_.reuse();
 }
@@ -46,7 +47,7 @@ void ObCGGetter::reuse()
 int ObCGGetter::init(
     const ObTableIterParam &iter_param,
     ObTableAccessContext &access_ctx,
-    ObCGTableWrapper &wrapper,
+    ObSSTableWrapper &wrapper,
     const blocksstable::ObDatumRowkey &idx_key)
 {
   int ret = OB_SUCCESS;
@@ -55,12 +56,12 @@ int ObCGGetter::init(
     ret = OB_INIT_TWICE;
     LOG_WARN("The ObCGGetter has been inited", K(ret));
   } else if (OB_UNLIKELY(!wrapper.is_valid() ||
-                         !wrapper.cg_sstable_->is_normal_cg_sstable() ||
+                         !wrapper.get_sstable()->is_normal_cg_sstable() ||
                          !iter_param.is_valid() ||
                          1 != idx_key.get_datum_cnt())) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("Invalid argument to init ObCGGetter", K(ret), K(wrapper), K(iter_param));
-  } else if (OB_FAIL(wrapper.get_sstable(sstable))) {
+  } else if (OB_FAIL(wrapper.get_loaded_column_store_sstable(sstable))) {
     LOG_WARN("fail to get sstable", K(ret), K(wrapper));
   } else {
     is_same_data_block_ = false;
@@ -85,8 +86,9 @@ int ObCGGetter::init(
       } else {
         ObMicroBlockDataHandle &micro_handle = prefetcher_.get_last_data_handle();
         is_same_data_block_ =
-            micro_handle.in_block_state() &&
+            nullptr != sstable_ &&
             sstable->get_key() == sstable_->get_key() &&
+            micro_handle.in_block_state() &&
             0 == read_handle_.index_block_info_.get_row_range().compare(idx_key.datums_[0].get_int()) &&
             micro_handle.match(
                 read_handle_.index_block_info_.get_macro_id(),
@@ -190,6 +192,7 @@ void ObCGSSTableRowGetter::reuse()
 {
   is_inited_ = false;
   row_.reuse();
+  co_sstable_ = nullptr;
   ObStoreRowIterator::reuse();
 }
 
@@ -330,7 +333,7 @@ int ObCGSSTableRowGetter::prepare_cg_row_getter(const ObCSRowId row_id, const Ob
     const ObColumnIndexArray &cols_index = read_info->get_columns_index();
     int64_t column_cnt = (nullptr == nop_pos) ? iter_param_->get_out_col_cnt() : nop_pos->count();
     int64_t column_group_cnt = co_sstable_->get_cs_meta().get_column_group_count();
-    ObCGTableWrapper table_wrapper;
+    ObSSTableWrapper table_wrapper;
     ObTableIterParam* cg_param = nullptr;
     int32_t cg_idx = INT32_MAX;
     row_idx_datum_.reuse();
@@ -412,7 +415,7 @@ int ObCGSSTableRowGetter::fetch_row(ObSSTableReadHandle &read_handle, const ObNo
     if (OB_SUCC(ret) && iter_param_->need_scn_) {
       if (OB_FAIL(fetch_rowkey_row(read_handle, store_row))) {
         LOG_WARN("Fail to fetch row", K(ret));
-      } else if (OB_FAIL(set_row_scn(*iter_param_, store_row))) {
+      } else if (OB_FAIL(set_row_scn(access_ctx_->use_fuse_row_cache_, *iter_param_, store_row))) {
         LOG_WARN("failed to set row scn", K(ret));
       } else {
         int64_t trans_idx = iter_param_->get_read_info()->get_trans_col_index();
@@ -457,7 +460,7 @@ int ObCGSSTableRowGetter::fetch_rowkey_row(ObSSTableReadHandle &read_handle, con
   } else if (OB_FAIL(micro_getter_->get_row(
               read_handle,
               store_row,
-              macro_block_reader_))) {
+              &macro_block_reader_))) {
     LOG_WARN("Fail to get row", K(ret));
   }
   return ret;

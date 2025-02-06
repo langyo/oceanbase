@@ -13,8 +13,7 @@
 #define USING_LOG_PREFIX RS
 
 #include "ob_drop_index_task.h"
-#include "share/schema/ob_multi_version_schema_service.h"
-#include "share/ob_ddl_error_message_table_operator.h"
+#include "share/ob_ddl_sim_point.h"
 #include "rootserver/ob_root_service.h"
 
 using namespace oceanbase::rootserver;
@@ -26,7 +25,9 @@ using namespace oceanbase::share::schema;
 using namespace oceanbase::sql;
 
 ObDropIndexTask::ObDropIndexTask()
-  : ObDDLTask(DDL_DROP_INDEX), wait_trans_ctx_(), drop_index_arg_()
+  : ObDDLTask(DDL_DROP_INDEX),
+    root_service_(nullptr),
+    drop_index_arg_()
 {
 }
 
@@ -37,11 +38,13 @@ ObDropIndexTask::~ObDropIndexTask()
 int ObDropIndexTask::init(
     const uint64_t tenant_id,
     const int64_t task_id,
+    const share::ObDDLType &ddl_type,
     const uint64_t data_table_id,
     const uint64_t index_table_id,
     const int64_t schema_version,
     const int64_t parent_task_id,
     const int64_t consumer_group_id,
+    const int32_t sub_task_trace_id,
     const obrpc::ObDropIndexArg &drop_index_arg)
 {
   int ret = OB_SUCCESS;
@@ -56,19 +59,19 @@ int ObDropIndexTask::init(
   } else if (OB_FAIL(deep_copy_index_arg(allocator_, drop_index_arg, drop_index_arg_))) {
     LOG_WARN("deep copy drop index arg failed", K(ret));
   } else {
-    set_gmt_create(ObTimeUtility::current_time());
     tenant_id_ = tenant_id;
     object_id_ = data_table_id;
     target_object_id_ = index_table_id;
     schema_version_ = schema_version;
     task_id_ = task_id;
+    task_type_ = ddl_type;
     parent_task_id_ = parent_task_id;
     consumer_group_id_ = consumer_group_id;
+    sub_task_trace_id_ = sub_task_trace_id;
     task_version_ = OB_DROP_INDEX_TASK_VERSION;
     dst_tenant_id_ = tenant_id_;
     dst_schema_version_ = schema_version_;
     is_inited_ = true;
-    ddl_tracing_.open();
   }
   return ret;
 }
@@ -95,9 +98,10 @@ int ObDropIndexTask::init(
     ret_code_ = task_record.ret_code_;
     dst_tenant_id_ = tenant_id_;
     dst_schema_version_ = schema_version_;
+    task_type_ = task_record.ddl_type_; // could be drop index / mlog
     if (nullptr != task_record.message_.ptr()) {
       int64_t pos = 0;
-      if (OB_FAIL(deserlize_params_from_message(task_record.tenant_id_, task_record.message_.ptr(), task_record.message_.length(), pos))) {
+      if (OB_FAIL(deserialize_params_from_message(task_record.tenant_id_, task_record.message_.ptr(), task_record.message_.length(), pos))) {
         LOG_WARN("deserialize params from message failed", K(ret));
       }
     }
@@ -143,11 +147,14 @@ int ObDropIndexTask::update_index_status(const ObIndexStatus new_status)
     arg.status_ = new_status;
     arg.exec_tenant_id_ = tenant_id_;
     arg.in_offline_ddl_white_list_ = index_schema->get_table_state_flag() != TABLE_STATE_NORMAL;
+    arg.data_table_id_ = index_schema->get_data_table_id();
     int64_t ddl_rpc_timeout = 0;
     int64_t table_id = index_schema->get_table_id();
     DEBUG_SYNC(BEFORE_UPDATE_GLOBAL_INDEX_STATUS);
     if (OB_FAIL(ObDDLUtil::get_ddl_rpc_timeout(tenant_id_, table_id, ddl_rpc_timeout))) {
       LOG_WARN("get ddl rpc timeout fail", K(ret));
+    } else if (OB_FAIL(DDL_SIM(tenant_id_, task_id_, UPDATE_INDEX_STATUS_FAILED))) {
+      LOG_WARN("ddl sim failure", K(ret), K(tenant_id_), K(task_id_));
     } else if (OB_FAIL(root_service_->get_common_rpc_proxy().to(GCTX.self_addr()).timeout(ddl_rpc_timeout).update_index_status(arg))) {
       LOG_WARN("update index status failed", K(ret), K(arg));
     } else {
@@ -207,6 +214,7 @@ int ObDropIndexTask::drop_index_impl()
   bool is_index_exist = false;
   ObString index_name;
   const ObTableSchema *index_schema = nullptr;
+  const bool is_mlog = (obrpc::ObIndexArg::DROP_MLOG == drop_index_arg_.index_action_type_);
   if (OB_ISNULL(root_service_)) {
     ret = OB_ERR_SYS;
     LOG_WARN("error sys, root_service is nullptr", K(ret));
@@ -221,7 +229,10 @@ int ObDropIndexTask::drop_index_impl()
   } else if (OB_ISNULL(index_schema)) {
     ret = OB_SCHEMA_ERROR;
     LOG_WARN("index schema is null", K(ret), K(target_object_id_));
-  } else if (OB_FAIL(index_schema->get_index_name(index_name))) {
+  } else if (is_mlog && OB_FAIL(index_schema->get_mlog_name(index_name))) {
+    LOG_WARN("failed to get materialized view log name",
+        KR(ret), K(index_schema->get_table_type()), KPC(index_schema));
+  } else if (!is_mlog && OB_FAIL(index_schema->get_index_name(index_name))) {
     LOG_WARN("get index name failed", K(ret), K(index_schema->get_table_type()), KPC(index_schema));
   } else if (OB_FAIL(schema_guard.get_database_schema(tenant_id_, index_schema->get_database_id(), database_schema))) {
     LOG_WARN("get database schema failed", K(ret), K(index_schema->get_database_id()));
@@ -244,12 +255,14 @@ int ObDropIndexTask::drop_index_impl()
     drop_index_arg.index_name_        = index_name;
     drop_index_arg.table_name_        = data_table_schema->get_table_name();
     drop_index_arg.database_name_     = database_schema->get_database_name_str();
-    drop_index_arg.index_action_type_ = obrpc::ObIndexArg::DROP_INDEX;
+    drop_index_arg.index_action_type_ = drop_index_arg_.index_action_type_;
     drop_index_arg.ddl_stmt_str_      = drop_index_sql.string();
     drop_index_arg.is_add_to_scheduler_ = false;
     drop_index_arg.task_id_           = task_id_;
     if (OB_FAIL(ObDDLUtil::get_ddl_rpc_timeout(index_schema->get_all_part_num() + data_table_schema->get_all_part_num(), ddl_rpc_timeout))) {
       LOG_WARN("failed to get ddl rpc timeout", K(ret));
+    } else if (OB_FAIL(DDL_SIM(tenant_id_, task_id_, DROP_INDEX_RPC_FAILED))) {
+      LOG_WARN("ddl sim failure", K(ret), K(tenant_id_), K(task_id_));
     } else if (OB_FAIL(root_service_->get_common_rpc_proxy().timeout(ddl_rpc_timeout).drop_index(drop_index_arg, drop_index_res))) {
       LOG_WARN("drop index failed", K(ret), K(ddl_rpc_timeout));
     }
@@ -343,10 +356,14 @@ int ObDropIndexTask::process()
         }
         break;
       case ObDDLTaskStatus::WAIT_TRANS_END_FOR_UNUSABLE:
-        if (OB_FAIL(wait_trans_end(wait_trans_ctx_, DROP_SCHEMA))) {
+        {
+        ObDDLTaskStatus next_status = drop_index_arg_.only_set_status_?
+                                      SUCCESS : DROP_SCHEMA;
+        if (OB_FAIL(wait_trans_end(wait_trans_ctx_, next_status))) {
           LOG_WARN("wait trans end failed", K(ret));
         }
         break;
+        }
       case ObDDLTaskStatus::DROP_SCHEMA:
         if (OB_FAIL(drop_index(SUCCESS))) {
           LOG_WARN("drop index failed", K(ret));
@@ -367,6 +384,10 @@ int ObDropIndexTask::process()
         LOG_WARN("error unexpected, task status is not valid", K(ret), K(task_status_));
     }
     ddl_tracing_.release_span_hierarchy();
+    if (OB_FAIL(ret)) {
+      add_event_info("drop index task process fail");
+      LOG_INFO("drop index task process fail", "ddl_event_info", ObDDLEventInfo());
+    }
   }
   return ret;
 }
@@ -383,6 +404,13 @@ int ObDropIndexTask::check_switch_succ()
   } else if (OB_ISNULL(root_service_)) {
     ret = OB_ERR_SYS;
     LOG_WARN("error sys", K(ret));
+  } else if (OB_FAIL(ObDDLUtil::check_tenant_status_normal(&root_service_->get_sql_proxy(), tenant_id_))) {
+    if (OB_TENANT_HAS_BEEN_DROPPED == ret || OB_STANDBY_READ_ONLY == ret) {
+      need_retry_ = false;
+      LOG_INFO("tenant status is abnormal, exit anyway", K(ret), K(tenant_id_));
+    } else {
+      LOG_WARN("check tenant status failed", K(ret), K(tenant_id_));
+    }
   } else if (OB_FAIL(refresh_schema_version())) {
     LOG_WARN("refresh schema version failed", K(ret));
   } else if (OB_FAIL(root_service_->get_schema_service().get_tenant_schema_guard(tenant_id_, schema_guard))) {
@@ -433,14 +461,14 @@ int ObDropIndexTask::serialize_params_to_message(char *buf, const int64_t buf_si
   return ret;
 }
 
-int ObDropIndexTask::deserlize_params_from_message(const uint64_t tenant_id, const char *buf, const int64_t buf_size, int64_t &pos)
+int ObDropIndexTask::deserialize_params_from_message(const uint64_t tenant_id, const char *buf, const int64_t buf_size, int64_t &pos)
 {
   int ret = OB_SUCCESS;
   obrpc::ObDropIndexArg tmp_drop_index_arg;
   if (OB_UNLIKELY(!is_valid_tenant_id(tenant_id) || nullptr == buf || buf_size <= 0)) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid arg", K(ret), K(tenant_id), KP(buf), K(buf_size));
-  } else if (OB_FAIL(ObDDLTask::deserlize_params_from_message(tenant_id, buf, buf_size, pos))) {
+  } else if (OB_FAIL(ObDDLTask::deserialize_params_from_message(tenant_id, buf, buf_size, pos))) {
     LOG_WARN("ObDDLTask deserlize failed", K(ret));
   } else if (OB_FAIL(tmp_drop_index_arg.deserialize(buf, buf_size, pos))) {
     LOG_WARN("deserialize failed", K(ret));
@@ -455,52 +483,4 @@ int ObDropIndexTask::deserlize_params_from_message(const uint64_t tenant_id, con
 int64_t ObDropIndexTask::get_serialize_param_size() const
 {
   return drop_index_arg_.get_serialize_size() + ObDDLTask::get_serialize_param_size();
-}
-
-void ObDropIndexTask::flt_set_task_span_tag() const
-{
-  FLT_SET_TAG(ddl_task_id, task_id_, ddl_parent_task_id, parent_task_id_,
-              ddl_data_table_id, object_id_, ddl_index_table_id, target_object_id_,
-              ddl_schema_version, schema_version_);
-}
-
-void ObDropIndexTask::flt_set_status_span_tag() const
-{
-  switch (task_status_) {
-  case ObDDLTaskStatus::PREPARE: {
-    FLT_SET_TAG(ddl_ret_code, ret_code_);
-    break;
-  }
-  case ObDDLTaskStatus::SET_WRITE_ONLY: {
-    FLT_SET_TAG(ddl_ret_code, ret_code_);
-    break;
-  }
-  case ObDDLTaskStatus::WAIT_TRANS_END_FOR_WRITE_ONLY: {
-    FLT_SET_TAG(ddl_data_table_id, object_id_, ddl_snapshot_version, snapshot_version_, ddl_ret_code, ret_code_);
-    break;
-  }
-  case ObDDLTaskStatus::SET_UNUSABLE: {
-    FLT_SET_TAG(ddl_ret_code, ret_code_);
-    break;
-  }
-  case ObDDLTaskStatus::WAIT_TRANS_END_FOR_UNUSABLE: {
-    FLT_SET_TAG(ddl_data_table_id, object_id_, ddl_snapshot_version, snapshot_version_, ddl_ret_code, ret_code_);
-    break;
-  }
-  case ObDDLTaskStatus::DROP_SCHEMA: {
-    FLT_SET_TAG(ddl_index_table_id, target_object_id_, ddl_ret_code, ret_code_);
-    break;
-  }
-  case ObDDLTaskStatus::FAIL: {
-    FLT_SET_TAG(ddl_ret_code, ret_code_);
-    break;
-  }
-  case ObDDLTaskStatus::SUCCESS: {
-    FLT_SET_TAG(ddl_ret_code, ret_code_);
-    break;
-  }
-  default: {
-    break;
-  }
-  }
 }

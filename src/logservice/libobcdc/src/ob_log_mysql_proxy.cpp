@@ -17,7 +17,6 @@
 #include "ob_log_mysql_proxy.h"                           // ObLogMysqlProxy
 
 #include "lib/mysqlclient/ob_mysql_server_provider.h"     // ObMySQLServerProvider
-#include "ob_log_utils.h"                                 // is_mysql_client_errno
 #include "share/ob_thread_mgr.h"
 #include "ob_log_mysql_connector.h"                       // ObLogMySQLConnector
 #include "ob_log_config.h"                                // TCONF
@@ -84,13 +83,13 @@ int ObLogMysqlProxy::init(
     const char *db_name = nullptr;
     if (is_tenant_server_provider) {
       // tenant conn poll will always query via sys tenant
-      db_name = ObLogMySQLConnector::DEFAULT_DB_NAME_MYSQL_MODE;
+      db_name = OB_SYS_DATABASE_NAME;
     } else if (OB_FAIL(detect_tenant_mode_(server_provider))) {
     LOG_ERROR("detect_tenant_mode_ failed", KR(ret), K(cluster_user), K(cluster_password));
     } else if (is_oracle_mode_) {
-      db_name = ObLogMySQLConnector::DEFAULT_DB_NAME_ORACLE_MODE;
+      db_name = OB_ORA_SYS_SCHEMA_NAME;
     } else {
-      db_name = ObLogMySQLConnector::DEFAULT_DB_NAME_MYSQL_MODE;
+      db_name = OB_SYS_DATABASE_NAME;
     }
     ObConnPoolConfigParam conn_pool_config;
     conn_pool_config.reset();

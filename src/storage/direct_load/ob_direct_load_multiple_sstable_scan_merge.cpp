@@ -13,7 +13,6 @@
 
 #include "storage/direct_load/ob_direct_load_multiple_sstable_scan_merge.h"
 #include "storage/direct_load/ob_direct_load_dml_row_handler.h"
-#include "storage/blocksstable/ob_datum_range.h"
 #include "storage/direct_load/ob_direct_load_multiple_datum_range.h"
 #include "storage/direct_load/ob_direct_load_multiple_sstable_scanner.h"
 
@@ -57,6 +56,9 @@ ObDirectLoadMultipleSSTableScanMerge::ObDirectLoadMultipleSSTableScanMerge()
     rows_merger_(nullptr),
     is_inited_(false)
 {
+  allocator_.set_tenant_id(MTL_ID());
+  scanners_.set_tenant_id(MTL_ID());
+  rows_.set_tenant_id(MTL_ID());
 }
 
 ObDirectLoadMultipleSSTableScanMerge::~ObDirectLoadMultipleSSTableScanMerge() { reset(); }
@@ -100,7 +102,6 @@ int ObDirectLoadMultipleSSTableScanMerge::init(
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid args", KR(ret), K(param), K(sstable_array), K(range));
   } else {
-    allocator_.set_tenant_id(MTL_ID());
     // construct scanners
     for (int64_t i = 0; OB_SUCC(ret) && i < sstable_array.count(); ++i) {
       ObDirectLoadMultipleSSTable *sstable = sstable_array.at(i);
@@ -284,6 +285,7 @@ int ObDirectLoadMultipleSSTableScanMerge::get_next_row(const ObDatumRow *&datum_
                  multiple_datum_row->to_datums(datum_row_.storage_datums_, datum_row_.count_))) {
       LOG_WARN("fail to transfer datum row", KR(ret));
     } else {
+      datum_row_.row_flag_.set_flag(multiple_datum_row->is_deleted_? ObDmlFlag::DF_DELETE : ObDmlFlag::DF_INSERT);
       datum_row = &datum_row_;
     }
   }

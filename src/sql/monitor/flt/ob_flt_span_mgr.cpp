@@ -13,20 +13,9 @@
 
 #define USING_LOG_PREFIX SERVER
 
-#include "sql/monitor/flt/ob_flt_span_mgr.h"
-#include "share/ob_define.h"
-#include "lib/time/ob_time_utility.h"
-#include "lib/allocator/ob_malloc.h"
-#include "lib/allocator/ob_concurrent_fifo_allocator.h"
-#include "lib/allocator/page_arena.h"
-#include "lib/stat/ob_session_stat.h"
-#include "lib/alloc/alloc_func.h"
-#include "lib/thread/thread_mgr.h"
+#include "ob_flt_span_mgr.h"
 #include "lib/rc/ob_rc.h"
-#include "share/rc/ob_context.h"
 #include "observer/ob_server.h"
-#include "sql/session/ob_basic_session_info.h"
-#include "lib/trace/ob_trace.h"
 
 namespace oceanbase
 {
@@ -81,23 +70,12 @@ namespace sql
   {
     int ret = OB_SUCCESS;
     uint64_t tenant_id = lib::current_resource_owner_id();
-    span_mgr = OB_NEW(ObFLTSpanMgr, ObMemAttr(tenant_id, "SqlFltSpanRec"));
-    if (nullptr == span_mgr) {
-      ret = OB_ALLOCATE_MEMORY_FAILED;
-      LOG_WARN("failed to alloc memory for ObMySQLRequestManager", K(ret));
+    int64_t mem_limit = lib::get_tenant_memory_limit(tenant_id);
+    int64_t queue_size = MAX_QUEUE_SIZE;
+    if (OB_FAIL(span_mgr->init(tenant_id, mem_limit, queue_size))) {
+      LOG_WARN("failed to init request manager", K(ret));
     } else {
-      int64_t mem_limit = lib::get_tenant_memory_limit(tenant_id);
-      int64_t queue_size = MAX_QUEUE_SIZE;
-      if (OB_FAIL(span_mgr->init(tenant_id, mem_limit, queue_size))) {
-        LOG_WARN("failed to init request manager", K(ret));
-      } else {
-        // do nothing
-      }
-    }
-    if (OB_FAIL(ret) && span_mgr != nullptr) {
-      // cleanup
-      common::ob_delete(span_mgr);
-      span_mgr = nullptr;
+      // do nothing
     }
     return ret;
   }

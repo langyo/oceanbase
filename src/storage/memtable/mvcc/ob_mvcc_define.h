@@ -27,6 +27,8 @@ class ObRowData;
 // Arguments for building tx node
 struct ObTxNodeArg
 {
+  // trans id
+  transaction::ObTransID tx_id_;
   // data_ is the new row of the modifiction
   const ObMemtableData *data_;
   // old_row_ is the old row of the modificattion
@@ -42,36 +44,45 @@ struct ObTxNodeArg
   int64_t memstore_version_;
   // seq_no_ is the sequence no of the executing sql
   transaction::ObTxSEQ seq_no_;
+  // parallel write epoch no
+  int64_t write_epoch_;
   // scn_ is thee log ts of the redo log
   share::SCN scn_;
   int64_t column_cnt_;
 
-  TO_STRING_KV(KP_(data),
+  TO_STRING_KV(K_(tx_id),
+               KP_(data),
                KP_(old_row),
                K_(modify_count),
                K_(acc_checksum),
                K_(memstore_version),
                K_(seq_no),
+               K_(write_epoch),
                K_(scn),
                K_(column_cnt));
 
   // Constructor for leader
-  ObTxNodeArg(const ObMemtableData *data,
+  ObTxNodeArg(const transaction::ObTransID tx_id,
+              const ObMemtableData *data,
               const ObRowData *old_row,
               const int64_t memstore_version,
               const transaction::ObTxSEQ seq_no,
+              const int64_t write_epoch,
               const int64_t column_cnt)
-    : data_(data),
+    : tx_id_(tx_id),
+    data_(data),
     old_row_(old_row),
     modify_count_(UINT32_MAX),
     acc_checksum_(0),
     memstore_version_(memstore_version),
     seq_no_(seq_no),
+    write_epoch_(write_epoch),
     scn_(share::SCN::max_scn()),
     column_cnt_(column_cnt) {}
 
   // Constructor for follower
-  ObTxNodeArg(const ObMemtableData *data,
+  ObTxNodeArg(const transaction::ObTransID tx_id,
+              const ObMemtableData *data,
               const ObRowData *old_row,
               const int64_t memstore_version,
               const transaction::ObTxSEQ seq_no,
@@ -79,22 +90,26 @@ struct ObTxNodeArg
               const uint32_t acc_checksum,
               const share::SCN scn,
               const int64_t column_cnt)
-    : data_(data),
+    : tx_id_(tx_id),
+    data_(data),
     old_row_(old_row),
     modify_count_(modify_count),
     acc_checksum_(acc_checksum),
     memstore_version_(memstore_version),
     seq_no_(seq_no),
+    write_epoch_(0),
     scn_(scn),
     column_cnt_(column_cnt) {}
 
   void reset() {
+    tx_id_.reset();
     data_ = NULL;
     old_row_ = NULL;
     modify_count_ = 0;
     acc_checksum_ = 0;
     memstore_version_ = 0;
     seq_no_.reset();
+    write_epoch_ = 0;
     scn_ = share::SCN::min_scn();
     column_cnt_ = 0;
   }
@@ -172,6 +187,17 @@ public:
   }
 };
 
+// used only for debug during mvcc_write
+struct ObMvccWriteDebugInfo {
+  ObMvccWriteDebugInfo()
+    : memtable_iterate_cnt_(0),
+    sstable_iterate_cnt_(0) {}
+
+  int64_t memtable_iterate_cnt_;
+  int64_t sstable_iterate_cnt_;
+  // TODO(handora.qc): add more debug info if necessary
+  // int64_t exist_table_bitmap_;
+};
 
 } // namespace memtable
 } // namespace oceanbase

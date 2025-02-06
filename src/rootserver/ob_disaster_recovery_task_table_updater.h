@@ -35,27 +35,6 @@ public:
         need_record_event_(true),
         ret_comment_(ObDRTaskRetComment::MAX),
         add_timestamp_(OB_INVALID_TIMESTAMP) {}
-  explicit ObDRTaskTableUpdateTask(
-      const uint64_t tenant_id,
-      const share::ObLSID &ls_id,
-      const ObDRTaskType &task_type,
-      const share::ObTaskId &task_id,
-      const ObDRTaskKey &task_key,
-      const int ret_code,
-      const bool need_clear_server_data_in_limit,
-      const bool need_record_event,
-      const ObDRTaskRetComment &ret_comment,
-      const int64_t add_timestamp)
-      : tenant_id_(tenant_id),
-        ls_id_(ls_id),
-        task_type_(task_type),
-        task_id_(task_id),
-        task_key_(),
-        ret_code_(ret_code),
-        need_clear_server_data_in_limit_(need_clear_server_data_in_limit),
-        need_record_event_(need_record_event),
-        ret_comment_(ret_comment),
-        add_timestamp_(add_timestamp) { task_key_ = task_key; }
   virtual ~ObDRTaskTableUpdateTask() {}
   int init(
       const uint64_t tenant_id,
@@ -92,8 +71,6 @@ public:
   // unused functions
   virtual bool is_barrier() const { return false; }
   virtual bool need_process_alone() const { return true; }
-  virtual bool need_assign_when_equal() const { return false; }
-  virtual int assign_when_equal(const ObDRTaskTableUpdateTask &other);
 
   TO_STRING_KV(K_(tenant_id), K_(ls_id), K_(task_type), K_(task_id),
                K_(task_key), K_(ret_code), K_(need_clear_server_data_in_limit),

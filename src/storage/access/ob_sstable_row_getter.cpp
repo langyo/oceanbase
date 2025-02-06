@@ -12,7 +12,6 @@
 
 #define USING_LOG_PREFIX STORAGE
 #include "ob_sstable_row_getter.h"
-#include "lib/stat/ob_diagnose_info.h"
 
 namespace oceanbase
 {
@@ -22,20 +21,21 @@ namespace storage
 {
 ObSSTableRowGetter::~ObSSTableRowGetter()
 {
-  FREE_PTR_FROM_CONTEXT(access_ctx_, micro_getter_, ObMicroBlockRowGetter);
+  FREE_ITER_FROM_ALLOCATOR(long_life_allocator_, micro_getter_, ObMicroBlockRowGetter);
+  FREE_ITER_FROM_ALLOCATOR(long_life_allocator_, macro_block_reader_, ObMacroBlockReader);
 }
 
 void ObSSTableRowGetter::reset()
 {
-  ObStoreRowIterator::reset();
-  FREE_PTR_FROM_CONTEXT(access_ctx_, micro_getter_, ObMicroBlockRowGetter);
+  FREE_ITER_FROM_ALLOCATOR(long_life_allocator_, micro_getter_, ObMicroBlockRowGetter);
+  FREE_ITER_FROM_ALLOCATOR(long_life_allocator_, macro_block_reader_, ObMacroBlockReader);
   is_opened_ = false;
   has_fetched_ = false;
   iter_param_ = nullptr;
   access_ctx_ = nullptr;
-  rowkey_ = nullptr;
   prefetcher_.reset();
   read_handle_.reset();
+  ObStoreRowIterator::reset();
 }
 
 void ObSSTableRowGetter::reuse()
@@ -43,8 +43,19 @@ void ObSSTableRowGetter::reuse()
   ObStoreRowIterator::reuse();
   is_opened_ = false;
   has_fetched_ = false;
+  sstable_ = nullptr;
   prefetcher_.reuse();
   read_handle_.reset();
+}
+
+void ObSSTableRowGetter::reclaim()
+{
+  is_opened_ = false;
+  has_fetched_ = false;
+  prefetcher_.reclaim();
+  read_handle_.reset();
+  ObStoreRowIterator::reset();
+  is_reclaimed_ = true;
 }
 
 int ObSSTableRowGetter::inner_open(
@@ -64,10 +75,9 @@ int ObSSTableRowGetter::inner_open(
     LOG_WARN("Invalid argument to init ObSSTableRowGetter", K(ret), KP(query_range), KP(table));
   } else {
     sstable_ = static_cast<ObSSTable *>(table);
-    rowkey_ = static_cast<const blocksstable::ObDatumRowkey *>(query_range);
     iter_param_ = &iter_param;
     access_ctx_ = &access_ctx;
-    read_handle_.rowkey_ = rowkey_;
+    read_handle_.rowkey_ = static_cast<const blocksstable::ObDatumRowkey *>(query_range);
     read_handle_.range_idx_ = 0;
     read_handle_.is_get_ = true;
     if (!prefetcher_.is_valid()) {
@@ -114,11 +124,18 @@ int ObSSTableRowGetter::inner_get_next_row(const ObDatumRow *&store_row)
     ObDatumRow &datum_row = *const_cast<ObDatumRow *>(store_row);
     if (!store_row->row_flag_.is_not_exist() &&
         iter_param_->need_scn_ &&
-        OB_FAIL(set_row_scn(*iter_param_, store_row))) {
+        OB_FAIL(set_row_scn(access_ctx_->use_fuse_row_cache_, *iter_param_, store_row))) {
       LOG_WARN("failed to set row scn", K(ret));
     }
     EVENT_INC(ObStatEventIds::SSSTORE_READ_ROW_COUNT);
-    LOG_DEBUG("inner get next row", KPC(store_row), KPC(rowkey_));
+    if (OB_NOT_NULL(sstable_)) {
+      if (sstable_->is_minor_sstable()) {
+        EVENT_INC(ObStatEventIds::MINOR_SSSTORE_READ_ROW_COUNT);
+      } else if (sstable_->is_major_sstable()) {
+        EVENT_INC(ObStatEventIds::MAJOR_SSSTORE_READ_ROW_COUNT);
+      }
+    }
+    LOG_DEBUG("inner get next row", KPC(store_row), KPC(read_handle_.rowkey_));
   }
   return ret;
 }
@@ -127,7 +144,7 @@ int ObSSTableRowGetter::fetch_row(ObSSTableReadHandle &read_handle, const ObDatu
 {
   int ret = OB_SUCCESS;
   if (nullptr == micro_getter_) {
-    if (nullptr == (micro_getter_ = OB_NEWx(ObMicroBlockRowGetter, access_ctx_->stmt_allocator_))) {
+    if (nullptr == (micro_getter_ = OB_NEWx(ObMicroBlockRowGetter, long_life_allocator_))) {
       ret = OB_ALLOCATE_MEMORY_FAILED;
       LOG_WARN("Fail to allocate micro block row getter", K(ret));
     } else if (OB_FAIL(micro_getter_->init(*iter_param_, *access_ctx_, sstable_))) {
@@ -136,7 +153,14 @@ int ObSSTableRowGetter::fetch_row(ObSSTableReadHandle &read_handle, const ObDatu
   } else if (OB_FAIL(micro_getter_->switch_context(*iter_param_, *access_ctx_, sstable_))) {
     LOG_WARN("Fail to switch context", K(ret));
   }
-  LOG_DEBUG("start to fetch row", KPC(rowkey_), K(read_handle));
+  if (OB_FAIL(ret)) {
+  } else if (read_handle.need_read_block() && nullptr == macro_block_reader_) {
+    if (OB_ISNULL(macro_block_reader_ = OB_NEWx(ObMacroBlockReader, long_life_allocator_))) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+      LOG_WARN("Fail to allocate macro block reader", K(ret));
+    }
+  }
+  LOG_DEBUG("start to fetch row", KPC(read_handle_.rowkey_), K(read_handle));
 
   if (OB_FAIL(ret)) {
   } else if (OB_FAIL(micro_getter_->get_row(
@@ -145,6 +169,7 @@ int ObSSTableRowGetter::fetch_row(ObSSTableReadHandle &read_handle, const ObDatu
               macro_block_reader_))) {
     LOG_WARN("Fail to get row", K(ret));
   } else {
+    REALTIME_MONITOR_ADD_SSSTORE_READ_BYTES(access_ctx_, micro_getter_->get_average_row_length());
     has_fetched_ = true;
   }
   return ret;

@@ -12,9 +12,7 @@
 
 #define USING_LOG_PREFIX STORAGE
 #include "ob_ls_backup_clean_mgr.h"
-#include "share/backup/ob_backup_clean_operator.h"
 #include "share/backup/ob_backup_data_table_operator.h"
-#include "share/backup/ob_backup_clean_operator.h"
 #include "share/backup/ob_archive_persist_helper.h"
 #include "share/backup/ob_backup_io_adapter.h"
 #include "share/backup/ob_backup_clean_util.h"
@@ -174,7 +172,7 @@ int ObLSBackupCleanDagNet::start_running()
   int tmp_ret = OB_SUCCESS;
   ObLSBackupCleanDag *clean_dag = nullptr;
   ObTenantDagScheduler *scheduler = nullptr;
-  FLOG_INFO("[BACKUP_CLEAN]satrt running ls backup clean dagnet");
+  FLOG_INFO("[BACKUP_CLEAN]start running ls backup clean dagnet");
   if (!is_inited_) {
     ret = OB_NOT_INIT;
     LOG_WARN("backup clean dag net do not init", K(ret));
@@ -242,8 +240,9 @@ int ObLSBackupCleanDagNet::fill_comment(char *buf, const int64_t buf_len) const
   if (!is_inited_) {
     ret = OB_NOT_INIT;
     LOG_WARN("log stream backup clean dag net do not init ", K(ret));
-  } else if (OB_FAIL(param_.trace_id_.to_string(task_id_str, MAX_TRACE_ID_LENGTH))) {
-    LOG_WARN("failed to trace task id to string", K(ret));
+  } else if (OB_UNLIKELY(0 > param_.trace_id_.to_string(task_id_str, MAX_TRACE_ID_LENGTH))) {
+    ret = OB_BUF_NOT_ENOUGH;
+    LOG_WARN("failed to get trace id string", K(ret), K(param_));
   } else if (OB_FAIL(databuff_printf(buf, buf_len,
           "tenant_id=%lu, task_id=%ld, ls_id=%ld, task_type=%s, id=%ld, trace_id=%s",
           param_.tenant_id_,
@@ -334,7 +333,10 @@ int64_t ObLSBackupCleanDag::hash() const
 int ObLSBackupCleanDag::fill_dag_key(char *buf, const int64_t buf_len) const
 {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(databuff_printf(buf, buf_len, "ls_id=%s", to_cstring(param_.ls_id_)))) {
+  int64_t pos = 0;
+  ret = databuff_printf(buf, buf_len, pos, "ls_id=");
+  OB_SUCCESS != ret ? : ret = databuff_printf(buf, buf_len, pos, param_.ls_id_);
+  if (OB_FAIL(ret)) {
     LOG_WARN("failed to fill dag_key", K(ret), K_(param));
   }
   return ret;
@@ -719,6 +721,74 @@ int ObLSBackupCleanTask::delete_minor_data_(const ObBackupPath &path)
   return ret;
 }
 
+int ObLSBackupCleanTask::delete_fused_meta_data_(const ObBackupPath &path)
+{
+  int ret = OB_SUCCESS;
+  ObBackupIoAdapter util;
+  ObArray<ObIODirentEntry> d_entrys;
+  const char fused_meta_prefix[OB_BACKUP_DIR_PREFIX_LENGTH] = "fused_meta_info_turn_";
+  ObDirPrefixEntryNameFilter prefix_op(d_entrys);
+  if (OB_FAIL(prefix_op.init(fused_meta_prefix, strlen(fused_meta_prefix)))) {
+    LOG_WARN("failed to init dir prefix", K(ret), K(fused_meta_prefix));
+  } else if (OB_FAIL(util.list_directories(path.get_obstr(), backup_dest_.get_storage_info(), prefix_op))) {
+    LOG_WARN("failed to list files", K(ret));
+  } else {
+    ObIODirentEntry tmp_entry;
+    ObBackupPath fused_meta_path;
+    for (int64_t i = 0; OB_SUCC(ret) && i < d_entrys.count(); ++i) {
+      ObIODirentEntry tmp_entry = d_entrys.at(i);
+      fused_meta_path.reset();
+      if (OB_ISNULL(tmp_entry.name_)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("file name is null", K(ret));
+      } else if (OB_FAIL(fused_meta_path.init(path.get_ptr()))) {
+        LOG_WARN("failed to init fused meta path", K(ret), K(path));
+      } else if (OB_FAIL(fused_meta_path.join(tmp_entry.name_, ObBackupFileSuffix::NONE))) {
+        LOG_WARN("failed to join fused meta path", K(ret));
+      } else if (OB_FAIL(ObBackupCleanUtil::delete_backup_dir_files(fused_meta_path, backup_dest_.get_storage_info()))) {
+        LOG_WARN("failed to delete backup log stream dir files", K(ret), K(path));
+      } else {
+        LOG_INFO("[BACKUP_CLEAN]success delete fused meta turn", K(fused_meta_path));
+      }
+    }
+  }
+  return ret;
+}
+
+int ObLSBackupCleanTask::delete_user_data_(const ObBackupPath &path)
+{
+  int ret = OB_SUCCESS;
+  ObBackupIoAdapter util;
+  ObArray<ObIODirentEntry> d_entrys;
+  const char user_data_prefix[OB_BACKUP_DIR_PREFIX_LENGTH] = "user_data_turn_";
+  ObDirPrefixEntryNameFilter prefix_op(d_entrys);
+  if (OB_FAIL(prefix_op.init(user_data_prefix, strlen(user_data_prefix)))) {
+    LOG_WARN("failed to init dir prefix", K(ret), K(user_data_prefix));
+  } else if (OB_FAIL(util.list_directories(path.get_obstr(), backup_dest_.get_storage_info(), prefix_op))) {
+    LOG_WARN("failed to list files", K(ret));
+  } else {
+    ObIODirentEntry tmp_entry;
+    ObBackupPath user_data_path;
+    for (int64_t i = 0; OB_SUCC(ret) && i < d_entrys.count(); ++i) {
+      ObIODirentEntry tmp_entry = d_entrys.at(i);
+      user_data_path.reset();
+      if (OB_ISNULL(tmp_entry.name_)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("file name is null", K(ret));
+      } else if (OB_FAIL(user_data_path.init(path.get_ptr()))) {
+        LOG_WARN("failed to init user data path", K(ret), K(path));
+      } else if (OB_FAIL(user_data_path.join(tmp_entry.name_, ObBackupFileSuffix::NONE))) {
+        LOG_WARN("failed to join user data path", K(ret));
+      } else if (OB_FAIL(ObBackupCleanUtil::delete_backup_dir_files(user_data_path, backup_dest_.get_storage_info()))) {
+        LOG_WARN("failed to delete backup log stream dir files", K(ret), K(path));
+      } else {
+        LOG_INFO("[BACKUP_CLEAN]success delete user data turn", K(user_data_path));
+      }
+    }
+  }
+  return ret;
+}
+
 int ObLSBackupCleanTask::delete_meta_info_(const ObBackupPath &path)
 {
   int ret = OB_SUCCESS;
@@ -784,6 +854,10 @@ int ObLSBackupCleanTask::delete_backup_set_ls_files_(const ObBackupPath &path)
     LOG_WARN("failed to delete major data", K(ret));
   } else if (OB_FAIL(delete_minor_data_(path))) {
     LOG_WARN("failed to delete minor data", K(ret));
+  } else if (OB_FAIL(delete_fused_meta_data_(path))) {
+    LOG_WARN("failed to delete fused meta data", K(ret));
+  } else if (OB_FAIL(delete_user_data_(path))) {
+    LOG_WARN("failed to delete user data", K(ret));
   } else if (OB_FAIL(delete_meta_info_(path))) {
     LOG_WARN("failed to delete meta info", K(ret)); 
   } else if (OB_FAIL(delete_log_stream_dir_(path))) {

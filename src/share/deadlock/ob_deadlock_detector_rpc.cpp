@@ -10,14 +10,7 @@
  * See the Mulan PubL v2 for more details.
  */
 
-#include "share/ob_occam_time_guard.h"
 #include "ob_deadlock_detector_rpc.h"
-#include "lib/ob_errno.h"
-#include "lib/oblog/ob_log_module.h"
-#include "ob_deadlock_detector_mgr.h"
-#include "ob_deadlock_parameters.h"
-#include "share/deadlock/ob_lcl_scheme/ob_lcl_message.h"
-#include "ob_deadlock_detector_common_define.h"
 
 namespace oceanbase
 {
@@ -38,6 +31,7 @@ int ObDetectorLCLMessageP::process()
   DETECT_TIME_GUARD(100_ms);
   ObDeadLockDetectorMgr *p_deadlock_detector_mgr = MTL(ObDeadLockDetectorMgr *);
   if (OB_ISNULL(p_deadlock_detector_mgr)) {
+    ret = OB_ERR_UNEXPECTED;
     DETECT_LOG(ERROR, "can not get ObDeadLockDetectorMgr", KP(p_deadlock_detector_mgr));
   } else if (OB_FAIL(p_deadlock_detector_mgr->process_lcl_message(arg_))) {
     DETECT_LOG(WARN, "process lcl message failed", KR(ret), KP(p_deadlock_detector_mgr));
@@ -54,6 +48,7 @@ int ObDeadLockCollectInfoMessageP::process()
   DETECT_TIME_GUARD(100_ms);
   ObDeadLockDetectorMgr *p_deadlock_detector_mgr = MTL(ObDeadLockDetectorMgr *);
   if (OB_ISNULL(p_deadlock_detector_mgr)) {
+    ret = OB_ERR_UNEXPECTED;
     DETECT_LOG(ERROR, "can not get ObDeadLockDetectorMgr", KP(p_deadlock_detector_mgr));
   } else if (OB_FAIL(p_deadlock_detector_mgr->process_collect_info_message(arg_))) {
     DETECT_LOG(WARN, "process collect info message failed",
@@ -74,6 +69,7 @@ int ObDeadLockNotifyParentMessageP::process()
   DETECT_LOG(INFO, "receive notify parent msg", K(arg_));
   ObDeadLockDetectorMgr *p_deadlock_detector_mgr = MTL(ObDeadLockDetectorMgr *);
   if (OB_ISNULL(p_deadlock_detector_mgr)) {
+    ret = OB_ERR_UNEXPECTED;
     DETECT_LOG(ERROR, "can not get ObDeadLockDetectorMgr", KP(p_deadlock_detector_mgr));
   } else if (OB_FAIL(p_deadlock_detector_mgr->process_notify_parent_message(arg_))) {
     DETECT_LOG(WARN, "process notify parent message failed",
@@ -196,6 +192,7 @@ int ObDeadLockDetectorRpc::post_notify_parent_message(const ObAddr &dest_addr,
   } else if (dest_addr == self_) {
     ObDeadLockDetectorMgr *p_deadlock_detector_mgr = MTL(ObDeadLockDetectorMgr *);
     if (OB_ISNULL(p_deadlock_detector_mgr)) {
+      ret = OB_ERR_UNEXPECTED;
       DETECT_LOG(ERROR, "can not get ObDeadLockDetectorMgr", KP(p_deadlock_detector_mgr));
     } else if(OB_FAIL(p_deadlock_detector_mgr->process_notify_parent_message(msg))) {
       DETECT_LOG(WARN, "process notify parent message failed", KR(ret), KP(p_deadlock_detector_mgr));

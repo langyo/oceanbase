@@ -13,14 +13,12 @@
 #define USING_LOG_PREFIX SERVER
 
 #include "observer/table_load/ob_table_load_table_ctx.h"
-#include "lib/allocator/ob_malloc.h"
 #include "observer/table_load/ob_table_load_coordinator_ctx.h"
 #include "observer/table_load/ob_table_load_store_ctx.h"
 #include "observer/table_load/ob_table_load_task.h"
 #include "observer/table_load/ob_table_load_task_scheduler.h"
 #include "observer/table_load/ob_table_load_trans_ctx.h"
-#include "observer/table_load/ob_table_load_utils.h"
-#include "share/ob_common_rpc_proxy.h"
+#include "sql/engine/ob_des_exec_context.h"
 
 namespace oceanbase
 {
@@ -36,12 +34,18 @@ ObTableLoadTableCtx::ObTableLoadTableCtx()
     store_ctx_(nullptr),
     job_stat_(nullptr),
     session_info_(nullptr),
+    exec_ctx_(nullptr),
     allocator_("TLD_TableCtx"),
     ref_count_(0),
-    is_dirty_(false),
-    is_inited_(false)
+    is_in_map_(false),
+    is_assigned_resource_(false),
+    is_assigned_memory_(false),
+    mark_delete_(false),
+    is_inited_(false),
+    des_exec_ctx_(nullptr)
 {
   free_session_ctx_.sessid_ = sql::ObSQLSessionInfo::INVALID_SESSID;
+  allocator_.set_tenant_id(MTL_ID());
 }
 
 ObTableLoadTableCtx::~ObTableLoadTableCtx()
@@ -49,8 +53,31 @@ ObTableLoadTableCtx::~ObTableLoadTableCtx()
   destroy();
 }
 
-int ObTableLoadTableCtx::init(const ObTableLoadParam &param, const ObTableLoadDDLParam &ddl_param,
-                                                            sql::ObSQLSessionInfo *session_info)
+int ObTableLoadTableCtx::new_exec_ctx(const ObString &des_exec_ctx_serialized_str)
+{
+  int ret = OB_SUCCESS;
+  if (!des_exec_ctx_serialized_str.empty()) {
+    ObString tmp_str;
+    des_exec_ctx_ = OB_NEWx(ObDesExecContext, &allocator_, allocator_, GCTX.session_mgr_);
+    int64_t pos = 0;
+
+    if (des_exec_ctx_ == nullptr) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+      LOG_WARN("fail to deserialize exe ctx", KR(ret));
+    } else if (OB_FAIL(ob_write_string(allocator_, des_exec_ctx_serialized_str, tmp_str))) {
+      LOG_WARN("fail to copy string", KR(ret));
+    } else if (OB_FAIL(des_exec_ctx_->deserialize(tmp_str.ptr(), tmp_str.length(), pos))) {
+      LOG_WARN("fail to deserialize exec ctx", KR(ret));
+    }
+  }
+  return ret;
+}
+
+int ObTableLoadTableCtx::init(const ObTableLoadParam &param,
+                              const ObTableLoadDDLParam &ddl_param,
+                              sql::ObSQLSessionInfo *session_info,
+                              const common::ObString &des_exec_ctx_serialized_str,
+                              ObExecContext *exec_ctx)
 {
   int ret = OB_SUCCESS;
   if (IS_INIT) {
@@ -59,18 +86,16 @@ int ObTableLoadTableCtx::init(const ObTableLoadParam &param, const ObTableLoadDD
   } else if (OB_UNLIKELY(!param.is_valid() || !ddl_param.is_valid() || nullptr == session_info)) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid args", KR(ret), K(param), K(ddl_param));
+  } else if ((des_exec_ctx_serialized_str.empty() && exec_ctx == nullptr)
+      || (!des_exec_ctx_serialized_str.empty() && exec_ctx != nullptr)) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid args", KR(ret), K(des_exec_ctx_serialized_str.empty()), KP(exec_ctx));
   } else {
     param_ = param;
     ddl_param_ = ddl_param;
-    allocator_.set_tenant_id(MTL_ID());
     if (OB_FAIL(schema_.init(param_.tenant_id_, param_.table_id_))) {
       LOG_WARN("fail to init table load schema", KR(ret), K(param_.tenant_id_),
                K(param_.table_id_));
-    } else if (OB_UNLIKELY(param.column_count_ != (schema_.is_heap_table_
-                                                     ? (schema_.store_column_count_ - 1)
-                                                     : schema_.store_column_count_))) {
-      ret = OB_ERR_UNEXPECTED;
-      LOG_WARN("unexpected column count", KR(ret), K(param.column_count_), K(schema_.store_column_count_), K(schema_.is_heap_table_));
     } else if (OB_FAIL(task_allocator_.init("TLD_TaskPool", param_.tenant_id_))) {
       LOG_WARN("fail to init allocator", KR(ret));
     } else if (OB_FAIL(trans_ctx_allocator_.init("TLD_TCtxPool", param_.tenant_id_))) {
@@ -81,10 +106,20 @@ int ObTableLoadTableCtx::init(const ObTableLoadParam &param, const ObTableLoadDD
       LOG_WARN("fail to create session info", KR(ret));
     } else if (OB_FAIL(ObTableLoadUtils::deep_copy(*session_info, *session_info_, allocator_))) {
       LOG_WARN("fail to deep copy", KR(ret));
-    } else {
-      is_inited_ = true;
+    } else if (OB_FAIL(new_exec_ctx(des_exec_ctx_serialized_str))) {
+      LOG_WARN("fail to new exec ctx", KR(ret));
     }
   }
+
+  if (OB_SUCC(ret)) {
+    if (exec_ctx != nullptr) {
+      exec_ctx_ = exec_ctx;
+    } else {
+      exec_ctx_ = des_exec_ctx_;
+    }
+    is_inited_ = true;
+  }
+
   return ret;
 }
 
@@ -107,14 +142,6 @@ int ObTableLoadTableCtx::register_job_stat()
     job_stat->start_time_ = ObTimeUtil::current_time();
     job_stat->max_allowed_error_rows_ = param_.max_error_row_count_;
     job_stat->detected_error_rows_ = 0;
-    job_stat->coordinator.received_rows_ = 0;
-    job_stat->coordinator.last_commit_segment_id_ = 0;
-    job_stat->coordinator.status_ = "none";
-    job_stat->coordinator.trans_status_ = "none";
-    job_stat->store.processed_rows_ = 0;
-    job_stat->store.last_commit_segment_id_ = 0;
-    job_stat->store.status_ = "none";
-    job_stat->store.trans_status_ = "none";
     job_stat->allocator_.set_tenant_id(param_.tenant_id_);
     if (OB_FAIL(ObTableLoadUtils::deep_copy(schema_.table_name_, job_stat->table_name_,
                                             job_stat->allocator_))) {
@@ -168,7 +195,8 @@ void ObTableLoadTableCtx::unregister_job_stat()
   }
 }
 
-int ObTableLoadTableCtx::init_coordinator_ctx(const ObIArray<int64_t> &idx_array,
+int ObTableLoadTableCtx::init_coordinator_ctx(const ObIArray<uint64_t> &column_ids,
+                                              const ObIArray<ObTabletID> &tablet_ids,
                                               ObTableLoadExecCtx *exec_ctx)
 {
   int ret = OB_SUCCESS;
@@ -183,7 +211,7 @@ int ObTableLoadTableCtx::init_coordinator_ctx(const ObIArray<int64_t> &idx_array
     if (OB_ISNULL(coordinator_ctx = OB_NEWx(ObTableLoadCoordinatorCtx, (&allocator_), this))) {
       ret = OB_ALLOCATE_MEMORY_FAILED;
       LOG_WARN("fail to new ObTableLoadCoordinatorCtx", KR(ret));
-    } else if (OB_FAIL(coordinator_ctx->init(idx_array, exec_ctx))) {
+    } else if (OB_FAIL(coordinator_ctx->init(column_ids, tablet_ids, exec_ctx))) {
       LOG_WARN("fail to init coordinator ctx", KR(ret));
     } else if (OB_FAIL(coordinator_ctx->set_status_inited())) {
       LOG_WARN("fail to set coordinator status inited", KR(ret));
@@ -259,6 +287,11 @@ void ObTableLoadTableCtx::destroy()
     allocator_.free(store_ctx_);
     store_ctx_ = nullptr;
   }
+  if (nullptr != des_exec_ctx_) {
+    des_exec_ctx_->~ObDesExecContext();
+    allocator_.free(des_exec_ctx_);
+    des_exec_ctx_ = nullptr;
+  }
   if (nullptr != session_info_) {
     observer::ObTableLoadUtils::free_session_info(session_info_, free_session_ctx_);
     session_info_ = nullptr;
@@ -321,6 +354,18 @@ void ObTableLoadTableCtx::free_trans_ctx(ObTableLoadTransCtx *trans_ctx)
   } else {
     trans_ctx_allocator_.free(trans_ctx);
   }
+}
+
+bool ObTableLoadTableCtx::is_stopped() const
+{
+  bool bret = true;
+  if (nullptr != coordinator_ctx_ && !coordinator_ctx_->task_scheduler_->is_stopped()) {
+    bret = false;
+  }
+  if (nullptr != store_ctx_ && !store_ctx_->task_scheduler_->is_stopped()) {
+    bret = false;
+  }
+  return bret;
 }
 
 }  // namespace observer

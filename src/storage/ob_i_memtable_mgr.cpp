@@ -10,13 +10,8 @@
  * See the Mulan PubL v2 for more details.
  */
 
-#include "storage/ob_i_memtable_mgr.h"
-#include "share/ob_task_define.h"
-#include "storage/ls/ob_freezer.h"
-#include "storage/memtable/ob_memtable_interface.h"
-#include "storage/memtable/ob_multi_source_data.h"
-#include "storage/tablet/ob_tablet.h"
-#include "storage/meta_mem/ob_tenant_meta_mem_mgr.h"
+#include "ob_i_memtable_mgr.h"
+#include "storage/tx_storage/ob_ls_service.h"
 
 using namespace oceanbase::share;
 using namespace oceanbase::memtable;
@@ -25,6 +20,18 @@ namespace oceanbase
 {
 namespace storage
 {
+
+ObIMemtableMgr::~ObIMemtableMgr()
+{
+  int ret = OB_SUCCESS;
+  const int64_t ref_cnt = get_ref();
+  if (OB_UNLIKELY(0 != ref_cnt)) {
+    STORAGE_LOG(ERROR, "ref cnt is NOT 0", K(ret), K(ref_cnt), K_(tablet_id), KPC(this));
+  }
+
+  reset_tables();
+  ATOMIC_STORE(&ref_cnt_, 0);
+}
 
 int ObIMemtableMgr::get_active_memtable(ObTableHandleV2 &handle) const
 {
@@ -53,14 +60,14 @@ int ObIMemtableMgr::get_first_nonempty_memtable(ObTableHandleV2 &handle) const
 
   for (int64_t i = memtable_head_; OB_SUCC(ret) && i < memtable_tail_; ++i) {
     ObTableHandleV2 tmp_handle;
-    memtable::ObMemtable *mt = NULL;
+    ObITabletMemtable *mt = NULL;
     if (OB_FAIL(get_ith_memtable(i, tmp_handle))) {
       STORAGE_LOG(WARN, "fail to get ith memtable", KR(ret), K(i));
     } else if (OB_UNLIKELY(!tmp_handle.is_valid())) {
       ret = OB_ERR_UNEXPECTED;
       STORAGE_LOG(WARN, "get invalid tmp table handle", KR(ret), K(i), K(tmp_handle));
-    } else if (OB_FAIL(tmp_handle.get_data_memtable(mt))) {
-      STORAGE_LOG(WARN, "failed to get_data_memtable", KR(ret), K(i), K(tmp_handle));
+    } else if (OB_FAIL(tmp_handle.get_tablet_memtable(mt))) {
+      STORAGE_LOG(WARN, "failed to get_tablet_memtable", KR(ret), K(i), K(tmp_handle));
     } else if (OB_ISNULL(mt)) {
       ret = OB_ERR_UNEXPECTED;
       STORAGE_LOG(WARN, "mt is NULL", KR(ret), K(i), K(tmp_handle));
@@ -206,6 +213,31 @@ int ObIMemtableMgr::release_memtables()
 }
 
 int ObIMemtableMgr::init(
+    const ObLSID &ls_id,
+    const ObTabletID &tablet_id,
+    lib::Worker::CompatMode compat_mode)
+{
+  int ret = OB_SUCCESS;
+  ObLS *ls = nullptr;
+  ObLSService *ls_service = nullptr;
+  ObLSHandle ls_handle;
+  ObTenantMetaMemMgr *t3m = MTL(ObTenantMetaMemMgr*);
+  if (OB_ISNULL(ls_service = MTL(ObLSService*))) {
+    ret = OB_ERR_UNEXPECTED;
+    STORAGE_LOG(WARN, "failed to get ObLSService from MTL", KR(ret), KPC(ls_service));
+  } else if (OB_FAIL(ls_service->get_ls(ls_id, ls_handle, ObLSGetMod::TABLET_MOD))) {
+    STORAGE_LOG(WARN, "failed to get ls", KR(ret), K(ls_id));
+  } else if (OB_ISNULL(ls = ls_handle.get_ls())) {
+    ret = OB_ERR_UNEXPECTED;
+    STORAGE_LOG(WARN, "ls should not be NULL", KR(ret), KP(ls));
+  } else if (OB_FAIL(init(tablet_id, ls_id, 0, 0, compat_mode,
+          ls->get_log_handler(), ls->get_freezer(), t3m))) {
+    STORAGE_LOG(WARN, "failed to init memtable mgr", KR(ret), K(tablet_id), K(ls_id));
+  }
+  return ret;
+}
+
+int ObIMemtableMgr::init(
     const ObTabletID &tablet_id,
     const share::ObLSID &ls_id,
     const int64_t max_saved_schema_version,
@@ -229,10 +261,10 @@ void ObIMemtableMgr::reset_tables()
 {
   if (OB_NOT_NULL(t3m_)) {
     for (int64_t pos = memtable_head_; pos < memtable_tail_; ++pos) {
-      memtable::ObIMemtable *memtable = tables_[get_memtable_idx(pos)];
+      ObIMemtable *memtable = tables_[get_memtable_idx(pos)];
       const int64_t ref_cnt = memtable->dec_ref();
       if (0 == ref_cnt) {
-        t3m_->push_table_into_gc_queue(memtable, table_type_);
+        t3m_->push_table_into_gc_queue(memtable, memtable->get_table_type());
       }
     }
   }
@@ -240,7 +272,6 @@ void ObIMemtableMgr::reset_tables()
   memtable_head_ = 0;
   memtable_tail_ = 0;
   t3m_ = nullptr;
-  table_type_ = ObITable::TableType::MAX_TABLE_TYPE;
 }
 
 void ObIMemtableMgr::release_head_memtable()
@@ -248,12 +279,12 @@ void ObIMemtableMgr::release_head_memtable()
   if (OB_ISNULL(t3m_)) {
     STORAGE_LOG_RET(ERROR, OB_ERR_UNEXPECTED, "t3m is nullptr", KP_(t3m));
   } else {
-    memtable::ObIMemtable *memtable = tables_[get_memtable_idx(memtable_head_)];
+    ObIMemtable *memtable = tables_[get_memtable_idx(memtable_head_)];
     tables_[get_memtable_idx(memtable_head_)] = nullptr;
     ++memtable_head_;
     const int64_t ref_cnt = memtable->dec_ref();
     if (0 == ref_cnt) {
-      t3m_->push_table_into_gc_queue(memtable, table_type_);
+      t3m_->push_table_into_gc_queue(memtable, memtable->get_table_type());
     }
   }
 }
@@ -264,12 +295,12 @@ void ObIMemtableMgr::release_tail_memtable()
     if (OB_ISNULL(t3m_)) {
       STORAGE_LOG_RET(ERROR, OB_ERR_UNEXPECTED, "t3m is nullptr", KP_(t3m));
     } else {
-      memtable::ObIMemtable *memtable = tables_[get_memtable_idx(memtable_tail_ - 1)];
+      ObIMemtable *memtable = tables_[get_memtable_idx(memtable_tail_ - 1)];
       tables_[get_memtable_idx(memtable_tail_ - 1)] = nullptr;
       --memtable_tail_;
       const int64_t ref_cnt = memtable->dec_ref();
       if (0 == ref_cnt) {
-        t3m_->push_table_into_gc_queue(memtable, table_type_);
+        t3m_->push_table_into_gc_queue(memtable, memtable->get_table_type());
       }
     }
   }
@@ -289,7 +320,6 @@ int64_t ObIMemtableMgr::to_string(char *buf, const int64_t buf_len) const
          K_(is_inited),
          K_(tablet_id),
          KP_(freezer),
-         K_(table_type),
          K_(memtable_head),
          K_(memtable_tail),
          KP_(t3m));
@@ -316,12 +346,13 @@ int64_t ObIMemtableMgr::to_string(char *buf, const int64_t buf_len) const
 int ObIMemtableMgr::add_memtable_(ObTableHandleV2 &memtable_handle)
 {
   int ret = OB_SUCCESS;
-  if (OB_UNLIKELY(nullptr == t3m_ || !ObITable::is_memtable(table_type_))) {
+  if (OB_UNLIKELY(nullptr == t3m_)) {
     ret = OB_NOT_INIT;
-    STORAGE_LOG(WARN, "Don't initialize memtable array", K(ret), KP(t3m_), K(table_type_));
+    STORAGE_LOG(WARN, "Don't initialize memtable array", K(ret), KP(t3m_));
   } else if (OB_UNLIKELY(!memtable_handle.is_valid())) {
     ret = OB_INVALID_ARGUMENT;
     STORAGE_LOG(WARN, "invalid argument", K(ret), K(memtable_handle));
+  } else if (!ObITable::is_memtable(memtable_handle.get_table()->get_table_type())) {
   } else {
     const int64_t idx = get_memtable_idx(memtable_tail_);
     if (OB_FAIL(memtable_handle.get_memtable(tables_[idx]))) {
@@ -336,7 +367,14 @@ int ObIMemtableMgr::add_memtable_(ObTableHandleV2 &memtable_handle)
 
 int ObIMemtableMgr::get_ith_memtable(const int64_t pos, ObTableHandleV2 &handle) const
 {
-  return handle.set_table(static_cast<ObITable *const>(tables_[get_memtable_idx(pos)]), t3m_, table_type_);
+  int ret = OB_SUCCESS;
+  ObITable *table = static_cast<ObITable *const>(tables_[get_memtable_idx(pos)]);
+  if (OB_NOT_NULL(table)) {
+    ret = handle.set_table(table, t3m_, table->get_table_type());
+  } else {
+    ret = OB_ERR_NULL_VALUE;
+  }
+  return ret;
 }
 
 ObMemtableMgrHandle::ObMemtableMgrHandle()
@@ -345,7 +383,7 @@ ObMemtableMgrHandle::ObMemtableMgrHandle()
 {
 }
 
-ObMemtableMgrHandle::ObMemtableMgrHandle(ObIMemtableMgr *memtable_mgr, ObITenantMetaObjPool *pool)
+ObMemtableMgrHandle::ObMemtableMgrHandle(ObIMemtableMgr *memtable_mgr, ObTabletMemtableMgrPool *pool)
   : memtable_mgr_(memtable_mgr),
     pool_(pool)
 {
@@ -373,7 +411,7 @@ void ObMemtableMgrHandle::reset()
       memtable_mgr_ = nullptr;
     } else {
       if (0 == memtable_mgr_->dec_ref()) {
-        pool_->free_obj(static_cast<void *>(memtable_mgr_));
+        pool_->release(static_cast<ObTabletMemtableMgr*>(memtable_mgr_));
       }
       memtable_mgr_ = nullptr;
       pool_ = nullptr;
@@ -399,7 +437,7 @@ ObMemtableMgrHandle &ObMemtableMgrHandle::operator= (const ObMemtableMgrHandle &
   return *this;
 }
 
-int ObMemtableMgrHandle::set_memtable_mgr(ObIMemtableMgr *memtable_mgr, ObITenantMetaObjPool *pool)
+int ObMemtableMgrHandle::set_memtable_mgr(ObIMemtableMgr *memtable_mgr, ObTabletMemtableMgrPool *pool)
 {
   int ret = OB_SUCCESS;
   reset();

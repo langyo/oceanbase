@@ -13,12 +13,8 @@
 #define USING_LOG_PREFIX SHARE_PT
 
 #include "share/ls/ob_ls_info.h"      // for decalrations of functions in this cpp
-#include "share/config/ob_server_config.h"            // for KR(), common::ob_error_name(x)
 #include "share/ls/ob_ls_replica_filter.h" // ObLSReplicaFilter
-#include "share/ob_share_util.h"           // ObShareUtils
 #include "share/ob_all_server_tracer.h"    // SVR_TRACER
-#include "lib/string/ob_sql_string.h"      // ObSqlString
-#include "lib/utility/utility.h" // split_on()
 
 namespace oceanbase
 {
@@ -148,7 +144,7 @@ void ObLSReplica::reset()
   replica_type_ = REPLICA_TYPE_FULL;
   proposal_id_ = 0;
   replica_status_ = REPLICA_STATUS_NORMAL;
-  restore_status_ = ObLSRestoreStatus::Status::RESTORE_NONE;
+  restore_status_ = ObLSRestoreStatus::Status::NONE;
   property_.reset();
   //meta related
   unit_id_ = OB_INVALID_ID;
@@ -276,7 +272,8 @@ bool ObLSReplica::is_equal_for_report(const ObLSReplica &other) const
       && property_ == other.property_
       && unit_id_ == other.unit_id_
       && zone_ == other.zone_
-      && paxos_replica_number_ == other.paxos_replica_number_) {
+      && paxos_replica_number_ == other.paxos_replica_number_
+      && required_size_ == other.required_size_) {
     is_equal = true;
   }
 
@@ -993,13 +990,18 @@ int ObLSInfo::update_replica_status()
       bool in_leader_learner_list = false;
       ObMember learner;
       // rectify replica_type_
+      const ObReplicaType replica_type_before_rectify = r->get_replica_type();
       if (OB_NOT_NULL(learner_list) && learner_list->contains(r->get_server())) {
-        r->set_replica_type(REPLICA_TYPE_READONLY);
         in_leader_learner_list = true;
         if (OB_FAIL(learner_list->get_learner_by_addr(r->get_server(), learner))) {
           LOG_WARN("fail to get learner by addr", KR(ret));
-        } else if (in_leader_learner_list) {
+        } else {
           in_member_time_us = learner.get_timestamp();
+          if (learner.is_columnstore()) {
+            r->set_replica_type(REPLICA_TYPE_COLUMNSTORE);
+          } else {
+            r->set_replica_type(REPLICA_TYPE_READONLY);
+          }
         }
       } else {
         r->set_replica_type(REPLICA_TYPE_FULL);
@@ -1021,8 +1023,17 @@ int ObLSInfo::update_replica_status()
       // 2 non_paxos replicas (READONLY),NORMAL when in leader's learner_list otherwise offline
       // 3 if non_paxos replicas are deleted by partition service, status in meta table is set to REPLICA_STATUS_OFFLINE,
       //    then set replica_status to REPLICA_STATUS_OFFLINE
+      // 4 COLUMNSTORE replica, if not in learner list or columnstore-flag is false,
+      //    then set replica_status to REPLICA_STATUS_OFFLINE
       if (REPLICA_STATUS_OFFLINE == r->get_replica_status()) {
         // do nothing
+      } else if (REPLICA_TYPE_COLUMNSTORE == replica_type_before_rectify
+                 && REPLICA_TYPE_COLUMNSTORE != r->get_replica_type()) {
+        // we set replica_type according to leader's member/learner_list, but need to log a warning.
+        LOG_WARN("replica_type before rectify is COLUMNSTORE, "
+                 "but not match with leader's member_list and learner_list",
+                 K(replica_type_before_rectify), K(member_list), K(learner_list), KPC(r));
+        r->set_replica_status(REPLICA_STATUS_OFFLINE);
       } else if (in_leader_member_list || in_leader_learner_list) {
         r->set_replica_status(REPLICA_STATUS_NORMAL);
       } else {

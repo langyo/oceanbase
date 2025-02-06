@@ -25,7 +25,7 @@ PHY_OP_DEF(PHY_HASH_GROUP_BY)
 PHY_OP_DEF(PHY_SCALAR_AGGREGATE) /* 10 */
 PHY_OP_DEF(PHY_MERGE_DISTINCT)
 PHY_OP_DEF(PHY_HASH_DISTINCT)  /*not implement yet*/
-PHY_OP_DEF(PHY_ROOT_TRANSMIT)
+PHY_OP_DEF(PHY_ROOT_TRANSMIT)  /*not implement yet*/
 PHY_OP_DEF(PHY_DIRECT_TRANSMIT)
 PHY_OP_DEF(PHY_DIRECT_RECEIVE) /* 15 */
 PHY_OP_DEF(PHY_DISTRIBUTED_TRANSMIT)
@@ -102,7 +102,7 @@ PHY_OP_DEF(PHY_PX_MULTI_PART_DELETE)
 PHY_OP_DEF(PHY_PX_MULTI_PART_UPDATE)
 PHY_OP_DEF(PHY_PX_MULTI_PART_INSERT)
 PHY_OP_DEF(PHY_UNPIVOT)
-PHY_OP_DEF(PHY_NESTED_LOOP_CONNECT_BY) /*90*/
+PHY_OP_DEF(PHY_CONNECT_BY) /*90*/
 PHY_OP_DEF(PHY_LINK_SCAN)
 PHY_OP_DEF(PHY_LOCK)
 PHY_OP_DEF(PHY_MULTI_LOCK)
@@ -117,9 +117,37 @@ PHY_OP_DEF(PHY_STAT_COLLECTOR)
 PHY_OP_DEF(PHY_LINK_DML)
 PHY_OP_DEF(PHY_JSON_TABLE)
 PHY_OP_DEF(PHY_OPTIMIZER_STATS_GATHERING)
+PHY_OP_DEF(PHY_VALUES_TABLE_ACCESS)
 /* end of phy operator type */
 PHY_OP_DEF(PHY_NEW_OP_ADAPTER)
 PHY_OP_DEF(PHY_FAKE_TABLE)  /* for testing only*/
+//TODO shengle improve operator name
+PHY_OP_DEF(PHY_VEC_MATERIAL)
+PHY_OP_DEF(PHY_VEC_HASH_GROUP_BY)
+PHY_OP_DEF(PHY_VEC_HASH_DISTINCT)
+PHY_OP_DEF(PHY_VEC_LIMIT)
+PHY_OP_DEF(PHY_VEC_SCALAR_AGGREGATE)
+PHY_OP_DEF(PHY_VEC_HASH_JOIN)
+PHY_OP_DEF(PHY_VEC_PX_MERGE_SORT_RECEIVE)
+PHY_OP_DEF(PHY_VEC_PX_MERGE_SORT_COORD)
+PHY_OP_DEF(PHY_VEC_TEMP_TABLE_INSERT)
+PHY_OP_DEF(PHY_VEC_TEMP_TABLE_ACCESS)
+PHY_OP_DEF(PHY_VEC_TEMP_TABLE_TRANSFORMATION)
+PHY_OP_DEF(PHY_VEC_SORT)
+PHY_OP_DEF(PHY_VEC_MERGE_DISTINCT)
+PHY_OP_DEF(PHY_VEC_HASH_UNION)
+PHY_OP_DEF(PHY_VEC_HASH_INTERSECT)
+PHY_OP_DEF(PHY_VEC_HASH_EXCEPT)
+PHY_OP_DEF(PHY_VEC_WINDOW_FUNCTION)
+PHY_OP_DEF(PHY_VEC_MERGE_GROUP_BY)
+PHY_OP_DEF(PHY_VEC_MERGE_JOIN)
+PHY_OP_DEF(PHY_VEC_MERGE_UNION)
+PHY_OP_DEF(PHY_VEC_MERGE_INTERSECT)
+PHY_OP_DEF(PHY_VEC_MERGE_EXCEPT)
+PHY_OP_DEF(PHY_EXPAND)
+PHY_OP_DEF(PHY_VEC_NESTED_LOOP_JOIN)
+PHY_OP_DEF(PHY_VEC_SUBPLAN_FILTER)
+PHY_OP_DEF(PHY_TABLE_DIRECT_INSERT)
 PHY_OP_DEF(PHY_END)
 #endif /*PHY_OP_DEF*/
 
@@ -140,22 +168,18 @@ namespace sql
 #include "sql/engine/ob_phy_operator_type.h"
 #undef PHY_OP_DEF
   };
-  const char *get_phy_op_name(ObPhyOperatorType type);
+  const char *get_phy_op_name(ObPhyOperatorType type, bool enable_rich_format = false);
 struct ObPhyOperatorTypeDescSet
 {
   struct ObPhyOperatorTypeDesc
   {
     const char *name_;
-    ObPhyOperatorTypeDesc() : name_(NULL) {}
+    const char *vec_name_;
+    ObPhyOperatorTypeDesc() : name_(NULL), vec_name_(NULL) {}
   };
-  ObPhyOperatorTypeDescSet()
-  {
-#define PHY_OP_DEF(type) set_type_str(type, #type);
-#include "sql/engine/ob_phy_operator_type.h"
-#undef PHY_OP_DEF
-  }
-  void set_type_str(ObPhyOperatorType type, const char *type_str);
-  const char *get_type_str(ObPhyOperatorType type) const;
+  ObPhyOperatorTypeDescSet();
+  void set_type_str(ObPhyOperatorType type, const char *type_str, const char *vec_name);
+  const char *get_type_str(ObPhyOperatorType type, bool enable_rich_format = false) const;
 private:
   ObPhyOperatorTypeDesc set_[PHY_END];
 };
@@ -165,7 +189,7 @@ OB_INLINE bool is_phy_op_type_valid(ObPhyOperatorType type)
   return PHY_INVALID < type && type < PHY_END;
 }
 
-const char *ob_phy_operator_type_str(ObPhyOperatorType type);
+const char *ob_phy_operator_type_str(ObPhyOperatorType type, bool enable_rich_format = false);
 }
 }
 

@@ -14,12 +14,7 @@
 
 #include "sql/engine/join/ob_hash_join_op.h"
 #include "sql/engine/px/ob_px_util.h"
-#include "observer/omt/ob_tenant_config_mgr.h"
-#include "sql/engine/ob_exec_context.h"
-#include "sql/session/ob_sql_session_info.h"
-#include "observer/omt/ob_tenant_config_mgr.h"
 #include "sql/engine/px/ob_px_util.h"
-#include "share/diagnosis/ob_sql_monitor_statname.h"
 
 namespace oceanbase
 {
@@ -107,7 +102,11 @@ ObHashJoinSpec::ObHashJoinSpec(common::ObIAllocator &alloc, const ObPhyOperatorT
   is_naaj_(false),
   is_sna_(false),
   is_shared_ht_(false),
-  is_ns_equal_cond_(alloc)
+  is_ns_equal_cond_(alloc),
+  adaptive_hj_scan_cols_(alloc),
+  adaptive_nlj_scan_cols_(alloc),
+  is_adaptive_(false),
+  left_join_row_(alloc)
 {
 }
 
@@ -119,7 +118,11 @@ OB_SERIALIZE_MEMBER((ObHashJoinSpec, ObJoinSpec),
                     is_naaj_,
                     is_sna_,
                     is_shared_ht_,
-                    is_ns_equal_cond_);
+                    is_ns_equal_cond_,
+                    adaptive_hj_scan_cols_,
+                    adaptive_nlj_scan_cols_,
+                    is_adaptive_,
+                    left_join_row_);
 
 int ObHashJoinOp::PartHashJoinTable::init(ObIAllocator &alloc)
 {
@@ -308,50 +311,24 @@ ObHashJoinOp::ObHashJoinOp(ObExecContext &ctx_, const ObOpSpec &spec, ObOpInput 
   get_next_left_batch_func_ = &ObHashJoinOp::get_next_left_row_batch;
 }
 
-int ObHashJoinOp::set_hash_function(int8_t hash_join_hasher)
+int ObHashJoinOp::set_hash_function()
 {
   int ret = OB_SUCCESS;
   const common::ObIArray<common::ObHashFunc> *cur_hash_funcs = &MY_SPEC.all_hash_funcs_;
-  if (DEFAULT_MURMUR_HASH != (hash_join_hasher & HASH_FUNCTION_MASK)) {
-    ObHashFunc hash_func;
-    if (OB_FAIL(tmp_hash_funcs_.init(MY_SPEC.all_hash_funcs_.count()))) {
-      LOG_WARN("failed to init tmp hash func", K(ret));
-    } else {
-      for (int64_t i = 0; i < MY_SPEC.all_hash_funcs_.count() && OB_SUCC(ret); ++i) {
-        if (ENABLE_WY_HASH == (hash_join_hasher & HASH_FUNCTION_MASK)) {
-          hash_func.hash_func_ = MY_SPEC.all_join_keys_.at(i)->basic_funcs_->wy_hash_;
-        } else  if (ENABLE_XXHASH64 == (hash_join_hasher & HASH_FUNCTION_MASK)) {
-          hash_func.hash_func_ = MY_SPEC.all_join_keys_.at(i)->basic_funcs_->xx_hash_;
-        } else {
-          ret = OB_ERR_UNEXPECTED;
-          LOG_WARN("unexpected status: hash join hasher is invalid", K(ret), K(hash_join_hasher));
-        }
-        if (OB_FAIL(ret)) {
-        } else if (OB_FAIL(tmp_hash_funcs_.push_back(hash_func))) {
-          LOG_WARN("failed to push back wy hash func", K(ret));
-        } else {
-          LOG_DEBUG("debug hash function", K(hash_func), K(i), K(*MY_SPEC.all_join_keys_.at(i)));
-        }
-      }
-      cur_hash_funcs = &tmp_hash_funcs_;
-    }
-  }
-  if (OB_SUCC(ret)) {
-    int64_t all_cnt = cur_hash_funcs->count();
-    left_hash_funcs_.init(
-      all_cnt / 2, const_cast<ObHashFunc*>(&cur_hash_funcs->at(0)), all_cnt / 2);
-    right_hash_funcs_.init(all_cnt / 2,
-      const_cast<ObHashFunc*>(&cur_hash_funcs->at(0) + left_hash_funcs_.count()),
-      cur_hash_funcs->count() - left_hash_funcs_.count());
-    if (left_hash_funcs_.count() != right_hash_funcs_.count()) {
-      ret = OB_ERR_UNEXPECTED;
-      LOG_WARN("unexpected status: hash func is not match", K(ret), K(cur_hash_funcs->count()),
-        K(left_hash_funcs_.count()), K(right_hash_funcs_.count()));
-    } else if (MY_SPEC.all_join_keys_.count() != cur_hash_funcs->count()) {
-      ret = OB_ERR_UNEXPECTED;
-      LOG_WARN("unexpected status: hash func is not match", K(ret), K(cur_hash_funcs->count()),
-        K(MY_SPEC.all_join_keys_.count()));
-    }
+  int64_t all_cnt = cur_hash_funcs->count();
+  left_hash_funcs_.init(
+    all_cnt / 2, const_cast<ObHashFunc*>(&cur_hash_funcs->at(0)), all_cnt / 2);
+  right_hash_funcs_.init(all_cnt / 2,
+    const_cast<ObHashFunc*>(&cur_hash_funcs->at(0) + left_hash_funcs_.count()),
+    cur_hash_funcs->count() - left_hash_funcs_.count());
+  if (left_hash_funcs_.count() != right_hash_funcs_.count()) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected status: hash func is not match", K(ret), K(cur_hash_funcs->count()),
+      K(left_hash_funcs_.count()), K(right_hash_funcs_.count()));
+  } else if (MY_SPEC.all_join_keys_.count() != cur_hash_funcs->count()) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected status: hash func is not match", K(ret), K(cur_hash_funcs->count()),
+      K(MY_SPEC.all_join_keys_.count()));
   }
   return ret;
 }
@@ -424,7 +401,7 @@ int ObHashJoinOp::inner_open()
       if (0 == (hash_join_processor_ & HJ_PROCESSOR_MASK)) {
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("unexpect hash join processor", K(ret), K(hash_join_processor_));
-      } else if (OB_FAIL(set_hash_function(tenant_config->_enable_hash_join_hasher))) {
+      } else if (OB_FAIL(set_hash_function())) {
         LOG_WARN("unexpect hash join function", K(ret));
       }
     } else {
@@ -607,14 +584,18 @@ void ObHashJoinOp::part_rescan()
     for (int64_t i = 0; i < part_count_; i ++) {
       hj_part_array_[i].~ObHashJoinPartition();
     }
-    alloc_->free(hj_part_array_);
+    if (OB_NOT_NULL(alloc_)) {
+      alloc_->free(hj_part_array_);
+    }
     hj_part_array_ = NULL;
   }
   if (right_hj_part_array_ != NULL) {
     for (int64_t i = 0; i < part_count_; i ++) {
       right_hj_part_array_[i].~ObHashJoinPartition();
     }
-    alloc_->free(right_hj_part_array_);
+    if (OB_NOT_NULL(alloc_)) {
+      alloc_->free(right_hj_part_array_);
+    }
     right_hj_part_array_ = NULL;
   }
   int64_t tmp_part_count = 0 < level2_part_count_ ?
@@ -624,11 +605,15 @@ void ObHashJoinOp::part_rescan()
     for (int64_t i = 0; i < tmp_part_count; i ++) {
       part_histograms_[i].~HashJoinHistogram();
     }
-    alloc_->free(part_histograms_);
+    if (OB_NOT_NULL(alloc_)) {
+      alloc_->free(part_histograms_);
+    }
     part_histograms_ = NULL;
   }
   if (OB_NOT_NULL(part_selectors_)) {
-    alloc_->free(part_selectors_);
+    if (OB_NOT_NULL(alloc_)) {
+      alloc_->free(part_selectors_);
+    }
     part_selectors_ = nullptr;
     part_selector_sizes_ = nullptr;
   }
@@ -1818,7 +1803,8 @@ int ObHashJoinOp::in_memory_process(bool &need_not_read_right)
     LOG_WARN("failed to build hash table", K(ret), K(part_level_));
   }
   if (OB_SUCC(ret)
-      && !is_shared_
+      && (!is_shared_ || (0 == cur_hash_table_->row_count_
+                          && cur_dumped_partition_ == max_partition_count_per_level_))
       && ((0 == num_left_rows
           && RIGHT_ANTI_JOIN != MY_SPEC.join_type_
           && RIGHT_OUTER_JOIN != MY_SPEC.join_type_
@@ -2045,7 +2031,7 @@ int ObHashJoinOp::asyn_dump_partition(
   LOG_TRACE("debug dump partition", K(is_left), K(start_dumped_part_idx),
     K(last_dumped_partition_idx), K(cur_dumped_partition_),
     K(pre_total_dumped_size), K(dumped_size), K(dump_all), K(lbt()));
-  // secondly dump one buffer per partiton one by one
+  // secondly dump one buffer per partition one by one
   bool finish_dump = false;
   while (OB_SUCC(ret) && !finish_dump) {
     finish_dump = true;
@@ -3614,7 +3600,8 @@ int ObHashJoinOp::recursive_process(bool &need_not_read_right)
     LOG_WARN("failed to build hash table", K(ret), K(part_level_));
   }
   if (OB_SUCC(ret)
-      && !is_shared_
+      && (!is_shared_ || (0 == cur_hash_table_->row_count_
+                          && cur_dumped_partition_ == max_partition_count_per_level_))
       && ((0 == num_left_rows
           && RIGHT_ANTI_JOIN != MY_SPEC.join_type_
           && RIGHT_OUTER_JOIN != MY_SPEC.join_type_
@@ -3991,7 +3978,7 @@ int ObHashJoinOp::insert_batch_row(const int64_t cur_partition_in_memory)
 {
   int ret = OB_SUCCESS;
   bool need_material = true;
-  bool dumped_partiton = false;
+  bool dumped_partition = false;
   ObHashJoinStoredJoinRow *stored_row = nullptr;
   const int64_t part_idx = get_part_idx(cur_right_hash_value_);
   if (part_idx < cur_partition_in_memory) {
@@ -4003,14 +3990,14 @@ int ObHashJoinOp::insert_batch_row(const int64_t cur_partition_in_memory)
       }
     }
   } else {
-    dumped_partiton = true;
+    dumped_partition = true;
   }
   if (!need_material) {
   } else if (nullptr != right_read_row_) {
     if (OB_FAIL(right_hj_part_array_[part_idx].add_row(right_read_row_, stored_row))) {
       LOG_WARN("fail to add row", K(ret));
     } else {
-      if (!dumped_partiton && right_hj_part_array_[part_idx].has_switch_block()) {
+      if (!dumped_partition && right_hj_part_array_[part_idx].has_switch_block()) {
         cur_full_right_partition_ = part_idx;
         cur_left_hist_ = &part_histograms_[cur_full_right_partition_];
       }
@@ -4021,7 +4008,7 @@ int ObHashJoinOp::insert_batch_row(const int64_t cur_partition_in_memory)
       LOG_WARN("fail to add row", K(ret));
     } else {
       stored_row->set_hash_value(cur_right_hash_value_);
-      if (!dumped_partiton && right_hj_part_array_[part_idx].has_switch_block()) {
+      if (!dumped_partition && right_hj_part_array_[part_idx].has_switch_block()) {
         cur_full_right_partition_ = part_idx;
         cur_left_hist_ = &part_histograms_[cur_full_right_partition_];
         // need right to probe, it may return left and right data, so it need save temporarily
@@ -4163,7 +4150,7 @@ int ObHashJoinOp::get_next_batch_right_rows()
   has_fill_left_row_ = false;
   if (OB_ITER_END == ret) {
     ret = OB_SUCCESS;
-    // probe left all right rows from 0 partition to last partiton
+    // probe left all right rows from 0 partition to last partition
     cur_full_right_partition_ = -1;
     LOG_DEBUG("debug partition start", K(cur_full_right_partition_));
     if (!enable_batch_) {
@@ -4438,7 +4425,8 @@ int ObHashJoinOp::calc_hash_value(
     if (skip_null) {
       skipped = true;
     } else {
-      hash_value = null_random_hash_value_++;
+      hash_value = common::murmurhash64A(&null_random_hash_value_, sizeof(int64_t), HASH_SEED);
+      null_random_hash_value_++;
     }
   }
   hash_value = hash_value & ObHashJoinStoredJoinRow::HASH_VAL_MASK;
@@ -4485,7 +4473,8 @@ int ObHashJoinOp::calc_hash_value_batch(const ObIArray<ObExpr*> &join_keys,
         if (need_null_random) {
           if (skip_null) {
           } else {
-            hash_vals[i] = null_random_hash_value_++;
+            hash_vals[i] = common::murmurhash64A(&null_random_hash_value_, sizeof(int64_t), HASH_SEED);
+            null_random_hash_value_++;
             right_selector_[selector_idx++] = i;
           }
         } else {

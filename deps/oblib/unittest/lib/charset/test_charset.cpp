@@ -10,19 +10,15 @@
  * See the Mulan PubL v2 for more details.
  */
 
-#include <pthread.h>
-#include <stdio.h>
-#include <time.h>
-#include <sys/time.h>
 #include <codecvt>
-#include "lib/allocator/page_arena.h"
-#include "lib/charset/ob_charset.h"
-#include "lib/string/ob_string.h"
-#include "lib/utility/ob_print_utils.h"
 #include "gtest/gtest.h"
-#include "unicode_map.h"
+
+#define protected public
+#define private public
+
+#include "lib/allocator/page_arena.h"
 #include "common/data_buffer.h"
-#include "lib/oblog/ob_log_module.h"
+#include "lib/charset/ob_charset_string_helper.h"
 #define USING_LOG_PREFIX SQL
 
 using namespace oceanbase::common;
@@ -141,7 +137,7 @@ TEST_F(TestCharset, sortkey)
 
   char space[10] = "  ";
   size1 = ObCharset::sortkey(CS_TYPE_UTF8MB4_GENERAL_CI, space, strlen(space), aa1, 10, is_valid_unicode);
-  ASSERT_EQ(size1, 2);
+  ASSERT_EQ(size1, 4);
   ASSERT_TRUE(is_valid_unicode);
 
   char empty[10] = "";
@@ -154,7 +150,7 @@ TEST_F(TestCharset, sortkey)
   invalid[1] = char(0x80);
   invalid[2] = '\0';
   size1 = ObCharset::sortkey(CS_TYPE_UTF8MB4_GENERAL_CI, invalid, strlen(invalid), aa1, 10, is_valid_unicode);
-  ASSERT_EQ(size1, 1);
+  ASSERT_EQ(size1, 2);
   ASSERT_FALSE(is_valid_unicode);
 
   //std::map<int, int> charset{
@@ -195,11 +191,11 @@ TEST_F(TestCharset, sortkey)
   std::vector<std::vector<int>>result{
     {0,1,1,1,1},
     {1,4,1,1,0},
-    {2,6,1,0,0},
+    {2,4,1,0,0},
     {3,6,1,0,0},
     {4,1,1,1,1},
     {5,4,1,0,0},
-    {6,4,1,0,0},
+    {6,6,1,0,0},
     {7,1,1,1,1},
     {8,4,1,1,1},
     {9,10,1,10,1},
@@ -605,7 +601,8 @@ TEST_F(TestCharset, tolower)
   fprintf(stdout, "ret:%p, %d\n", y1.ptr(), y1.length() );
   for (int cs_i = CHARSET_INVALID; cs_i < CHARSET_MAX; ++cs_i) {
     auto charset_type = static_cast<ObCharsetType>(cs_i);
-    if (!ObCharset::is_valid_charset(charset_type) || CHARSET_UTF16 == charset_type || CHARSET_BINARY == charset_type)
+    if (!ObCharset::is_valid_charset(charset_type) || CHARSET_UTF16 == charset_type
+        || CHARSET_UTF16LE == charset_type || CHARSET_BINARY == charset_type)
       continue;
     ObCollationType cs_type = ObCharset::get_default_collation(charset_type);
     ASSERT_TRUE(ObCharset::is_valid_collation(cs_type));
@@ -640,7 +637,8 @@ TEST_F(TestCharset, toupper)
   fprintf(stdout, "ret:%p, %d\n", y1.ptr(), y1.length() );
   for (int cs_i = CHARSET_INVALID; cs_i < CHARSET_MAX; ++cs_i) {
     auto charset_type = static_cast<ObCharsetType>(cs_i);
-    if (!ObCharset::is_valid_charset(charset_type) || CHARSET_UTF16 == charset_type || CHARSET_BINARY == charset_type)
+    if (!ObCharset::is_valid_charset(charset_type) || CHARSET_UTF16 == charset_type
+    || CHARSET_UTF16LE == charset_type || CHARSET_BINARY == charset_type)
       continue;
     ObCollationType cs_type = ObCharset::get_default_collation(charset_type);
     ASSERT_TRUE(ObCharset::is_valid_collation(cs_type));
@@ -820,6 +818,351 @@ TEST_F(TestCharset, check_gb18030_2022)
     int len_gb18030_2022 = ob_wc_mb_gb18030_2022(NULL, i, s_gb18030_2022, s_gb18030_2022 + 4);
     uint code_gb18030_2022 = (len_gb18030_2022 == 0) ? 0 : gb18030_chs_to_code(s_gb18030_2022, len_gb18030_2022);
     ASSERT_TRUE(target == code_gb18030_2022);
+  }
+}
+
+TEST_F(TestCharset, check_mbmaxlenlen)
+{
+  for (int64_t type = ObCollationType::CS_TYPE_INVALID; type < ObCollationType::CS_TYPE_MAX; ++type) {
+    if (nullptr != ObCharset::charset_arr[type]) {
+      const uint mbmaxlenlen = ob_mbmaxlenlen(ObCharset::charset_arr[type]);
+      const char *cs_name = ObCharset::charset_name(static_cast<ObCollationType>(type));
+      std::cout << "charset=" << cs_name << ", mbmaxlenlen=" << mbmaxlenlen << ", type=" << type << std::endl;
+      if (ObCharset::is_gb18030_2022(type)
+          || CS_TYPE_GB18030_CHINESE_CI == type
+          || CS_TYPE_GB18030_CHINESE_CS == type
+          || CS_TYPE_GB18030_BIN == type
+          || CS_TYPE_GB18030_ZH_0900_AS_CS == type
+          || CS_TYPE_GB18030_ZH2_0900_AS_CS == type
+          || CS_TYPE_GB18030_ZH3_0900_AS_CS == type
+          || CS_TYPE_GB18030_2022_ZH_0900_AS_CS == type
+          || CS_TYPE_GB18030_2022_ZH2_0900_AS_CS == type
+          || CS_TYPE_GB18030_2022_ZH3_0900_AS_CS == type) {
+        ASSERT_EQ(2, mbmaxlenlen);
+      } else {
+        ASSERT_EQ(1, mbmaxlenlen);
+      }
+    }
+  }
+}
+
+std::vector<const char *> test_strings = {"1", "abcdef", "ab1dc4", "好", "b今a天", "1abad    "};
+
+
+TEST_F(TestCharset, basic_collation_handler_test)
+{
+  ObArenaAllocator alloc;
+  for (int i = CS_TYPE_INVALID; i < CS_TYPE_MAX; i++) {
+    ObCollationType coll = static_cast<ObCollationType>(i);
+    if (!ObCharset::is_valid_charset(coll)) {
+      continue;
+    }
+    const ObCharsetInfo * cs = ObCharset::get_charset(coll);
+      const char *coll_name = ObCharset::collation_name(coll);
+    if (OB_NOT_NULL(cs)) {
+      std::cout << "#TEST Coll = " << coll_name << std::endl;
+      for (const char* utf8_str:test_strings) {
+        ObString dst;
+        if (cs->mbmaxlen <= 1) {
+          dst = ObString(utf8_str);
+        } else {
+          ASSERT_EQ(0, ObCharset::charset_convert(alloc, ObString(utf8_str), CS_TYPE_UTF8MB4_BIN, coll, dst));
+        }
+        char*str = dst.ptr();
+        char*end = dst.ptr() + dst.length();
+
+        if (OB_NOT_NULL(cs->coll->strnncoll)) {
+          fprintf(stdout, ">> strnncoll = %d for text = \"%s\"\n",
+                    cs->coll->strnncoll(cs, pointer_cast<const uchar*>(str), end-str, pointer_cast<const uchar*>(str), end-str, true), utf8_str);
+        }
+        if (OB_NOT_NULL(cs->coll->strnncollsp)) {
+          fprintf(stdout, ">> strnncollsp = %d for text = \"%s\"\n",
+                    cs->coll->strnncollsp(cs, pointer_cast<const uchar*>(str), end-str, pointer_cast<const uchar*>(str), end-str, true), utf8_str);
+        }
+        if (OB_NOT_NULL(cs->coll->strnxfrm)) {
+          char temp[100];
+          bool is_valid_unicode = false;
+          fprintf(stdout, ">> strnxfrm = %ld for text = \"%s\", is_valid_unicode = %d\n",
+                    cs->coll->strnxfrm(cs, reinterpret_cast<unsigned char *>(temp), 100, UINT32_MAX,
+                    reinterpret_cast<unsigned char *>(str), end-str, 0, &is_valid_unicode), utf8_str, is_valid_unicode);
+        }
+        if (OB_NOT_NULL(cs->coll->strnxfrmlen)) {
+          fprintf(stdout, ">> strnxfrmlen = %ld for text = \"%s\"\n",
+                    cs->coll->strnxfrmlen(cs, end-str), utf8_str);
+        }
+        if (OB_NOT_NULL(cs->coll->strnxfrm_varlen)) {
+          fprintf(stdout, ">> strnxfrmlen = %ld for text = \"%s\"\n",
+                    cs->coll->strnxfrmlen(cs, end-str), utf8_str);
+        }
+        if (OB_NOT_NULL(cs->coll->like_range)) {
+          char temp1[100];
+          char temp2[100];
+          size_t len1, len2, prefix_len;
+          fprintf(stdout, ">> like_range = %d for text = \"%s\", min = %.*s, max = %.*s\n",
+                    cs->coll->like_range(cs, str, end-str, '\\', '_', '%', 100, temp1, temp2, &len1, &len2, &prefix_len), utf8_str,
+                    (int)len1, temp1, (int)len2, temp2);
+        }
+        if (OB_NOT_NULL(cs->coll->wildcmp)) {
+          const char *wild_str = "%";
+          fprintf(stdout, ">> wildcmp = %d for text = \"%s\"\n",
+                    cs->coll->wildcmp(cs, str, end, wild_str, wild_str + strlen(wild_str), '\\', '_', '%'), utf8_str);
+        }
+        if (OB_NOT_NULL(cs->coll->strcasecmp)) {
+          fprintf(stdout, ">> strcasecmp = %d for text = \"%s\"\n",
+                    cs->coll->strcasecmp(cs, str, end), utf8_str);
+        }
+        if (OB_NOT_NULL(cs->coll->instr)) {
+          ob_match_t m_match_t[2];
+          unsigned int nmatch = 1;
+          const char *temp = "1";
+          fprintf(stdout, ">> instr = %d for text = \"%s\" nmatch = %u match_mb_len = %u\n",
+                    cs->coll->instr(cs, temp, strlen(temp), str, end-str, m_match_t, nmatch), utf8_str,
+                    nmatch, m_match_t[0].mb_len);
+        }
+        if (OB_NOT_NULL(cs->coll->hash_sort)) {
+          ulong nr1, nr2;
+          cs->coll->hash_sort(cs, pointer_cast<const uchar*>(str), end-str, &nr1, &nr2, true, NULL);
+          fprintf(stdout, ">> hash_sort for text = \"%s\" nr1 = %lu nr1 = %lu\n", utf8_str, nr1, nr2);
+        }
+        if (OB_NOT_NULL(cs->coll->propagate)) {
+          fprintf(stdout, ">> propagate = %d for text = \"%s\"\n",
+                    cs->coll->propagate(cs, pointer_cast<const uchar*>(str), end-str), utf8_str);
+        }
+      }
+    }
+  }
+}
+
+TEST_F(TestCharset, foreach_char) {
+  const char *data = "豫章故郡，洪都新府。星分翼轸，地接衡庐。襟三江而带五湖，控蛮荆而引瓯越。物华天宝，龙光射牛斗之墟"
+               "人杰地灵，徐孺下陈蕃之榻。雄州雾列，俊采星驰。台隍枕夷夏之交，宾主尽东南之美。都督阎公之雅望，棨戟遥临"
+               "宇文新州之懿范，襜帷暂驻。十旬休假，胜友如云；千里逢迎，高朋满座。腾蛟起凤，孟学士之词宗；紫电青霜"
+               "王将军之武库。家君作宰，路出名区；童子何知，躬逢胜饯。时维九月，序属三秋。潦水尽而寒潭清，烟光凝而暮山紫"
+               "俨骖騑于上路，访风景于崇阿。临帝子之长洲，得天人之旧馆。层峦耸翠，上出重霄；飞阁流丹，下临无地。鹤汀凫渚"
+               "穷岛屿之萦回；桂殿兰宫，即冈峦之体势。披绣闼，俯雕甍，山原旷其盈视，川泽纡其骇瞩。闾阎扑地，钟鸣鼎食之家"
+               "舸舰弥津，青雀黄龙之舳。云销雨霁，彩彻区明。落霞与孤鹜齐飞，秋水共长天一色。渔舟唱晚，响穷彭蠡之滨"
+               "雁阵惊寒，声断衡阳之浦。遥襟甫畅，逸兴遄飞。爽籁发而清风生，纤歌凝而白云遏。睢园绿竹，气凌彭泽之樽"
+               "邺水朱华，光照临川之笔。四美具，二难并。穷睇眄于中天，极娱游于暇日。天高地迥，觉宇宙之无穷；兴尽悲来"
+               "识盈虚之有数。望长安于日下，目吴会于云间。地势极而南溟深，天柱高而北辰远。关山难越，谁悲失路之人"
+               "萍水相逢，尽是他乡之客。怀帝阍而不见，奉宣室以何年？嗟乎！时运不齐，命途多舛。冯唐易老，李广难封"
+               "屈贾谊于长沙，非无圣主；窜梁鸿于海曲，岂乏明时？所赖君子见机，达人知命。老当益壮，宁移白首之心"
+               "穷且益坚，不坠青云之志。酌贪泉而觉爽，处涸辙以犹欢。北海虽赊，扶摇可接；东隅已逝，桑榆非晚。孟尝高洁"
+               "空余报国之情；阮籍猖狂，岂效穷途之哭！勃，三尺微命，一介书生。无路请缨，等终军之弱冠；有怀投笔，慕宗悫之长风"
+               "舍簪笏于百龄，奉晨昏于万里。非谢家之宝树，接孟氏之芳邻。他日趋庭，叨陪鲤对；今兹捧袂，喜托龙门。杨意不逢"
+               "抚凌云而自惜；钟期既遇，奏流水以何惭？呜呼！胜地不常，盛筵难再；兰亭已矣，梓泽丘墟。临别赠言，幸承恩于伟饯"
+               "登高作赋，是所望于群公。敢竭鄙怀，恭疏短引；一言均赋，四韵俱成。请洒潘江，各倾陆海云尔：滕王高阁临江渚"
+               "佩玉鸣鸾罢歌舞。画栋朝飞南浦云，珠帘暮卷西山雨。闲云潭影日悠悠，物换星移几度秋。阁中帝子今何在？槛外长江空自流。";
+
+       const char *data1 =   "豫章故郡，洪都新府。星分翼軒，地接衡廬。襟三江而帶五湖，控蠻荊而引甌越。物華天寶，龍光射牛斗之墟。落霞與孤鷺齊飛，秋水共長天一色。"
+                              "人傑地靈，徐孺下陳蕃之榻。雄州霧列，俊採星馳。台隍枕夷夏之交，賓主盡東南之美。都督閻之雅望，棨戟遙臨"
+                              "時維九月，序屬三秋。潦水盡而寒潭清，煙光凝而暮山紫。物華天寶";
+  /*
+  const char *data = "I hear America singing, the varied carols I hear,Those of mechanics, "
+                     "each one singing his as it should be blithe and strong,The carpenter "
+                     "singing his as he measures his plank or beam,The mason singing his as "
+                     "he makes ready for work, or leaves off work,The boatman singing what "
+                     "belongs to him in his boat, the deckhand singing on the steamboat deck,"
+                     "The shoemaker singing as he sits on his bench, the hatter singing as "
+                     "he stands,The wood-cutter’s song, the ploughboy’s on his way in the morning, "
+                     "or at noon intermission or at sundown,The delicious singing of the mother, "
+                     "or of the young wife at work, or of the girl sewing or washing,Each singing "
+                     "what belongs to him or her and to none else,The day what belongs to the day—at "
+                     "night the party of young fellows, robust, friendly,Singing with open "
+                     "mouths their strong melodious songs.";
+                     */
+  int64_t word_cnt = 0;
+  auto do_nothing = [&word_cnt] (const ObString &str, ob_wc_t wchar) -> int {
+    int ret = OB_SUCCESS;
+    word_cnt++;
+    return ret;
+  };
+
+  int repeat = 10000;
+  int64_t total_bytes = 0;
+  int64_t time_start = 0;
+  int64_t time_dur = 0;
+
+  auto start_timer = [&]() { time_start = ObTimeUtility::current_time(); word_cnt = 0; };
+  auto end_timer = [&]() {
+    time_dur = ObTimeUtility::current_time() - time_start;
+    fprintf(stdout, "==> speed:%ldM/s, word_cnt=>%ld\n", (total_bytes >> 20) * 1000000 / time_dur, word_cnt);
+  };
+
+  ObString data_in(data);
+  ObString data_in1(data1);
+  ObArenaAllocator alloc;
+
+  for (int i = CHARSET_BINARY + 1; i <= CHARSET_GB18030; i++) {
+    ObCharsetType test_cs_type = static_cast<ObCharsetType>(i);
+    ObCollationType test_collation_type = ObCharset::get_default_collation(test_cs_type);
+    ObString data_out;
+    char *buf = NULL;
+    buf = static_cast<char*>(alloc.alloc(data_in.length() * repeat));
+    ASSERT_TRUE(NULL != buf);
+    ObString input(data_in.length() * repeat, buf);
+    for (int i = 0; i < repeat; i++) {
+      MEMCPY(buf + i*data_in.length(), data_in.ptr(), data_in.length());
+    }
+
+    int32_t buf_len = input.length() * ObCharset::MAX_MB_LEN;
+    buf = static_cast<char*>(alloc.alloc(buf_len));
+    ASSERT_TRUE(NULL != buf);
+    data_out.assign_buffer(buf, buf_len);
+
+    total_bytes = input.length();
+    fprintf(stdout, "\n# For charset: %s, ConvertDataLen: %d\n", ObCharset::charset_name(test_collation_type), input.length());
+
+
+    uint32_t result_len;
+    start_timer();
+    ASSERT_EQ(OB_SUCCESS,
+              ObCharset::charset_convert(CS_TYPE_UTF8MB4_BIN, input.ptr(), input.length(),
+                                         test_collation_type, data_out.ptr(), data_out.size(),
+                                         result_len));
+    end_timer();
+
+    start_timer();
+    int64_t pos = 0;
+    ASSERT_EQ(OB_SUCCESS,
+              ObFastStringScanner::convert_charset(
+                input, CS_TYPE_UTF8MB4_BIN, test_collation_type, buf, buf_len, pos));
+    end_timer();
+    fprintf(stdout, "input.length = %d, data_out.length = %ld\n", input.length(), pos);
+  }
+
+
+  for (int i = CHARSET_INVALID + 1; i < CHARSET_MAX; i++) {
+    ObCharsetType test_cs_type = static_cast<ObCharsetType>(i);
+    ObCollationType test_collation_type = ObCharset::get_default_collation(test_cs_type);
+    ObString data_out;
+    ASSERT_TRUE(ObCharset::is_valid_collation(test_collation_type));
+    if (ObCharset::get_charset(test_collation_type)->mbmaxlen == 1 || test_cs_type == CHARSET_SJIS) {
+      data_out = data_in;
+      continue;
+    } else if (test_cs_type == CHARSET_BIG5 || test_cs_type == CHARSET_HKSCS || test_cs_type == CHARSET_HKSCS31) {
+      ASSERT_TRUE(OB_SUCCESS == ObCharset::charset_convert(alloc, data_in1, CS_TYPE_UTF8MB4_BIN, test_collation_type, data_out));
+    } else {
+      ASSERT_TRUE(OB_SUCCESS == ObCharset::charset_convert(alloc, data_in, CS_TYPE_UTF8MB4_BIN, test_collation_type, data_out));
+    }
+
+
+    int data_len = data_out.length();
+    total_bytes = static_cast<int64_t>(data_len) * repeat;
+    char *buf = (char*)(alloc.alloc(data_len * repeat));
+    ObString input(data_len * repeat, buf);
+    for (int i = 0; i < repeat; i++) {
+      MEMCPY(buf + i*data_len, data_out.ptr(), data_len);
+    }
+    fprintf(stdout, "\n# For charset: %s, TestDataLen: %d\n", ObCharset::charset_name(test_collation_type), data_len * repeat);
+    ASSERT_TRUE(NULL != buf);
+
+    fprintf(stdout, "Raw Impl\n");
+    start_timer();
+    ASSERT_EQ(OB_SUCCESS, ObCharsetUtils::foreach_char(input, test_collation_type, do_nothing, true));
+    end_timer();
+
+
+    fprintf(stdout, "Inline Impl\n");
+    start_timer();
+    ASSERT_EQ(OB_SUCCESS, ObFastStringScanner::foreach_char(input, test_cs_type, do_nothing));
+    end_timer();
+
+    fprintf(stdout, "Skip encoding Impl\n");
+    start_timer();
+    ASSERT_EQ(OB_SUCCESS, ObFastStringScanner::foreach_char(input, test_cs_type, do_nothing, false));
+    end_timer();
+  }
+}
+
+
+
+
+TEST_F(TestCharset, basic_charset_handler_test)
+{
+  ObArenaAllocator alloc;
+  for (int i = CHARSET_INVALID; i < CHARSET_MAX; i++) {
+    if (ObCharset::is_valid_charset(static_cast<ObCharsetType>(i))) {
+      ObCollationType coll = static_cast<ObCollationType>(ObCharset::get_default_collation(static_cast<ObCharsetType>(i)));
+      const char *coll_name = ObCharset::collation_name(coll);
+      const ObCharsetInfo * cs = ObCharset::get_charset(coll);
+      std::cout << "#TEST Coll = " << coll_name << std::endl;
+      for (const char* utf8_str:test_strings) {
+        ObString dst;
+        if (cs->mbmaxlen <= 1) {
+          dst = ObString(utf8_str);
+        } else {
+          ASSERT_EQ(0, ObCharset::charset_convert(alloc, ObString(utf8_str), CS_TYPE_UTF8MB4_BIN, coll, dst));
+        }
+        const char*str = dst.ptr();
+        const char*end = dst.ptr() + dst.length();
+        if (OB_NOT_NULL(cs->cset->ismbchar)) {
+          fprintf(stdout, ">> ismbchar = %d for text = \"%s\"\n",
+                    cs->cset->ismbchar(cs, str, end), utf8_str);
+        }
+        if (OB_NOT_NULL(cs->cset->mbcharlen)) {
+          fprintf(stdout, ">> mbcharlen = %d for text = \"%s\"\n",
+                    cs->cset->mbcharlen(cs, str[0]), utf8_str);
+        }
+        if (OB_NOT_NULL(cs->cset->numchars)) {
+          fprintf(stdout, ">> numchars = %ld for text = \"%s\"\n",
+                    cs->cset->numchars(cs, str, end), utf8_str);
+        }
+        if (OB_NOT_NULL(cs->cset->charpos)) {
+          size_t pos = 3;
+          fprintf(stdout, ">> charpos = %ld pos = %ld for text = \"%s\"\n",
+                    cs->cset->charpos(cs, str, end, pos), pos, utf8_str);
+        }
+        if (OB_NOT_NULL(cs->cset->max_bytes_charpos)) {
+          size_t max_bytes = 5;
+          size_t char_len = 0;
+          fprintf(stdout, ">> max_bytes_charpos = %ld max_bytes = %ld char_len = %ld for text = \"%s\"\n",
+                    cs->cset->max_bytes_charpos(cs, str, end, max_bytes, &char_len), max_bytes, char_len, utf8_str);
+        }
+        if (OB_NOT_NULL(cs->cset->well_formed_len)) {
+          int error = 0;
+          fprintf(stdout, ">> well_formed_len = %ld error = %d text = \"%s\"\n",
+                    cs->cset->well_formed_len(cs, str, end, INT64_MAX, &error), error, utf8_str);
+        }
+        if (OB_NOT_NULL(cs->cset->lengthsp)) {
+          fprintf(stdout, ">> lengthsp = %ld text = \"%s\"\n",
+                    cs->cset->lengthsp(cs, str, end-str), utf8_str);
+        }
+        if (OB_NOT_NULL(cs->cset->mb_wc)) {
+          ob_wc_t wchar = 0;
+          fprintf(stdout, ">> mb_wc = %d wchar = %ld text = \"%s\"\n",
+                    cs->cset->mb_wc(cs, &wchar, pointer_cast<const uchar*>(str), pointer_cast<const uchar*>(end)), wchar, utf8_str);
+        }
+        if (OB_NOT_NULL(cs->cset->wc_mb)) {
+          ob_wc_t wchar = 41;
+          unsigned char temp[10];
+          MEMSET(temp, 0, 10);
+          fprintf(stdout, ">> wc_mb = %d A = %.*s text = \"%s\"\n",
+                    cs->cset->wc_mb(cs, wchar, temp, temp + 10), 10, temp, utf8_str);
+        }
+        if (OB_NOT_NULL(cs->cset->ctype)) {
+          int ctype = 0;
+          fprintf(stdout, ">> ctype = %d ctype = %d text = \"%s\"\n",
+                    cs->cset->ctype(cs, &ctype, pointer_cast<const uchar*>(str), pointer_cast<const uchar*>(end)), ctype, utf8_str);
+        }
+        if (cs->casedn_multiply <= 1 && OB_NOT_NULL(cs->cset->casedn)) {
+          ObString temp;
+          ASSERT_EQ(0, ob_write_string(alloc, dst, temp));
+          fprintf(stdout, ">> casedn = %ld res = %.*s text = \"%s\"\n",
+                    cs->cset->casedn(cs, temp.ptr(), temp.length(), temp.ptr(), temp.length()), temp.length(), temp.ptr(), utf8_str);
+        }
+        if (cs->caseup_multiply <= 1 && OB_NOT_NULL(cs->cset->caseup)) {
+          ObString temp;
+          ASSERT_EQ(0, ob_write_string(alloc, dst, temp));
+          fprintf(stdout, ">> caseup = %ld res = %.*s text = \"%s\"\n",
+                    cs->cset->caseup(cs, temp.ptr(), temp.length(), temp.ptr(), temp.length()), temp.length(), temp.ptr(), utf8_str);
+        }
+        if (OB_NOT_NULL(cs->cset->fill)) {
+          char temp[10];
+          cs->cset->fill(cs, temp, 10, 0x42);
+          fprintf(stdout, ">> fill res = %.*s text = \"%s\"\n", 10, temp, utf8_str);
+        }
+      }
+    }
   }
 }
 

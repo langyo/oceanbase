@@ -12,12 +12,7 @@
 
 #define USING_LOG_PREFIX STORAGE
 #include "ob_table_read_info.h"
-#include "storage/ob_i_store.h"
-#include "storage/ob_storage_schema.h"
-#include "share/schema/ob_table_param.h"
-#include "storage/blocksstable/ob_macro_block.h"
 #include "storage/meta_mem/ob_tenant_meta_mem_mgr.h"
-#include "share/ob_cluster_version.h"
 
 namespace oceanbase
 {
@@ -27,6 +22,44 @@ namespace storage
 /*
  * ------------------------------- ObColumnIndexArray -------------------------------
  */
+int64_t return_array_cnt(uint32_t schema_rowkey_cnt, const ObFixedMetaObjArray<int32_t> & array)
+{
+  return array.count();
+}
+int64_t return_schema_rowkey_cnt(uint32_t schema_rowkey_cnt, const ObFixedMetaObjArray<int32_t> & array)
+{
+  return schema_rowkey_cnt;
+}
+int32_t return_array_idx_for_memtable(uint32_t schema_rowkey_cnt, uint32_t column_cnt,
+                         int64_t idx,
+                         const ObFixedMetaObjArray<int32_t> &array)
+{
+  int32_t ret_val = 0;
+  const int32_t extra_rowkey_cnt = storage::ObMultiVersionRowkeyHelpper::get_extra_rowkey_col_cnt();
+  OB_ASSERT(idx >= 0 && idx < column_cnt);
+  if (idx < schema_rowkey_cnt) {
+    ret_val = idx;
+  } else if (idx < schema_rowkey_cnt + extra_rowkey_cnt) {
+    ret_val = OB_INVALID_INDEX;
+  } else {
+    ret_val = idx - extra_rowkey_cnt;
+  }
+  return ret_val;
+}
+int32_t return_idx(uint32_t schema_rowkey_cnt, uint32_t column_cnt,
+                         int64_t idx,
+                         const ObFixedMetaObjArray<int32_t> &array)
+{
+  OB_ASSERT(idx >= 0 && idx < column_cnt);
+  return (int32_t)idx;
+}
+int32_t return_array_idx(uint32_t schema_rowkey_cnt, uint32_t column_cnt,
+                         int64_t idx,
+                         const ObFixedMetaObjArray<int32_t> &array)
+{
+  OB_ASSERT(idx >= 0 && idx < array.count());
+  return array[idx];
+}
 ObColumnIndexArray::ObColumnIndexArray(const bool rowkey_mode /* = false*/,
                                        const bool for_memtable /* = false*/)
     : version_(COLUMN_INDEX_ARRAY_VERSION),
@@ -39,48 +72,33 @@ ObColumnIndexArray::ObColumnIndexArray(const bool rowkey_mode /* = false*/,
 {
   if (rowkey_mode) {
     if (for_memtable) { // no multi_version rowkey in memtable
-      at_func_ =[](uint32_t schema_rowkey_cnt, uint32_t column_cnt, int64_t idx, const ObFixedMetaObjArray<int32_t> &array) -> int32_t {
-        int32_t ret_val = 0;
-        const int32_t extra_rowkey_cnt = storage::ObMultiVersionRowkeyHelpper::get_extra_rowkey_col_cnt();
-        OB_ASSERT(idx >= 0 && idx < column_cnt);
-        if (idx < schema_rowkey_cnt) {
-          ret_val = idx;
-        } else if (idx < schema_rowkey_cnt + extra_rowkey_cnt) {
-          ret_val = OB_INVALID_INDEX;
-        } else {
-          ret_val = idx - extra_rowkey_cnt;
-        }
-        return ret_val;
-      };
+      at_func_ = return_array_idx_for_memtable;
     } else {
-      at_func_ =[](uint32_t schema_rowkey_cnt, uint32_t column_cnt, int64_t idx, const ObFixedMetaObjArray<int32_t> &) -> int32_t {
-        OB_ASSERT(idx >= 0 && idx < column_cnt);
-        return (int32_t)idx;
-      };
+      at_func_ = return_idx;
     }
-    count_func_ = [](uint32_t column_cnt, const ObFixedMetaObjArray<int32_t> &) -> int64_t { return column_cnt; };
+    count_func_ = return_schema_rowkey_cnt;
   } else {
-    at_func_ = [](uint32_t, uint32_t, int64_t idx, const ObFixedMetaObjArray<int32_t> &array) -> int32_t {
-      OB_ASSERT(idx >= 0 && idx < array.count());
-      return array[idx];
-    };
-    count_func_ = [](uint32_t, const ObFixedMetaObjArray<int32_t> &array) -> int64_t { return array.count(); };
+    at_func_ = return_array_idx;
+    count_func_ = return_array_cnt;
   }
 }
 
 int64_t ObColumnIndexArray::to_string(char *buf, const int64_t buf_len) const
 {
   int64_t pos = 0;
-  J_OBJ_START();
-  J_KV(K_(rowkey_mode), K_(for_memtable));
-  if (rowkey_mode_) {
-    J_COMMA();
-    J_KV(K_(schema_rowkey_cnt), K_(column_cnt));
+  if (OB_ISNULL(buf) || buf_len <= 0) {
   } else {
-    J_COMMA();
-    J_KV(K_(array));
+    J_OBJ_START();
+    J_KV(K_(rowkey_mode), K_(for_memtable));
+    if (rowkey_mode_) {
+      J_COMMA();
+      J_KV(K_(schema_rowkey_cnt), K_(column_cnt));
+    } else {
+      J_COMMA();
+      J_KV(K_(array));
+    }
+    J_OBJ_END();
   }
-  J_OBJ_END();
   return pos;
 }
 
@@ -96,6 +114,15 @@ int ObColumnIndexArray::init(const int64_t count, const int64_t schema_rowkey_cn
     } else if (OB_FAIL(array_.prepare_allocate(count))) {
       LOG_WARN("failed to pre alloc array", K(ret), K(count));
     }
+  }
+  return ret;
+}
+
+int ObColumnIndexArray::init_and_assign(const ObIArray<int32_t> &other, ObIAllocator &allocator)
+{
+  int ret = OB_SUCCESS;
+  if (OB_FAIL(array_.init_and_assign(other, allocator))) {
+    STORAGE_LOG(WARN, "failed to assign from other array", K(ret), K(other));
   }
   return ret;
 }
@@ -194,7 +221,8 @@ void ObReadInfoStruct::reset()
   is_oracle_mode_ = false;
   allocator_ = nullptr;
   schema_column_count_ = 0;
-  compat_version_ = READ_INFO_VERSION_V2;
+  compat_version_ = READ_INFO_VERSION_V3;
+  is_cs_replica_compat_ = false;
   reserved_ = 0;
   schema_rowkey_cnt_ = 0;
   rowkey_cnt_ = 0;
@@ -207,12 +235,14 @@ void ObReadInfoStruct::reset()
 void ObReadInfoStruct::init_basic_info(const int64_t schema_column_count,
                      const int64_t schema_rowkey_cnt,
                      const bool is_oracle_mode,
-                     const bool is_cg_sstable) {
+                     const bool is_cg_sstable,
+                     const bool is_cs_replica_compat) {
   const int64_t extra_rowkey_cnt = is_cg_sstable ? 0 : storage::ObMultiVersionRowkeyHelpper::get_extra_rowkey_col_cnt();
   schema_column_count_ = schema_column_count;
   schema_rowkey_cnt_ = schema_rowkey_cnt;
   rowkey_cnt_ = schema_rowkey_cnt + extra_rowkey_cnt;
   is_oracle_mode_ = is_oracle_mode;
+  is_cs_replica_compat_ = is_cs_replica_compat;
 }
 
 int ObReadInfoStruct::generate_for_column_store(ObIAllocator &allocator,
@@ -246,16 +276,20 @@ int ObReadInfoStruct::generate_for_column_store(ObIAllocator &allocator,
 int64_t ObReadInfoStruct::to_string(char *buf, const int64_t buf_len) const
 {
   int64_t pos = 0;
-  J_OBJ_START();
-  J_KV(K_(is_inited), K_(compat_version), K_(is_oracle_mode),
-       K_(schema_column_count),
-       K_(schema_rowkey_cnt),
-       K_(rowkey_cnt),
-       K_(cols_index),
-       K_(cols_desc),
-       K_(datum_utils));
-  J_OBJ_END();
-
+  if (OB_ISNULL(buf) || buf_len <= 0) {
+  } else {
+    J_OBJ_START();
+    J_KV(K_(is_inited), K_(compat_version), K_(is_oracle_mode),
+        K_(is_cs_replica_compat),
+        K_(schema_column_count),
+        K_(schema_rowkey_cnt),
+        K_(rowkey_cnt),
+        K_(cols_index),
+        K_(cols_desc),
+        K_(datum_utils),
+        K_(memtable_cols_index));
+    J_OBJ_END();
+  }
   return pos;
 }
 
@@ -267,8 +301,10 @@ int ObReadInfoStruct::init_compat_version()
     LOG_WARN("fail to get data version", K(ret));
   } else if (compat_version < DATA_VERSION_4_3_0_0) {
     compat_version_ = READ_INFO_VERSION_V1;
-  } else {
+  } else if (compat_version < DATA_VERSION_4_3_4_0) {
     compat_version_ = READ_INFO_VERSION_V2;
+  } else {
+    compat_version_ = READ_INFO_VERSION_V3;
   }
   return ret;
 }
@@ -280,11 +316,13 @@ ObTableReadInfo::ObTableReadInfo()
   : ObReadInfoStruct(false/*rowkey_mode*/),
     trans_col_index_(OB_INVALID_INDEX),
     group_idx_col_index_(OB_INVALID_INDEX),
+    mview_old_new_col_index_(OB_INVALID_INDEX),
     seq_read_column_count_(0),
     max_col_index_(-1),
     cols_param_(),
     cols_extend_(),
-    has_all_column_group_(true)
+    has_all_column_group_(true),
+    mock_sstable_query_(false)
 {
 }
 
@@ -293,23 +331,56 @@ ObTableReadInfo::~ObTableReadInfo()
   reset();
 }
 
-int ObTableReadInfo::init(
+int ObTableReadInfo::mock_for_sstable_query(
     common::ObIAllocator &allocator,
     const int64_t schema_column_count,
     const int64_t schema_rowkey_cnt,
     const bool is_oracle_mode,
     const common::ObIArray<ObColDesc> &cols_desc,
+    const common::ObIArray<int32_t> &storage_cols_index,
+    const common::ObIArray<ObColumnParam *> &cols_param,
+    const common::ObIArray<int32_t> &cg_idxs)
+{
+  int ret = OB_SUCCESS;
+  const bool is_cg_sstable = false;
+  if (OB_FAIL(init_pre_check(schema_column_count, schema_rowkey_cnt, cols_desc,
+                             &storage_cols_index, &cols_param, &cg_idxs))) {
+    LOG_WARN("failed to pre check", K(ret));
+  } else if (OB_FAIL(init_compat_version())) { // init compat verion
+    LOG_WARN("failed to init compat version", KR(ret));
+  } else if (FALSE_IT(init_basic_info(schema_column_count, schema_rowkey_cnt, is_oracle_mode, is_cg_sstable, false /*is_cs_replica_compat*/))) { // init basic info
+  } else if (OB_FAIL(cols_desc_.init_and_assign(cols_desc, allocator))) {
+    LOG_WARN("Fail to assign cols_desc", K(ret));
+  } else if (OB_FAIL(cols_index_.init_and_assign(storage_cols_index, allocator))) {
+    LOG_WARN("failed to assign cols index", KR(ret));
+  } else if (OB_FAIL(cols_param_.init_and_assign(cols_param, allocator))) {
+    LOG_WARN("Fail to assign cols_param", K(ret));
+  } else if (OB_FAIL(cg_idxs_.init_and_assign(cg_idxs, allocator))) {
+    LOG_WARN("Fail to init cg idxs", K(ret));
+  } else if (OB_FAIL(init_datum_utils(allocator, is_cg_sstable))) {
+    LOG_WARN("failed to init sequence read info & datum utils", K(ret));
+  } else {
+    mock_sstable_query_ = true;
+    has_all_column_group_ = false;
+    is_inited_ = true;
+  }
+  if (OB_FAIL(ret) && OB_INIT_TWICE != ret) {
+    reset();
+  }
+  return ret;
+}
+
+int ObTableReadInfo::init_pre_check(
+    const int64_t schema_column_count,
+    const int64_t schema_rowkey_cnt,
+    const common::ObIArray<ObColDesc> &cols_desc,
     const common::ObIArray<int32_t> *storage_cols_index,
     const common::ObIArray<ObColumnParam *> *cols_param,
     const common::ObIArray<int32_t> *cg_idxs,
-    const common::ObIArray<ObColExtend> *cols_extend,
-    const bool has_all_column_group)
+    const common::ObIArray<ObColExtend> *cols_extend)
 {
   int ret = OB_SUCCESS;
   const int64_t out_cols_cnt = cols_desc.count();
-  //TODO find a better way to deal with normal cg sstable
-  const bool is_cg_sstable = ObCGReadInfo::is_cg_sstable(schema_rowkey_cnt, schema_column_count);
-
   if (OB_UNLIKELY(is_inited_)) {
     ret = OB_INIT_TWICE;
     LOG_WARN("init twice", K(ret), KPC(this));
@@ -325,61 +396,90 @@ int ObTableReadInfo::init(
     LOG_WARN("Invalid argument", K(ret), K(schema_rowkey_cnt), K(schema_column_count),
              K(cols_desc.count()), KPC(storage_cols_index), KPC(cols_param),
              KPC(cg_idxs), KPC(cols_extend));
+  }
+  return ret;
+}
+
+int ObTableReadInfo::init(
+    common::ObIAllocator &allocator,
+    const int64_t schema_column_count,
+    const int64_t schema_rowkey_cnt,
+    const bool is_oracle_mode,
+    const common::ObIArray<ObColDesc> &cols_desc,
+    const common::ObIArray<int32_t> *storage_cols_index,
+    const common::ObIArray<ObColumnParam *> *cols_param,
+    const common::ObIArray<int32_t> *cg_idxs,
+    const common::ObIArray<ObColExtend> *cols_extend,
+    const bool has_all_column_group,
+    const bool is_cg_sstable)
+{
+  int ret = OB_SUCCESS;
+  if (OB_FAIL(init_pre_check(schema_column_count, schema_rowkey_cnt, cols_desc,
+                             storage_cols_index, cols_param, cg_idxs, cols_extend))) {
+    LOG_WARN("failed to pre check", K(ret));
   } else if (OB_FAIL(init_compat_version())) { // init compat verion
     LOG_WARN("failed to init compat version", KR(ret));
+  } else if (FALSE_IT(init_basic_info(schema_column_count, schema_rowkey_cnt, is_oracle_mode, is_cg_sstable, false /*is_cs_replica_compat*/))) { // init basic info
+  } else if (OB_FAIL(ObReadInfoStruct::prepare_arrays(allocator, cols_desc, cols_desc.count()))) {
+    LOG_WARN("failed to prepare arrays", K(ret), K(cols_desc.count()));
+  } else if (nullptr != cols_param && OB_FAIL(cols_param_.init_and_assign(*cols_param, allocator))) {
+    LOG_WARN("Fail to assign cols_param", K(ret));
+  } else if (nullptr != cg_idxs && OB_FAIL(cg_idxs_.init_and_assign(*cg_idxs, allocator))) {
+    LOG_WARN("Fail to init cg idxs", K(ret));
+  } else if (nullptr != cols_extend && OB_FAIL(cols_extend_.init_and_assign(*cols_extend, allocator))) {
+    LOG_WARN("Fail to assign cols_extend", K(ret));
+  } else if (FALSE_IT(inner_gene_cols_index_by_col_descs(schema_rowkey_cnt, cols_desc, storage_cols_index, is_cg_sstable))) {
+  } else if (OB_FAIL(init_datum_utils(allocator, is_cg_sstable))) {
+    LOG_WARN("failed to init sequence read info & datum utils", K(ret));
   } else {
     has_all_column_group_ = has_all_column_group;
-    const int64_t trans_version_col_idx = ObMultiVersionRowkeyHelpper::get_trans_version_col_store_index(
-        schema_rowkey_cnt, true);
-    const int64_t sql_sequence_col_idx = ObMultiVersionRowkeyHelpper::get_sql_sequence_col_store_index(
-        schema_rowkey_cnt, true);
-    const int64_t extra_rowkey_cnt = is_cg_sstable ? 0: storage::ObMultiVersionRowkeyHelpper::get_extra_rowkey_col_cnt();
-    init_basic_info(schema_column_count, schema_rowkey_cnt, is_oracle_mode, is_cg_sstable); // init basic info
-    if (OB_FAIL(ObReadInfoStruct::prepare_arrays(allocator, cols_desc, out_cols_cnt))) {
-      LOG_WARN("failed to prepare arrays", K(ret), K(out_cols_cnt));
-    } else if (nullptr != cols_param && OB_FAIL(cols_param_.init_and_assign(*cols_param, allocator))) {
-      LOG_WARN("Fail to assign cols_param", K(ret));
-    } else if (nullptr != cg_idxs && OB_FAIL(cg_idxs_.init_and_assign(*cg_idxs, allocator))) {
-      LOG_WARN("Fail to init cg idxs", K(ret));
-    } else if (nullptr != cols_extend && OB_FAIL(cols_extend_.init_and_assign(*cols_extend, allocator))) {
-      LOG_WARN("Fail to assign cols_extend", K(ret));
-    } else {
-      int32_t col_index = OB_INVALID_INDEX;
-      for (int64_t i = 0; i < out_cols_cnt; i++) {
-        col_index = (nullptr == storage_cols_index) ? i : storage_cols_index->at(i);
-        //memtable do not involve the multi version column
-        memtable_cols_index_.array_[i] = col_index;
-        if (i < schema_rowkey_cnt) {
-          // continue
-        } else if (OB_INVALID_INDEX == col_index) {
-          if (common::OB_HIDDEN_TRANS_VERSION_COLUMN_ID == cols_desc.at(i).col_id_) {
-            trans_col_index_ = i;
-            col_index = trans_version_col_idx;
-          } else if (common::OB_HIDDEN_SQL_SEQUENCE_COLUMN_ID == cols_desc.at(i).col_id_) {
-            col_index = sql_sequence_col_idx;
-          } else if (common::OB_HIDDEN_GROUP_IDX_COLUMN_ID == cols_desc.at(i).col_id_) {
-            group_idx_col_index_ = i;
-            col_index = -1;
-          } else {
-            col_index = -1;
-          }
-        } else {
-          col_index = col_index + extra_rowkey_cnt;
-        }
-        cols_index_.array_[i] = col_index;
-      }
-    }
-  }
-
-  if (FAILEDx(init_datum_utils(allocator, is_cg_sstable))) {
-    LOG_WARN("failed to init sequence read info & datum utils", K(ret));
-  }
-  if (OB_SUCC(ret)) {
     is_inited_ = true;
-  } else if (OB_INIT_TWICE != ret) {
+  }
+  if (OB_FAIL(ret) && OB_INIT_TWICE != ret) {
     reset();
   }
   return ret;
+}
+
+void ObTableReadInfo::inner_gene_cols_index_by_col_descs(
+    const int64_t schema_rowkey_cnt,
+    const common::ObIArray<ObColDesc> &cols_desc,
+    const common::ObIArray<int32_t> *storage_cols_index,
+    const bool is_cg_sstable)
+{
+  const int64_t out_cols_cnt = cols_desc.count();
+  int32_t col_index = OB_INVALID_INDEX;
+  const int64_t trans_version_col_idx = ObMultiVersionRowkeyHelpper::get_trans_version_col_store_index(
+        schema_rowkey_cnt, true);
+  const int64_t sql_sequence_col_idx = ObMultiVersionRowkeyHelpper::get_sql_sequence_col_store_index(
+        schema_rowkey_cnt, true);
+  const int64_t extra_rowkey_cnt = is_cg_sstable ? 0: storage::ObMultiVersionRowkeyHelpper::get_extra_rowkey_col_cnt();
+  for (int64_t i = 0; i < out_cols_cnt; i++) {
+    col_index = (nullptr == storage_cols_index) ? i : storage_cols_index->at(i);
+    // memtable do not involve the multi version column
+    memtable_cols_index_.array_[i] = col_index;
+    if (i < schema_rowkey_cnt) {
+      // continue
+    } else if (OB_INVALID_INDEX == col_index) {
+      if (common::OB_HIDDEN_TRANS_VERSION_COLUMN_ID == cols_desc.at(i).col_id_) {
+        trans_col_index_ = i;
+        col_index = trans_version_col_idx;
+      } else if (common::OB_HIDDEN_SQL_SEQUENCE_COLUMN_ID == cols_desc.at(i).col_id_) {
+        col_index = sql_sequence_col_idx;
+      } else if (common::OB_HIDDEN_GROUP_IDX_COLUMN_ID == cols_desc.at(i).col_id_) {
+        group_idx_col_index_ = i;
+        col_index = -1;
+      } else if (common::OB_MAJOR_REFRESH_MVIEW_OLD_NEW_COLUMN_ID == cols_desc.at(i).col_id_) {
+         mview_old_new_col_index_ = i;
+         col_index = -1;
+      } else {
+        col_index = -1;
+      }
+    } else {
+      col_index = col_index + extra_rowkey_cnt;
+    }
+    cols_index_.array_[i] = col_index;
+  }
 }
 
 int ObReadInfoStruct::prepare_arrays(
@@ -418,6 +518,8 @@ int ObTableReadInfo::init_datum_utils(common::ObIAllocator &allocator, const boo
     if (cols_param_.at(i)->get_meta_type().is_decimal_int()) {
       cols_desc_.at(i).col_type_.set_stored_precision(cols_param_.at(i)->get_accuracy().get_precision());
       cols_desc_.at(i).col_type_.set_scale(cols_param_.at(i)->get_accuracy().get_scale());
+    } else if (ob_is_real_type(cols_param_.at(i)->get_meta_type().get_type())) {
+      cols_desc_.at(i).col_type_.set_scale(cols_param_.at(i)->get_accuracy().get_scale());
     }
   }
   if (OB_FAIL(datum_utils_.init(cols_desc_, schema_rowkey_cnt_, is_oracle_mode_, allocator, is_cg_sstable))) {
@@ -431,6 +533,7 @@ void ObTableReadInfo::reset()
   ObReadInfoStruct::reset();
   trans_col_index_ = OB_INVALID_INDEX;
   group_idx_col_index_ = OB_INVALID_INDEX;
+  mview_old_new_col_index_ = OB_INVALID_INDEX;
   seq_read_column_count_ = 0;
   max_col_index_ = -1;
   cols_param_.reset();
@@ -438,6 +541,7 @@ void ObTableReadInfo::reset()
   cols_extend_.reset();
   memtable_cols_index_.reset();
   has_all_column_group_ = true;
+  mock_sstable_query_ = false;
 }
 
 /*
@@ -478,6 +582,11 @@ int ObTableReadInfo::serialize(
 
   if (OB_SUCC(ret) && compat_version_ >= READ_INFO_VERSION_V2) {
     LST_DO_CODE(OB_UNIS_ENCODE, cg_idxs_, cols_extend_, has_all_column_group_);
+  }
+  if (OB_SUCC(ret) && compat_version_ >= READ_INFO_VERSION_V3) {
+    if (OB_FAIL(serialization::encode_vi64(buf, buf_len, pos, mview_old_new_col_index_))) {
+      LOG_WARN("Fail to encode mview old new col index", K(ret));
+    }
   }
   return ret;
 }
@@ -554,7 +663,15 @@ int ObTableReadInfo::deserialize(
       cg_idxs_.reset();
       cols_extend_.reset();
       has_all_column_group_ = true;
-      compat_version_ = READ_INFO_VERSION_V2;
+    }
+  }
+  if (OB_SUCC(ret)) {
+    if (compat_version_ >= READ_INFO_VERSION_V3) {
+      if (OB_FAIL(serialization::decode_vi64(buf, data_len, pos, &mview_old_new_col_index_))) {
+        LOG_WARN("Fail to decode mview old new col index", K(ret));
+      }
+    } else {
+      mview_old_new_col_index_ = OB_INVALID_INDEX;
     }
   }
 
@@ -614,32 +731,39 @@ int64_t ObTableReadInfo::get_serialize_size() const
   if (OB_SUCC(ret) && compat_version_ >= READ_INFO_VERSION_V2) {
     LST_DO_CODE(OB_UNIS_ADD_LEN, cg_idxs_, cols_extend_, has_all_column_group_);
   }
+  if (OB_SUCC(ret) && compat_version_ >= READ_INFO_VERSION_V3) {
+    len += serialization::encoded_length_vi64(mview_old_new_col_index_);
+  }
   return len;
 }
 
 int64_t ObTableReadInfo::to_string(char *buf, const int64_t buf_len) const
 {
   int64_t pos = 0;
-  J_OBJ_START();
-  J_KV(K_(schema_column_count),
-       K_(schema_rowkey_cnt),
-       K_(rowkey_cnt),
-       K_(trans_col_index),
-       K_(seq_read_column_count),
-       K_(max_col_index),
-       K_(is_oracle_mode),
-       K_(cols_index),
-       K_(memtable_cols_index),
-       K_(cols_desc),
-       K_(cg_idxs),
-       K_(cols_extend),
-       K_(has_all_column_group),
-       K_(datum_utils),
-       "cols_param",
-       ObArrayWrap<ObColumnParam *>(0 == cols_param_.count() ? NULL : &cols_param_.at(0),
-                                    cols_param_.count()));
-  J_OBJ_END();
-
+  if (OB_ISNULL(buf) || buf_len <= 0) {
+  } else {
+    J_OBJ_START();
+    J_KV(K_(schema_column_count),
+        K_(schema_rowkey_cnt),
+        K_(rowkey_cnt),
+        K_(trans_col_index),
+        K_(mview_old_new_col_index),
+        K_(group_idx_col_index),
+        K_(seq_read_column_count),
+        K_(max_col_index),
+        K_(is_oracle_mode),
+        K_(cols_index),
+        K_(memtable_cols_index),
+        K_(cols_desc),
+        K_(cg_idxs),
+        K_(cols_extend),
+        K_(has_all_column_group),
+        K_(datum_utils),
+        "cols_param",
+        ObArrayWrap<ObColumnParam *>(0 == cols_param_.count() ? NULL : &cols_param_.at(0),
+                                      cols_param_.count()));
+    J_OBJ_END();
+  }
   return pos;
 }
 
@@ -661,7 +785,8 @@ int ObRowkeyReadInfo::init(
     const bool is_oracle_mode,
     const common::ObIArray<ObColDesc> &rowkey_col_descs,
     const bool is_cg_sstable,
-    const bool use_default_compat_version)
+    const bool use_default_compat_version,
+    const bool is_cs_replica_compat)
 {
   int ret = OB_SUCCESS;
   const int64_t extra_rowkey_cnt = is_cg_sstable ? 0: storage::ObMultiVersionRowkeyHelpper::get_extra_rowkey_col_cnt();
@@ -680,7 +805,7 @@ int ObRowkeyReadInfo::init(
     LOG_WARN("failed to init compat version", KR(ret));
   }
   if (OB_SUCC(ret)) {
-    init_basic_info(schema_column_count, schema_rowkey_cnt, is_oracle_mode, is_cg_sstable); // init basic info
+    init_basic_info(schema_column_count, schema_rowkey_cnt, is_oracle_mode, is_cg_sstable, is_cs_replica_compat); // init basic info
     if (OB_FAIL(prepare_arrays(allocator, rowkey_col_descs, out_cols_cnt))) {
       LOG_WARN("failed to prepare arrays", K(ret), K(out_cols_cnt));
     } else if (OB_FAIL(datum_utils_.init(cols_desc_, schema_rowkey_cnt_, is_oracle_mode_, allocator, is_cg_sstable))) {
@@ -846,7 +971,7 @@ void ObCGReadInfoHandle::reset()
 
 /*
  * ------------------------------- ObTenantCGReadInfoMgr -------------------------------
- */
+*/
 ObTenantCGReadInfoMgr::ObTenantCGReadInfoMgr()
   : allocator_(MTL_ID()),
     index_read_info_(),
@@ -854,6 +979,7 @@ ObTenantCGReadInfoMgr::ObTenantCGReadInfoMgr()
     lock_(),
     hold_cg_read_info_cnt_(0),
     in_progress_cnt_(0),
+    alloc_buf_(nullptr),
     is_inited_(false)
 {
 }
@@ -895,7 +1021,7 @@ int ObTenantCGReadInfoMgr::init()
 #define WAIT_CNT(cnt_str, cnt) \
     while (ATOMIC_LOAD(&cnt) > 0) { \
       usleep(1000L); \
-      if (REACH_TENANT_TIME_INTERVAL(PRINT_LOG_INVERVAL)) { \
+      if (REACH_THREAD_TIME_INTERVAL(PRINT_LOG_INVERVAL)) { \
         LOG_INFO("ObTenantCGReadInfoMgr wait release", cnt_str, ATOMIC_LOAD(&cnt)); \
       } \
     } // end of while
@@ -1046,7 +1172,8 @@ int ObTenantCGReadInfoMgr::construct_index_read_info(ObIAllocator &allocator, Ob
                                           lib::is_oracle_mode(),
                                           idx_cols_desc,
                                           true, /* is_cg_sstable */
-                                          true /* use_default_compat_version */))) {
+                                          true /* use_default_compat_version */,
+                                          false /* is_cs_replica_compat */))) {
     STORAGE_LOG(WARN, "Fail to init mtl index read info", K(ret));
   }
 
@@ -1081,39 +1208,77 @@ int ObTenantCGReadInfoMgr::construct_normal_cg_read_infos()
       read_info_array = new(buf) ObCGReadInfo[array_cnt];
       basic_info_array = new((char *)buf + (sizeof(ObCGReadInfo) * array_cnt)) ObReadInfoStruct[array_cnt];
       alloc_buf_ = buf;
+      ObColExtend tmp_col_extend;
+      tmp_col_extend.skip_index_attr_.set_min_max();
+      int64_t idx = 0;
+      for (int64_t i = 0 ; OB_SUCC(ret) && i < ObObjType::ObMaxType ; ++i) {
+        ObObjType type = static_cast<ObObjType>(i);
+        ObColDesc tmp_desc;
+        ObCGReadInfo &tmp_read_info = read_info_array[idx];
+        normal_cg_read_infos_.at(i) = &tmp_read_info;
+        if (not_in_normal_cg_array(type)) {
+        } else if (FALSE_IT(set_col_desc(type, tmp_desc))) {
+        } else if (FALSE_IT(tmp_read_info.cg_basic_info_ = &basic_info_array[idx])) {
+        } else if (OB_FAIL(tmp_read_info.cg_basic_info_->generate_for_column_store(allocator_, tmp_desc, index_read_info_.is_oracle_mode()))) {
+          STORAGE_LOG(WARN, "Fail to generate column group read info", K(ret));
+        } else if (OB_FAIL(tmp_read_info.cols_extend_.init(1, allocator_))) {
+          STORAGE_LOG(WARN, "Fail to init columns extend", K(ret));
+        } else if (OB_FAIL(tmp_read_info.cols_extend_.push_back(tmp_col_extend))) {
+          STORAGE_LOG(WARN, "Fail to push col extend", K(ret));
+        } else {
+          tmp_read_info.need_release_ = false;
+          idx++;
+        }
+      } // end of for
+      // if failed, will call destroy outside
     }
-    ObColExtend tmp_col_extend;
-    tmp_col_extend.skip_index_attr_.set_min_max();
-    int64_t idx = 0;
-    for (int64_t i = 0 ; OB_SUCC(ret) && i < ObObjType::ObMaxType ; ++i) {
-      ObObjType type = static_cast<ObObjType>(i);
-      ObColDesc tmp_desc;
-      ObCGReadInfo &tmp_read_info = read_info_array[idx];
-      normal_cg_read_infos_.at(i) = &tmp_read_info;
-      if (not_in_normal_cg_array(type)) {
-      } else if (FALSE_IT(set_col_desc(type, tmp_desc))) {
-      } else if (FALSE_IT(tmp_read_info.cg_basic_info_ = &basic_info_array[idx])) {
-      } else if (OB_FAIL(tmp_read_info.cg_basic_info_->generate_for_column_store(allocator_, tmp_desc, index_read_info_.is_oracle_mode()))) {
-        STORAGE_LOG(WARN, "Fail to generate column group read info", K(ret));
-      } else if (OB_FAIL(tmp_read_info.cols_extend_.init(1, allocator_))) {
-        STORAGE_LOG(WARN, "Fail to init columns extend", K(ret));
-      } else if (OB_FAIL(tmp_read_info.cols_extend_.push_back(tmp_col_extend))) {
-        STORAGE_LOG(WARN, "Fail to push col extend", K(ret));
-      } else {
-        tmp_read_info.need_release_ = false;
-        idx++;
-      }
-    } // end of for
-    // if failed, will call destroy outside
   }
 
+  return ret;
+}
+
+int ObTenantCGReadInfoMgr::construct_cg_read_info(
+    common::ObIAllocator &allocator,
+    const bool is_oracle_mode,
+    const ObColDesc &col_desc,
+    ObColumnParam *col_param,
+    ObTableReadInfo &cg_read_info)
+{
+  int ret = OB_SUCCESS;
+  share::schema::ObColExtend tmp_col_extend;
+  tmp_col_extend.skip_index_attr_.set_min_max();
+  ObSEArray<ObColDesc, 1> tmp_access_cols_desc;
+  ObSEArray<ObColumnParam *, 1> tmp_access_cols_param;
+  ObSEArray<int32_t, 1> tmp_access_cols_index;
+  ObSEArray<ObColExtend, 1> tmp_access_cols_extend;
+  if (OB_FAIL(tmp_access_cols_desc.push_back(col_desc))) {
+    LOG_WARN("Fail to push back col desc", K(ret));
+  } else if (nullptr != col_param && OB_FAIL(tmp_access_cols_param.push_back(col_param))) {
+    LOG_WARN("Fail to push back col param", K(ret));
+  } else if (OB_FAIL(tmp_access_cols_index.push_back(0))) {
+    LOG_WARN("Fail to push back col index", K(ret));
+  } else if (OB_FAIL(tmp_access_cols_extend.push_back(tmp_col_extend))) {
+    LOG_WARN("Fail to push_back tmp_col_extend", K(ret));
+  } else if (OB_FAIL(cg_read_info.init(allocator,
+                                       ObCGReadInfo::CG_COL_CNT,
+                                       ObCGReadInfo::CG_ROWKEY_COL_CNT,
+                                       is_oracle_mode,
+                                       tmp_access_cols_desc,
+                                       &tmp_access_cols_index,
+                                       tmp_access_cols_param.empty() ? nullptr : &tmp_access_cols_param,
+                                       nullptr,
+                                       &tmp_access_cols_extend,
+                                       false/*has_all_column_group*/,
+                                       true/*is_cg_sstable*/))) {
+    LOG_WARN("Fail to init cg read info", K(ret));
+  }
   return ret;
 }
 
 void ObTenantCGReadInfoMgr::inner_print_log()
 {
   int ret = OB_SUCCESS;
-  if (REACH_TENANT_TIME_INTERVAL(PRINT_LOG_INVERVAL)) {
+  if (REACH_THREAD_TIME_INTERVAL(PRINT_LOG_INVERVAL)) {
     LOG_INFO("ObTenantCGReadInfoMgr current status", "hold_cg_read_info_cnt", ATOMIC_LOAD(&hold_cg_read_info_cnt_));
   }
 }

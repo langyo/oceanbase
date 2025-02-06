@@ -12,12 +12,7 @@
 
 #define USING_LOG_PREFIX STORAGE
 
-#include "share/rc/ob_tenant_base.h"
-#include "share/schema/ob_table_param.h"
 #include "ob_sstable_sec_meta_iterator.h"
-#include "storage/blocksstable/ob_shared_macro_block_manager.h"
-#include "storage/blocksstable/ob_logic_macro_id.h"
-#include "storage/ddl/ob_tablet_ddl_kv.h"
 
 namespace oceanbase
 {
@@ -27,7 +22,7 @@ namespace blocksstable
 ObSSTableSecMetaIterator::ObSSTableSecMetaIterator()
   : tenant_id_(OB_INVALID_TENANT_ID), rowkey_read_info_(nullptr), sstable_meta_hdl_(),
     prefetch_flag_(), idx_cursor_(), macro_reader_(), block_cache_(nullptr),
-    micro_reader_(nullptr), micro_reader_helper_(), block_meta_tree_(nullptr),
+    micro_reader_(nullptr), micro_reader_helper_(), block_meta_tree_(nullptr), ddl_iter_(),
     query_range_(nullptr), start_bound_micro_block_(), end_bound_micro_block_(),
     micro_handles_(), row_(), io_allocator_(), curr_handle_idx_(0), prefetch_handle_idx_(0), prev_block_row_cnt_(0),
     curr_block_start_idx_(0), curr_block_end_idx_(0), curr_block_idx_(0), step_cnt_(0),
@@ -44,6 +39,7 @@ void ObSSTableSecMetaIterator::reset()
   block_cache_ = nullptr;
   micro_reader_ = nullptr;
   micro_reader_helper_.reset();
+  ddl_iter_.reset();
   block_meta_tree_ = nullptr;
   row_.reset();
   query_range_ = nullptr;
@@ -75,7 +71,7 @@ int ObSSTableSecMetaIterator::open(
 {
   int ret = OB_SUCCESS;
   bool is_meta_root = false;
-  bool is_ddl_mem_sstable = false;
+  const bool is_ddl_mem_sstable = sstable.is_ddl_mem_sstable();
   if (IS_INIT) {
     ret = OB_INIT_TWICE;
     LOG_WARN("Fail to open sstable secondary meta iterator", K(ret));
@@ -100,30 +96,30 @@ int ObSSTableSecMetaIterator::open(
     block_cache_ = &ObStorageCacheSuite::get_instance().get_block_cache();
     is_meta_root = sstable_meta_hdl_.get_sstable_meta().get_macro_info().is_meta_root();
   }
-
   if (OB_FAIL(ret) || is_prefetch_end_) {
-  } else if (sstable.is_ddl_mem_sstable()) {
-    is_ddl_mem_sstable = true;
+  } else if (is_ddl_mem_sstable) {
+    const bool is_co_sstable = sstable.is_co_sstable() || sstable.is_ddl_mem_co_cg_sstable();
     const ObMicroBlockData &root_block = sstable_meta_hdl_.get_sstable_meta().get_root_info().get_block_data();
     if (ObMicroBlockData::DDL_BLOCK_TREE != root_block.type_ || nullptr == root_block.buf_) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("block type is not ddl block tree", K(ret), K(root_block));
     } else {
       block_meta_tree_ = reinterpret_cast<ObBlockMetaTree *>(const_cast<char *>(root_block.buf_));
-      if (OB_FAIL(block_meta_tree_->locate_range(query_range,
-                                                 rowkey_read_info.get_datum_utils(),
-                                                 true, //is_left_border
-                                                 true, //is_right_border,
-                                                 curr_block_start_idx_,
-                                                 curr_block_end_idx_))) {
+      const int64_t step = max(1, sample_step);
+      if (OB_FAIL(ddl_iter_.set_iter_param(const_cast<ObStorageDatumUtils *>(&rowkey_read_info.get_datum_utils()), is_reverse_scan, block_meta_tree_, is_co_sstable, step))) {
+        LOG_WARN("fail to set ddl iter param", K(ret));
+      } else if (OB_FAIL(ddl_iter_.locate_range(query_range,
+                                                true, /*is_left_border*/
+                                                true, /*is_right_border*/
+                                                true /*is_bormal_cg*/))) {
         if (OB_UNLIKELY(OB_BEYOND_THE_RANGE != ret)) {
-          LOG_WARN("locate range failed", K(ret), K(query_range));
+          LOG_WARN("locate range failed", K(ret), K(query_range), K(ddl_iter_));
         } else {
-          curr_block_idx_ = curr_block_end_idx_ + 1;
+          ddl_iter_.set_iter_end();
           ret = OB_SUCCESS; // return OB_ITER_END on get_next() for get
         }
-      } else {
-        const int64_t step = max(1, sample_step);
+      }
+      if (OB_SUCC(ret)) {
         step_cnt_ = !is_reverse_scan ? step : -step;
         curr_block_idx_ = !is_reverse_scan ? curr_block_start_idx_ : curr_block_end_idx_;
         is_inited_ = true;
@@ -143,7 +139,7 @@ int ObSSTableSecMetaIterator::open(
   const int64_t request_col_cnt = rowkey_read_info.get_schema_rowkey_count()
            + ObMultiVersionRowkeyHelpper::get_extra_rowkey_col_cnt() + 1;
 
-  if (OB_SUCC(ret) && !is_prefetch_end_ && !is_meta_root && !is_ddl_mem_sstable) {
+  if (OB_SUCC(ret) && !is_prefetch_end_ && !is_meta_root && !is_ddl_mem_sstable /* ddl kv use ddl_iter directly*/) {
     bool start_key_beyond_range = false;
     bool end_key_beyond_range = false;
     if (is_reverse_scan) {
@@ -218,6 +214,7 @@ int ObSSTableSecMetaIterator::get_next(ObDataMacroBlockMeta &macro_meta)
 {
   int ret = OB_SUCCESS;
   MacroBlockId macro_id;
+  const ObDataMacroBlockMeta *tmp_meta = nullptr;
   row_.reuse();
   if (IS_NOT_INIT) {
     ret = OB_NOT_INIT;
@@ -225,10 +222,13 @@ int ObSSTableSecMetaIterator::get_next(ObDataMacroBlockMeta &macro_meta)
   } else if (nullptr != block_meta_tree_) {
     if (!is_target_row_in_curr_block()) {
       ret = OB_ITER_END;
-    } else if (OB_FAIL(block_meta_tree_->get_macro_block_meta(curr_block_idx_, macro_meta))) {
-      LOG_WARN("get next macro block meta failed", K(ret), K(curr_block_idx_));
-    } else {
-      curr_block_idx_ += step_cnt_;
+    } else if (OB_UNLIKELY(!ddl_iter_.is_valid())) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("cur tree value is null", K(ret), K(ddl_iter_));
+    } else if (OB_FAIL(ddl_iter_.get_next_meta(tmp_meta))) {
+      LOG_WARN("get next meta failed", K(ret));
+    } else if (OB_FAIL(macro_meta.assign(*tmp_meta))) {
+      LOG_WARN("assign macro meta failed", K(ret), KPC(tmp_meta));
     }
   } else {
     while (OB_SUCC(ret) && !is_target_row_in_curr_block()) {
@@ -247,12 +247,13 @@ int ObSSTableSecMetaIterator::get_next(ObDataMacroBlockMeta &macro_meta)
     }
     if (OB_FAIL(ret)) {
     } else if (OB_FAIL(micro_reader_->get_row(curr_block_idx_, row_))) {
-      LOG_WARN("Fail to get secondary meta row from block", K(ret));
+      LOG_WARN("Fail to get secondary meta row from block", K(ret), K_(curr_block_idx));
     } else if (OB_FAIL(macro_meta.parse_row(row_))) {
       LOG_WARN("Fail to parse macro meta", K(ret));
     } else {
       const ObSSTableMacroInfo &macro_info = sstable_meta_hdl_.get_sstable_meta().get_macro_info();
-      if (!macro_info.is_meta_root() && 0 == macro_info.get_other_block_count()) {
+      const int64_t data_block_count = sstable_meta_hdl_.get_sstable_meta().get_basic_meta().get_data_macro_block_count();
+      if (macro_meta.get_macro_id() == ObIndexBlockRowHeader::DEFAULT_IDX_ROW_MACRO_ID) {
         // this means macro meta root block is larger than 16KB but read from the end of data block
         // So the macro id parsed from macro meta is empty, which actually should be same to the
         // data block id read in open_next_micro_block
@@ -512,44 +513,45 @@ int ObSSTableSecMetaIterator::get_micro_block(
     LOG_WARN("Invalid parameters to locate micro block", K(ret), K(macro_id), K(idx_row_header));
   }
 
-  if (OB_FAIL(ret)) {
-    // do nothing
-  } else if (OB_FAIL(block_cache_->get_cache_block(
-      tenant_id_,
-      macro_id,
-      idx_row_header.get_block_offset() + nested_offset,
-      idx_row_header.get_block_size(),
-      data_handle.cache_handle_))) {
-    if (OB_UNLIKELY(OB_ENTRY_NOT_EXIST != ret)) {
-      LOG_WARN("Fail to get micro block handle from cache", K(ret), K(idx_row_header));
-    } else {
-      // Cache miss, async IO
-      ObMicroIndexInfo idx_info;
-      idx_info.row_header_ = &idx_row_header;
-      idx_info.nested_offset_ = nested_offset;
-      data_handle.allocator_ = &io_allocator_;
-      // TODO: @saitong.zst not safe here, remove tablet_handle from SecMeta prefetch interface, disable cache decoders
-      if (OB_FAIL(block_cache_->prefetch(
-          tenant_id_,
-          macro_id,
-          idx_info,
-          prefetch_flag_.is_use_block_cache(),
-          data_handle.io_handle_,
-          &io_allocator_))) {
-        LOG_WARN("Fail to prefetch with async io", K(ret));
+  if (OB_SUCC(ret)) {
+    ObMicroBlockCacheKey key;
+    idx_row_header.has_valid_logic_micro_id() ?
+      key.set(tenant_id_, idx_row_header.get_logic_micro_id(), idx_row_header.get_data_checksum()) :
+      key.set(tenant_id_, macro_id, idx_row_header.get_block_offset() + nested_offset, idx_row_header.get_block_size());
+    if (OB_FAIL(block_cache_->get_cache_block(key, data_handle.cache_handle_))) {
+      if (OB_UNLIKELY(OB_ENTRY_NOT_EXIST != ret)) {
+        LOG_WARN("Fail to get micro block handle from cache", K(ret), K(idx_row_header));
       } else {
-        data_handle.block_state_ = ObSSTableMicroBlockState::IN_BLOCK_IO;
-        data_handle.need_release_data_buf_ = true;
+        // Cache miss, async IO
+        ObMicroIndexInfo idx_info;
+        idx_info.row_header_ = &idx_row_header;
+        idx_info.nested_offset_ = nested_offset;
+        data_handle.allocator_ = &io_allocator_;
+        // TODO: @saitong.zst not safe here, remove tablet_handle from SecMeta prefetch interface, disable cache decoders
+        if (OB_FAIL(block_cache_->prefetch(
+            tenant_id_,
+            macro_id,
+            idx_info,
+            prefetch_flag_.is_use_block_cache(),
+            data_handle.io_handle_,
+            &io_allocator_))) {
+          LOG_WARN("Fail to prefetch with async io", K(ret));
+        } else {
+          data_handle.block_state_ = ObSSTableMicroBlockState::IN_BLOCK_IO;
+        }
       }
+    } else {
+      data_handle.block_state_ = ObSSTableMicroBlockState::IN_BLOCK_CACHE;
     }
-  } else {
-    data_handle.block_state_ = ObSSTableMicroBlockState::IN_BLOCK_CACHE;
+    LOG_DEBUG("get cache block", K(ret), K(key), K(macro_id), K(idx_row_header));
   }
 
   if (OB_SUCC(ret)) {
     data_handle.macro_block_id_ = macro_id;
-    data_handle.micro_info_.offset_ = idx_row_header.get_block_offset() + nested_offset;
-    data_handle.micro_info_.size_ = idx_row_header.get_block_size();
+    data_handle.micro_info_.set(idx_row_header.get_block_offset() + nested_offset,
+                                idx_row_header.get_block_size(),
+                                idx_row_header.get_logic_micro_id(),
+                                idx_row_header.get_data_checksum());
     const bool deep_copy_key = true;
     if (OB_FAIL(idx_row_header.fill_micro_des_meta(deep_copy_key, data_handle.des_meta_))) {
       LOG_WARN("Fail to fill deserialize meta", K(ret));

@@ -12,14 +12,9 @@
 
 #define USING_LOG_PREFIX SQL_ENG
 #include "ob_px_worker.h"
-#include "lib/time/ob_time_utility.h"
-#include "sql/engine/px/ob_px_worker_stat.h"
-#include "sql/engine/px/ob_px_interruption.h"
 #include "sql/engine/px/ob_px_sqc_handler.h"
 #include "sql/engine/px/ob_px_admission.h"
 #include "observer/omt/ob_tenant.h"
-#include "share/rc/ob_tenant_base.h"
-#include "share/rc/ob_context.h"
 
 using namespace oceanbase;
 using namespace oceanbase::common;
@@ -148,7 +143,7 @@ private:
   ObPxSqcHandler *sqc_handler_;
 };
 
-void PxWorkerFunctor::operator ()()
+void PxWorkerFunctor::operator ()(bool need_exec)
 {
   int ret = OB_SUCCESS;
   ObCurTraceId::set(env_arg_.get_trace_id());
@@ -160,10 +155,13 @@ void PxWorkerFunctor::operator ()()
   ObPxSqcHandler *sqc_handler = task_arg_.get_sqc_handler();
   SQCHandlerGuard sqc_handler_guard(sqc_handler);
   lib::MemoryContext mem_context = nullptr;
-  const bool enable_trace_log = lib::is_trace_log_enabled();
   //ensure PX worker skip updating timeout_ts_ by ntp offset
   THIS_WORKER.set_ntp_offset(0);
-  if (OB_NOT_NULL(sqc_handler) && OB_LIKELY(!sqc_handler->has_interrupted())) {
+  if (!need_exec) {
+    LOG_INFO("px pool already stopped, do not execute the task.");
+  } else if (OB_FAIL(px_int_guard.get_interrupt_reg_ret())) {
+    LOG_WARN("px worker failed to SET_INTERRUPTABLE");
+  } else if (OB_NOT_NULL(sqc_handler) && OB_LIKELY(!sqc_handler->has_interrupted())) {
     THIS_WORKER.set_worker_level(sqc_handler->get_rpc_level());
     THIS_WORKER.set_curr_request_level(sqc_handler->get_rpc_level());
     LOG_TRACE("init flt ctx", K(sqc_handler->get_flt_ctx()));
@@ -181,11 +179,10 @@ void PxWorkerFunctor::operator ()()
     if (OB_LOGGER.is_info_as_wdiag()) {
       ObThreadLogLevelUtils::clear();
     } else {
-      if (OB_LOG_LEVEL_NONE != env_arg_.get_log_level() && enable_trace_log) {
+      if (OB_LOG_LEVEL_NONE != env_arg_.get_log_level()) {
         ObThreadLogLevelUtils::init(env_arg_.get_log_level());
       }
     }
-    THIS_WORKER.set_group_id(env_arg_.get_group_id());
     // When deserialize expr, sql mode will affect basic function of expr.
     CompatModeGuard mode_guard(env_arg_.is_oracle_mode() ? Worker::CompatMode::ORACLE : Worker::CompatMode::MYSQL);
     MTL_SWITCH(sqc_handler->get_tenant_id()) {
@@ -201,7 +198,6 @@ void PxWorkerFunctor::operator ()()
             if (OB_FAIL(runtime_arg.init_deserialize_param(mem_context, *env_arg_.get_gctx()))) {
               LOG_WARN("fail to init args", K(ret));
             } else if (OB_FAIL(runtime_arg.deep_copy_assign(task_arg_, mem_context->get_arena_allocator()))) {
-              (void) ObInterruptUtil::interrupt_qc(task_arg_.task_, ret, task_arg_.exec_ctx_);
               LOG_WARN("fail deep copy assign arg", K(task_arg_), K(ret));
             } else {
               // 绑定sqc_handler，方便算子任何地方都可以拿sqc_handle
@@ -229,14 +225,26 @@ void PxWorkerFunctor::operator ()()
         }
       }
     }
-    if (enable_trace_log) {
-      ObThreadLogLevelUtils::clear();
-    }
+    ObThreadLogLevelUtils::clear();
   } else if (OB_ISNULL(sqc_handler)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_ERROR("Unexpected null sqc handler", K(sqc_handler));
   } else {
     LOG_WARN("already interrupted");
+  }
+
+  if (OB_ISNULL(sqc_handler)) {
+    // do nothing
+  } else if (sqc_handler->get_flt_ctx().trace_id_.is_inited()) {
+    OBTRACE->reset();
+  }
+
+  //if start worker failed, still need set task state, interrupt qc
+  if (OB_FAIL(ret)) {
+    if (task_arg_.sqc_task_ptr_ != NULL) {
+      task_arg_.sqc_task_ptr_->set_task_state(SQC_TASK_EXIT);
+    }
+    (void) ObInterruptUtil::interrupt_qc(task_arg_.task_, ret, task_arg_.exec_ctx_);
   }
 
   PxWorkerFinishFunctor on_func_finish;
@@ -248,7 +256,6 @@ void PxWorkerFinishFunctor::operator ()()
 {
   // 每个 worker 结束后，都释放一个槽位
   ObPxSubAdmission::release(1);
-  ObActiveSessionGuard::setup_default_ash();
 }
 
 
@@ -292,7 +299,6 @@ int ObPxThreadWorker::run_at(ObPxRpcInitTaskArgs &task_arg, omt::ObPxPool &px_po
   env_args.set_trace_id(*ObCurTraceId::get_trace_id());
   env_args.set_is_oracle_mode(lib::is_oracle_mode());
   env_args.set_gctx(&gctx_);
-  env_args.set_group_id(THIS_WORKER.get_group_id());
   if (OB_LOG_LEVEL_NONE != common::ObThreadLogLevelUtils::get_level()) {
     env_args.set_log_level(common::ObThreadLogLevelUtils::get_level());
   }
@@ -339,9 +345,25 @@ int ObPxThreadWorker::exit()
 
 int ObPxLocalWorker::run(ObPxRpcInitTaskArgs &task_arg)
 {
-  FLTSpanGuard(px_task);
-  ObPxTaskProcess task_proc(gctx_, task_arg);
-  return task_proc.process();
+  int ret = OB_SUCCESS;
+  ObPxSqcHandler *h = task_arg.get_sqc_handler();
+
+  if (OB_ISNULL(h)) {
+  } else if (h->get_flt_ctx().trace_id_.is_inited()) {
+    OBTRACE->init(h->get_flt_ctx());
+  }
+
+  {
+    FLTSpanGuard(px_task);
+    ObPxTaskProcess task_proc(gctx_, task_arg);
+    ret = task_proc.process();
+  }
+
+  if (OB_ISNULL(h)) {
+  } else if (h->get_flt_ctx().trace_id_.is_inited()) {
+    OBTRACE->reset();
+  }
+  return ret;
 }
 
 //////////////////////////////////////////////////////////////////////////////

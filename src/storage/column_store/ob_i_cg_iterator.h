@@ -23,8 +23,8 @@ struct PushdownFilterInfo;
 }
 namespace storage
 {
-struct ObCGTableWrapper;
-class ObGroupByCell;
+class ObSSTableWrapper;
+class ObGroupByCellBase;
 
 class ObICGIterator
 {
@@ -36,6 +36,7 @@ public:
     OB_CG_SINGLE_ROW_SCANNER,
     OB_CG_AGGREGATED_SCANNER,
     OB_CG_GROUP_BY_SCANNER,
+    OB_CG_GROUP_BY_DEFAULT_SCANNER,
     OB_CG_VIRTUAL_SCANNER,
     OB_CG_DEFAULT_SCANNER,
     OB_CG_TILE_SCANNER,
@@ -48,7 +49,15 @@ public:
       const int cg_iter_type,
       const bool project_single_row)
   {
-    return project_single_row ? (OB_CG_SINGLE_ROW_SCANNER || OB_CG_DEFAULT_SCANNER) : (OB_CG_ROW_SCANNER <= cg_iter_type && cg_iter_type < OB_CG_TILE_SCANNER);
+    return project_single_row ? (OB_CG_SINGLE_ROW_SCANNER == cg_iter_type || OB_CG_DEFAULT_SCANNER == cg_iter_type) : (OB_CG_ROW_SCANNER <= cg_iter_type && cg_iter_type < OB_CG_TILE_SCANNER);
+  }
+  static bool is_valid_cg_row_scanner(const int cg_iter_type)
+  {
+    return OB_CG_ROW_SCANNER == cg_iter_type || OB_CG_GROUP_BY_SCANNER == cg_iter_type;
+  }
+  static bool is_valid_group_by_cg_scanner(const int cg_iter_type)
+  {
+    return OB_CG_GROUP_BY_SCANNER == cg_iter_type || OB_CG_GROUP_BY_DEFAULT_SCANNER == cg_iter_type;
   }
   ObICGIterator() : cg_idx_(OB_CS_INVALID_CG_IDX) {};
   virtual ~ObICGIterator() {};
@@ -61,14 +70,14 @@ public:
   virtual int init(
     const ObTableIterParam &iter_param,
     ObTableAccessContext &access_ctx,
-    ObCGTableWrapper &wrapper) = 0;
+    ObSSTableWrapper &wrapper) = 0;
   /*
    * rescan interface
    */
   virtual int switch_context(
       const ObTableIterParam &iter_param,
       ObTableAccessContext &access_ctx,
-      ObCGTableWrapper &wrapper) = 0;
+      ObSSTableWrapper &wrapper) = 0;
   /*
    * range: locate row index range
    * bitmap: only used for projection when filter applied
@@ -142,6 +151,8 @@ public:
    * is_group_by_col: current column is group by column?
    */
   virtual int calc_aggregate(const bool is_group_by_col) = 0;
+
+  virtual int locate_micro_index(const ObCSRange &range) = 0;
   DECLARE_PURE_VIRTUAL_TO_STRING;
 };
 

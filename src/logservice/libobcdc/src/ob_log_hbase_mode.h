@@ -17,9 +17,14 @@
 
 #include "lib/hash/ob_hashset.h"                // ObHashSet
 #include "lib/hash/ob_linear_hash_map.h"        // ObLinearHashMap
+#include "logservice/data_dictionary/ob_data_dict_struct.h"
 
 namespace oceanbase
 {
+namespace datadict
+{
+class ObDictTableMeta;
+}
 namespace share
 {
 namespace schema
@@ -46,7 +51,27 @@ public:
   // 2. contains four columns K, Q, T, V
   // 3. T is of type bigint
   // Note: All of the above conditions are not necessarily met for an hbase table
-  int add_hbase_table_id(const oceanbase::share::schema::ObTableSchema &table_schema);
+  template<class TABLE_SCHEMA>
+  int add_hbase_table_id(const TABLE_SCHEMA &table_schema)
+  {
+    int ret = OB_SUCCESS;
+
+    bool is_hbase_mode_table = false;
+    const uint64_t table_id = table_schema.get_table_id();
+    const char *table_name = table_schema.get_table_name();
+
+    if (OB_FAIL(filter_hbase_mode_table_(table_schema, is_hbase_mode_table))) {
+      OBLOG_LOG(ERROR, "filter_hbase_mode_table_ fail", KR(ret), K(table_id), K(table_name), K(is_hbase_mode_table));
+    } else if (! is_hbase_mode_table) {
+      OBLOG_LOG(INFO, "[IS_NOT_HBASE_TABLE]", K(table_name), K(table_id), K(is_hbase_mode_table));
+    } else if (OB_FAIL(table_id_set_.set_refactored(table_id))) {
+      OBLOG_LOG(ERROR, "add_table_id into table_id_set_ fail", KR(ret), K(table_name), K(table_id));
+    } else {
+      OBLOG_LOG(INFO, "[HBASE] add_table_id into table_id_set_ succ", K(table_name), K(table_id));
+    }
+
+    return ret;
+  }
 
   // Determine if conversion is required
   // table exists and is a T column
@@ -71,6 +96,7 @@ private:
   static const int64_t DEFAULT_TABLE_SET_SIZE = 1024;
   typedef common::hash::ObHashSet<uint64_t> HbaseTableIDSet;
 
+public:
   struct TableID
   {
     uint64_t table_id_;
@@ -107,6 +133,22 @@ private:
 
 private:
   int filter_hbase_mode_table_(const oceanbase::share::schema::ObTableSchema &table_schema,
+      bool &is_hbase_mode_table);
+  int filter_hbase_mode_table_(const oceanbase::datadict::ObDictTableMeta &table_meta,
+      bool &is_hbase_mode_table);
+  template <class COLUMN_SCHEMA>
+  int match_column_name_(const COLUMN_SCHEMA &col_schema,
+      const int column_flag_size,
+      int *column_flag,
+      bool &is_T_column_bigint_type,
+      uint64_t &column_id);
+
+  template<class TABLE_SCHEMA>
+  int judge_and_add_hbase_table_(const TABLE_SCHEMA &table_schema,
+      const bool is_T_column_bigint_type,
+      const uint64_t column_id,
+      const int column_flag_size,
+      const int *column_flag,
       bool &is_hbase_mode_table);
 
 private:

@@ -12,18 +12,8 @@
 
 #define USING_LOG_PREFIX PL
 
-#include "pl/ob_pl_package_state.h"
+#include "ob_pl_package_state.h"
 #include "pl/ob_pl_package.h"
-#include "pl/ob_pl_package_manager.h"
-#include "lib/oblog/ob_log_module.h"
-#include "lib/utility/ob_print_utils.h"
-#include "lib/utility/serialization.h"
-#include "lib/string/ob_string.h"
-#include "observer/mysql/obmp_utils.h"
-#include "rpc/obmysql/ob_mysql_packet.h"
-#include "sql/ob_sql_utils.h"
-#include "sql/engine/ob_exec_context.h"
-#include "pl/ob_pl_resolver.h"
 namespace oceanbase
 {
 using namespace common;
@@ -142,6 +132,11 @@ int ObPackageVarSetName::decode(common::ObIAllocator &alloc, const common::ObStr
   return ret;
 }
 
+int ObPLPackageState::init()
+{
+  return inner_allocator_.init(nullptr);
+}
+
 int ObPLPackageState::add_package_var_val(const common::ObObj &value, ObPLType type)
 {
   int ret = OB_SUCCESS;
@@ -160,13 +155,17 @@ void ObPLPackageState::reset(ObSQLSessionInfo *session_info)
   changed_vars_.reset();
   for (int64_t i = 0; i < types_.count(); ++i) {
     if (!vars_.at(i).is_ext()) {
+      void * ptr = vars_.at(i).get_deep_copy_obj_ptr();
+      if (nullptr != ptr) {
+        inner_allocator_.free(ptr);
+      }
     } else if (PL_RECORD_TYPE == types_.at(i)
                || PL_NESTED_TABLE_TYPE == types_.at(i)
                || PL_ASSOCIATIVE_ARRAY_TYPE == types_.at(i)
                || PL_VARRAY_TYPE == types_.at(i)
                || PL_OPAQUE_TYPE == types_.at(i)) {
       int ret = OB_SUCCESS;
-      if (OB_FAIL(ObUserDefinedType::destruct_obj(vars_.at(i), session_info))) {
+      if (OB_FAIL(ObUserDefinedType::destruct_objparam(inner_allocator_, vars_.at(i), session_info))) {
         LOG_WARN("failed to destruct composte obj", K(ret));
       }
     } else if (PL_CURSOR_TYPE == types_.at(i)) {
@@ -183,7 +182,10 @@ void ObPLPackageState::reset(ObSQLSessionInfo *session_info)
   cursor_allocator_.reset();
 }
 
-int ObPLPackageState::set_package_var_val(const int64_t var_idx, const ObObj &value, bool deep_copy_complex)
+int ObPLPackageState::set_package_var_val(const int64_t var_idx,
+                                          const ObObj &value,
+                                          const ObPLResolveCtx &resolve_ctx,
+                                          bool deep_copy_complex)
 {
   int ret = OB_SUCCESS;
   if (var_idx < 0 || var_idx >= vars_.count()) {
@@ -191,7 +193,7 @@ int ObPLPackageState::set_package_var_val(const int64_t var_idx, const ObObj &va
     LOG_WARN("invalid var index", K(var_idx), K(vars_.count()), K(ret));
   } else {
     // VAR的生命周期是SESSION级, 因此这里需要深拷贝下
-    if (value.need_deep_copy()) {
+    if (value.need_deep_copy() && deep_copy_complex) {
       int64_t pos = 0;
       char *buf = static_cast<char*>(inner_allocator_.alloc(value.get_deep_copy_size()));
       if (OB_ISNULL(buf)) {
@@ -211,7 +213,12 @@ int ObPLPackageState::set_package_var_val(const int64_t var_idx, const ObObj &va
                && types_.at(var_idx) != PL_CURSOR_TYPE
                && types_.at(var_idx) != PL_REF_CURSOR_TYPE) {
       CK (vars_.at(var_idx).get_ext() != 0);
-      OZ (ObUserDefinedType::destruct_obj(vars_.at(var_idx), NULL, false));
+      if (OB_FAIL(ret)) {
+      } else if (PL_RECORD_TYPE == types_.at(var_idx)) {
+        OZ (ObUserDefinedType::reset_record(vars_.at(var_idx), NULL));
+      } else {
+        OZ (ObUserDefinedType::destruct_obj(vars_.at(var_idx), NULL, true));
+      }
     } else {
       vars_.at(var_idx) = value;
     }
@@ -272,16 +279,18 @@ int ObPLPackageState::make_pkg_var_kv_value(ObPLExecCtx &ctx, ObObj &var_val, in
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("sql session is null.", K(ret));
   } else {
-    pl::ObPLPackageGuard package_guard(sql_session->get_effective_tenant_id());
+    pl::ObPLPackageGuard *package_guard = NULL;
     CK (OB_NOT_NULL(sql_session->get_pl_engine()));
-    OZ (package_guard.init());
+    OZ (ctx.exec_ctx_->get_package_guard(package_guard));
+    CK (OB_NOT_NULL(package_guard));
 
     if (OB_SUCC(ret)) {
       const ObPLVar *var = NULL;
       ObPLResolveCtx resolve_ctx(*ctx.allocator_,
                                  *sql_session,
                                  *ctx.exec_ctx_->get_sql_ctx()->schema_guard_,
-                                 package_guard,
+                                 nullptr != ctx.exec_ctx_->get_package_guard() ? *ctx.exec_ctx_->get_package_guard()
+                                                                                 : *package_guard,
                                  *ctx.exec_ctx_->get_sql_proxy(),
                                  false /*is_ps*/);
       OZ (sql_session->get_pl_engine()

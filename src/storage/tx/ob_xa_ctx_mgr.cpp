@@ -12,7 +12,6 @@
 
 #include "ob_xa_ctx_mgr.h"
 #include "ob_xa_service.h"
-//#include "ob_xa_ctx.h"
 
 namespace oceanbase
 {
@@ -28,7 +27,7 @@ void XACtxAlloc::free_value(ObXACtx* ctx)
     ctx->destroy();
     op_reclaim_free(ctx);
     ctx = NULL;
-    MTL(ObXAService *)->get_xa_statistics().dec_ctx_count();
+    XA_ACTIVE_DECREMENT_XA_CTX_COUNT();
   }
 }
 
@@ -183,7 +182,7 @@ int ObXACtxMgr::get_xa_ctx_(const ObTransID &trans_id, bool &alloc, ObXACtx*& ct
     } else {
       ctx = tmp_ctx;
       inc_total_ctx_count();
-      MTL(ObXAService *)->get_xa_statistics().inc_ctx_count();
+      XA_ACTIVE_INCREMENT_XA_CTX_COUNT();
     }
   }
 

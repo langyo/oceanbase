@@ -11,19 +11,8 @@
  */
 
 #define USING_LOG_PREFIX SHARE
-#include <time.h>
 #include "ob_backup_struct.h"
-#include "lib/utility/ob_defer.h"
-#include "lib/alloc/alloc_assist.h"
-#include "lib/utility/utility.h"
-#include "common/ob_record_header.h"
-#include "share/config/ob_server_config.h"
-#include "share/schema/ob_multi_version_schema_service.h"
-#include "share/backup/ob_backup_path.h"
 #include "share/backup/ob_backup_config.h"
-#include "storage/tx/ob_i_ts_source.h"
-#include "storage/backup/ob_backup_data_store.h"
-#include "share/backup/ob_archive_struct.h"
 #include "observer/omt/ob_tenant_timezone_mgr.h"
 #include "storage/tx/ob_ts_mgr.h"
 
@@ -1151,10 +1140,45 @@ int ObBackupStorageInfo::get_authorization_info(char *authorization, const int64
     LOG_WARN("invalid args", K(ret), KP(authorization), K(length));
   } else if (OB_STORAGE_FILE == device_type_) {
     // do nothing
-  } else if (OB_FAIL(get_access_key_(access_key_buf, sizeof(access_key_buf)))) {
-    LOG_WARN("failed to get access key", K(ret));
-  } else if (OB_FAIL(databuff_printf(authorization, length, "%s&%s",  access_id_, access_key_buf))) {
-    LOG_WARN("failed to set authorization", K(ret), K(length), K_(access_id), K(strlen(access_key_buf)));
+  } else if (!is_assume_role_mode_) {
+    // access by ak/sk mode
+    if (OB_FAIL(get_access_key_(access_key_buf, sizeof(access_key_buf)))) {
+      LOG_WARN("failed to get access key", K(ret));
+    } else if (OB_FAIL(databuff_printf(authorization, length, "%s&%s", access_id_, access_key_buf))) {
+      LOG_WARN("failed to set authorization", K(ret), K(length), K_(access_id), K(strlen(access_key_buf)));
+    }
+  } else {
+    // access by assume role mode
+    int64_t pos = 0;
+    if (OB_FAIL(databuff_printf(authorization, length, pos, "%s", role_arn_))) {
+      LOG_WARN("failed to set authorization", K(ret), K(length), KP_(role_arn));
+    } else if (external_id_[0] != '\0') {
+      if (OB_FAIL(databuff_printf(authorization, length, pos, "&%s", external_id_))) {
+        LOG_WARN("failed to set authorization", K(ret), K(length), KP_(external_id));
+      }
+    }
+  }
+
+  return ret;
+}
+
+int ObBackupStorageInfo::get_unencrypted_authorization_info(
+    char *authorization, const int64_t length) const
+{
+  int ret = OB_SUCCESS;
+  const int64_t key_len = MAX(OB_MAX_BACKUP_SERIALIZEKEY_LENGTH, OB_MAX_BACKUP_ACCESSKEY_LENGTH);
+  char access_key_buf[key_len] = { 0 };
+  STATIC_ASSERT(OB_MAX_BACKUP_AUTHORIZATION_LENGTH > (OB_MAX_BACKUP_ACCESSID_LENGTH + key_len), "array length overflow");
+  if (!is_valid()) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("storage info not init", K(ret));
+  } else if (OB_ISNULL(authorization) || length <= 0) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid args", K(ret), KP(authorization), K(length));
+  } else if (OB_STORAGE_FILE == device_type_) {
+    // do nothing
+  } else if (OB_FAIL(databuff_printf(authorization, length, "%s&%s",  access_id_, access_key_))) {
+    LOG_WARN("failed to set authorization", K(ret), K(length), K_(access_id), K(strlen(access_key_)));
   }
 
   return ret;
@@ -1171,14 +1195,14 @@ int ObBackupStorageInfo::get_access_key_(char *key_buf, const int64_t key_buf_le
   return ret;
 }
 
-int ObBackupStorageInfo::parse_storage_info_(const char *storage_info, bool &has_appid)
+int ObBackupStorageInfo::parse_storage_info_(const char *storage_info, bool &has_needed_extension)
 {
   int ret = OB_SUCCESS;
   if (OB_ISNULL(storage_info) || strlen(storage_info) >= OB_MAX_BACKUP_STORAGE_INFO_LENGTH) {
     ret = OB_INVALID_BACKUP_DEST;
-    LOG_WARN("storage info is invalid", K(ret), K(storage_info), K(strlen(storage_info)));
-  } else if (OB_FAIL(ObObjectStorageInfo::parse_storage_info_(storage_info, has_appid))) {
-    LOG_WARN("failed to parse storage info", K(ret), K(storage_info));
+    LOG_WARN("storage info is invalid", K(ret), KP(storage_info), K(strlen(storage_info)));
+  } else if (OB_FAIL(ObObjectStorageInfo::parse_storage_info_(storage_info, has_needed_extension))) {
+    LOG_WARN("failed to parse storage info", K(ret), KP(storage_info));
   } else {
     char tmp[OB_MAX_BACKUP_STORAGE_INFO_LENGTH] = { 0 };
     char serialize_key[OB_MAX_BACKUP_SERIALIZEKEY_LENGTH] = { 0 };
@@ -1260,7 +1284,7 @@ int ObBackupStorageInfo::decrypt_access_key_(const char *buf)
   } else if (OB_FAIL(ObEncryptionUtil::decrypt_sys_data(OB_SYS_TENANT_ID,
       deserialize_buf, deserialize_size,
       decrypt_key, sizeof(decrypt_key), key_len))) {
-    LOG_WARN("failed to decrypt authorization key", K(ret), K(deserialize_buf), K(deserialize_size));
+    LOG_WARN("failed to decrypt authorization key", K(ret), KP(deserialize_buf), K(deserialize_size));
   } else if (key_len >= sizeof(decrypt_key) || (key_len + strlen(ACCESS_KEY)) >= sizeof(access_key_)) {
     ret = OB_SIZE_OVERFLOW;
     LOG_WARN("decrypt key size overflow", K(ret), K(key_len), K(sizeof(decrypt_key)));
@@ -1378,6 +1402,8 @@ int ObBackupDest::parse_backup_dest_str_(const char *backup_dest)
     LOG_WARN("failed to get storage type", K(ret));
   } else {
     // oss://backup_dir/?host=xxx.com&access_id=111&access_key=222
+    // oss://backup_dir/?host=xxx.com&role_arn=xxx&external_id=xxx
+    // oss://backup_dir/?host=xxx.com&role_arn=xxx (external_id is optional)
     // file:///root_backup_dir"
     while (backup_dest[pos] != '\0') {
       if ('?' == backup_dest[pos]) {
@@ -1551,6 +1577,25 @@ int ObBackupDest::set_without_decryption(const common::ObString &backup_dest) {
   return ret;
 }
 
+int ObBackupDest::reset_access_id_and_access_key(
+    const char *access_id, const char *access_key)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(storage_info_)) {
+    // do nothing
+  } else if (OB_FAIL(storage_info_->reset_access_id_and_access_key(access_id, access_key))) {
+    LOG_WARN("failed to reset access id and access key", K(ret), KCSTRING(access_id), KCSTRING(access_key));
+  } else {
+    LOG_INFO("reset access id and access key", KCSTRING(access_id));
+  }
+  return ret;
+}
+
+ObStorageType ObBackupDest::get_device_type() const
+{
+  return storage_info_->get_type();
+}
+
 void ObBackupDest::root_path_trim_()
 {
   int len = static_cast<int32_t>(strlen(root_path_));
@@ -1572,7 +1617,7 @@ bool ObBackupDest::is_root_path_equal(const ObBackupDest &backup_dest) const
   } else if (!OB_ISNULL(root_path_) && !OB_ISNULL(backup_dest.root_path_)) {
     if (strlen(root_path_) != strlen(backup_dest.root_path_)) {
       is_equal = false;
-    } else if (0 != MEMCMP(root_path_, backup_dest.root_path_, strlen(root_path_))) {
+    } else if (0 != STRCMP(root_path_, backup_dest.root_path_)) {
       is_equal = false;
     }
   }
@@ -1586,9 +1631,9 @@ int ObBackupDest::is_backup_path_equal(const ObBackupDest &backup_dest, bool &is
   if (!is_valid() || !backup_dest.is_valid()) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("backup dest is valid", K(ret), K(*this), K(backup_dest));
-  } else if(0 != MEMCMP(root_path_, backup_dest.root_path_, OB_MAX_BACKUP_PATH_LENGTH)) {
+  } else if(0 != STRCMP(root_path_, backup_dest.root_path_)) {
     is_equal = false;
-  } else if (0 != MEMCMP(storage_info_->endpoint_, backup_dest.storage_info_->endpoint_, sizeof(storage_info_->endpoint_))) {
+  } else if (0 != STRCMP(storage_info_->endpoint_, backup_dest.storage_info_->endpoint_)) {
     is_equal = false;
   }
   return ret;
@@ -1967,6 +2012,9 @@ int ObBackupUtils::get_full_replica_num(const uint64_t tenant_id, int64_t &repli
     LOG_WARN("[DATA_BACKUP]failed to get_tenant_schema_guard", KR(ret), K(tenant_id));
   } else if (OB_FAIL(schema_guard.get_tenant_info(tenant_id, tenant_info))) {
     LOG_WARN("[DATA_BACKUP]failed to get tenant info", K(ret), K(tenant_id));
+  } else if (OB_ISNULL(tenant_info)) {
+    ret = OB_TENANT_NOT_EXIST;
+    LOG_WARN("tenant schema is null, tenant may has been dropped", K(ret), K(tenant_id));
   } else {
     replica_num = tenant_info->get_full_replica_num();
   }
@@ -2026,7 +2074,7 @@ bool ObBackupUtils::is_need_retry_error(const int err)
     case OB_BACKUP_PERMISSION_DENIED :
     case OB_BACKUP_DEVICE_OUT_OF_SPACE :
     case OB_BACKUP_DEST_NOT_CONNECT :
-    case OB_BACKUP_FILE_NOT_EXIST :
+    case OB_OBJECT_NOT_EXIST :
     case OB_LOG_ARCHIVE_INTERRUPTED :
     case OB_LOG_ARCHIVE_NOT_RUNNING :
     case OB_BACKUP_CAN_NOT_START :
@@ -2034,6 +2082,8 @@ bool ObBackupUtils::is_need_retry_error(const int err)
     case OB_TABLET_NOT_EXIST :
     case OB_CHECKSUM_ERROR :
     case OB_VERSION_NOT_MATCH:
+    case OB_INVALID_DATA:
+    case OB_BACKUP_MISSING_MVIEW_DEP_TABLET_SSTABLE:
       bret = false;
       break;
     default:
@@ -2788,7 +2838,6 @@ const char *backup_set_file_info_status_strs[] = {
     "FAILED",
 };
 
-
 ObBackupRegion::ObBackupRegion()
   : region_(),
     priority_(-1)
@@ -2918,10 +2967,13 @@ const char* ObBackupStatus::get_str() const
     "CANCELED",
     "BACKUP_SYS_META",
     "BACKUP_USER_META",
-    "BACKUP_DATA_SYS",
-    "BACKUP_DATA_MINOR",
-    "BACKUP_DATA_MAJOR",
+    "BACKUP_META_FINISH",
+    "BACKUP_SYS_DATA",
+    "BACKUP_USER_DATA",
+    "BEFORE_BACKUP_LOG",
     "BACKUP_LOG",
+    "BACKUP_FUSE_TABLET_META",
+    "PREPARE_BACKUP_LOG",
   };
 
   STATIC_ASSERT(MAX_STATUS == ARRAYSIZEOF(status_strs), "status count mismatch");
@@ -2946,10 +2998,13 @@ int ObBackupStatus::set_status(const char *str)
     "CANCELED",
     "BACKUP_SYS_META",
     "BACKUP_USER_META",
-    "BACKUP_DATA_SYS",
-    "BACKUP_DATA_MINOR",
-    "BACKUP_DATA_MAJOR",
+    "BACKUP_META_FINISH",
+    "BACKUP_SYS_DATA",
+    "BACKUP_USER_DATA",
+    "BEFORE_BACKUP_LOG",
     "BACKUP_LOG",
+    "BACKUP_FUSE_TABLET_META",
+    "PREPARE_BACKUP_LOG",
   };
   const int64_t count = ARRAYSIZEOF(status_strs);
   if (s.empty()) {
@@ -2971,10 +3026,8 @@ int ObBackupStatus::get_backup_data_type(share::ObBackupDataType &backup_data_ty
   int ret = OB_SUCCESS;
   if (BACKUP_USER_META == status_) {
     backup_data_type.set_sys_data_backup();
-  } else if (BACKUP_DATA_MINOR == status_) {
-    backup_data_type.set_minor_data_backup();
-  } else if (BACKUP_DATA_MAJOR == status_) {
-    backup_data_type.set_major_data_backup();
+  } else if (BACKUP_USER_DATA == status_) {
+    backup_data_type.set_user_data_backup();
   } else {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("status not expected", K(ret), K_(status));
@@ -3032,7 +3085,8 @@ int ObBackupTaskStatus::set_status(const char *str)
 }
 
 OB_SERIALIZE_MEMBER(ObBackupStats, input_bytes_, output_bytes_, tablet_count_, finish_tablet_count_,
-    macro_block_count_, finish_macro_block_count_, extra_bytes_, finish_file_count_);
+    macro_block_count_, finish_macro_block_count_, extra_bytes_, finish_file_count_,
+    log_file_count_, finish_log_file_count_);
 
 ObBackupStats::ObBackupStats()
   : input_bytes_(0),
@@ -3042,7 +3096,9 @@ ObBackupStats::ObBackupStats()
     macro_block_count_(0),
     finish_macro_block_count_(0),
     extra_bytes_(0),
-    finish_file_count_(0)
+    finish_file_count_(0),
+    log_file_count_(0),
+    finish_log_file_count_(0)
 {
 }
 
@@ -3055,19 +3111,30 @@ bool ObBackupStats::is_valid() const
       && macro_block_count_ >= 0
       && finish_macro_block_count_ >= 0
       && extra_bytes_ >= 0
-      && finish_file_count_ >= 0;
+      && finish_file_count_ >= 0
+      && log_file_count_ >= 0
+      && finish_log_file_count_ >= 0;
 }
 
-void ObBackupStats::assign(const ObBackupStats &other)
+int ObBackupStats::assign(const ObBackupStats &other)
 {
-  input_bytes_ = other.input_bytes_;
-  output_bytes_ = other.output_bytes_;
-  tablet_count_ = other.tablet_count_;
-  finish_tablet_count_ = other.finish_tablet_count_;
-  macro_block_count_ = other.macro_block_count_;
-  finish_macro_block_count_ = other.finish_macro_block_count_;
-  extra_bytes_ = other.extra_bytes_;
-  finish_file_count_ = other.finish_file_count_;
+  int ret = OB_SUCCESS;
+  if (!other.is_valid()) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("get invalid arg", K(ret), K(other));
+  } else {
+    input_bytes_ = other.input_bytes_;
+    output_bytes_ = other.output_bytes_;
+    tablet_count_ = other.tablet_count_;
+    finish_tablet_count_ = other.finish_tablet_count_;
+    macro_block_count_ = other.macro_block_count_;
+    finish_macro_block_count_ = other.finish_macro_block_count_;
+    extra_bytes_ = other.extra_bytes_;
+    finish_file_count_ = other.finish_file_count_;
+    log_file_count_ = other.log_file_count_;
+    finish_log_file_count_ = other.finish_log_file_count_;
+  }
+  return ret;
 }
 
 void ObBackupStats::cum_with(const ObBackupStats &other)
@@ -3080,6 +3147,8 @@ void ObBackupStats::cum_with(const ObBackupStats &other)
   finish_macro_block_count_ += other.finish_macro_block_count_;
   extra_bytes_ += other.extra_bytes_;
   finish_file_count_ += other.finish_file_count_;
+  log_file_count_ += other.log_file_count_;
+  finish_log_file_count_ += other.finish_log_file_count_;
 }
 
 void ObBackupStats::reset()
@@ -3092,6 +3161,8 @@ void ObBackupStats::reset()
   finish_macro_block_count_ = 0;
   extra_bytes_ = 0;
   finish_file_count_ = 0;
+  log_file_count_ = 0;
+  finish_log_file_count_ = 0;
 }
 
 ObHAResultInfo::ObHAResultInfo(
@@ -3391,10 +3462,12 @@ const char* ObBackupDataTaskType::get_str() const
   const char *str = "UNKNOWN";
   const char *type_strs[] = {
     "BACKUP_META",
-    "BACKUP_DATA_MINOR",
-    "BACKUP_DATA_MAJOR",
+    "BACKUP_META_FINISH",
+    "BACKUP_USER_DATA",
+    "BEFORE_PLUS_ARCHIVE_LOG",
     "PLUS_ARCHIVE_LOG",
-    "BUILD_INDEX"
+    "BUILD_INDEX",
+    "BACKUP_FUSE_TABLET_META",
   };
   if (type_ < Type::BACKUP_META || type_ >= Type::BACKUP_MAX) {
     LOG_ERROR_RET(OB_ERR_UNEXPECTED, "invalid compressor type", K(type_));
@@ -3410,10 +3483,12 @@ int ObBackupDataTaskType::set_type(const char *buf)
   ObString s(buf);
   const char *type_strs[] = {
     "BACKUP_META",
-    "BACKUP_DATA_MINOR",
-    "BACKUP_DATA_MAJOR",
+    "BACKUP_META_FINISH",
+    "BACKUP_USER_DATA",
+    "BEFORE_PLUS_ARCHIVE_LOG",
     "PLUS_ARCHIVE_LOG",
     "BUILD_INDEX",
+    "BACKUP_FUSE_TABLET_META",
   };
   const int64_t count = ARRAYSIZEOF(type_strs);
   if (s.empty()) {
@@ -3437,10 +3512,10 @@ int ObBackupDataTaskType::get_backup_data_type(share::ObBackupDataType &backup_d
     LOG_WARN("not suitable backup type", K(ret));
   } else if (BACKUP_META == type_) {
     backup_data_type.set_sys_data_backup();
-  } else if (BACKUP_DATA_MINOR == type_) {
-    backup_data_type.set_minor_data_backup();
+  } else if (BACKUP_USER_DATA == type_) {
+    backup_data_type.set_user_data_backup();
   } else {
-    backup_data_type.set_major_data_backup();
+    ret = OB_ERR_UNEXPECTED;
   }
   return ret;
 }
@@ -3494,8 +3569,9 @@ int ObBackupSetTaskAttr::assign(const ObBackupSetTaskAttr &other)
     LOG_WARN("failed to assign backup path", K(ret), K(other.backup_path_));
   } else if (OB_FAIL(comment_.assign(other.comment_))) {
     LOG_WARN("failed to assign comment", K(ret));
+  } else if (OB_FAIL(stats_.assign(other.stats_))) {
+    LOG_WARN("failed to assign stats", K(ret));
   } else {
-    stats_.assign(other.stats_);
     incarnation_id_ = other.incarnation_id_;
     task_id_ = other.task_id_;
     tenant_id_ = other.tenant_id_;
@@ -3711,7 +3787,6 @@ void ObBackupSetFileDesc::reset()
   consistent_scn_.reset();
 }
 
-
 bool ObBackupSetFileDesc::is_key_valid() const
 {
   return tenant_id_ != OB_INVALID_ID
@@ -3875,6 +3950,18 @@ int64_t ObBackupSetFileDesc::to_string(char *min_restore_scn_str_buf,  char *buf
     J_OBJ_END();
   }
   return pos;
+}
+
+bool ObBackupSetFileDesc::is_allow_quick_restore(const Compatible &compatible)
+{
+  const bool is_shared_storage_mode = GCTX.is_shared_storage_mode();
+  return !is_shared_storage_mode && is_backup_set_support_quick_restore(compatible);
+}
+
+bool ObBackupSetFileDesc::is_not_allow_quick_restore(const Compatible &compatible)
+{
+  const bool is_shared_storage_mode = GCTX.is_shared_storage_mode();
+  return is_shared_storage_mode || is_backup_set_not_support_quick_restore(compatible);
 }
 
 
@@ -4316,9 +4403,15 @@ int ObRestoreBackupSetBriefInfo::get_restore_backup_set_brief_info_str(
     if (OB_FALSE_IT(pos = 0)) {
     } else if (OB_FAIL(backup_scn_to_time_tag(backup_set_desc_.min_restore_scn_, scn_display_buf, OB_MAX_TIME_STR_LENGTH, pos))) {
       LOG_WARN("failed to backup scn to time tag", K(ret));
-    } else if (OB_FAIL(databuff_printf(str_buf, str_buf_len, pos, "type: %s, min_restore_scn_display: %s, size: %s.",
-        type_str, scn_display_buf, to_cstring(ObSizeLiteralPrettyPrinter(backup_set_desc_.total_bytes_))))) {
-      LOG_WARN("failed to databuff print", K(ret), KPC(this));
+    } else {
+      ret = databuff_printf(str_buf, str_buf_len, pos,
+          "type: %s, min_restore_scn_display: %s, size: ", type_str, scn_display_buf);
+      OB_SUCCESS != ret ? : ret = databuff_printf(str_buf, str_buf_len, pos,
+          ObSizeLiteralPrettyPrinter(backup_set_desc_.total_bytes_));
+      OB_SUCCESS != ret ? : ret = databuff_printf(str_buf, str_buf_len, pos, ".");
+      if (OB_FAIL(ret)) {
+        LOG_WARN("failed to databuff print", K(ret), KPC(this));
+      }
     }
   }
   if (OB_FAIL(ret)) {
@@ -4360,6 +4453,10 @@ const char *ObBackupSkippedType::str() const
     str = "TRANSFER";
     break;
   }
+  case REORGANIZED: {
+    str = "REORGANIZED";
+    break;
+  }
   default: {
     str = "INVALID_TYPE";
   }
@@ -4374,6 +4471,8 @@ int ObBackupSkippedType::parse_from_str(const ObString &str)
     type_ = DELETED;
   } else if (0 == str.case_compare("TRANSFER")) {
     type_ = TRANSFER;
+  } else if (0 == str.case_compare("REORGANIZED")) {
+    type_ = REORGANIZED;
   } else {
     type_ = MAX_TYPE;
     ret = OB_INVALID_ARGUMENT;
@@ -4434,6 +4533,239 @@ int ObRestoreLogPieceBriefInfo::assign(const ObRestoreLogPieceBriefInfo &that)
     piece_id_ = that.piece_id_;
     start_scn_ = that.start_scn_;
     checkpoint_scn_ = that.checkpoint_scn_;
+  }
+  return ret;
+}
+
+/* ObBackupDestAttributeParser */
+
+ObBackupDestAttributeParser::ExtraArgsCb::Action ObBackupDestAttributeParser::ExtraArgsCb::actions_[] = {
+  {"access_id",     ObBackupDestAttributeParser::ExtraArgsCb::set_access_id_,     false},
+  {"access_key",    ObBackupDestAttributeParser::ExtraArgsCb::set_access_key_,    false},
+  {"max_iops",      ObBackupDestAttributeParser::ExtraArgsCb::set_max_iops_,      false},
+  {"max_bandwidth", ObBackupDestAttributeParser::ExtraArgsCb::set_max_bandwidth_, false},
+};
+
+ObBackupDestAttributeParser::ExtraArgsCb::ExtraArgsCb(ObBackupDestAttribute &option)
+  : option_(option)
+{
+};
+
+int ObBackupDestAttributeParser::ExtraArgsCb::match(const char *key, const char *value)
+{
+  int ret = OB_SUCCESS;
+  bool found = false;
+  for (int i = 0; i < ACTION_CNT && !found && OB_SUCC(ret); ++i) {
+    if (0 == STRCASECMP(actions_[i].key_, key)) {
+      if (OB_FAIL(actions_[i].setter_(value, option_))) {
+        LOG_WARN("fail set value", K(value), K(ret));
+      } else {
+        is_set_[i] = true;
+        found = true;
+      }
+    }
+  }
+  if (!found) {
+    LOG_TRACE("KV pair ignored by common backup dest option parser", K(key), K(value), K(ret));
+  }
+  return ret;
+}
+
+bool ObBackupDestAttributeParser::ExtraArgsCb::check() const
+{
+  bool pass = true;
+  for (int i = 0; i < ACTION_CNT && pass; ++i) {
+    if (actions_[i].required_ && !is_set_[i]) {
+      pass = false;
+      LOG_USER_WARN(OB_MISS_ARGUMENT, actions_[i].key_);
+    }
+  }
+  return pass;
+}
+
+int ObBackupDestAttributeParser::parse(
+    const ObString &str, ObBackupDestAttribute &option)
+{
+  int ret = OB_SUCCESS;
+  char str_buf[OB_MAX_URI_LENGTH];
+  if (str.length() >= OB_MAX_URI_LENGTH) {
+    ret = OB_SIZE_OVERFLOW;
+    OB_LOG(WARN, "the str too long", "len", str.length(), K(str), K(ret));
+  } else {
+    MEMSET(str_buf, 0, OB_MAX_URI_LENGTH);
+    MEMCPY(str_buf, str.ptr(), str.length());
+    if (OB_FAIL(parse_(str_buf, option))) {
+      LOG_WARN("fail parse str buf", K(str_buf), K(ret));
+    }
+  }
+  return ret;
+}
+
+int ObBackupDestAttributeParser::parse_(
+    const char *str, ObBackupDestAttribute &option)
+{
+  int ret = OB_SUCCESS;
+  char extra_args[OB_MAX_URI_LENGTH];
+  ExtraArgsCb extra_arg_cb(option);
+  ObKVParser kv_parser('=', '&');
+  kv_parser.set_match_callback(extra_arg_cb);
+  kv_parser.set_allow_space(false);
+  int64_t uri_len = STRLEN(str);
+  if (OB_ISNULL(str)) {
+    ret = OB_INVALID_ARGUMENT;
+    OB_LOG(WARN, "the argument is invalid", K(ret));
+  } else if (uri_len >= OB_MAX_URI_LENGTH) {
+    ret = OB_SIZE_OVERFLOW;
+    OB_LOG(WARN, "the str too long", K(uri_len), K(ret));
+  } else if (OB_FAIL(kv_parser.parse(str))) {
+    LOG_WARN("fail parse arg", K(extra_args), K(str), K(ret));
+  }
+  return ret;
+}
+
+int ObBackupDestAttributeParser::ExtraArgsCb::set_access_id_(const char *val, ObBackupDestAttribute &option)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(val)) {
+    ret = OB_INVALID_ARGUMENT;
+  } else if (STRLEN(val) >= OB_MAX_BACKUP_ACCESSID_LENGTH) {
+    ret = OB_SIZE_OVERFLOW;
+  } else {
+    STRNCPY(option.access_id_, val, STRLEN(val));
+    option.access_id_[STRLEN(val)] = '\0';
+    LOG_INFO("set access id", "val_len", STRLEN(val), KCSTRING(val));
+  }
+  return ret;
+}
+
+int ObBackupDestAttributeParser::ExtraArgsCb::set_access_key_(const char *val, ObBackupDestAttribute &option)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(val)) {
+    ret = OB_INVALID_ARGUMENT;
+  } else if (STRLEN(val) >= OB_MAX_BACKUP_ACCESSKEY_LENGTH) {
+    ret = OB_SIZE_OVERFLOW;
+  } else {
+    STRNCPY(option.access_key_, val, STRLEN(val));
+    option.access_key_[STRLEN(val)] = '\0';
+    LOG_INFO("set access key", K(STRLEN(val)), KCSTRING(val));
+  }
+  return ret;
+}
+
+int ObBackupDestAttributeParser::ExtraArgsCb::set_max_iops_(const char *val, ObBackupDestAttribute &option)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(val)) {
+    ret = OB_INVALID_ARGUMENT;
+  } else if (STRLEN(val) >= common::OB_INNER_TABLE_DEFAULT_VALUE_LENTH) {
+    ret = OB_SIZE_OVERFLOW;
+  } else if (OB_FAIL(ob_atoll(val, option.max_iops_))) {
+    LOG_WARN("failed to atoll", K(ret), KCSTRING(val));
+  } else {
+    LOG_INFO("set max iops", "max_iops", option.max_iops_);
+  }
+  return ret;
+}
+
+int ObBackupDestAttributeParser::ExtraArgsCb::set_max_bandwidth_(const char *val, ObBackupDestAttribute &option)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(val)) {
+    ret = OB_INVALID_ARGUMENT;
+  } else if (STRLEN(val) >= common::OB_INNER_TABLE_DEFAULT_VALUE_LENTH) {
+    ret = OB_SIZE_OVERFLOW;
+  } else {
+    bool is_valid = false;
+    int64_t value = ObConfigCapacityParser::get(val, is_valid, true /*check_unit*/);
+    if (!is_valid) {
+      ret = OB_INVALID_ARGUMENT;
+      LOG_WARN("convert failed", K(ret), K(val));
+    } else {
+      option.max_bandwidth_ = value;
+      LOG_INFO("set max bandwidth", "max_bandwidth", option.max_bandwidth_);
+    }
+  }
+  return ret;
+}
+
+OB_SERIALIZE_MEMBER(ObBackupTableListItem,
+                    database_name_,
+                    table_name_);
+
+ObBackupTableListItem::ObBackupTableListItem()
+  : database_name_(),
+    table_name_()
+{
+}
+
+bool ObBackupTableListItem::is_valid() const
+{
+  return !database_name_.is_empty() && !table_name_.is_empty();
+}
+
+void ObBackupTableListItem::reset()
+{
+   database_name_.reset();
+   table_name_.reset();
+}
+
+int ObBackupTableListItem::assign(const ObBackupTableListItem &o)
+{
+  int ret = OB_SUCCESS;
+  if (OB_FAIL(database_name_.assign(o.database_name_))) {
+    LOG_WARN("fail to assign database name", K(ret), K(o.database_name_));
+  } else if (OB_FAIL(table_name_.assign(o.table_name_))) {
+    LOG_WARN("fail to assign table name", K(ret), K(o.table_name_));
+  }
+  return ret;
+}
+
+bool ObBackupTableListItem::operator==(const ObBackupTableListItem &o) const
+{
+  return database_name_ == o.database_name_ && table_name_ == o.table_name_;
+}
+
+bool ObBackupTableListItem::operator>(const ObBackupTableListItem &o) const
+{
+  bool b_ret = false;
+  if (database_name_ > o.database_name_) {
+    b_ret = true;
+  } else if (database_name_ == o.database_name_
+            && table_name_ > o.table_name_) {
+    b_ret = true;
+  }
+  return b_ret;
+}
+
+OB_SERIALIZE_MEMBER(ObBackupPartialTableListMeta,
+                    start_key_,
+                    end_key_);
+
+ObBackupPartialTableListMeta::ObBackupPartialTableListMeta()
+  : start_key_(),
+    end_key_()
+{
+}
+
+bool ObBackupPartialTableListMeta::is_valid() const
+{
+  return start_key_.is_valid() && end_key_.is_valid() && end_key_ >= start_key_;
+}
+
+void ObBackupPartialTableListMeta::reset()
+{
+  start_key_.reset();
+  end_key_.reset();
+}
+
+int ObBackupPartialTableListMeta::assign(const ObBackupPartialTableListMeta &other)
+{
+  int ret = OB_SUCCESS;
+  if (OB_FAIL(start_key_.assign(other.start_key_))) {
+    LOG_WARN("fail to assign start key", K(ret), K(other.start_key_));
+  } else if (OB_FAIL(end_key_.assign(other.end_key_))) {
+    LOG_WARN("fail to assign end key", K(ret), K(other.end_key_));
   }
   return ret;
 }

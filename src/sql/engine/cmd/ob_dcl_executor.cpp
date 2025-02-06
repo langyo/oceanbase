@@ -14,13 +14,9 @@
 #include "sql/engine/cmd/ob_dcl_executor.h"
 
 #include "lib/encrypt/ob_encrypted_helper.h"
-#include "share/ob_rpc_struct.h"
-#include "share/schema/ob_schema_struct.h"
-#include "share/ob_common_rpc_proxy.h"
 #include "sql/engine/ob_exec_context.h"
 #include "sql/resolver/dcl/ob_grant_stmt.h"
 #include "sql/resolver/dcl/ob_revoke_stmt.h"
-#include "sql/session/ob_sql_session_info.h"
 #include "sql/engine/cmd/ob_user_cmd_executor.h"
 
 namespace oceanbase
@@ -41,6 +37,8 @@ int ObGrantExecutor::execute(ObExecContext &ctx, ObGrantStmt &stmt)
   ObIAllocator &allocator = ctx.get_allocator();
   obrpc::ObGrantArg &arg = static_cast<obrpc::ObGrantArg &>(stmt.get_ddl_arg());
   const bool is_role = arg.roles_.count() > 0;
+  ObSchemaGetterGuard schema_guard;
+  const ObUserInfo *user_info = NULL;
 
   if (OB_ISNULL(task_exec_ctx = GET_TASK_EXECUTOR_CTX(ctx))) {
     ret = OB_NOT_INIT;
@@ -51,6 +49,9 @@ int ObGrantExecutor::execute(ObExecContext &ctx, ObGrantStmt &stmt)
   } else if (OB_ISNULL(common_rpc_proxy = task_exec_ctx->get_common_rpc())) {
     ret = OB_NOT_INIT;
     LOG_WARN("get common rpc proxy failed", K(ret));
+  } else if (OB_ISNULL(GCTX.schema_service_)) {
+    ret = OB_NOT_INIT;
+    LOG_WARN("get schema service failed", K(ret));
   } else if (!is_role) {
     ObString user_name;
     ObString host_name;
@@ -124,11 +125,49 @@ int ObGrantExecutor::execute(ObExecContext &ctx, ObGrantStmt &stmt)
     arg.object_type_ = stmt.get_object_type();
     arg.object_id_ = stmt.get_object_id();
     arg.grantor_id_ = stmt.get_grantor_id();
-    arg.ins_col_ids_ = stmt.get_ins_col_ids();
-    arg.upd_col_ids_ = stmt.get_upd_col_ids();
-    arg.ref_col_ids_ = stmt.get_ref_col_ids();
     arg.is_inner_ = session_info->is_inner();
-    if (OB_FAIL(common_rpc_proxy->grant(arg))) {
+    arg.based_schema_object_infos_.reset();
+    if (OB_FAIL(append(arg.column_names_priv_, stmt.get_column_privs()))
+        || OB_FAIL(append(arg.ins_col_ids_, stmt.get_ins_col_ids()))
+        || OB_FAIL(append(arg.upd_col_ids_, stmt.get_upd_col_ids()))
+        || OB_FAIL(append(arg.ref_col_ids_, stmt.get_ref_col_ids()))) {
+        LOG_WARN("append failed", K(ret));
+    } else if (lib::is_mysql_mode() && arg.object_type_ == ObObjectType::TABLE
+                && arg.column_names_priv_.count() > 0) {
+      if (arg.object_id_ == OB_INVALID) {
+        //do nothing
+        //todo: oracle every object will use id, and should also record the schema version in future.
+      } else if (stmt.get_table_schema_version() != 0
+                  && OB_FAIL(arg.based_schema_object_infos_.push_back(ObBasedSchemaObjectInfo(arg.object_id_,
+                                                                            TABLE_SCHEMA,
+                                                                            stmt.get_table_schema_version())))) {
+        LOG_WARN("push back failed", K(ret));
+      }
+    }
+    if (OB_FAIL(ret)) {
+    } else if (OB_FAIL(GCTX.schema_service_->get_tenant_schema_guard(tenant_id, schema_guard))) {
+      LOG_WARN("failed to get tenant schema guard", K(ret));
+    } else if (OB_FAIL(schema_guard.get_user_info(tenant_id,
+                                                  session_info->get_priv_user_id(),
+                                                  user_info))) {
+      LOG_WARN("failed to get user info", K(ret));
+    } else if (OB_ISNULL(user_info)) {
+      // ignore ret
+      LOG_WARN("user info is unexpected null", K(ret));
+    } else if (OB_FAIL(ob_write_string(allocator, user_info->get_user_name_str(), arg.grantor_))) {
+      LOG_WARN("failed to write string", K(ret));
+    } else if (OB_FAIL(ob_write_string(allocator, user_info->get_host_name_str(), arg.grantor_host_))) {
+      LOG_WARN("failed to write string", K(ret));
+    }
+    int tmp_ret = OB_SUCCESS;
+    if (OB_TMP_FAIL(schema_guard.reset())) {
+      LOG_WARN("failed to reset schema guard", K(tmp_ret));
+      if (OB_SUCC(ret)) {
+        ret = tmp_ret;
+      }
+    }
+    if (OB_FAIL(ret)) {
+    } else if (OB_FAIL(common_rpc_proxy->grant(arg))) {
       LOG_WARN("Grant privileges to user error", K(ret), K(arg));
     }
   }
@@ -147,6 +186,8 @@ int ObRevokeExecutor::execute(ObExecContext &ctx, ObRevokeStmt &stmt)
   } else if (OB_ISNULL(common_rpc_proxy = task_exec_ctx->get_common_rpc())) {
     ret = OB_NOT_INIT;
     LOG_WARN("get common rpc proxy failed");
+  } else if (stmt.get_has_warning()) {
+    //do nothing
   } else {
     switch (stmt.get_grant_level()) {
       case OB_PRIV_USER_LEVEL: {
@@ -162,16 +203,22 @@ int ObRevokeExecutor::execute(ObExecContext &ctx, ObRevokeStmt &stmt)
         break;
       }
       case OB_PRIV_TABLE_LEVEL: {
-        if (OB_FAIL(revoke_table(common_rpc_proxy, stmt))) {
+        if (OB_FAIL(revoke_table(common_rpc_proxy, stmt, ctx))) {
           LOG_WARN("grant_revoke_user error", K(ret));
         }
         break;
+      }
+      case OB_PRIV_ROUTINE_LEVEL: {
+        if (OB_FAIL(revoke_routine(common_rpc_proxy, stmt, ctx))) {
+          LOG_WARN("grant_revoke_user error", K(ret));
+        }
+        break;
+      }
       case OB_PRIV_SYS_ORACLE_LEVEL: { // Oracle revoke role and sys_priv
         if (OB_FAIL(revoke_sys_priv(common_rpc_proxy, stmt))) {
           LOG_WARN("grant_revoke_user error", K(ret));
         }
         break;
-      }
       }
       default: {
         ret = OB_ERR_UNEXPECTED;
@@ -246,31 +293,141 @@ int ObRevokeExecutor::revoke_db(obrpc::ObCommonRpcProxy *rpc_proxy, ObRevokeStmt
   return ret;
 }
 
-int ObRevokeExecutor::revoke_table(obrpc::ObCommonRpcProxy *rpc_proxy, ObRevokeStmt &stmt)
+int ObRevokeExecutor::revoke_table(obrpc::ObCommonRpcProxy *rpc_proxy,
+                                   ObRevokeStmt &stmt,
+                                   ObExecContext &ctx)
 {
   int ret = OB_SUCCESS;
-  if (OB_ISNULL(rpc_proxy)) {
+  ObSQLSessionInfo *session_info = NULL;
+  ObSchemaGetterGuard schema_guard;
+  const ObUserInfo *user_info = NULL;
+  if (OB_ISNULL(rpc_proxy) || OB_ISNULL(GCTX.schema_service_)) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("Input argument error", K(rpc_proxy), K(ret));
+  } else if (OB_ISNULL(session_info = ctx.get_my_session())) {
+    ret = OB_NOT_INIT;
+    LOG_WARN("Get my session error");
   } else {
     obrpc::ObRevokeTableArg &arg = static_cast<obrpc::ObRevokeTableArg &>(stmt.get_ddl_arg());
     arg.tenant_id_ = stmt.get_tenant_id();
     arg.priv_set_ = stmt.get_priv_set();
     arg.db_ = stmt.get_database_name();
     arg.table_ = stmt.get_table_name();
-    arg.obj_id_ = stmt.get_obj_id();
+    arg.obj_id_ = stmt.get_object_id();
     arg.obj_type_ = static_cast<uint64_t>(stmt.get_object_type());
     arg.grantor_id_ = stmt.get_grantor_id();
     arg.revoke_all_ora_ = stmt.get_revoke_all_ora();
-
+    arg.based_schema_object_infos_.reset();
+    if (OB_FAIL(append(arg.column_names_priv_, stmt.get_column_privs()))) {
+      LOG_WARN("append failed", K(ret));
+    } else if (stmt.get_object_type() == ObObjectType::TABLE
+            && (arg.column_names_priv_.count() > 0)) {
+      if (arg.obj_id_ == OB_INVALID) {
+        //do nothing
+        //todo: oracle every object will use id, and should also record the schema version in future.
+      } else if (lib::is_mysql_mode() && stmt.get_table_schema_version()!= 0 &&
+                OB_FAIL(arg.based_schema_object_infos_.push_back(ObBasedSchemaObjectInfo(arg.obj_id_,
+                                                                            TABLE_SCHEMA,
+                                                                            stmt.get_table_schema_version())))) {
+        LOG_WARN("push back failed", K(ret));
+      }
+    } else {
+      //todo: pl routine and others
+    }
+    if (OB_FAIL(ret)) {
+    } else if (OB_FAIL(GCTX.schema_service_->get_tenant_schema_guard(arg.tenant_id_, schema_guard))) {
+      LOG_WARN("failed to get tenant schema guard", K(ret));
+    } else if (OB_FAIL(schema_guard.get_user_info(arg.tenant_id_,
+                                                  session_info->get_priv_user_id(),
+                                                  user_info))) {
+      LOG_WARN("failed to get user info", K(ret));
+    } else if (OB_ISNULL(user_info)) {
+      // ignore ret
+      LOG_WARN("user info is unexpected null", K(ret));
+    } else if (OB_FAIL(ob_write_string(ctx.get_allocator(), user_info->get_user_name_str(), arg.grantor_))) {
+      LOG_WARN("failed to write string", K(ret));
+    } else if (OB_FAIL(ob_write_string(ctx.get_allocator(), user_info->get_host_name_str(), arg.grantor_host_))) {
+      LOG_WARN("failed to write string", K(ret));
+    }
+    int tmp_ret = OB_SUCCESS;
+    if (OB_TMP_FAIL(schema_guard.reset())) {
+      LOG_WARN("failed to reset schema guard", K(tmp_ret));
+      if (OB_SUCC(ret)) {
+        ret = tmp_ret;
+      }
+    }
     const ObIArray<uint64_t> &user_ids = stmt.get_users();
-    if (0 == user_ids.count()) {
+    if (OB_FAIL(ret)) {
+    } else if (0 == user_ids.count()) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("User ids is empty, resolver may be error", K(ret));
     } else {
       for (int i = 0; OB_SUCC(ret) && i < user_ids.count(); i++) {
         arg.user_id_ = user_ids.at(i);
         if (OB_FAIL(rpc_proxy->revoke_table(arg))) {
+          LOG_WARN("revoke user error", K(arg), K(ret));
+        }
+      }
+    }
+  }
+  return ret;
+}
+
+int ObRevokeExecutor::revoke_routine(obrpc::ObCommonRpcProxy *rpc_proxy,
+                                     ObRevokeStmt &stmt,
+                                     ObExecContext &ctx)
+{
+  int ret = OB_SUCCESS;
+  ObSQLSessionInfo *session_info = NULL;
+  ObSchemaGetterGuard schema_guard;
+  const ObUserInfo *user_info = NULL;
+  if (OB_ISNULL(rpc_proxy)) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("Input argument error", K(rpc_proxy), K(ret));
+  } else if (OB_ISNULL(session_info = ctx.get_my_session())) {
+    ret = OB_NOT_INIT;
+    LOG_WARN("Get my session error");
+  } else {
+    obrpc::ObRevokeRoutineArg &arg = static_cast<obrpc::ObRevokeRoutineArg &>(stmt.get_ddl_arg());
+    arg.tenant_id_ = stmt.get_tenant_id();
+    arg.priv_set_ = stmt.get_priv_set();
+    arg.db_ = stmt.get_database_name();
+    arg.routine_ = stmt.get_table_name();
+    arg.obj_id_ = stmt.get_object_id();
+    arg.obj_type_ = static_cast<uint64_t>(stmt.get_object_type());
+    arg.grantor_id_ = stmt.get_grantor_id();
+    arg.revoke_all_ora_ = stmt.get_revoke_all_ora();
+    if (OB_FAIL(ret)) {
+    } else if (OB_FAIL(GCTX.schema_service_->get_tenant_schema_guard(arg.tenant_id_, schema_guard))) {
+      LOG_WARN("failed to get tenant schema guard", K(ret));
+    } else if (OB_FAIL(schema_guard.get_user_info(arg.tenant_id_,
+                                                  session_info->get_priv_user_id(),
+                                                  user_info))) {
+      LOG_WARN("failed to get user info", K(ret));
+    } else if (OB_ISNULL(user_info)) {
+      // ignore ret
+      LOG_WARN("user info is unexpected null", K(ret));
+    } else if (OB_FAIL(ob_write_string(ctx.get_allocator(), user_info->get_user_name_str(), arg.grantor_))) {
+      LOG_WARN("failed to write string", K(ret));
+    } else if (OB_FAIL(ob_write_string(ctx.get_allocator(), user_info->get_host_name_str(), arg.grantor_host_))) {
+      LOG_WARN("failed to write string", K(ret));
+    }
+    int tmp_ret = OB_SUCCESS;
+    if (OB_TMP_FAIL(schema_guard.reset())) {
+      LOG_WARN("failed to reset schema guard", K(tmp_ret));
+      if (OB_SUCC(ret)) {
+        ret = tmp_ret;
+      }
+    }
+    const ObIArray<uint64_t> &user_ids = stmt.get_users();
+    if (OB_FAIL(ret)) {
+    } else if (0 == user_ids.count()) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("User ids is empty, resolver may be error", K(ret));
+    } else {
+      for (int i = 0; OB_SUCC(ret) && i < user_ids.count(); i++) {
+        arg.user_id_ = user_ids.at(i);
+        if (OB_FAIL(rpc_proxy->revoke_routine(arg))) {
           LOG_WARN("revoke user error", K(arg), K(ret));
         }
       }

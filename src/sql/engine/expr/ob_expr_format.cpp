@@ -13,9 +13,7 @@
 #define USING_LOG_PREFIX  SQL_ENG
 
 #include "ob_expr_format.h"
-#include "lib/charset/ob_charset.h"
 #include "sql/engine/ob_exec_context.h"
-#include "sql/engine/expr/ob_expr_util.h"
 #include "sql/engine/expr/ob_expr_lob_utils.h"
 #include "sql/engine/expr/ob_expr_func_round.h"
 
@@ -143,6 +141,8 @@ int ObExprFormat::calc_result_type(ObExprResType &type, ObExprResType *type_arra
         case ObDateTimeType:
         case ObTimestampType:
         case ObDateType:
+        case ObMySQLDateType:
+        case ObMySQLDateTimeType:
         case ObTimeType:
         case ObYearType: {
           int64_t max_char_length = type_array[0].get_length();
@@ -344,6 +344,7 @@ int ObExprFormat::calc_format_expr(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &
         LOG_WARN("fail to build format str", K(ret));
       } else if (!ob_is_text_tc(expr.datum_meta_.type_)) {
         if (OB_ISNULL(res_buf = expr.get_str_res_mem(ctx, str.length()))) {
+          ret = OB_ALLOCATE_MEMORY_FAILED;
           LOG_ERROR("fail to allocate memory", K(buf_len), K(ret));
         } else {
           MEMCPY(res_buf, str.ptr(), str.length());

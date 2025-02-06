@@ -115,7 +115,6 @@ class ObMultiVersionSchemaService : public ObServerSchemaService
 typedef common::ObSortedVector<ObSchemaMgr *> SchemaMgrInfos;
 typedef SchemaMgrInfos::iterator SchemaMgrIterator;
 public:
-  static bool g_skip_resolve_materialized_view_definition_;
 
   enum RefreshSchemaMode
   {
@@ -182,11 +181,6 @@ public:
                         const uint64_t tenant_id,
                         const uint64_t schema_id,
                         const ObSchema *&schema);
-
-  const ObSimpleTenantSchema* get_simple_gts_tenant() const
-  {
-    return schema_cache_.get_simple_gts_tenant();
-  }
 
   // Get pairs of tablet-table with specific tenant_id/schema_version.
   // If local cache miss, this function will fetch pairs of tablet-table from __all_tablet_to_table_history.
@@ -294,10 +288,12 @@ public:
       const uint64_t database_id,
       const common::ObString &outline_name,
       uint64_t &outline_id,
+      bool is_format,
       bool &exist) ;
   int check_outline_exist_with_sql(const uint64_t tenant_id,
       const uint64_t database_id,
       const common::ObString &paramlized_sql,
+      bool is_format,
       bool &exist) ;
   int check_synonym_exist(const uint64_t tenant_id,
       const uint64_t database_id,
@@ -315,6 +311,7 @@ public:
   int check_outline_exist_with_sql_id(const uint64_t tenant_id,
       const uint64_t database_id,
       const common::ObString &sql_id,
+      bool is_format,
       bool &exist) ;
 
   int check_procedure_exist(uint64_t tenant_id, uint64_t database_id,
@@ -454,10 +451,6 @@ private:
   virtual int add_aux_schema_from_mgr(const ObSchemaMgr &mgr,
       ObTableSchema &table_schema,
       const ObTableType table_type) override;
-  int build_full_materalized_view_schema(
-      ObSchemaGetterGuard &schema_guard,
-      common::ObIAllocator &allocator,
-      ObTableSchema *&view_schema);
 
   //for liboblog
   int fallback_schema_mgr_for_liboblog(const ObRefreshSchemaStatus &schema_status,

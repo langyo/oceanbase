@@ -13,16 +13,8 @@
 #define USING_LOG_PREFIX RPC_OBMYSQL
 
 #include "rpc/obmysql/ob_mysql_handler.h"
-#include "lib/compress/zlib/ob_zlib_compressor.h"
 #include "rpc/ob_request.h"
-#include "rpc/obmysql/ob_mysql_packet.h"
-#include "rpc/obmysql/ob_mysql_util.h"
-#include "rpc/obmysql/ob_mysql_request_utils.h"
-#include "rpc/obmysql/ob_virtual_cs_protocol_processor.h"
-#include "rpc/obmysql/ob_2_0_protocol_struct.h"
 #include "rpc/obmysql/packet/ompk_handshake.h"
-#include "rpc/obmysql/packet/ompk_ok.h"
-#include "rpc/obmysql/packet/ompk_handshake_response.h"
 
 using namespace oceanbase::common;
 using namespace oceanbase::rpc;
@@ -173,7 +165,7 @@ int ObMySQLHandler::process(easy_request_t *r)
               OB_NOT_NULL(pkt.get_cdata()) &&
               pkt.get_clen() > comment_header_len_ &&
               memcmp(pkt.get_cdata(), comment_header_, 9) == comment_header_len_) {
-            if (OB_FAIL(OB_FAIL(parse_head_comment(pkt.get_cdata(), pkt.get_clen())))) {
+            if (OB_FAIL(parse_head_comment(pkt.get_cdata(), pkt.get_clen()))) {
               LOG_WARN("failed to parse head comment", K(ObString(pkt.get_clen(), pkt.get_cdata())), K(ret));
             } else {
               // to resolve dead lock triggled by nested sql between ob cluster

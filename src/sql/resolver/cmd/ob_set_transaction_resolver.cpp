@@ -14,8 +14,7 @@
 
 #include "sql/resolver/cmd/ob_set_transaction_resolver.h"
 #include "sql/resolver/cmd/ob_variable_set_stmt.h"
-#include "sql/resolver/expr/ob_raw_expr_util.h"
-#include "sql/session/ob_sql_session_info.h"
+#include "src/sql/resolver/ob_resolver_utils.h"
 #include "sql/ob_trans_character.h"
 using namespace oceanbase::common;
 using namespace oceanbase::transaction;
@@ -137,8 +136,8 @@ int ObSetTransactionResolver::build_isolation_expr(ObRawExpr *&expr, int32_t lev
   } else if (level_name.empty()) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("isolation level is not invalid", K(ret), K(level));
-  } else if (params_.expr_factory_->create_raw_expr(T_VARCHAR, c_expr)) {
-    LOG_WARN("fail to create raw expr");
+  } else if (OB_FAIL(params_.expr_factory_->create_raw_expr(T_VARCHAR, c_expr))) {
+    LOG_WARN("fail to create raw expr", K(ret));
   } else {
     // we use int type to represent isolation level, except for system variable tx_isolation,
     // which use varchar type, so we need cast int to varchar here.

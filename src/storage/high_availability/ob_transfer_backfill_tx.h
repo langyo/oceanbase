@@ -16,6 +16,7 @@
 #include "ob_storage_ha_struct.h"
 #include "ob_storage_ha_dag.h"
 #include "share/scn.h"
+#include "share/ob_storage_ha_diagnose_struct.h"
 
 namespace oceanbase
 {
@@ -86,6 +87,7 @@ public:
   virtual int fill_comment(char *buf, const int64_t buf_len) const override;
   virtual bool is_valid() const;
   virtual DagNetCtxType get_dag_net_ctx_type() { return ObIHADagNetCtx::TRANSFER_BACKFILL_TX; }
+  const share::ObLSID &get_ls_id() const { return dest_ls_id_; }
 public:
   uint64_t tenant_id_;
 #ifdef ERRSIM
@@ -96,6 +98,7 @@ public:
   share::ObLSID dest_ls_id_;
   share::SCN backfill_scn_;
   common::ObArray<ObTabletBackfillInfo> tablet_infos_;
+  ObBackfillTabletsTableMgr tablets_table_mgr_;
   INHERIT_TO_STRING_KV(
       "ObIHADagNetCtx", ObIHADagNetCtx,
       K_(tenant_id),
@@ -187,28 +190,12 @@ private:
   DISALLOW_COPY_AND_ASSIGN(ObStartTransferBackfillTXTask);
 };
 
-class ObTransferReplaceTableDag : public ObBaseTransferBackfillTXDag
-{
-public:
-  ObTransferReplaceTableDag();
-  virtual ~ObTransferReplaceTableDag();
-  virtual int fill_dag_key(char *buf, const int64_t buf_len) const override;
-  virtual int create_first_task() override;
-  virtual bool check_can_retry();
-  virtual int fill_info_param(compaction::ObIBasicInfoParam *&out_param, ObIAllocator &allocator) const override;
-  int init(share::ObIDagNet *dag_net);
-  INHERIT_TO_STRING_KV("ObStorageHADag", ObStorageHADag, KP(this));
-protected:
-  bool is_inited_;
-  DISALLOW_COPY_AND_ASSIGN(ObTransferReplaceTableDag);
-};
-
 class ObTransferReplaceTableTask : public share::ObITask
 {
 public:
   ObTransferReplaceTableTask();
   virtual ~ObTransferReplaceTableTask();
-  int init();
+  int init(const ObTabletBackfillInfo &tablet_info);
   virtual int process() override;
   VIRTUAL_TO_STRING_KV(K("ObTransferReplaceTableTask"), KP(this), KPC(ctx_));
 private:
@@ -227,34 +214,63 @@ private:
       ObTablesHandleArray &tables_handle);
   int get_all_sstable_handles_(
       const ObTablet *tablet,
-      const ObTabletMemberWrapper<ObTabletTableStore> &wrapper,
-      ObTableStoreIterator &sstable_iter,
+      const ObTablesHandleArray &table_handle_array,
       ObTablesHandleArray &sstable_handles);
-  int check_src_tablet_sstables_(const ObTablet *tablet, ObTablesHandleArray &tables_handle);
+  int check_src_tablet_sstables_(
+      const ObTabletBackfillInfo &tablet_info,
+      const ObTablet *tablet,
+      ObTablesHandleArray &tables_handle);
   int check_source_minor_end_scn_(
-      const ObTabletMemberWrapper<ObTabletTableStore> &wrapper,
+      const ObTabletBackfillInfo &tablet_info,
+      const ObTablesHandleArray &tables_handle,
       const ObTablet *dest_tablet,
       bool &need_fill_minor);
   int fill_empty_minor_sstable(
       ObTablet *tablet,
       bool need_fill_minor,
       const share::SCN &end_scn,
-      const ObTabletMemberWrapper<ObTabletTableStore> &wrapper,
+      const ObTablesHandleArray &table_handle_array,
       common::ObArenaAllocator &allocator,
       ObTablesHandleArray &tables_handle);
-  int check_src_memtable_is_empty_(ObTablet *tablet, const share::SCN &transfer_scn);
-  int build_migration_param_(
+  int check_src_memtable_is_valid_(
+      ObTablet *tablet,
+      const ObTabletBackfillInfo &tablet_info,
+      const share::SCN &transfer_scn,
+      const ObTabletMemberWrapper<ObTabletTableStore> &wrapper,
+      const ObTablesHandleArray &filled_table_handle_array);
+  int build_transfer_backfill_tablet_param_(
       const ObTablet *tablet,
       ObTabletHandle &src_tablet_handle,
       ObMigrationTabletParam &param);
   int check_major_sstable_(
       const ObTablet *tablet,
       const ObTabletMemberWrapper<ObTabletTableStore> &table_store_wrapper);
+  int get_transfer_sstables_info_(
+      const ObTablesHandleArray &table_handle_array,
+      share::SCN &max_minor_end_scn);
+  int check_memtable_max_end_scn_(
+      ObTablet &tablet);
+  int add_src_major_sstable_(
+      const common::ObTabletID &tablet_id,
+      const ObTabletMemberWrapper<ObTabletTableStore> &src_wrapper,
+      ObTablesHandleArray &filled_table_handle_array);
+
+  void process_transfer_perf_diagnose_(
+      const int64_t timestamp,
+      const int64_t start_ts,
+      const bool is_report,
+      const share::ObLSID &dest_ls_id,
+      const share::SCN &log_sync_scn,
+      const common::ObTabletID &tablet_id,
+      const share::ObStorageHACostItemName name) const;
+  void transfer_tablet_restore_stat_() const;
 private:
   bool is_inited_;
+  ObTabletBackfillInfo tablet_info_;
   ObTransferBackfillTXCtx *ctx_;
   DISALLOW_COPY_AND_ASSIGN(ObTransferReplaceTableTask);
 };
+
 
 }
 }

@@ -11,25 +11,13 @@
  */
 
 #define USING_LOG_PREFIX SQL_OPT
-#include "sql/resolver/dml/ob_insert_stmt.h"
-#include "sql/optimizer/ob_log_insert.h"
+#include "sql/optimizer/ob_log_select_into.h"
 #include "sql/optimizer/ob_insert_log_plan.h"
-#include "sql/optimizer/ob_log_operator_factory.h"
-#include "sql/optimizer/ob_log_plan_factory.h"
-#include "sql/optimizer/ob_select_log_plan.h"
 #include "sql/optimizer/ob_log_expr_values.h"
-#include "sql/optimizer/ob_log_group_by.h"
-#include "sql/optimizer/ob_log_table_scan.h"
-#include "sql/engine/expr/ob_expr_column_conv.h"
-#include "sql/optimizer/ob_log_subplan_filter.h"
 #include "sql/optimizer/ob_log_insert_all.h"
-#include "sql/optimizer/ob_log_link_dml.h"
-#include "sql/ob_optimizer_trace_impl.h"
-#include "common/ob_smart_call.h"
 #include "sql/resolver/dml/ob_del_upd_resolver.h"
-#include "share/system_variable/ob_sys_var_class_type.h"
-#include "share/stat/ob_stat_define.h"
 #include "sql/rewrite/ob_transform_utils.h"
+#include "share/stat/ob_dbms_stats_utils.h"
 using namespace oceanbase;
 using namespace sql;
 using namespace oceanbase::common;
@@ -82,43 +70,74 @@ int ObInsertLogPlan::generate_normal_raw_plan()
         ret = OB_NOT_SUPPORTED;
         LOG_USER_ERROR(OB_NOT_SUPPORTED, "update values contain non onetime subquery");
         LOG_WARN("update values contain non onetime subquery", K(ret));
-      } else if (!subquery.empty() && OB_FAIL(candi_allocate_subplan_filter(subquery))) {
-        LOG_WARN("failed to allocate subplan", K(ret));
+      } else if (OB_FAIL(candi_allocate_subplan_filter_for_assignments(assign_exprs))) {
+        LOG_WARN("failed to allocate subplan filter for assignments", K(ret));
       } else { /*do nothing*/ }
     }
 
     bool need_osg = false;
     OSGShareInfo *osg_info = NULL;
+    double online_sample_percent = 100.;
     if (OB_SUCC(ret)) {
       // compute parallel before check allocate stats gather
       if (OB_FAIL(compute_dml_parallel())) {
         LOG_WARN("failed to compute dml parallel", K(ret));
-      } else if (use_pdml() && OB_FAIL(set_is_direct_insert())) {
-        LOG_WARN("failed to set is direct insert", K(ret));
-      } else if (OB_FAIL(check_need_online_stats_gather(need_osg))) {
-        LOG_WARN("fail to check wether we need optimizer stats gathering operator", K(ret));
+      }
+      if (OB_SUCC(ret)) {
+        bool tmp_need_osg = false;
+        if (OB_FAIL(check_need_online_stats_gather(tmp_need_osg))) {
+          LOG_WARN("fail to check wether we need optimizer stats gathering operator", K(ret));
+        } else if (tmp_need_osg &&
+                   OB_FAIL(get_online_estimate_percent(online_sample_percent))) {
+          LOG_WARN("failed to get sys online sample percent", K(ret));
+        } else {
+          if (get_optimizer_context().get_direct_load_optimizer_ctx().use_direct_load()) {
+            get_optimizer_context().get_exec_ctx()->get_table_direct_insert_ctx()
+              .set_is_online_gather_statistics(tmp_need_osg);
+            get_optimizer_context().get_exec_ctx()->get_table_direct_insert_ctx()
+              .set_online_sample_percent(online_sample_percent);
+          } else {
+            need_osg = tmp_need_osg;
+          }
+        }
+      }
+      if (OB_FAIL(ret)) {
+        //pass
       } else if (need_osg && OB_FAIL(generate_osg_share_info(osg_info))) {
         LOG_WARN("failed to generate osg share info");
       } else if (need_osg && OB_ISNULL(osg_info)) {
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("get unexpected null");
+      } else if (need_osg) {
+        osg_info->online_sample_rate_ = online_sample_percent;
       }
     }
-
     if (OB_SUCC(ret)) {
-      if (OB_FAIL(prepare_dml_infos())) {
-        LOG_WARN("failed to prepare dml infos", K(ret));
-      } else if (use_pdml()) {
-        if (OB_FAIL(candi_allocate_pdml_insert(osg_info))) {
-          LOG_WARN("failed to allocate pdml insert", K(ret));
+      TableItem *insert_table = NULL;
+      if (OB_ISNULL(insert_table = insert_stmt->get_table_item_by_id(insert_stmt->get_insert_table_info().table_id_))) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("insert target table is unexpected null", K(ret));
+      } else if (schema::EXTERNAL_TABLE == insert_table->table_type_) {
+        if (OB_FAIL(candi_allocate_select_into_for_insert())) {
+          LOG_WARN("failed to allocate select into op", K(ret));
         } else {
-          LOG_TRACE("succeed to allocate pdml insert operator",
-              K(candidates_.candidate_plans_.count()));
+          LOG_TRACE("succeed to allocate select into clause", K(candidates_.candidate_plans_.count()));
         }
-      } else if (OB_FAIL(candi_allocate_insert(osg_info))) {
-        LOG_WARN("failed to allocate insert operator", K(ret));
       } else {
-        LOG_TRACE("succeed to allocate insert operator", K(candidates_.candidate_plans_.count()));
+        if (OB_FAIL(prepare_dml_infos())) {
+          LOG_WARN("failed to prepare dml infos", K(ret));
+        } else if (use_pdml()) {
+          if (OB_FAIL(candi_allocate_pdml_insert(osg_info))) {
+            LOG_WARN("failed to allocate pdml insert", K(ret));
+          } else {
+            LOG_TRACE("succeed to allocate pdml insert operator",
+                K(candidates_.candidate_plans_.count()));
+          }
+        } else if (OB_FAIL(candi_allocate_insert(osg_info))) {
+          LOG_WARN("failed to allocate insert operator", K(ret));
+        } else {
+          LOG_TRACE("succeed to allocate insert operator", K(candidates_.candidate_plans_.count()));
+        }
       }
     }
     if (OB_SUCC(ret) && insert_stmt->get_returning_aggr_item_size() > 0) {
@@ -156,6 +175,73 @@ int ObInsertLogPlan::generate_normal_raw_plan()
       } else {
         LOG_TRACE("succeed to allocate root operator",
                 K(candidates_.candidate_plans_.count()));
+      }
+    }
+  }
+  return ret;
+}
+
+int ObInsertLogPlan::get_index_part_ids(const ObInsertTableInfo& table_info, const ObTableSchema *&data_table_schema, const ObTableSchema *&index_schema, ObIArray<uint64_t> &index_part_ids)
+{
+  int ret = OB_SUCCESS;
+  common::hash::ObHashSet<int64_t> data_part_id_set;
+  index_part_ids.reset();
+  if (OB_UNLIKELY(OB_ISNULL(data_table_schema) || OB_ISNULL(index_schema))) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("the parameters is invalid", K(ret), K(table_info));
+  } else if (table_info.part_ids_.count() > 0) {
+    const ObPartitionOption &data_part_option = data_table_schema->get_part_option();
+    ObPartition **data_partitions  = data_table_schema->get_part_array();
+    ObPartition **index_partitions = index_schema->get_part_array();
+    const ObPartitionLevel part_level = data_table_schema->get_part_level();
+    if (OB_ISNULL(data_partitions)) {
+      ret = OB_PARTITION_NOT_EXIST;
+      LOG_WARN("data table part array is null", K(ret));
+    } else if (OB_ISNULL(index_partitions)) {
+      ret = OB_PARTITION_NOT_EXIST;
+      LOG_WARN("index table part array is null", K(ret));
+    } else {
+      uint64_t part_ids_count = table_info.part_ids_.count();
+      if (OB_FAIL(data_part_id_set.create(part_ids_count))) {
+        LOG_WARN("fail to create data part id set", K(ret), K(part_ids_count));
+      }
+      for (int64_t i = 0; i < part_ids_count && OB_SUCC(ret); i++) {
+        if (OB_FAIL(data_part_id_set.set_refactored(table_info.part_ids_.at(i), true/*overwrite*/))) {
+          LOG_WARN("fail to set refactored", K(ret), K(table_info.part_ids_.at(i)), K(table_info.part_ids_));
+        }
+      }
+      for (int64_t i = 0; i < data_part_option.get_part_num() && OB_SUCC(ret); ++i) {
+        if (OB_ISNULL(data_partitions[i]) || OB_ISNULL(index_partitions[i])) {
+          ret = OB_PARTITION_NOT_EXIST;
+          LOG_WARN("NULL ptr", K(ret), K(i));
+        } else if (PARTITION_LEVEL_ONE == part_level) {
+          int64_t data_part_id = data_partitions[i]->get_part_id();
+          if (OB_UNLIKELY(OB_HASH_EXIST == data_part_id_set.exist_refactored(data_part_id))) {
+            if (OB_FAIL(index_part_ids.push_back(index_partitions[i]->get_part_id()))) {
+              LOG_WARN("push back error", K(ret), K(index_partitions[i]->get_part_id()));
+            }
+          }
+        } else if (PARTITION_LEVEL_TWO == part_level) {
+          ObSubPartition **data_subpart_array = data_partitions[i]->get_subpart_array();
+          ObSubPartition **index_subpart_array = index_partitions[i]->get_subpart_array();
+          int64_t subpart_num = index_partitions[i]->get_subpartition_num();
+          if (OB_ISNULL(data_subpart_array) || OB_ISNULL(index_subpart_array)) {
+            ret = OB_PARTITION_NOT_EXIST;
+            LOG_WARN("part array is null", K(ret), K(i));
+          } else if (OB_UNLIKELY(subpart_num < 1)) {
+            ret = OB_ERR_UNEXPECTED;
+            LOG_WARN("sub part num less than 1", K(ret), K(subpart_num));
+          } else {
+            for (int64_t j = 0; j < subpart_num && OB_SUCC(ret); j++) {
+              int64_t data_part_id = data_subpart_array[j]->get_sub_part_id();
+              if (OB_UNLIKELY(OB_HASH_EXIST == data_part_id_set.exist_refactored(data_part_id))) {
+                if (OB_FAIL(index_part_ids.push_back(index_subpart_array[j]->get_sub_part_id()))) {
+                  LOG_WARN("push back error", K(ret), K(index_subpart_array[j]->get_sub_part_id()));
+                }
+              }
+            }
+          }
+        }
       }
     }
   }
@@ -252,33 +338,6 @@ int ObInsertLogPlan::generate_osg_share_info(OSGShareInfo *&info)
   return ret;
 }
 
-// Direct-insert is enabled only:
-// 1. pdml insert
-// 2. _ob_enable_direct_load
-// 3. insert into select clause
-// 4. append hint
-// 5. auto_commit, not in a transaction
-int ObInsertLogPlan::set_is_direct_insert() {
-  int ret = OB_SUCCESS;
-  is_direct_insert_ = false;
-  bool auto_commit = false;
-  const ObSQLSessionInfo* session_info = get_optimizer_context().get_session_info();
-  if (OB_ISNULL(get_stmt()) || OB_ISNULL(session_info)) {
-    ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("get unexpected null", K(ret), K(get_stmt()), K(session_info));
-  } else if (!get_stmt()->value_from_select()
-             || !get_optimizer_context().get_global_hint().has_append()
-             || !GCONF._ob_enable_direct_load
-             || session_info->is_in_transaction()) {
-    /* is not direct insert */
-  } else if (OB_FAIL(session_info->get_autocommit(auto_commit))) {
-    LOG_WARN("failed to get auto commit", KR(ret));
-  } else {
-    is_direct_insert_ = auto_commit;
-  }
-  return ret;
-}
-
 int ObInsertLogPlan::check_contain_non_onetime_expr(const ObRawExpr *expr, bool &contain)
 {
   int ret = OB_SUCCESS;
@@ -325,6 +384,8 @@ int ObInsertLogPlan::check_need_online_stats_gather(bool &need_osg)
   ObObj online_sys_var_obj;
   const ObInsertStmt *insert_stmt = NULL;
   TableItem *ins_table = NULL;
+  bool disable_pdml = false;
+  bool is_pk_auto_inc = false;
   if (OB_ISNULL(insert_stmt = get_stmt()) ||
       OB_ISNULL(ins_table = insert_stmt->get_table_item_by_id(insert_stmt->get_insert_table_info().table_id_))) {
     ret = OB_ERR_UNEXPECTED;
@@ -333,6 +394,11 @@ int ObInsertLogPlan::check_need_online_stats_gather(bool &need_osg)
              || insert_stmt->is_insert_up()
              || !insert_stmt->value_from_select()
              || (!get_optimizer_context().get_session_info()->is_user_session())) {
+    need_gathering = false;
+  } else if (OB_FAIL(insert_stmt->check_pdml_disabled(get_optimizer_context().is_online_ddl(),
+                                                      disable_pdml, is_pk_auto_inc))) {
+    LOG_WARN("fail to check pdml disable for insert stmt", K(ret));
+  } else if (disable_pdml) {
     need_gathering = false;
   }
 
@@ -362,6 +428,7 @@ int ObInsertLogPlan::allocate_insert_values_as_top(ObLogicalOperator *&top)
   const ObInsertStmt *insert_stmt = get_stmt();
   ObSQLSessionInfo *session_info = get_optimizer_context().get_session_info();
   if (OB_ISNULL(insert_stmt) || OB_ISNULL(session_info)) {
+    ret = OB_ERR_UNEXPECTED;
     LOG_WARN("get unexpected null", K(insert_stmt), K(session_info), K(ret));
   } else if (OB_ISNULL(values_op = static_cast<ObLogExprValues*>(get_log_op_factory().
                                    allocate(*this, LOG_EXPR_VALUES)))) {
@@ -402,7 +469,7 @@ int ObInsertLogPlan::candi_allocate_insert(OSGShareInfo *osg_info)
   int ret = OB_SUCCESS;
   ObConstRawExpr *lock_row_flag_expr = NULL;
   ObTablePartitionInfo *insert_table_part = NULL;
-  ObShardingInfo *insert_sharding = NULL;
+  ObShardingInfo *insert_table_sharding = NULL;
   ObSEArray<CandidatePlan, 8> candi_plans;
   ObSEArray<CandidatePlan, 8> insert_plans;
   const bool force_no_multi_part = get_log_plan_hint().no_use_distributed_dml();
@@ -413,14 +480,14 @@ int ObInsertLogPlan::candi_allocate_insert(OSGShareInfo *osg_info)
   if (OB_FAIL(build_lock_row_flag_expr(lock_row_flag_expr))) {
     LOG_WARN("failed to build lock row flag expr", K(ret));
   } else if (OB_FAIL(calculate_insert_table_location_and_sharding(insert_table_part,
-                                                                  insert_sharding))) {
+                                                                  insert_table_sharding))) {
     LOG_WARN("failed to calculate insert table location and sharding", K(ret));
   } else if (OB_FAIL(get_minimal_cost_candidates(candidates_.candidate_plans_,
                                                  candi_plans))) {
     LOG_WARN("failed to get minimal cost candidates", K(ret));
   } else if (OB_FAIL(create_insert_plans(candi_plans,
                                          insert_table_part,
-                                         insert_sharding,
+                                         insert_table_sharding,
                                          lock_row_flag_expr,
                                          force_no_multi_part,
                                          force_multi_part,
@@ -432,7 +499,7 @@ int ObInsertLogPlan::candi_allocate_insert(OSGShareInfo *osg_info)
   } else if (OB_FAIL(get_log_plan_hint().check_status())) {
     LOG_WARN("failed to generate plans with hint", K(ret));
   } else if (OB_FAIL(create_insert_plans(candi_plans, insert_table_part,
-                                         insert_sharding,
+                                         insert_table_sharding,
                                          lock_row_flag_expr,
                                          false, false,
                                          insert_plans,
@@ -473,9 +540,34 @@ int ObInsertLogPlan::build_lock_row_flag_expr(ObConstRawExpr *&lock_row_flag_exp
   return ret;
 }
 
+int ObInsertLogPlan::get_osg_type(bool is_multi_part_dml,
+                                  ObShardingInfo *insert_table_sharding,
+                                  int64_t distributed_method,
+                                  OSG_TYPE &type)
+{
+  int ret = OB_SUCCESS;
+  type = OSG_TYPE::NORMAL_OSG;
+  if (DIST_PARTITION_WISE == distributed_method ||
+      DIST_PULL_TO_LOCAL == distributed_method) {
+    //need merge stats
+    type = OSG_TYPE::GATHER_OSG;
+  } else if (DIST_BASIC_METHOD == distributed_method) {
+    if (is_multi_part_dml) {
+      type = OSG_TYPE::NORMAL_OSG;
+    } else if (OB_ISNULL(insert_table_sharding)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("unexpect null sharding", K(ret));
+    } else if (insert_table_sharding->is_remote()) {
+      //need merge stats
+      type = OSG_TYPE::GATHER_OSG;
+    }
+  }
+  return ret;
+}
+
 int ObInsertLogPlan::create_insert_plans(ObIArray<CandidatePlan> &candi_plans,
                                          ObTablePartitionInfo *insert_table_part,
-                                         ObShardingInfo *insert_sharding,
+                                         ObShardingInfo *insert_table_sharding,
                                          ObConstRawExpr *lock_row_flag_expr,
                                          const bool force_no_multi_part,
                                          const bool force_multi_part,
@@ -486,33 +578,74 @@ int ObInsertLogPlan::create_insert_plans(ObIArray<CandidatePlan> &candi_plans,
   ObExchangeInfo exch_info;
   bool is_multi_part_dml = false;
   CandidatePlan candi_plan;
+  OSG_TYPE osg_type = OSG_TYPE::NORMAL_OSG;
+  int64_t inherit_sharding_index = OB_INVALID_INDEX;
+  ObShardingInfo *insert_op_sharding = NULL;
+  ObSEArray<ObShardingInfo*, 2> input_shardings;
+  int64_t distributed_methods = DIST_BASIC_METHOD | DIST_PARTITION_WISE | DIST_PULL_TO_LOCAL;
   for (int64_t i = 0; OB_SUCC(ret) && i < candi_plans.count(); i++) {
     candi_plan = candi_plans.at(i);
     is_multi_part_dml = force_multi_part;
+    input_shardings.reuse();
+    insert_op_sharding = NULL;
     if (OB_ISNULL(candi_plan.plan_tree_)) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("get unexpected null", K(ret));
-    } else if (!force_multi_part &&
-               OB_FAIL(check_insert_need_multi_partition_dml(*candi_plan.plan_tree_,
-                                                             insert_table_part,
-                                                             insert_sharding,
-                                                             is_multi_part_dml))) {
-      LOG_WARN("failed to check need multi-partition dml", K(ret));
-    } else if (is_multi_part_dml && force_no_multi_part) {
+    } else if (OB_FAIL(get_best_insert_dist_method(*candi_plan.plan_tree_,
+                                                  insert_table_part,
+                                                  insert_table_sharding,
+                                                  force_no_multi_part,
+                                                  force_multi_part,
+                                                  distributed_methods,
+                                                  is_multi_part_dml))) {
+      LOG_WARN("failed to get best insert plan method", K(ret));
+    } else if (0 == distributed_methods) {
       /*do nothing*/
     } else if (osg_info != NULL &&
+               OB_FAIL(get_osg_type(is_multi_part_dml,
+                                    insert_table_sharding,
+                                    distributed_methods,
+                                    osg_type))) {
+      LOG_WARN("failed to get osg type", K(ret));
+    } else if (osg_info != NULL &&
                OB_FAIL(allocate_optimizer_stats_gathering_as_top(candi_plan.plan_tree_,
-                                                                 *osg_info))) {
+                                                                 *osg_info,
+                                                                 osg_type))) {
       LOG_WARN("failed to allocate sequence as top", K(ret));
-    } else if (candi_plan.plan_tree_->is_sharding() &&
-               (is_multi_part_dml || insert_sharding->is_local()) &&
-               OB_FAIL(allocate_exchange_as_top(candi_plan.plan_tree_, exch_info))) {
-      LOG_WARN("failed to allocate exchange as top", K(ret));
+    } else if (DIST_PULL_TO_LOCAL == distributed_methods) {
+      if (OB_FAIL(allocate_exchange_as_top(candi_plan.plan_tree_, exch_info))) {
+        LOG_WARN("failed to allocate exchange as top", K(ret));
+      } else {
+        insert_op_sharding = get_optimizer_context().get_local_sharding();
+      }
+    } else if (DIST_BASIC_METHOD == distributed_methods) {
+      if (OB_FAIL(input_shardings.push_back(candi_plan.plan_tree_->get_strong_sharding()))) {
+        LOG_WARN("failed to push back sharding", K(ret));
+      } else if (OB_FAIL(input_shardings.push_back(is_multi_part_dml ?
+                                                    get_optimizer_context().get_local_sharding() :
+                                                    insert_table_sharding))) {
+        LOG_WARN("failed to push back sharding", K(ret));
+      } else if (OB_FAIL(ObOptimizerUtil::compute_basic_sharding_info(
+                                                get_optimizer_context().get_local_server_addr(),
+                                                input_shardings,
+                                                get_optimizer_context().get_allocator(),
+                                                insert_op_sharding,
+                                                inherit_sharding_index))) {
+        LOG_WARN("failed to compute basic sharding info", K(ret));
+      }
+    } else if (DIST_PARTITION_WISE == distributed_methods) {
+      insert_op_sharding = candi_plan.plan_tree_->get_strong_sharding();
+    } else {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("invalid method", K(distributed_methods), K(ret));
+    }
+    if (OB_FAIL(ret) || OB_ISNULL(insert_op_sharding)) {
     } else if (OB_FAIL(allocate_insert_as_top(candi_plan.plan_tree_,
                                               lock_row_flag_expr,
                                               insert_table_part,
-                                              insert_sharding,
-                                              is_multi_part_dml))) {
+                                              insert_op_sharding,
+                                              is_multi_part_dml,
+                                              DIST_PARTITION_WISE == distributed_methods))) {
       LOG_WARN("failed to allocate insert as top", K(ret));
     } else if (OB_FAIL(insert_plans.push_back(candi_plan))) {
       LOG_WARN("failed to push back", K(ret));
@@ -524,8 +657,9 @@ int ObInsertLogPlan::create_insert_plans(ObIArray<CandidatePlan> &candi_plans,
 int ObInsertLogPlan::allocate_insert_as_top(ObLogicalOperator *&top,
                                             ObRawExpr *lock_row_flag_expr,
                                             ObTablePartitionInfo *table_partition_info,
-                                            ObShardingInfo *insert_sharding,
-                                            bool is_multi_part_dml)
+                                            ObShardingInfo *insert_op_sharding,
+                                            bool is_multi_part_dml,
+                                            bool is_partition_wise)
 {
   int ret = OB_SUCCESS;
   ObLogInsert *insert_op = NULL;
@@ -550,16 +684,20 @@ int ObInsertLogPlan::allocate_insert_as_top(ObLogicalOperator *&top,
     insert_op->set_is_returning(insert_stmt->is_returning());
     insert_op->set_replace(insert_stmt->is_replace());
     insert_op->set_ignore(insert_stmt->is_ignore());
+    insert_op->set_overwrite(insert_stmt->is_overwrite());
     insert_op->set_is_multi_part_dml(is_multi_part_dml);
     insert_op->set_table_partition_info(table_partition_info);
     insert_op->set_lock_row_flag_expr(lock_row_flag_expr);
     insert_op->set_has_instead_of_trigger(insert_stmt->has_instead_of_trigger());
+    if (get_can_use_parallel_das_dml()) {
+      insert_op->set_das_dop(max_dml_parallel_);
+      LOG_TRACE("insert das dop", K(max_dml_parallel_));
+    }
+    insert_op->set_is_partition_wise(is_partition_wise);
     if (OB_NOT_NULL(insert_stmt->get_table_item(0))) {
       insert_op->set_append_table_id(insert_stmt->get_table_item(0)->ref_id_);
     }
-    if (top->is_match_all() && !is_multi_part_dml && !insert_stmt->has_instead_of_trigger()) {
-      insert_op->set_strong_sharding(insert_sharding);
-    }
+    insert_op->set_strong_sharding(insert_op_sharding);
     if (insert_stmt->is_insert_up()) {
       insert_op->set_insert_up(true);
     }
@@ -602,35 +740,85 @@ int ObInsertLogPlan::candi_allocate_pdml_insert(OSGShareInfo *osg_info)
 /*
  * for insert stmt to check whether need multi-partition dml
  */
-int ObInsertLogPlan::check_insert_need_multi_partition_dml(ObLogicalOperator &top,
-                                                           ObTablePartitionInfo *insert_table_partition,
-                                                           ObShardingInfo *insert_sharding,
-                                                           bool &is_multi_part_dml)
+int ObInsertLogPlan::get_best_insert_dist_method(ObLogicalOperator &top,
+                                                ObTablePartitionInfo *insert_table_partition,
+                                                ObShardingInfo *insert_table_sharding,
+                                                const bool force_no_multi_part,
+                                                const bool force_multi_part,
+                                                int64_t &distributed_methods,
+                                                bool &is_multi_part_dml)
 {
   int ret = OB_SUCCESS;
   is_multi_part_dml = false;
-  bool is_one_part_table = false;
-  if (OB_ISNULL(get_stmt())) {
+  bool is_basic = false;
+  bool is_partition_wise = false;
+  ObShardingInfo *local_sharding = get_optimizer_context().get_local_sharding();
+  if (OB_ISNULL(local_sharding)) {
     ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("get unexpected null", K(get_stmt()), K(ret));
-  } else if (OB_FAIL(check_insert_stmt_need_multi_partition_dml(is_multi_part_dml,
-                                                                is_one_part_table))) {
+    LOG_WARN("get unexpected null", K(local_sharding), K(ret));
+  } else if (OB_FAIL(check_insert_plan_need_multi_partition_dml(insert_table_partition,
+                                                        insert_table_sharding,
+                                                        is_multi_part_dml))) {
     LOG_WARN("failed to check if insert stmt need multi-partition dml", K(ret));
+  } else if (is_multi_part_dml && force_no_multi_part) {
+    distributed_methods = 0;
+  } else if (OB_FALSE_IT(is_multi_part_dml |= force_multi_part)) {
+    //hint force use multi part dml
   } else if (is_multi_part_dml) {
-    /*do nothing*/
-  } else if (OB_FAIL(check_insert_location_need_multi_partition_dml(top,
-                                                                    insert_table_partition,
-                                                                    insert_sharding,
-                                                                    is_one_part_table,
-                                                                    is_multi_part_dml))) {
-    LOG_WARN("failed to check if insert stmt need multi-partition dml", K(ret));
-  } else { /*do nothing*/ }
-
+    if (OB_FAIL(check_basic_sharding_for_insert_stmt(*local_sharding,
+                                                    top,
+                                                    is_basic))) {
+      LOG_WARN("failed to check basic sharding for insert stmt", K(ret));
+    } else if (is_basic) {
+      distributed_methods = DIST_BASIC_METHOD;
+      OPT_TRACE("insert plan will use basic method");
+    } else {
+      distributed_methods = DIST_PULL_TO_LOCAL;
+      OPT_TRACE("insert plan will use pull to local method");
+    }
+  } else if (OB_ISNULL(insert_table_sharding)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("get unexpected null", K(insert_table_sharding), K(ret));
+  } else if ((distributed_methods & DIST_PARTITION_WISE) &&
+              OB_FAIL(check_if_match_partition_wise_insert(*insert_table_sharding,
+                                                          top,
+                                                          is_partition_wise))) {
+    LOG_WARN("failed to check if match partition wise insert", K(ret));
+  } else if (is_partition_wise) {
+    distributed_methods = DIST_PARTITION_WISE;
+    OPT_TRACE("insert plan will use partition wise method");
+  } else if (OB_FAIL(check_basic_sharding_for_insert_stmt(*insert_table_sharding,
+                                                          top,
+                                                          is_basic))) {
+    LOG_WARN("failed to check basic sharding for insert stmt", K(ret));
+  } else if (is_basic) {
+    distributed_methods = DIST_BASIC_METHOD;
+    OPT_TRACE("insert plan will use basic method");
+  } else if (!insert_table_sharding->is_local() &&
+             OB_FALSE_IT(is_multi_part_dml=true)) {
+    //insert into remote table, force use multi part dml
+  } else if (OB_FAIL(check_basic_sharding_for_insert_stmt(*local_sharding,
+                                                          top,
+                                                          is_basic))) {
+    LOG_WARN("failed to check basic sharding for insert stmt", K(ret));
+  } else if (is_basic) {
+    distributed_methods = DIST_BASIC_METHOD;
+    OPT_TRACE("insert partition table force use multi part dml");
+    OPT_TRACE("insert plan will use basic method");
+  } else {
+    distributed_methods = DIST_PULL_TO_LOCAL;
+    OPT_TRACE("insert partition table force use multi part dml");
+    OPT_TRACE("insert plan will use pull to local method");
+  }
+  if (OB_SUCC(ret)) {
+    LOG_TRACE("succeed to get best insert plan", K(is_multi_part_dml), K(distributed_methods));
+  }
   return ret;
 }
 
-int ObInsertLogPlan::check_insert_stmt_need_multi_partition_dml(bool &is_multi_part_dml,
-                                                                bool &is_one_part_table)
+int ObInsertLogPlan::check_insert_plan_need_multi_partition_dml(ObTablePartitionInfo *insert_table_part,
+                                                                ObShardingInfo *insert_table_sharding,
+                                                                bool &is_multi_part_dml)
 {
   int ret = OB_SUCCESS;
   bool has_rand_part_key = false;
@@ -643,21 +831,33 @@ int ObInsertLogPlan::check_insert_stmt_need_multi_partition_dml(bool &is_multi_p
   ObSQLSessionInfo *session_info = NULL;
   ObSEArray<ObObjectID, 4> part_ids;
   is_multi_part_dml = false;
-  is_one_part_table = false;
-  if (OB_ISNULL(insert_stmt = get_stmt()) ||
+  bool is_one_part_table = false;
+  if (OB_ISNULL(insert_table_part) || OB_ISNULL(insert_table_sharding)) {
+    //insert into values
+    is_multi_part_dml = true;
+  } else if (OB_ISNULL(insert_stmt = get_stmt()) ||
       OB_ISNULL(schema_guard = get_optimizer_context().get_schema_guard()) ||
       OB_ISNULL(session_info = get_optimizer_context().get_session_info())) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("get unexpected error", K(insert_stmt), K(schema_guard), K(session_info), K(ret));
-  } else if (insert_stmt->has_instead_of_trigger() || index_dml_infos_.count() > 1 ||
+  } else if (0 == insert_table_part->get_phy_tbl_location_info().get_partition_cnt()) {
+    is_multi_part_dml = true;
+    OPT_TRACE("insert table has no partition, force use multi part dml");
+  } else if (use_parallel_das_dml_) {
+    is_multi_part_dml = true;
+    OPT_TRACE("insert table use parallel das dml, force use multi part dml");
+  } else if (insert_stmt->has_instead_of_trigger() ||
+             index_dml_infos_.count() > 1 ||
              get_optimizer_context().is_batched_multi_stmt() ||
              //ddl sql can produce a PDML plan with PL UDF,
              //some PL UDF that cannot be executed in a PDML plan
              //will be forbidden during the execution phase
              optimizer_context_.contain_user_nested_sql()) {
     is_multi_part_dml = true;
+    OPT_TRACE("trigger/multi insert/batch stmt/nested sql, force use multi part dml");
   } else if (!insert_stmt->value_from_select()) {
     is_multi_part_dml = true;
+    OPT_TRACE("insert into values, force use multi part dml");
   } else if (OB_FAIL(schema_guard->get_table_schema(session_info->get_effective_tenant_id(),
                                                     insert_stmt->get_insert_table_info().ref_table_id_,
                                                     table_schema))) {
@@ -666,22 +866,31 @@ int ObInsertLogPlan::check_insert_stmt_need_multi_partition_dml(bool &is_multi_p
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("get unexpected null", K(ret));
   } else if (OB_FALSE_IT(is_one_part_table = ObSQLUtils::is_one_part_table_can_skip_part_calc(*table_schema))) {
+  } else if (insert_table_sharding->is_single() &&
+             !is_one_part_table &&
+             insert_table_part->get_table_location().is_part_or_subpart_all_partition()) {
+    is_multi_part_dml = true;
+    OPT_TRACE("insert table has only one partition in partition level, force use multi part dml");
   } else if ((insert_stmt->is_ignore() && !is_one_part_table) ||
              (lib::is_mysql_mode() && !is_strict_mode(session_info->get_sql_mode()))) {
     // insert ignore，并且是分区表插入时，不能优化
     // mysql non strict mode can not optimize as multi part dml
     is_multi_part_dml = true;
+    OPT_TRACE("insert partition table with ignore/mysql non strict mode, force use multi part dml");
   } else if (!insert_stmt->get_insert_table_info().part_ids_.empty() &&
              insert_stmt->value_from_select()) {
     is_multi_part_dml = true;
+    OPT_TRACE("insert partition table with ignore/mysql non strict mode, force use multi part dml");
   } else if (OB_FAIL(insert_stmt->part_key_is_updated(part_key_update))) {
     LOG_WARN("failed to check part key is updated", K(ret));
   } else if (part_key_update && !is_one_part_table) {
     is_multi_part_dml = true;
+    OPT_TRACE("insert partition table with update part key, force use multi part dml");
   } else if (insert_stmt->has_part_key_sequence() &&
               share::schema::PARTITION_LEVEL_ZERO != table_schema->get_part_level()) {
     // sequence 作为分区键的值插入分区表或者是insert...update更新了分区键，都需要使用multi table dml
     is_multi_part_dml = true;
+    OPT_TRACE("insert partition table with sequence, force use multi part dml");
   } else if (OB_FAIL(insert_stmt->part_key_has_rand_value(has_rand_part_key))) {
     LOG_WARN("check part key has rand value failed", K(ret));
   } else if (OB_FAIL(insert_stmt->part_key_has_subquery(has_subquery_part_key))) {
@@ -690,58 +899,10 @@ int ObInsertLogPlan::check_insert_stmt_need_multi_partition_dml(bool &is_multi_p
     LOG_WARN("check to check whether part key contains auto inc column", K(ret));
   } else if (has_rand_part_key || has_subquery_part_key || has_auto_inc_part_key) {
     is_multi_part_dml = true;
+    OPT_TRACE("part key with rand/subquery/auto_inc expr, force use multi part dml");
   } else { /*do nothing*/ }
   if (OB_SUCC(ret)) {
     LOG_TRACE("succeed to check insert_stmt need multi-partition-dml", K(is_multi_part_dml));
-  }
-  return ret;
-}
-
-int ObInsertLogPlan::check_insert_location_need_multi_partition_dml(ObLogicalOperator &top,
-                                                                    ObTablePartitionInfo *insert_table_part,
-                                                                    ObShardingInfo *insert_sharding,
-                                                                    bool is_one_part_table,
-                                                                    bool &is_multi_part_dml)
-{
-  int ret = OB_SUCCESS;
-  bool is_basic = false;
-  bool is_partition_wise = false;
-  const ObInsertStmt *insert_stmt = NULL;
-  is_multi_part_dml = false;
-  if (OB_ISNULL(insert_table_part) || OB_ISNULL(insert_sharding) ||
-      OB_ISNULL(insert_stmt = get_stmt())) {
-    ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("get unexpected null", K(insert_table_part), K(insert_sharding),
-                                    K(insert_stmt), K(ret));
-  } else if (0 == insert_table_part->get_phy_tbl_location_info().get_partition_cnt()) {
-    is_multi_part_dml = true;
-  } else if (OB_FAIL(check_basic_sharding_for_insert_stmt(*insert_sharding,
-                                                           top,
-                                                           is_basic))) {
-    LOG_WARN("failed to compute basic sharding info", K(ret));
-  } else if (insert_sharding->is_local() || is_basic) {
-    if (is_one_part_table || !insert_table_part->get_table_location().is_part_or_subpart_all_partition()) {
-      is_multi_part_dml = false;
-    } else {
-      is_multi_part_dml = true;
-    }
-  } else if (insert_stmt->is_insert_up() || insert_stmt->is_replace()) {
-    // #issue/44052024
-    // force insert_up & replace use distribute op to avoid 4.0 branch rollback bug.
-    // should remove this condition in 4.1
-    is_multi_part_dml = true;
-  } else if (OB_FAIL(check_if_match_partition_wise_insert(*insert_sharding,
-                                                          top,
-                                                          is_partition_wise))) {
-    LOG_WARN("failed to check if match partition wise insert", K(ret));
-  } else if (is_partition_wise) {
-    is_multi_part_dml = false;
-  } else {
-    is_multi_part_dml = true;
-  }
-  if (OB_SUCC(ret)) {
-    LOG_TRACE("succeed to check insert location need multi_partition_dml", K(is_multi_part_dml),
-        K(is_partition_wise));
   }
   return ret;
 }
@@ -799,6 +960,7 @@ int ObInsertLogPlan::check_if_match_partition_wise_insert(ObShardingInfo &target
   } else {
     is_partition_wise = is_match && !top.is_exchange_allocated();
   }
+  LOG_TRACE("check partition wise", K(is_match), K(top.is_exchange_allocated()));
   return ret;
 }
 
@@ -1148,17 +1310,36 @@ int ObInsertLogPlan::prepare_unique_constraint_info(const ObTableSchema &index_s
   } else if (!index_schema.is_index_table() && index_schema.is_heap_table()) {
     // 如果是堆表，那么这里还需要在 constraint_info.constraint_columns_中追加分区建
     // 因为4.0版本堆表 分区建 + hidden_pk 才能保证唯一性
-    uint64_t rowkey_column_id = 0;
-    const ObRowkeyInfo &rowkey_info = index_schema.get_partition_key_info();
     const ColumnItem *col_item = NULL;
-    for (int64_t i = 0; OB_SUCC(ret) && i < rowkey_info.get_size(); ++i) {
-      if (OB_FAIL(rowkey_info.get_column_id(i, rowkey_column_id))) {
-        LOG_WARN("get rowkey column id failed", K(ret));
-      } else if (OB_ISNULL(col_item = ObResolverUtils::find_col_by_base_col_id(*insert_stmt,
-                                                                               constraint_info.table_id_,
-                                                                               rowkey_column_id))) {
+    const ObRowkeyColumn *key_column = NULL;
+    ObSEArray<uint64_t, 5> partkey_ids;
+    const ObPartitionKeyInfo &partition_info = index_schema.get_partition_key_info();
+    const ObPartitionKeyInfo &sub_partition_info = index_schema.get_subpartition_key_info();
+    for (int i = 0; OB_SUCC(ret) && i < partition_info.get_size(); ++i) {
+      if (NULL == (key_column = partition_info.get_column(i))) {
         ret = OB_ERR_UNEXPECTED;
-        LOG_WARN("get column expr by id failed", K(ret), K(rowkey_column_id));
+        LOG_WARN("The key column is NULL, ", K(i));
+      } else if (OB_FAIL(add_var_to_array_no_dup(partkey_ids, key_column->column_id_))) {
+        LOG_WARN("failed to push back part key column id", K(ret));
+      } else { /*do nothing*/ }
+    }
+    for (int i = 0; OB_SUCC(ret) && i < sub_partition_info.get_size(); ++i) {
+      if (NULL == (key_column = sub_partition_info.get_column(i))) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("The key column is NULL, ", K(i));
+      } else if (OB_FAIL(add_var_to_array_no_dup(partkey_ids, key_column->column_id_))) {
+        LOG_WARN("failed to push back subpart key column id", K(ret));
+      } else { /*do nothing*/ }
+    }
+    for (int64_t i = 0; OB_SUCC(ret) && i < partkey_ids.count(); ++i) {
+      uint64_t partkey_cid = partkey_ids.at(i);
+      if (OB_ISNULL(col_item = ObResolverUtils::find_col_by_base_col_id(*insert_stmt,
+                                                                        constraint_info.table_id_,
+                                                                        partkey_cid,
+                                                                        OB_INVALID_ID,
+                                                                        true))) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("get column expr by id failed", K(ret), K(partkey_cid), K(i), K(partkey_ids));
       } else if (OB_FAIL(constraint_info.constraint_columns_.push_back(col_item->expr_))) {
         LOG_WARN("store column expr to column exprs failed", K(ret));
       }
@@ -1196,20 +1377,26 @@ int ObInsertLogPlan::prepare_table_dml_info_for_ddl(const ObInsertTableInfo& tab
       LOG_WARN("failed to get table schema", K(table_info), K(ret));
     } else if (index_schema->is_index_table() && !index_schema->is_global_index_table()) {
       // local index
+      ObArray<uint64_t> index_part_ids;
       if (OB_FAIL(schema_guard->get_table_schema(session_info->get_effective_tenant_id(),
-                                                 index_schema->get_data_table_id(),
-                                                 data_table_schema))) {
-        LOG_WARN("get table schema failed", K(ret));
+                                                index_schema->get_data_table_id(),
+                                                data_table_schema))) {
+        LOG_WARN("get table schema failed", K(ret), K(session_info->get_effective_tenant_id()), K(index_schema->get_data_table_id()));
       } else if (OB_ISNULL(data_table_schema)) {
-        ret = OB_ERR_UNEXPECTED;
-        LOG_WARN("failed to get table schema", K(index_schema->get_data_table_id()), K(ret));
+        ret = OB_TABLE_NOT_EXIST;
+        LOG_WARN("failed to get table schema", K(ret), K(index_schema->get_data_table_id()));
+      } else if (OB_FAIL(get_index_part_ids(table_info, data_table_schema, index_schema, index_part_ids))) {
+        LOG_WARN("fail to get index part ids", K(ret), K(table_info), K(table_item->ddl_table_id_), K(index_schema->get_data_table_id()), K(index_part_ids));
+      } else if (OB_FAIL(index_dml_info->part_ids_.assign(index_part_ids))) {
+          LOG_WARN("fail to assign part ids", K(ret), K(index_part_ids));
       } else {
-        index_dml_info->table_id_ = table_info.table_id_;
-        index_dml_info->loc_table_id_ = table_info.loc_table_id_;
-        index_dml_info->ref_table_id_ = index_schema->get_data_table_id();
-        index_dml_info->rowkey_cnt_ = index_schema->get_rowkey_column_num();
-        index_dml_info->spk_cnt_ = index_schema->get_shadow_rowkey_column_num();
-        index_dml_info->index_name_ = data_table_schema->get_table_name_str();
+          index_dml_info->table_id_ = table_info.table_id_;
+          index_dml_info->loc_table_id_ = table_info.loc_table_id_;
+          index_dml_info->ref_table_id_ = index_schema->get_data_table_id();
+          index_dml_info->rowkey_cnt_ = index_schema->get_rowkey_column_num();
+          index_dml_info->spk_cnt_ = index_schema->get_shadow_rowkey_column_num();
+          index_dml_info->index_name_ = data_table_schema->get_table_name_str();
+          LOG_INFO("index dml info contains part ids: ", K(ret), K(index_dml_info->part_ids_)); //在局部索引表补数据场景下，对主表part ids和索引表part ids做了关系映射
       }
     } else {
       // global index or primary table
@@ -1232,13 +1419,14 @@ int ObInsertLogPlan::prepare_table_dml_info_for_ddl(const ObInsertTableInfo& tab
       //@TODO: 后续@yibo, @cangdi会重构create local index的处理
       index_dml_info->ref_table_id_ = table_item->ddl_table_id_;
     }
-    
+
     if (OB_SUCC(ret)) {
       if (OB_FAIL(get_all_rowkey_columns_for_ddl(table_info, index_schema, index_dml_info->column_exprs_))) {
         LOG_WARN("failed to get all rowkey columns for ddl" , K(ret));
       } else if (OB_FAIL(get_all_columns_for_ddl(table_info, index_schema, index_dml_info->column_exprs_))) {
         LOG_WARN("failed to get all columns for ddl" , K(ret));
-      } else if (index_schema->is_index_table() && !index_schema->is_global_index_table() && data_table_schema->is_heap_table() && 
+      } else if (index_schema->is_index_local_storage() &&
+                 index_schema->need_partition_key_for_build_local_index(*data_table_schema) &&
                  OB_FAIL(get_all_part_columns_for_ddl(table_info, data_table_schema, index_dml_info->column_exprs_))) {
         LOG_WARN("failed to get all part columns for ddl" , K(ret));
       } else {
@@ -1519,7 +1707,8 @@ int ObInsertLogPlan::candi_allocate_optimizer_stats_merge(OSGShareInfo *osg_info
           LOG_WARN("failed to allocate exchange as top", K(ret));
         } else if (OB_FAIL(allocate_optimizer_stats_gathering_as_top(
                                                                 best_candidates.at(i).plan_tree_,
-                                                                *osg_info))) {
+                                                                *osg_info,
+                                                                OSG_TYPE::MERGE_OSG))) {
           LOG_WARN("failed to allocate sequence as top", K(ret));
         }
       }
@@ -1530,6 +1719,152 @@ int ObInsertLogPlan::candi_allocate_optimizer_stats_merge(OSGShareInfo *osg_info
   }
   if (OB_SUCC(ret) && OB_FAIL(prune_and_keep_best_plans(stats_gathering_plan))) {
     LOG_WARN("failed to prune and keep best plans", K(ret));
+  }
+  return ret;
+}
+
+int ObInsertLogPlan::get_online_estimate_percent(double &percent)
+{
+  int ret = OB_SUCCESS;
+  percent = 100.;
+  const ObSQLSessionInfo *session_info = NULL;
+  if (OB_ISNULL(get_optimizer_context().get_exec_ctx()) ||
+      OB_ISNULL(session_info = get_optimizer_context().get_session_info()) ||
+      OB_ISNULL(get_stmt()) ||
+      OB_ISNULL(get_optimizer_context().get_query_ctx())) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("get unexpected null", K(ret));
+  } else if (get_optimizer_context().get_query_ctx()->optimizer_features_enable_version_ < COMPAT_VERSION_4_3_2) {
+    // do nothing
+  } else if (OB_FAIL(ObDbmsStatsUtils::get_sys_online_estimate_percent(*get_optimizer_context().get_exec_ctx(),
+                                                                       session_info->get_effective_tenant_id(),
+                                                                       get_stmt()->get_insert_table_info().ref_table_id_,
+                                                                       percent))) {
+    LOG_WARN("failed to get sys online estimate percent", K(ret));
+  }
+  return ret;
+}
+int ObInsertLogPlan::candi_allocate_select_into_for_insert()
+{
+  int ret = OB_SUCCESS;
+  ObExchangeInfo exch_info;
+  CandidatePlan candidate_plan;
+  ObSEArray<CandidatePlan, 4> select_into_plans;
+  int64_t dml_parallel = ObGlobalHint::UNSET_PARALLEL;
+  if (OB_FAIL(get_parallel_info_from_candidate_plans(dml_parallel))) {
+    LOG_WARN("failed to get parallel info from candidate plans", K(ret));
+  } else if (dml_parallel > 1) {
+    exch_info.dist_method_ = ObPQDistributeMethod::RANDOM;
+  }
+  for (int64_t i = 0 ; OB_SUCC(ret) && i < candidates_.candidate_plans_.count(); ++i) {
+    candidate_plan = candidates_.candidate_plans_.at(i);
+    if (OB_ISNULL(candidate_plan.plan_tree_)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("get unexpected null", K(ret));
+    } else if (candidate_plan.plan_tree_->is_sharding()
+               && OB_FAIL((allocate_exchange_as_top(candidate_plan.plan_tree_, exch_info)))) {
+      LOG_WARN("failed to allocate exchange as top", K(ret));
+    } else if (OB_FAIL(allocate_select_into_as_top_for_insert(candidate_plan.plan_tree_))) {
+      LOG_WARN("failed to allocate select into", K(ret));
+    } else if (OB_FAIL(select_into_plans.push_back(candidate_plan))) {
+      LOG_WARN("failed to push back candidate plan", K(ret));
+    } else { /*do nothing*/ }
+  }
+  if (OB_SUCC(ret)) {
+    if (OB_FAIL(prune_and_keep_best_plans(select_into_plans))) {
+      LOG_WARN("failed to prune and keep best plans", K(ret));
+    } else { /*do nothing*/ }
+  }
+  return ret;
+}
+
+int ObInsertLogPlan::allocate_select_into_as_top_for_insert(ObLogicalOperator *&old_top)
+{
+  int ret = OB_SUCCESS;
+  ObLogSelectInto *select_into = NULL;
+  ObSchemaGetterGuard *schema_guard = NULL;
+  const ObTableSchema *table_schema = NULL;
+  ObSQLSessionInfo *session_info = NULL;
+  const ObInsertStmt *stmt = get_stmt();
+  ObColumnRefRawExpr *col_expr = NULL;
+  if (OB_ISNULL(old_top) || OB_ISNULL(stmt)
+      || OB_ISNULL(schema_guard = get_optimizer_context().get_schema_guard())
+      || OB_ISNULL(session_info = get_optimizer_context().get_session_info())
+      || stmt->get_table_items().count() != 2
+      || OB_ISNULL(stmt->get_table_item(0)) || OB_ISNULL(stmt->get_table_item(1))) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("Get unexpected null", K(ret), K(old_top), K(schema_guard), K(session_info), K(stmt));
+  } else if (OB_FAIL(schema_guard->get_table_schema(session_info->get_effective_tenant_id(),
+                                                    stmt->get_insert_table_info().ref_table_id_,
+                                                    table_schema))) {
+    LOG_WARN("get table schema from schema guard failed", K(ret));
+  } else if (OB_ISNULL(table_schema)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("get unexpected null", K(ret));
+  } else if (OB_ISNULL(select_into = static_cast<ObLogSelectInto *>(
+                       get_log_op_factory().allocate(*this, LOG_SELECT_INTO)))) {
+    ret = OB_ALLOCATE_MEMORY_FAILED;
+    LOG_WARN("allocate memory for ObLogSelectInto failed", K(ret));
+  } else {
+    ObString external_properties;
+    const ObString &table_format_or_properties = table_schema->get_external_file_format().empty()
+                                            ? table_schema->get_external_properties()
+                                            : table_schema->get_external_file_format();
+    const ObInsertTableInfo& table_info = stmt->get_insert_table_info();
+    if (table_format_or_properties.empty()) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("external properties is empty", K(ret));
+    } else if (table_schema->get_external_properties().empty()) { //目前只支持写odps外表 其他类型暂不支持
+      ret = OB_NOT_SUPPORTED;
+      LOG_WARN("not support to insert into external table which is not in odps", K(ret));
+      LOG_USER_ERROR(OB_NOT_SUPPORTED, "insert into external table which is not in odps");
+    } else if (OB_FAIL(ob_write_string(get_allocator(), table_format_or_properties, external_properties))) {
+      LOG_WARN("failed to append string", K(ret));
+    } else if (OB_FAIL(select_into->get_select_exprs().assign(table_info.column_conv_exprs_))) {
+      LOG_WARN("failed to get select exprs", K(ret));
+    }
+    for (int64_t i = 0; OB_SUCC(ret) && i < table_info.values_desc_.count(); i++) {
+      if (OB_ISNULL(col_expr = table_info.values_desc_.at(i))) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("get unexpected null", K(ret));
+      } else if (OB_FAIL(select_into->get_alias_names().push_back(col_expr->get_column_name()))) {
+        LOG_WARN("failed to push back column name", K(ret));
+      }
+    }
+    if (OB_SUCC(ret)) {
+      select_into->set_is_overwrite(stmt->is_external_table_overwrite());
+      select_into->set_external_properties(external_properties);
+      select_into->set_external_partition(stmt->get_table_item(0)->external_table_partition_);
+      select_into->set_child(ObLogicalOperator::first_child, old_top);
+      // compute property
+      if (OB_FAIL(select_into->compute_property())) {
+        LOG_WARN("failed to compute equal set", K(ret));
+      } else {
+        old_top = select_into;
+      }
+    }
+  }
+  return ret;
+}
+
+int ObInsertLogPlan::perform_vector_assign_expr_replacement(ObDelUpdStmt *stmt)
+{
+  int ret = OB_SUCCESS;
+  ObSQLSessionInfo* session_info = optimizer_context_.get_session_info();
+  if (OB_ISNULL(stmt)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("stmt is null", K(ret), K(stmt));
+  } else {
+    ObInsertTableInfo &table_info = static_cast<ObInsertStmt*>(stmt)->get_insert_table_info();
+    for (int64_t i = 0; OB_SUCC(ret) && i < table_info.assignments_.count(); ++i) {
+      ObRawExpr *value = table_info.assignments_.at(i).expr_;
+      bool replace_happened = false;
+      if (OB_FAIL(replace_alias_ref_expr(value, replace_happened))) {
+        LOG_WARN("failed to replace alias ref expr", K(ret));
+      } else if (replace_happened && OB_FAIL(value->formalize(session_info))) {
+        LOG_WARN("failed to formalize expr", K(ret));
+      }
+    }
   }
   return ret;
 }

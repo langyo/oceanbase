@@ -11,13 +11,9 @@
  */
 
 #define USING_LOG_PREFIX SQL_OPT
-#include "lib/json/ob_json.h"
 #include "sql/optimizer/ob_explain_log_plan.h"
-#include "sql/optimizer/ob_log_operator_factory.h"
-#include "sql/optimizer/ob_log_plan_factory.h"
 #include "sql/optimizer/ob_log_values.h"
 #include "sql/code_generator/ob_code_generator.h"
-#include "sql/monitor/ob_sql_plan.h"
 
 using namespace oceanbase;
 using namespace sql;
@@ -54,6 +50,8 @@ int ObExplainLogPlan::generate_normal_raw_plan()
       LOG_ERROR("failed to create log plan for explain stmt");
     } else if (OB_FAIL(child_plan->generate_plan())) {
       LOG_WARN("failed to generate plan tree for explain", K(ret));
+    } else if (OB_FAIL(remove_duplicate_constraints())) {
+      LOG_WARN("failed to remove duplicate constraints for explain", K(ret));
     } else if (OB_FAIL(check_explain_generate_plan_with_outline(child_plan))) {
       LOG_WARN("failed to check generate plan with outline for explain", K(ret));
     } else if (OB_FAIL(ObCodeGenerator::detect_batch_size(*child_plan, batch_size))) {
@@ -70,6 +68,7 @@ int ObExplainLogPlan::generate_normal_raw_plan()
       values_op = static_cast<ObLogValues*>(top);
       values_op->set_explain_plan(child_plan);
       ObSqlPlan sql_plan(get_allocator());
+      sql_plan.set_session_info(get_optimizer_context().get_session_info());
       ObExplainLogPlan *explain_plan = static_cast<ObExplainLogPlan*>(child_plan);
       ObSEArray<common::ObString, 64> plan_strs;
       const ObString& into_table = explain_stmt->get_into_table();
@@ -130,8 +129,11 @@ int ObExplainLogPlan::check_explain_generate_plan_with_outline(ObLogPlan *real_p
       || OB_ISNULL(sql_ctx = exec_ctx->get_sql_ctx())) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("get unexpected null", K(ret), K(real_plan), K(explain_stmt), K(session_info), K(exec_ctx), K(sql_ctx));
-  } else if (session_info->is_inner()) {
+  } else if (session_info->is_inner() || sql_ctx->is_prepare_protocol_) {
     /* do not check explain for inner sql (include query in PL) */
+  } else if (OB_UNLIKELY(get_optimizer_context().get_query_ctx() != NULL
+                         && get_optimizer_context().get_query_ctx()->get_injected_random_status())) {
+    /* do nothing */
   } else if (sql_ctx->multi_stmt_item_.is_part_of_multi_stmt()
              && sql_ctx->multi_stmt_item_.get_seq_num() > 0) {
     /* generate plan call by ObMPQuery::process_with_tmp_context use tmp context, do not check */

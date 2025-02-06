@@ -15,8 +15,32 @@
 
 #include "lib/utility/serialization.h"
 
-namespace oceanbase {
-namespace lib {
+namespace oceanbase
+{
+namespace lib
+{
+
+#ifdef ENABLE_SERIALIZATION_CHECK
+enum ObSerializationCheckStatus
+{
+  CHECK_STATUS_WATING = 0,
+  CHECK_STATUS_RECORDING = 1,
+  CHECK_STATUS_COMPARING = 2
+};
+static constexpr int MAX_SERIALIZE_RECORD_LENGTH = 256;
+struct SerializeDiagnoseRecord
+{
+  uint8_t encoded_lens[MAX_SERIALIZE_RECORD_LENGTH];
+  int count = -1;
+  int check_index = -1;
+  int flag = CHECK_STATUS_WATING;
+};
+RLOCAL_EXTERN(SerializeDiagnoseRecord, ser_diag_record);
+void begin_record_serialization();
+void finish_record_serialization();
+void begin_check_serialization();
+void finish_check_serialization();
+#endif
 
 #define SERIAL_PARAMS char *buf, const int64_t buf_len, int64_t &pos
 #define DESERIAL_PARAMS const char *buf, const int64_t data_len, int64_t &pos
@@ -43,32 +67,75 @@ namespace lib {
 #define NS_ ::oceanbase::common::serialization
 #define OK_ ::oceanbase::common::OB_SUCCESS
 
-#define OB_UNIS_ENCODE(obj)                                              \
-  if (OB_SUCC(ret)) {                                                    \
+#define OB_UNIS_ENCODE_IF(obj, PRED)                                     \
+  if (OB_SUCC(ret) && (PRED)) {                                          \
     if (OB_FAIL(NS_::encode(buf, buf_len, pos, obj))) {                  \
       RPC_WARN("encode object fail",                                     \
                "name", MSTR(obj), K(buf_len), K(pos), K(ret));           \
     }                                                                    \
   }
 
-#define OB_UNIS_DECODEx(obj)                                             \
-  if (OB_SUCC(ret)) {                                                    \
+#define OB_UNIS_DECODE_IF(obj, PRED)                                     \
+  if (OB_SUCC(ret) && pos < data_len && (PRED)) {                        \
     if (OB_FAIL(NS_::decode(buf, data_len, pos, obj))) {                 \
       RPC_WARN("decode object fail",                                     \
                "name", MSTR(obj), K(data_len), K(pos), K(ret));          \
     }                                                                    \
   }
 
-#define OB_UNIS_DECODE(obj)                                              \
-  if (OB_SUCC(ret) && pos < data_len) {                                  \
-    if (OB_FAIL(NS_::decode(buf, data_len, pos, obj))) {                 \
-      RPC_WARN("decode object fail",                                     \
-               "name", MSTR(obj), K(data_len), K(pos), K(ret));          \
-    }                                                                    \
-  }
+#define OB_UNIS_ENCODE(obj) OB_UNIS_ENCODE_IF(obj, true)
+#define OB_UNIS_DECODE(obj) OB_UNIS_DECODE_IF(obj, true)
 
-#define OB_UNIS_ADD_LEN(obj)                                             \
-  len += NS_::encoded_length(obj)
+// int FUNC(tmp, obj): copy tmp to obj
+#define OB_UNIS_DECODE_AND_FUNC(obj, FUNC)                       \
+  if (OB_SUCC(ret)) {                                            \
+    typeof(obj) tmp;                                             \
+    OB_UNIS_DECODE(tmp);                                         \
+    if (FAILEDx(FUNC(tmp, obj))) {                               \
+      RPC_WARN("failed to assign obj",                           \
+               "name", MSTR(obj), K(data_len), K(pos), K(ret));  \
+    }                                                            \
+  }                                                              \
+
+#ifdef ENABLE_SERIALIZATION_CHECK
+
+#define IF_TYPE_MATCH(obj, type) \
+        std::is_same<type, decltype(obj)>::value || std::is_same<type &, decltype(obj)>::value
+
+#define IF_NEED_TO_CHECK_SERIALIZATION(obj)       \
+        !(std::is_const<decltype(obj)>::value ||  \
+        IF_TYPE_MATCH(obj, uint8_t) ||            \
+        IF_TYPE_MATCH(obj, int8_t) ||             \
+        IF_TYPE_MATCH(obj, bool) ||               \
+        IF_TYPE_MATCH(obj, char))
+
+#define OB_UNIS_ADD_LEN_IF(obj, PRED)                                                                               \
+  if ((PRED)) {                                                                                                     \
+    int64_t this_len = NS_::encoded_length(obj);                                                                    \
+    if (IF_NEED_TO_CHECK_SERIALIZATION(obj)) {                                                                      \
+      if (oceanbase::lib::CHECK_STATUS_RECORDING == oceanbase::lib::ser_diag_record.flag &&                         \
+          oceanbase::lib::ser_diag_record.count < oceanbase::lib::MAX_SERIALIZE_RECORD_LENGTH) {                    \
+        oceanbase::lib::ser_diag_record.encoded_lens[oceanbase::lib::ser_diag_record.count++] =                     \
+            static_cast<uint8_t>(this_len);                                                                         \
+      } else if (oceanbase::lib::CHECK_STATUS_COMPARING == oceanbase::lib::ser_diag_record.flag &&                  \
+                 oceanbase::lib::ser_diag_record.check_index < oceanbase::lib::ser_diag_record.count) {             \
+        int ret = OB_ERR_UNEXPECTED;                                                                                \
+        int record_len = oceanbase::lib::ser_diag_record.encoded_lens[oceanbase::lib::ser_diag_record.check_index]; \
+        if (this_len != record_len) {                                                                               \
+          OB_LOG(ERROR, "encoded length not match", "name", MSTR(obj), K(this_len), K(record_len), "value", obj);   \
+        }                                                                                                           \
+        oceanbase::lib::ser_diag_record.check_index++;                                                              \
+      }                                                                                                             \
+    }                                                                                                               \
+    len += this_len;                                                                                                \
+  }
+#else
+#define OB_UNIS_ADD_LEN_IF(obj, PRED)   \
+  if ((PRED)) {                         \
+    len += NS_::encoded_length(obj);    \
+  }
+#endif
+#define OB_UNIS_ADD_LEN(obj) OB_UNIS_ADD_LEN_IF(obj, true)
 //-----------------------------------------------------------------------
 
 // serialize_ no header
@@ -162,8 +229,8 @@ struct EmptyUnisStruct
       }                                                                 \
       int64_t serial_size = pos - pos_bak;                               \
       int64_t tmp_pos = 0;                                               \
-      CHECK_SERIALIZE_SIZE(CLS, serial_size);                            \
       if (OB_SUCC(ret)) {                                                \
+        CHECK_SERIALIZE_SIZE(CLS, serial_size);                          \
         ret = NS_::encode_fixed_bytes_i64(buf + pos_bak - size_nbytes,   \
           size_nbytes, tmp_pos, serial_size);                            \
       }                                                                  \
@@ -177,8 +244,8 @@ struct EmptyUnisStruct
     int64_t version = 0;                                                 \
     int64_t len = 0;                                                     \
     if (OB_SUCC(ret)) {                                                 \
-      OB_UNIS_DECODEx(version);                                         \
-      OB_UNIS_DECODEx(len);                                             \
+      OB_UNIS_DECODE(version);                                         \
+      OB_UNIS_DECODE(len);                                             \
       CHECK_VERSION_LENGTH(CLS, version, len);                          \
     }                                                                   \
     if (OB_SUCC(ret)) {                                                 \
@@ -276,6 +343,95 @@ const static int64_t UNIS_VERSION = VER
     OB_UNIS_DECODE(objs[i]);                                    \
   }
 
+// ATTENTION!!! macro OB_UNIS_DECODE_ARRAY and OB_UNIS_DECODE_ARRAY_AND_FUNC is not same
+// OB_UNIS_DECODE_ARRAY_AND_FUNC will decode objs_count, while OB_UNIS_DECODE_ARRAY will not
+#define OB_UNIS_DECODE_ARRAY_AND_FUNC(objs, objs_count, FUNC)                                           \
+  if (OB_SUCC(ret)) {                                                                                   \
+    typeof(objs_count) tmp_count = 0;                                                                   \
+    OB_UNIS_DECODE(tmp_count);                                                                          \
+    for (int64_t i = 0; OB_SUCC(ret) && i < tmp_count; ++i) {                                           \
+      typeof(objs[0]) tmp;                                                                              \
+      OB_UNIS_DECODE(tmp);                                                                              \
+      if (FAILEDx(FUNC(tmp))) {                                                                         \
+        RPC_WARN("failed to handle deserialized objects",                                               \
+                 "name", MSTR(obj), K(data_len), K(pos), K(ret));                                       \
+      }                                                                                                 \
+    }                                                                                                   \
+    if (OB_SUCC(ret) && tmp_count != objs_count) {                                                      \
+      ret = OB_ERR_UNEXPECTED;                                                                          \
+      RPC_WARN("the deserialized count is not equal to objs count",                                     \
+               "name", MSTR(obj), K(tmp_count), "objs_count", objs_count, K(data_len), K(pos), K(ret)); \
+    }                                                                                                   \
+  }
+
+#define OB_UNIS_ENCODE_ARRAY_POINTER_IF(objs, objs_count, PRED)                                         \
+  if (OB_SUCC(ret) && (PRED)) {                                                                         \
+    OB_UNIS_ENCODE((objs_count));                                                                       \
+    if (OB_SUCC(ret)) {                                                                                 \
+      if (OB_ISNULL(objs)) {                                                                            \
+        if (objs_count != 0) {                                                                          \
+          ret = OB_ERR_UNEXPECTED;                                                                      \
+          RPC_WARN("objs is null and objs_count is not zero", KR(ret), K(objs_count), K(objs));         \
+        }                                                                                               \
+      } else {                                                                                          \
+        for (int64_t i = 0; OB_SUCC(ret) && i < (objs_count); ++i) {                                    \
+          if (OB_ISNULL(objs[i])) {                                                                     \
+            ret = OB_ERR_UNEXPECTED;                                                                    \
+            RPC_WARN("null pointer", KR(ret), K(objs_count), K(objs), K(i));                            \
+          } else {                                                                                      \
+            OB_UNIS_ENCODE(*(objs[i]));                                                                 \
+          }                                                                                             \
+        }                                                                                               \
+      }                                                                                                 \
+    }                                                                                                   \
+  }
+
+// macro to deserialize array of pointer
+// 1. deserialize count of array
+// 2. for each object in the array, deserialize the object and use FUNC to push the object to array
+// objs: the array of pointer
+// objs_count: the size of objs
+// FUNC: int FUNC(ObjType &obj), this function should add the object to array and update objs_count
+#define OB_UNIS_DECODE_ARRAY_POINTER_IF(objs, objs_count, FUNC, PRED)                                   \
+  if (OB_SUCC(ret) && (PRED)) {                                                                         \
+    typeof(objs_count) tmp_count = 0;                                                                   \
+    OB_UNIS_DECODE(tmp_count);                                                                          \
+    for (int64_t i = 0; OB_SUCC(ret) && i < tmp_count; ++i) {                                           \
+      typeof(*(objs[0])) tmp;                                                                           \
+      OB_UNIS_DECODE(tmp);                                                                              \
+      if (FAILEDx(FUNC(tmp))) {                                                                         \
+        RPC_WARN("failed to handle deserialized objects",                                               \
+                 "name", MSTR(obj), K(data_len), K(pos), K(ret), K(tmp), K(i));                         \
+      }                                                                                                 \
+    }                                                                                                   \
+    if (OB_SUCC(ret) && tmp_count != objs_count) {                                                      \
+      ret = OB_ERR_UNEXPECTED;                                                                          \
+      RPC_WARN("the deserialized count is not equal to objs count",                                     \
+               "name", MSTR(obj), K(tmp_count), "objs_count", objs_count, K(data_len), K(pos), K(ret)); \
+    }                                                                                                   \
+  }
+
+#define OB_UNIS_ADD_LEN_ARRAY_POINTER_IF(objs, objs_count, PRED)  \
+  if ((PRED)) {                                                   \
+    OB_UNIS_ADD_LEN((objs_count));                                \
+    if (!OB_ISNULL(objs)) {                                       \
+      for (int64_t i = 0; i < (objs_count); ++i) {                \
+        if (!OB_ISNULL(objs[i])) {                                \
+          OB_UNIS_ADD_LEN(*objs[i]);                              \
+        }                                                         \
+      }                                                           \
+    }                                                             \
+  }
+
+#define OB_UNIS_ENCODE_ARRAY_POINTER(objs, objs_count) \
+  OB_UNIS_ENCODE_ARRAY_POINTER_IF(objs, objs_count, true)
+
+#define OB_UNIS_DECODE_ARRAY_POINTER(objs, objs_count, FUNC) \
+  OB_UNIS_DECODE_ARRAY_POINTER_IF(objs, objs_count, FUNC, true)
+
+#define OB_UNIS_ADD_LEN_ARRAY_POINTER(objs, objs_count) \
+  OB_UNIS_ADD_LEN_ARRAY_POINTER_IF(objs, objs_count, true)
+
 #define OB_UNIS_DEF_SERIALIZE(CLS, ...)  \
   OB_UNIS_SERIALIZE(MY_CLS(CLS));                                  \
   OB_SERIALIZE_NOHEADER(MY_CLS(CLS), BASE_CLS(CLS), _, true, ##__VA_ARGS__);
@@ -316,6 +472,7 @@ inline uint64_t &get_unis_compat_version()
 }
 
 #define UNIS_VERSION_GUARD(x)
-}} // namespace oceanbase::lib
+}  // namespace lib
+}  // namespace oceanbase
 
 #endif /* _OCEABASE_LIB_UTILITY_OB_UNIFY_SERIALIZE_H_ */

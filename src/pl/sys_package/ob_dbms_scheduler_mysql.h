@@ -27,19 +27,18 @@ public:
   virtual ~ObDBMSSchedulerMysql() {}
 
 public:
-
 #define DECLARE_FUNC(func) \
   static int func(sql::ObExecContext &ctx, sql::ParamStore &params, common::ObObj &result);
-
-  DECLARE_FUNC(create_job);
   DECLARE_FUNC(disable);
   DECLARE_FUNC(enable);
   DECLARE_FUNC(set_attribute);
+  DECLARE_FUNC(get_and_increase_job_id);
 
 #undef DECLARE_FUNC
 
 private:
   static int execute_sql(sql::ObExecContext &ctx, ObSqlString &sql, int64_t &affected_rows);
+  static int _generate_job_id(int64_t tenant_id, int64_t &max_job_id);
 };
 
 } // end of pl

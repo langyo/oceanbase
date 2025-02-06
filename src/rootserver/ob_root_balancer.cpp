@@ -12,18 +12,9 @@
 
 #define USING_LOG_PREFIX RS_LB
 
-#include "ob_root_balancer.h"
 
-#include "lib/ob_define.h"
-#include "lib/mysqlclient/ob_mysql_proxy.h"
-#include "lib/stat/ob_diagnose_info.h"
-#include "share/config/ob_server_config.h"
-#include "share/schema/ob_multi_version_schema_service.h"
-#include "share/ob_unit_replica_counter.h"
-#include "rootserver/ob_rs_event_history_table_operator.h"
+#include "ob_root_balancer.h"
 #include "rootserver/ob_root_service.h"
-#include "observer/ob_server_struct.h"
-#include "ob_unit_manager.h"
 #include "ob_balance_info.h"
 
 namespace oceanbase
@@ -79,7 +70,7 @@ int ObRootBalancer::init(common::ObServerConfig &cfg,
   } else if (OB_FAIL(create(root_balancer_thread_cnt, "RootBalance"))) {
     LOG_WARN("create root balancer thread failed", K(ret), K(root_balancer_thread_cnt));
   } else if (OB_FAIL(disaster_recovery_worker_.init(
-          self_addr, cfg, unit_mgr, zone_mgr,
+          self_addr, cfg, zone_mgr,
           dr_task_mgr, *GCTX.lst_operator_, schema_service, rpc_proxy, sql_proxy))) {
     LOG_WARN("fail to init disaster recovery worker", KR(ret));
   } else if (OB_FAIL(rootservice_util_checker_.init(

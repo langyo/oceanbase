@@ -12,6 +12,7 @@
 
 #include "rpc/obrpc/ob_poc_rpc_request_operator.h"
 #include "rpc/obrpc/ob_poc_rpc_server.h"
+#include "rpc/obmysql/ob_mysql_request_utils.h"
 
 using namespace oceanbase::rpc;
 namespace oceanbase
@@ -30,6 +31,7 @@ void* ObPocRpcRequestOperator::alloc_response_buffer(ObRequest* req, int64_t siz
 
 void ObPocRpcRequestOperator::response_result(ObRequest* req, obrpc::ObRpcPacket* pkt)
 {
+  obmysql::request_finish_callback();
   get_poc_handle_context(req)->resp(pkt);
   get_poc_handle_context(req)->destroy();
 

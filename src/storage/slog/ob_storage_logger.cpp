@@ -12,22 +12,9 @@
 
 #define USING_LOG_PREFIX STORAGE_REDO
 #include "ob_storage_logger.h"
-#include "lib/oblog/ob_log.h"
-#include "lib/ob_running_mode.h"
-#include "lib/file/ob_file.h"
 #include "lib/file/file_directory_utils.h"
-#include "lib/utility/ob_tracepoint.h"
-#include "share/ob_debug_sync.h"
-#include "share/ob_force_print_log.h"
-#include "common/log/ob_log_dir_scanner.h"
-#include "storage/blocksstable/ob_data_buffer.h"
-#include "storage/blocksstable/ob_log_file_spec.h"
 #include "storage/slog/ob_storage_logger_manager.h"
-#include "storage/slog/ob_storage_log_struct.h"
 #include "storage/slog/ob_storage_log_batch_header.h"
-#include "storage/meta_mem/ob_meta_obj_struct.h"
-#include "share/rc/ob_tenant_base.h"
-#include <inttypes.h>
 
 namespace oceanbase
 {
@@ -108,35 +95,6 @@ int ObStorageLogger::start()
   return ret;
 }
 
-int ObStorageLogger::mtl_init(ObStorageLogger* &slogger)
-{
-  int ret = OB_SUCCESS;
-  const uint64_t tenant_id = MTL_ID();
-  if (OB_UNLIKELY(nullptr == slogger)) {
-    ret = OB_INVALID_ARGUMENT;
-    STORAGE_REDO_LOG(WARN, "Slogger is null.", K(ret), KP(slogger));
-  } else if (OB_FAIL(slogger->init(ObStorageLoggerManager::get_instance(), tenant_id))) {
-    STORAGE_REDO_LOG(WARN, "failed to init slogger", K(ret));
-  }
-
-  return ret;
-}
-
-int ObStorageLogger::mtl_start(ObStorageLogger* &slogger)
-{
-  int ret = OB_SUCCESS;
-  if (OB_ISNULL(slogger)) {
-    ret = OB_INVALID_ARGUMENT;
-    STORAGE_REDO_LOG(WARN, "Slogger is null.", K(ret));
-  } else if (OB_UNLIKELY(!slogger->is_inited_)) {
-    ret = OB_NOT_INIT;
-    STORAGE_REDO_LOG(WARN, "Slogger has not been inited.", K(ret));
-  } else if (OB_FAIL(slogger->log_writer_->start())) {
-    STORAGE_REDO_LOG(WARN, "Fail to start slog writer.", K(ret));
-  }
-  return ret;
-}
-
 void ObStorageLogger::destroy()
 {
   if (nullptr != log_writer_) {
@@ -149,17 +107,17 @@ void ObStorageLogger::destroy()
   log_seq_ = 0;
 }
 
-void ObStorageLogger::mtl_stop(ObStorageLogger* &slogger)
+void ObStorageLogger::stop()
 {
-  if (OB_LIKELY(nullptr != slogger) && OB_LIKELY(nullptr != slogger->log_writer_)) {
-    slogger->log_writer_->stop();
+  if (OB_NOT_NULL(log_writer_)) {
+    log_writer_->stop();
   }
 }
 
-void ObStorageLogger::mtl_wait(ObStorageLogger* &slogger)
+void ObStorageLogger::wait()
 {
-  if (OB_LIKELY(nullptr != slogger) && OB_LIKELY(nullptr != slogger->log_writer_)) {
-    slogger->log_writer_->wait();
+  if (OB_NOT_NULL(log_writer_)) {
+    log_writer_->wait();
   }
 }
 

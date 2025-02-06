@@ -11,9 +11,7 @@
  */
 
 #include "ob_block_sample_iterator.h"
-#include "storage/tablet/ob_table_store_util.h"
 #include "storage/tablet/ob_tablet.h"
-#include "storage/blocksstable/ob_logic_macro_id.h"
 
 namespace oceanbase
 {
@@ -226,8 +224,9 @@ int ObBlockSampleSSTableEndkeyIterator::get_current_block_id(ObMicroBlockId &mic
   const ObIndexBlockRowHeader *idx_row_header = nullptr;
   if (OB_FAIL(tree_cursor_.get_idx_row_header(idx_row_header))) {
     STORAGE_LOG(WARN, "Fail to get index block row header", K(ret), K(tree_cursor_));
+  } else if (OB_FAIL(tree_cursor_.get_macro_block_id(micro_block_id.macro_id_))) {
+    STORAGE_LOG(WARN, "Fail to get macro block id", K(ret));
   } else {
-    micro_block_id.macro_id_ = idx_row_header->get_macro_id();
     micro_block_id.offset_ = idx_row_header->get_block_offset();
     micro_block_id.size_ = idx_row_header->get_block_size();
   }
@@ -393,6 +392,7 @@ int ObBlockSampleRangeIterator::init_and_push_endkey_iterator(ObGetTableParam &g
     ret = OB_INVALID_ARGUMENT;
     STORAGE_LOG(WARN, "Invalid argument", K(get_table_param));
   } else {
+    get_table_param.tablet_iter_.table_iter()->resume();
     while (OB_SUCC(ret)) {
       void *buf = nullptr;
       ObITable *table = nullptr;
@@ -615,6 +615,7 @@ ObBlockSampleIterator::ObBlockSampleIterator(const SampleInfo &sample_info)
     read_info_(nullptr),
     scan_merge_(nullptr),
     block_num_(0),
+    sample_block_cnt_(0),
     range_allocator_(),
     range_iterator_(),
     micro_range_(),
@@ -629,6 +630,7 @@ ObBlockSampleIterator::~ObBlockSampleIterator()
 void ObBlockSampleIterator::reuse()
 {
   block_num_ = 0;
+  sample_block_cnt_ = 0;
   range_allocator_.reuse();
   range_iterator_.reset();
   micro_range_.reset();
@@ -641,6 +643,7 @@ void ObBlockSampleIterator::reset()
   read_info_ = nullptr;
   scan_merge_ = nullptr;
   block_num_ = 0;
+  sample_block_cnt_ = 0;
   range_allocator_.reset();
   range_iterator_.reset();
   micro_range_.reset();
@@ -660,7 +663,7 @@ int ObBlockSampleIterator::open(ObMultipleScanMerge &scan_merge,
     STORAGE_LOG(WARN, "Invalid argument", K(ret), K(access_ctx), K(get_table_param));
   }  else if (OB_FAIL(range_iterator_.open(get_table_param, range, *access_ctx.stmt_allocator_, sample_info_->percent_, is_reverse_scan))) {
     STORAGE_LOG(WARN, "Fail to init micro block iterator", K(ret));
-  }else {
+  } else {
     scan_merge_ = &scan_merge;
     has_opened_range_ = false;
     access_ctx_ = &access_ctx;
@@ -696,6 +699,7 @@ int ObBlockSampleIterator::get_next_row(blocksstable::ObDatumRow *&row)
           STORAGE_LOG(WARN, "range is null", K(ret), K(block_num_));
         } else if (return_this_sample(block_num_++)) {
           STORAGE_LOG(DEBUG, "open a range", K(*range), K_(block_num));
+          ++sample_block_cnt_;
           micro_range_.reset();
           micro_range_ = *range;
           if (OB_FAIL(open_range(micro_range_))) {
@@ -707,6 +711,11 @@ int ObBlockSampleIterator::get_next_row(blocksstable::ObDatumRow *&row)
     if (OB_FAIL(ret) && OB_ITER_END != ret)  {
       STORAGE_LOG(WARN, "failed to get next row from ObBlockSampleIterator", K(ret), K(block_num_));
     }
+#ifdef ENABLE_DEBUG_LOG
+    if (OB_ITER_END == ret) {
+      STORAGE_LOG(INFO, "block sample scan finish", K(ret), K_(sample_block_cnt), K_(block_num), KPC_(sample_info));
+    }
+#endif
   }
 
   return ret;

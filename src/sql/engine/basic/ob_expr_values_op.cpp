@@ -13,12 +13,6 @@
 #define USING_LOG_PREFIX SQL_ENG
 
 #include "sql/engine/basic/ob_expr_values_op.h"
-#include "sql/engine/expr/ob_expr_column_conv.h"
-#include "sql/engine/ob_exec_context.h"
-#include "sql/resolver/expr/ob_raw_expr_util.h"
-#include "sql/engine/expr/ob_expr_type_to_str.h"
-#include "sql/engine/px/ob_dfo.h"
-#include "sql/engine/expr/ob_expr_lob_utils.h"
 #include "sql/engine/dml/ob_dml_service.h"
 
 namespace oceanbase
@@ -526,6 +520,9 @@ OB_INLINE int ObExprValuesOp::calc_next_row()
          && ObDatumCast::need_scale_decimalint(src_meta.scale_, src_meta.precision_,
                                                dst_expr->datum_meta_.scale_,
                                                dst_expr->datum_meta_.precision_));
+      bool need_cast_collection_element =
+        (src_meta.type_ == ObCollectionSQLType && dst_expr->datum_meta_.type_ == ObCollectionSQLType
+         && src_expr->obj_meta_.get_subschema_id() != dst_expr->obj_meta_.get_subschema_id());
       if (OB_FAIL(ret)) {
         // do nothing
       } else if (src_expr == dst_expr) {
@@ -542,7 +539,8 @@ OB_INLINE int ObExprValuesOp::calc_next_row()
       } else if (src_meta.type_ == dst_expr->datum_meta_.type_
                  && src_meta.cs_type_ == dst_expr->datum_meta_.cs_type_
                  && src_obj_meta.has_lob_header() == dst_expr->obj_meta_.has_lob_header()
-                 && !need_adjust_decimal_int) {
+                 && !need_adjust_decimal_int
+                 && !need_cast_collection_element) {
         // 将values中数据copy到output中
         if (OB_FAIL(src_expr->eval(eval_ctx_, datum))) {
           // catch err and print log later
@@ -592,21 +590,26 @@ OB_INLINE int ObExprValuesOp::calc_next_row()
             }
           }
         } else if (!dst_expr->obj_meta_.is_lob_storage()) {
+          ObString column_name = MY_SPEC.column_names_.at(col_idx);
+          ObUserLoggingCtx::Guard logging_ctx_guard(*eval_ctx_.exec_ctx_.get_user_logging_ctx());
+          eval_ctx_.exec_ctx_.set_cur_rownum(row_num);
+          eval_ctx_.exec_ctx_.set_cur_column_name(&column_name);
           if (OB_FAIL(datum_caster_.to_type(dst_expr->datum_meta_, real_src_expr,
-                                            cm_, datum))) {
+                                            cm_, datum, 0, dst_expr->obj_meta_.get_subschema_id()))) {
             LOG_WARN("fail to dynamic cast", K(dst_expr->datum_meta_),
                                              K(real_src_expr), K(cm_), K(ret));
             if (dst_expr->obj_meta_.is_geometry()) {
               ret = OB_ERR_CANT_CREATE_GEOMETRY_OBJECT;
               LOG_USER_WARN(OB_ERR_CANT_CREATE_GEOMETRY_OBJECT);
             }
-            ObString column_name = MY_SPEC.column_names_.at(col_idx);
             ret = ObDMLService::log_user_error_inner(ret, row_num, column_name, ctx_);
           }
         } else { // dst type is lob
           if (OB_FAIL(eval_values_op_dynamic_cast_to_lob(real_src_expr, src_obj_meta, dst_expr))) {
             LOG_WARN("fail to dynamic cast to lob types", K(dst_expr->datum_meta_),
                                                           K(real_src_expr), K(cm_), K(ret));
+            ObString column_name = MY_SPEC.column_names_.at(col_idx);
+            ret = ObDMLService::log_user_error_inner(ret, row_num, column_name, ctx_);
           } else {
             dst_expr->set_evaluated_projected(eval_ctx_);
           }

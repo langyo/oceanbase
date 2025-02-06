@@ -14,17 +14,8 @@
 
 #include "observer/mysql/obmp_stmt_send_piece_data.h"
 
-#include "lib/worker.h"
-#include "lib/oblog/ob_log.h"
-#include "lib/stat/ob_session_stat.h"
-#include "rpc/ob_request.h"
-#include "share/schema/ob_schema_getter_guard.h"
-#include "sql/ob_sql_context.h"
-#include "sql/session/ob_sql_session_info.h"
 #include "sql/ob_sql.h"
-#include "observer/ob_req_time_service.h"
 #include "observer/omt/ob_tenant.h"
-#include "observer/mysql/obsm_utils.h"
 #include "sql/plan_cache/ob_ps_cache.h"
 
 namespace oceanbase
@@ -45,7 +36,7 @@ ObMPStmtSendPieceData::ObMPStmtSendPieceData(const ObGlobalContext &gctx)
       exec_start_timestamp_(0),
       exec_end_timestamp_(0),
       stmt_id_(0),
-      param_id_(-1),
+      param_id_(OB_MAX_PARAM_ID),
       buffer_len_(0),
       buffer_(),
       piece_mode_(ObInvalidPiece),
@@ -72,26 +63,45 @@ int ObMPStmtSendPieceData::before_process()
   } else {
     const ObMySQLRawPacket &pkt = reinterpret_cast<const ObMySQLRawPacket&>(req_->get_packet());
     const char* pos = pkt.get_cdata();
-    // stmt_id
-    ObMySQLUtil::get_int4(pos, stmt_id_);
-    ObMySQLUtil::get_uint2(pos, param_id_);
-    ObMySQLUtil::get_int1(pos, piece_mode_);
-    int8_t is_null = 0;
-    ObMySQLUtil::get_int1(pos, is_null);
-    1 == is_null ? is_null_ = true : is_null_ = false;
-    ObMySQLUtil::get_int8(pos, buffer_len_);
-    if (stmt_id_ < 1 || param_id_ < 0 || buffer_len_ < 0) {
-      ret = OB_ERR_PARAM_INVALID;
-      LOG_WARN("send long data get error info.", K(stmt_id_), K(param_id_), K(buffer_len_));
-    } else {
+    defender_.init(pos, pkt.get_clen() - 1);  // pkt.get_cdata() do not include 1 byte for `request command code`
+
+    PS_STATIC_DEFENSE_CHECK(&defender_, 4 + 2 + 1 + 1 + 8)
+    {
+      ObMySQLUtil::get_int4(pos, stmt_id_);
+      ObMySQLUtil::get_uint2(pos, param_id_);
+      ObMySQLUtil::get_int1(pos, piece_mode_);
+      int8_t is_null = 0;
+      ObMySQLUtil::get_int1(pos, is_null);
+      is_null_ = (1 == is_null);
+      ObMySQLUtil::get_int8(pos, buffer_len_);
+    }
+
+    if (stmt_id_ < 1 || buffer_len_ < 0) {
+      ret = OB_ERR_MALFORMED_PS_PACKET;
+      LOG_WARN("send_piece receive unexpected params", K(ret), K(stmt_id_), K(buffer_len_));
+    } else if (param_id_ >= OB_PARAM_ID_OVERFLOW_RISK_THRESHOLD) {
+      LOG_WARN("param_id_ has the risk of overflow", K(ret), K(stmt_id_), K(param_id_));
+    }
+
+    PS_STATIC_DEFENSE_CHECK(&defender_, buffer_len_)
+    {
       buffer_.assign_ptr(pos, static_cast<ObString::obstr_size_t>(buffer_len_));
       pos += buffer_len_;
-      LOG_DEBUG("get info success in send long data protocol.", 
-                  K(stmt_id_), K(param_id_));
+      LOG_INFO("resolve send_piece protocol packet successfully",
+               K(ret), K(stmt_id_), K(param_id_), K(buffer_len_));
+      LOG_DEBUG("send_piece packet content", K(buffer_));
     }
-    LOG_DEBUG("send long data get param",K(stmt_id_), K(param_id_), 
-              K(piece_mode_), K(buffer_len_), K(buffer_.length()));
+
+    LOG_INFO("resolve send_piece protocol packet",
+             K(ret), K(stmt_id_), K(param_id_), K(buffer_len_), K(piece_mode_), K(is_null_));
   }
+
+  if (OB_FAIL(ret)) {
+    send_error_packet(ret, nullptr);
+    force_disconnect();
+    LOG_WARN("force disconnect connection", K(ret));
+  }
+
   return ret;
 }
 
@@ -125,6 +135,7 @@ int ObMPStmtSendPieceData::process()
     THIS_WORKER.set_session(sess);
     ObSQLSessionInfo::LockGuard lock_guard(session.get_query_lock());
     session.set_current_trace_id(ObCurTraceId::get_trace_id());
+    session.init_use_rich_format();
     session.get_raw_audit_record().request_memory_used_ = 0;
     observer::ObProcessMallocCallback pmcb(0,
           session.get_raw_audit_record().request_memory_used_);
@@ -136,6 +147,8 @@ int ObMPStmtSendPieceData::process()
     if (OB_UNLIKELY(!session.is_valid())) {
       ret = OB_ERR_UNEXPECTED;
       LOG_ERROR("invalid session", K_(stmt_id), K_(param_id), K(ret));
+    } else if (OB_FAIL(process_kill_client_session(session))) {
+      LOG_WARN("client session has been killed", K(ret));
     } else if (OB_UNLIKELY(session.is_zombie())) {
       ret = OB_ERR_SESSION_INTERRUPTED;
       LOG_WARN("session has been killed", K(session.get_session_state()), K_(stmt_id), K_(param_id),
@@ -155,6 +168,10 @@ int ObMPStmtSendPieceData::process()
                && OB_FAIL(session.update_sys_variable(SYS_VAR_OB_TRACE_INFO,
                                                       pkt.get_trace_info()))) {
       LOG_WARN("fail to update trace info", K(ret));
+    } else if (FALSE_IT(session.set_txn_free_route(pkt.txn_free_route()))) {
+    } else if (OB_FAIL(process_extra_info(session, pkt, need_response_error))) {
+      LOG_WARN("fail get process extra info", K(ret));
+    } else if (FALSE_IT(session.post_sync_session_info())) {
     } else {
       THIS_WORKER.set_timeout_ts(get_receive_timestamp() + query_timeout);
       session.partition_hit().reset();
@@ -164,7 +181,9 @@ int ObMPStmtSendPieceData::process()
     }
 
     if (OB_FAIL(ret)) {
-      send_error_packet(ret, NULL);
+      if (need_response_error) {
+        send_error_packet(ret, NULL);
+      }
       force_disconnect();
       LOG_WARN("disconnect connection when process query", K(ret));
     }
@@ -185,15 +204,9 @@ int ObMPStmtSendPieceData::process_send_long_data_stmt(ObSQLSessionInfo &session
   setup_wb(session);
 
   ObVirtualTableIteratorFactory vt_iter_factory(*gctx_.vt_iter_creator_);
-  ObSessionStatEstGuard stat_est_guard(get_conn()->tenant_->id(), session.get_sessid());
-  const bool enable_trace_log = lib::is_trace_log_enabled();
-  if (enable_trace_log) {
-    ObThreadLogLevelUtils::init(session.get_log_id_level_map());
-  }
+  ObThreadLogLevelUtils::init(session.get_log_id_level_map());
   ret = do_process(session);
-  if (enable_trace_log) {
-    ObThreadLogLevelUtils::clear();
-  }
+  ObThreadLogLevelUtils::clear();
 
   //对于tracelog的处理，不影响正常逻辑，错误码无须赋值给ret
   int tmp_ret = OB_SUCCESS;
@@ -206,22 +219,28 @@ int ObMPStmtSendPieceData::process_send_long_data_stmt(ObSQLSessionInfo &session
 int ObMPStmtSendPieceData::do_process(ObSQLSessionInfo &session)
 {
   int ret = OB_SUCCESS;
+  ObExecutingSqlStatRecord sqlstat_record;
   ObAuditRecordData &audit_record = session.get_raw_audit_record();
   audit_record.try_cnt_++;
   const bool enable_perf_event = lib::is_diagnose_info_enabled();
   const bool enable_sql_audit = GCONF.enable_sql_audit
                                 && session.get_local_ob_enable_sql_audit();
+  const bool enable_sqlstat = session.is_sqlstat_enabled();
   single_process_timestamp_ = ObTimeUtility::current_time();
   bool is_diagnostics_stmt = false;
 
   ObWaitEventStat total_wait_desc;
-  ObDiagnoseSessionInfo *di = ObDiagnoseSessionInfo::get_local_diagnose_info();
   {
     ObMaxWaitGuard max_wait_guard(enable_perf_event
-                                    ? &audit_record.exec_record_.max_wait_event_ : NULL, di);
-    ObTotalWaitGuard total_wait_guard(enable_perf_event ? &total_wait_desc : NULL, di);
+                                    ? &audit_record.exec_record_.max_wait_event_ : nullptr);
+    ObTotalWaitGuard total_wait_guard(enable_perf_event ? &total_wait_desc : nullptr);
     if (enable_perf_event) {
-      audit_record.exec_record_.record_start(di);
+      audit_record.exec_record_.record_start();
+    }
+    if (enable_sqlstat) {
+      sqlstat_record.record_sqlstat_start_value();
+      sqlstat_record.set_is_in_retry(session.get_is_in_retry());
+      session.sql_sess_record_sql_stat_start_value(sqlstat_record);
     }
     int64_t execution_id = 0;
     ObString sql = "send long data";
@@ -246,13 +265,17 @@ int ObMPStmtSendPieceData::do_process(ObSQLSessionInfo &session)
       audit_record.exec_timestamp_.update_stage_time();
 
       if (enable_perf_event) {
-        audit_record.exec_record_.record_end(di);
+        audit_record.exec_record_.record_end();
         audit_record.exec_record_.wait_time_end_ = total_wait_desc.time_waited_;
         audit_record.exec_record_.wait_count_end_ = total_wait_desc.total_waits_;
         audit_record.update_event_stage_state();
         const int64_t time_cost = exec_end_timestamp_ - get_receive_timestamp();
         EVENT_INC(SQL_PS_PREPARE_COUNT);
         EVENT_ADD(SQL_PS_PREPARE_TIME, time_cost);
+      }
+      if (enable_sqlstat) {
+        sqlstat_record.record_sqlstat_end_value();
+
       }
     }
   } // diagnose end
@@ -306,7 +329,7 @@ int ObMPStmtSendPieceData::do_process(ObSQLSessionInfo &session)
 int ObMPStmtSendPieceData::store_piece(ObSQLSessionInfo &session)
 {
   int ret = OB_SUCCESS;
-  ObPieceCache *piece_cache = static_cast<ObPieceCache*>(session.get_piece_cache(true));
+  ObPieceCache *piece_cache = session.get_piece_cache(true);
   if (OB_ISNULL(piece_cache)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("piece cache is null.", K(ret), K(stmt_id_));
@@ -328,6 +351,8 @@ int ObMPStmtSendPieceData::store_piece(ObSQLSessionInfo &session)
                                                       &buffer_))) {
         LOG_WARN("add piece buffer fail.", K(ret), K(stmt_id_));
       } else {
+        LOG_INFO("store piece successfully", K(ret), K(session.get_sessid()),
+                                             K(stmt_id_), K(param_id_));
         if (is_null_) {
           OZ (piece->get_is_null_map().add_member(piece->get_position()));
         }
@@ -360,31 +385,31 @@ int ObPiece::piece_init(ObSQLSessionInfo &session,
                         int32_t stmt_id, 
                         uint16_t param_id) {
   int ret = OB_SUCCESS;
+  lib::ContextParam param;
+  ObPieceCache* piece_cache = nullptr;
   set_stmt_id(stmt_id);
   set_param_id(param_id);
-  lib::MemoryContext entity = NULL;
-  lib::ContextParam param;
-  param.set_mem_attr(session.get_effective_tenant_id(),
-                      ObModIds::OB_PL_TEMP, ObCtxIds::DEFAULT_CTX_ID);
-  param.set_page_size(OB_MALLOC_BIG_BLOCK_SIZE);
-  if (OB_FAIL((static_cast<ObPieceCache*>(session.get_piece_cache()))
-                    ->mem_context_->CREATE_CONTEXT(entity, param))) {
-    LOG_WARN("failed to create ref cursor entity", K(ret));
-  } else if (OB_ISNULL(entity)) {
+  param.set_page_size(OB_MALLOC_NORMAL_BLOCK_SIZE)
+      .set_mem_attr(session.get_effective_tenant_id(), "SendPieceProto", ObCtxIds::DEFAULT_CTX_ID);
+  if (OB_ISNULL(piece_cache = session.get_piece_cache())) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("piece cache is null", K(ret));
+  } else if (OB_FAIL(piece_cache->mem_context_->CREATE_CONTEXT(entity_, param))) {
+    LOG_WARN("failed to create piece memory context", K(ret));
+  } else if (OB_ISNULL(entity_)) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
-    LOG_WARN("failed to alloc ref cursor entity", K(ret));
+    LOG_WARN("failed to alloc piece memory context", K(ret));
   } else {
-    void *buf = NULL;
-    ObPieceBufferArray *buf_array = NULL;
-    ObIAllocator *alloc = &entity->get_arena_allocator();
+    void *buf = nullptr;
+    ObPieceBufferArray *buf_array = nullptr;
+    ObIAllocator *alloc = &entity_->get_arena_allocator();
     OV (OB_NOT_NULL(buf = alloc->alloc(sizeof(ObPieceBufferArray))),
         OB_ALLOCATE_MEMORY_FAILED, sizeof(ObPieceBufferArray));
     OX (MEMSET(buf, 0, sizeof(ObPieceBufferArray)));
     OV (OB_NOT_NULL(buf_array = new (buf) ObPieceBufferArray(alloc)));
-    OZ (buf_array->reserve(OB_MAX_PIECE_COUNT));
+    OZ (buf_array->reserve(OB_MAX_PIECE_BUFFER_COUNT));
     if (OB_SUCC(ret)) {
-        set_allocator(alloc);
-        set_buffer_array(buf_array);
+      set_buffer_array(buf_array);
     } else {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("alloc buffer array fail.", K(ret), K(stmt_id), K(param_id));
@@ -695,7 +720,7 @@ int ObPieceCache::make_piece_buffer(ObIAllocator *allocator,
   OX (MEMSET(piece_mem, 0, sizeof(ObPieceBuffer)));
   OV (OB_NOT_NULL(piece_buffer = new (piece_mem) ObPieceBuffer(allocator, mode)));
   CK (OB_NOT_NULL(piece_buffer));
-  OX (piece_buffer->set_piece_buffer(buf));
+  OZ (piece_buffer->set_piece_buffer(buf));
   LOG_DEBUG("make piece buffer.", K(ret), K(mode), K(buf->length()));
   return ret;
 }

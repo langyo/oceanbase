@@ -50,22 +50,8 @@ static void make_random_logic_id(blocksstable::ObLogicMacroBlockId &logic_id)
   logic_id.tablet_id_ = random(1, 10000000);
   blocksstable::ObMacroDataSeq seq;
   seq.macro_data_seq_ = random(1, 10000000);
-  seq.version_ = blocksstable::ObMacroDataSeq::MACRO_DATA_SEQ_VERSION;
   logic_id.data_seq_ = seq;
   logic_id.logic_version_ = random(1, 10000000);
-}
-
-static void make_random_backup_physical_id(ObBackupPhysicalID &physical_id)
-{
-  physical_id.ls_id_ = random(1, ObBackupPhysicalID::MAX_BACKUP_LS_ID);
-  physical_id.type_ = 0;
-  physical_id.turn_id_ = random(1, ObBackupPhysicalID::MAX_BACKUP_TURN_ID);
-  physical_id.retry_id_ = random(0, ObBackupPhysicalID::MAX_BACKUP_RETRY_ID);
-  physical_id.file_id_ = random(0, ObBackupPhysicalID::MAX_BACKUP_FILE_ID);
-  physical_id.reserved_ = 0;
-  physical_id.backup_set_id_ = random(1, ObBackupPhysicalID::MAX_BACKUP_SET_ID);
-  physical_id.offset_ = random(1, ObBackupPhysicalID::MAX_BACKUP_FILE_SIZE);
-  physical_id.length_ = random(1, ObBackupPhysicalID::MAX_BACKUP_BLOCK_SIZE);
 }
 
 static void make_random_backup_set_id(int64_t &backup_set_id)
@@ -109,12 +95,6 @@ static void make_random_table_key(storage::ObITable::TableKey &table_key)
   make_random_tablet_id(table_key.tablet_id_);
   table_key.scn_range_.start_scn_.convert_for_gts(1);
   table_key.scn_range_.end_scn_.convert_for_gts(100);
-}
-
-static void make_random_pair(ObBackupMacroBlockIDPair &pair)
-{
-  make_random_logic_id(pair.logic_id_);
-  make_random_backup_physical_id(pair.physical_id_);
 }
 
 static void make_random_cache_key(ObBackupIndexCacheKey &cache_key)

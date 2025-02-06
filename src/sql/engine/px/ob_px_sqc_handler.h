@@ -64,7 +64,8 @@ public:
     mem_context_(NULL), tenant_id_(UINT64_MAX), reserved_px_thread_count_(0), process_flags_(0),
     end_ret_(OB_SUCCESS), reference_count_(1), notifier_(nullptr), exec_ctx_(nullptr),
     des_phy_plan_(nullptr), sqc_init_args_(nullptr), sub_coord_(nullptr), rpc_level_(INT32_MAX),
-    node_sequence_id_(0), has_interrupted_(false) {
+    node_sequence_id_(0), has_interrupted_(false),
+    part_ranges_spin_lock_(common::ObLatchIds::PX_TENANT_TARGET_LOCK) {
   }
   ~ObPxSqcHandler() = default;
   static constexpr const char *OP_LABEL = ObModIds::ObModIds::OB_SQL_SQC_HANDLER;
@@ -99,7 +100,7 @@ public:
   ObPxSubCoord &get_sub_coord() { return *sub_coord_; }
   ObPxSQCProxy &get_sqc_proxy() { return sub_coord_->get_sqc_proxy(); }
   ObSqcCtx &get_sqc_ctx() { return sub_coord_->get_sqc_ctx(); }
-  int64_t get_ddl_context_id() const { return sub_coord_->get_ddl_context_id(); }
+  const ObDDLCtrl &get_ddl_control() { return sub_coord_->get_ddl_control(); }
   trace::FltTransCtx &get_flt_ctx() { return flt_ctx_; }
   ObPxWorkNotifier &get_notifier() { return *notifier_; }
   int worker_end_hook();
@@ -127,6 +128,9 @@ public:
   void set_node_sequence_id(uint64_t node_sequence_id) { node_sequence_id_ = node_sequence_id; }
   int thread_count_auto_scaling(int64_t &reserved_px_thread_count);
   bool has_interrupted() const { return has_interrupted_; }
+  const Ob2DArray<ObPxTabletRange> &get_partition_ranges() const { return part_ranges_; }
+  int set_partition_ranges(const Ob2DArray<ObPxTabletRange> &part_ranges,
+                           char *buf = NULL, int64_t max_size = 0);
   TO_STRING_KV(K_(tenant_id), K_(reserved_px_thread_count), KP_(notifier),
       K_(exec_ctx), K_(des_phy_plan), K_(sqc_init_args), KP_(sub_coord), K_(rpc_level));
 
@@ -158,6 +162,8 @@ private:
    * 2. worker register interruption first, then check has_interrupted_, skip execution if has_interrupted_ = true.
    */
   bool has_interrupted_;
+  Ob2DArray<ObPxTabletRange> part_ranges_;
+  SpinRWLock part_ranges_spin_lock_;
 };
 
 }

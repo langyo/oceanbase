@@ -13,12 +13,7 @@
 
 #define USING_LOG_PREFIX SQL_ENG
 #include "sql/engine/expr/ob_expr_st_geomfromewkt.h"
-#include "lib/geo/ob_wkt_parser.h"
-#include "observer/omt/ob_tenant_srs.h"
 #include "sql/engine/expr/ob_geo_expr_utils.h"
-#include "lib/geo/ob_geo_coordinate_range_visitor.h"
-#include "lib/geo/ob_geo_reverse_coordinate_visitor.h"
-#include "lib/geo/ob_geo_func_common.h"
 
 
 using namespace oceanbase::common;
@@ -60,7 +55,8 @@ int ObExprPrivSTGeomFromEwkt::eval_st_geomfromewkt(const ObExpr &expr, ObEvalCtx
 {
   int ret = OB_SUCCESS;
   ObEvalCtx::TempAllocGuard tmp_alloc_g(ctx);
-  common::ObArenaAllocator &tmp_allocator = tmp_alloc_g.get_allocator();
+  uint64_t tenant_id = ObMultiModeExprHelper::get_tenant_id(ctx.exec_ctx_.get_my_session());
+  MultimodeAlloctor tmp_allocator(tmp_alloc_g.get_allocator(), expr.type_, tenant_id, ret, N_PRIV_ST_GEOMFROMEWKT);
   ObDatum *datum = NULL;
   bool is_null_result = false;
   uint32_t srid = 0;
@@ -70,17 +66,19 @@ int ObExprPrivSTGeomFromEwkt::eval_st_geomfromewkt(const ObExpr &expr, ObEvalCtx
   ObSQLSessionInfo *session = ctx.exec_ctx_.get_my_session();
   ObGeometry *geo = NULL;
   bool is_geog = false;
+  bool is_3d_geo = false;
 
   // get wkt
-  if (OB_FAIL(expr.args_[0]->eval(ctx, datum))) {
+  if (OB_FAIL(tmp_allocator.eval_arg(expr.args_[0], ctx, datum))) {
     LOG_WARN("eval wkt arg failed", K(ret));
   } else if(datum->is_null()){
     is_null_result = true;
   } else {
     wkt = datum->get_string();
-    if (OB_FAIL(ObTextStringHelper::read_real_string_data(tmp_allocator, *datum,
+    if (OB_FAIL(ObTextStringHelper::read_real_string_data_with_copy(tmp_allocator, *datum,
         expr.args_[0]->datum_meta_, expr.args_[0]->obj_meta_.has_lob_header(), wkt))) {
       LOG_WARN("fail to get real string data", K(ret), K(wkt));
+    } else if (FALSE_IT(tmp_allocator.set_baseline_size(wkt.length()))) {
     }
   }
   // get srid
@@ -92,7 +90,7 @@ int ObExprPrivSTGeomFromEwkt::eval_st_geomfromewkt(const ObExpr &expr, ObEvalCtx
     } else if (srid < 0 || srid > UINT_MAX32) {
       ret = OB_OPERATE_OVERFLOW;
       LOG_WARN("srid input value out of range", K(ret), K(datum->get_int()));
-    } else if (0 != srid) {
+    } else if (ObGeoTypeUtil::need_get_srs(srid)) {
       if (OB_FAIL(OTSRS_MGR->get_tenant_srs_guard(srs_guard))) {
         LOG_WARN("failed to get srs guard", K(ret));
       } else if (OB_FAIL(srs_guard.get_srs_item(srid, srs_item))) {

@@ -1,3 +1,6 @@
+// owner: gaishun.gs
+// owner group: storage
+
 /**
  * Copyright (c) 2021 OceanBase
  * OceanBase CE is licensed under Mulan PubL v2.
@@ -10,13 +13,11 @@
  * See the Mulan PubL v2 for more details.
  */
 
-#include <errno.h>
 #include <gtest/gtest.h>
 #define OK(ass) ASSERT_EQ(OB_SUCCESS, (ass))
 #define protected public
 #define private public
 #include "ob_index_block_data_prepare.h"
-#include "storage/blocksstable/ob_shared_macro_block_manager.h"
 
 namespace oceanbase
 {
@@ -54,7 +55,6 @@ TEST_F(TestSharedMacroBlk, test_used_size_mgr)
   MacroBlockId id1(0, MacroBlockId::AUTONOMIC_BLOCK_INDEX, 0);
   const int64_t illegal_size = ObSharedMacroBlockMgr::SMALL_SSTABLE_STHRESHOLD_SIZE;
   OK(shared_mgr.add_block(id1, illegal_size));
-  ASSERT_NE(OB_SUCCESS, shared_mgr.free_block(id1, illegal_size));
   OK(shared_mgr.free_block(id1, illegal_size - 1));
   OK(shared_mgr.free_block(id1, 1));
   ASSERT_EQ(OB_ENTRY_NOT_EXIST, shared_mgr.block_used_size_.get(id1, size));
@@ -62,9 +62,6 @@ TEST_F(TestSharedMacroBlk, test_used_size_mgr)
   const int64_t legal_size = ObSharedMacroBlockMgr::SMALL_SSTABLE_STHRESHOLD_SIZE - 1;
   OK(shared_mgr.add_block(id1, legal_size));
   OK(shared_mgr.free_block(id1, legal_size)); // delete id from mgr
-  ASSERT_EQ(OB_ENTRY_NOT_EXIST, shared_mgr.block_used_size_.get(id1, size));
-  OK(shared_mgr.free_block(id1, legal_size));
-  OK(shared_mgr.add_block(id1, legal_size)); // delete id from mgr
   ASSERT_EQ(OB_ENTRY_NOT_EXIST, shared_mgr.block_used_size_.get(id1, size));
 
   const int64_t recyclable_size = ObSharedMacroBlockMgr::RECYCLABLE_BLOCK_SIZE - 1;
@@ -94,7 +91,7 @@ TEST_F(TestSharedMacroBlk, test_rebuild_sstable)
   ASSERT_EQ(OB_SUCCESS, ls_handle.get_ls()->get_tablet(tablet_id, tablet_handle));
   ObSharedMacroBlockMgr *shared_blk_mgr = MTL(ObSharedMacroBlockMgr*);
   ObArenaAllocator allocator;
-  ObSSTableIndexBuilder *sstable_index_builder = OB_NEW(ObSSTableIndexBuilder, "SSTableIdx");
+  ObSSTableIndexBuilder *sstable_index_builder = OB_NEW(ObSSTableIndexBuilder, "SSTableIdx",false /*not need writer buffer*/);
   ObIndexBlockRebuilder *index_block_rebuilder = OB_NEW(ObIndexBlockRebuilder, "IdxRebuilder");
   ObSSTable sstable;
 

@@ -38,8 +38,12 @@ using namespace storage;
 namespace storage
 {
 class ObAggDatumBuf;
+class ObAggCellBase;
 class ObAggCell;
+class ObAggCellVec;
+class ObGroupByCellBase;
 class ObGroupByCell;
+class ObGroupByCellVec;
 };
 namespace memtable {
 class ObIMvccCtx;
@@ -47,13 +51,15 @@ class ObIMvccCtx;
 namespace blocksstable
 {
 struct ObMicroIndexInfo;
+struct ObRowHeader;
 
 #define FREE_PTR_FROM_CONTEXT(ctx, ptr, T)                                  \
   do {                                                                      \
     if (nullptr != ptr) {                                                   \
       ptr->~T();                                                            \
-      if (OB_LIKELY(nullptr != ctx && nullptr != ctx->stmt_allocator_)) {   \
-        ctx->stmt_allocator_->free(ptr);                                    \
+      if (OB_LIKELY(nullptr != ctx &&                                       \
+          nullptr != ctx->get_long_life_allocator())) {                     \
+        ctx->get_long_life_allocator()->free(ptr);                          \
       }                                                                     \
       ptr = nullptr;                                                        \
     }                                                                       \
@@ -103,6 +109,7 @@ struct ObMicroBlockData
     DATA_BLOCK,
     INDEX_BLOCK,
     DDL_BLOCK_TREE,
+    DDL_MERGE_INDEX_BLOCK,
     MAX_TYPE
   };
 public:
@@ -131,7 +138,9 @@ public:
   int64_t &get_extra_size() { return extra_size_; }
 
   int64_t total_size() const { return size_ + extra_size_; }
-  bool is_index_block() const { return INDEX_BLOCK == type_ || DDL_BLOCK_TREE == type_;}
+
+  bool is_normal_block() const { return INDEX_BLOCK == type_ || DATA_BLOCK == type_; }
+  bool is_index_block() const { return INDEX_BLOCK == type_ || DDL_BLOCK_TREE == type_ || DDL_MERGE_INDEX_BLOCK == type_;}
 
   void reset() { *this = ObMicroBlockData(); }
   OB_INLINE const ObMicroBlockHeader *get_micro_header() const
@@ -158,6 +167,9 @@ public:
   const char *extra_buf_;
   int64_t extra_size_;
   Type type_;
+
+  static const uint64_t ALIGN_SIZE = 8;
+  static const int64_t ALIGN_REDUNDANCY_SIZE = ALIGN_SIZE - 1;
 };
 
 class ObMicroBlock
@@ -190,14 +202,17 @@ public:
   ObIMicroBlockReaderInfo()
       : is_inited_(false),
       row_count_(-1),
+      original_data_length_(0),
       read_info_(nullptr),
 	  datum_utils_(nullptr)
   {}
   virtual ~ObIMicroBlockReaderInfo() { reset(); }
   OB_INLINE int64_t row_count() const { return row_count_; }
+  OB_INLINE int64_t original_data_length() const { return original_data_length_; }
   OB_INLINE void reset()
   {
     row_count_ = -1;
+    original_data_length_ = 0;
     read_info_ = nullptr;
     datum_utils_ = nullptr;
     is_inited_ = false;
@@ -205,6 +220,7 @@ public:
 
   bool is_inited_;
   int64_t row_count_;
+  int64_t original_data_length_;
   const ObITableReadInfo *read_info_;
   const ObStorageDatumUtils *datum_utils_;
 };
@@ -261,12 +277,15 @@ public:
     Reader,
     Decoder,
     CSDecoder,
+    MemtableReader,
+    MaxReaderType
   };
   ObIMicroBlockReader()
     : ObIMicroBlockReaderInfo()
-  {}
+  {
+    reader_type_ = MaxReaderType;
+  }
   virtual ~ObIMicroBlockReader() {}
-  virtual ObReaderType get_type() = 0;
   virtual void reset() { ObIMicroBlockReaderInfo::reset(); }
   virtual int init(const ObMicroBlockData &block_data, const ObITableReadInfo &read_info) = 0;
   //when there is not read_info in input parameters, it indicates reading all columns from all rows
@@ -292,12 +311,13 @@ public:
       const bool is_index_block = false);
   virtual int get_row_count(
       int32_t col_id,
-      const int64_t *row_ids,
+      const int32_t *row_ids,
       const int64_t row_cap,
       const bool contains_null,
+      const share::schema::ObColumnParam *col_param,
       int64_t &count)
   {
-    UNUSEDx(col_id, row_ids, row_cap, contains_null, count);
+    UNUSEDx(col_id, row_ids, row_cap, contains_null, col_param, count);
     return OB_NOT_SUPPORTED;
   }
   virtual int64_t get_column_count() const = 0;
@@ -309,23 +329,47 @@ public:
                  int64_t &row_idx,
                  bool &equal) = 0;
   virtual int get_column_datum(
+      const ObTableIterParam &iter_param,
+      const ObTableAccessContext &context,
+      const share::schema::ObColumnParam &col_param,
       const int32_t col_offset,
       const int64_t row_index,
       ObStorageDatum &datum)
   {
-    UNUSEDx(col_offset, row_index, datum);
+    UNUSEDx(iter_param, context, col_param, col_offset, row_index, datum);
     return OB_NOT_SUPPORTED;
+  }
+  virtual bool can_pushdown_decoder(
+      const share::schema::ObColumnParam &col_param,
+      const int32_t col_offset,
+      const int32_t *row_ids,
+      const int64_t row_cap,
+      const storage::ObAggCellBase &agg_cell)
+  {
+    UNUSEDx(col_param, col_offset, row_ids, row_cap, agg_cell);
+    return false;
   }
   // for scalar group by pushdown
   virtual int get_aggregate_result(
+      const ObTableIterParam &iter_param,
+      const ObTableAccessContext &context,
       const int32_t col_offset,
-      const share::schema::ObColumnParam *col_param,
-      const int64_t *row_ids,
+      const share::schema::ObColumnParam &col_param,
+      const int32_t *row_ids,
       const int64_t row_cap,
       storage::ObAggDatumBuf &datum_buf,
       storage::ObAggCell &agg_cell)
   {
     UNUSEDx(col_offset, col_param, row_ids, row_cap, datum_buf, agg_cell);
+    return OB_NOT_SUPPORTED;
+  }
+  virtual int get_aggregate_result(
+      const int32_t col_offset,
+      const int32_t *row_ids,
+      const int64_t row_cap,
+      storage::ObAggCellVec &agg_cell)
+  {
+    UNUSEDx(col_offset, row_ids, row_cap, agg_cell);
     return OB_NOT_SUPPORTED;
   }
   // for normal group by pushdown
@@ -337,27 +381,39 @@ public:
   virtual int read_distinct(
       const int32_t group_by_col,
       const char **cell_datas,
-      storage::ObGroupByCell &group_by_cell) const
+      storage::ObGroupByCellBase &group_by_cell) const
   {
     UNUSEDx(group_by_col, cell_datas, group_by_cell);
     return OB_NOT_SUPPORTED;
   }
   virtual int read_reference(
       const int32_t group_by_col,
-      const int64_t *row_ids,
+      const int32_t *row_ids,
       const int64_t row_cap,
-      storage::ObGroupByCell &group_by_cell) const
+      storage::ObGroupByCellBase &group_by_cell) const
   {
     UNUSEDx(group_by_col, row_ids, row_cap, group_by_cell);
     return OB_NOT_SUPPORTED;
   }
   virtual int get_group_by_aggregate_result(
-      const int64_t *row_ids,
+      const int32_t *row_ids,
       const char **cell_datas,
       const int64_t row_cap,
       storage::ObGroupByCell &group_by_cell)
   {
     UNUSEDx(row_ids, cell_datas, row_cap, group_by_cell);
+    return OB_NOT_SUPPORTED;
+  }
+  virtual int get_group_by_aggregate_result(
+      const int32_t *row_ids,
+      const char **cell_datas,
+      const int64_t row_cap,
+      const int64_t vec_offset,
+      uint32_t *len_array,
+      sql::ObEvalCtx &eval_ctx,
+      storage::ObGroupByCellVec &group_by_cell)
+  {
+    UNUSEDx(row_ids, cell_datas, row_cap, vec_offset, len_array, eval_ctx, group_by_cell);
     return OB_NOT_SUPPORTED;
   }
   virtual void reserve_reader_memory(bool reserve) { UNUSED(reserve); }
@@ -381,9 +437,10 @@ public:
       int32_t &compare_result) = 0;
   static int filter_white_filter(
       const sql::ObWhiteFilterExecutor &filter,
-      const common::ObObjMeta &obj_meta,
       const common::ObDatum &datum,
       bool &filtered);
+  virtual bool has_lob_out_row() const = 0;
+  OB_INLINE ObReaderType get_type() const { return reader_type_; }
 
 protected:
   virtual int find_bound(const ObDatumRange &range,
@@ -398,6 +455,7 @@ protected:
       const void* col_buf,
       const int64_t col_capacity,
       const ObMicroBlockHeader *header);
+  ObReaderType reader_type_;
 };
 
 class ObBlockReaderAllocator

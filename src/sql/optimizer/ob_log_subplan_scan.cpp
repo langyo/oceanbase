@@ -12,10 +12,7 @@
 
 #define USING_LOG_PREFIX SQL_OPT
 #include "sql/optimizer/ob_log_subplan_scan.h"
-#include "sql/optimizer/ob_log_plan.h"
-#include "sql/optimizer/ob_opt_est_cost.h"
 #include "sql/optimizer/ob_join_order.h"
-#include "common/ob_smart_call.h"
 using namespace oceanbase::sql;
 using namespace oceanbase::common;
 
@@ -134,7 +131,7 @@ int ObLogSubPlanScan::do_re_est_cost(EstimateCostInfo &param, double &card, doub
       ObOptimizerContext &opt_ctx = get_plan()->get_optimizer_context();
       op_cost = ObOptEstCost::cost_filter_rows(child_card / parallel,
                                                get_filter_exprs(),
-                                               opt_ctx.get_cost_model_type());
+                                               opt_ctx);
       cost = child_cost + op_cost;
       card = child_card * selectivity;
     }

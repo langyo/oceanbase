@@ -13,14 +13,7 @@
 
 #define USING_LOG_PREFIX SQL_ENG
 #include "sql/engine/expr/ob_expr_priv_st_setsrid.h"
-#include "lib/geo/ob_geo_common.h"
-#include "lib/geo/ob_geo_func_common.h"
-#include "lib/geo/ob_geo_utils.h"
-#include "lib/geo/ob_geo.h"
-#include "observer/omt/ob_tenant_srs.h"
-#include "sql/engine/expr/ob_geo_expr_utils.h"
-#include "sql/session/ob_sql_session_info.h"
-#include "share/object/ob_obj_cast_util.h"
+#include "src/sql/session/ob_sql_session_info.h"
 
 using namespace oceanbase::common;
 using namespace oceanbase::sql;
@@ -72,9 +65,7 @@ int ObExprPrivSTSetSRID::calc_result_type2(ObExprResType &type,
       cast_mode &= ~CM_WARN_ON_FAIL; // make cast return error when fail
       cast_mode |= CM_STRING_INTEGER_TRUNC; // make cast check range when string to int
       type_ctx.set_cast_mode(cast_mode); // cast mode only do work in new sql engine cast frame.
-      type.set_type(ObGeometryType);
-      type.set_collation_level(common::CS_LEVEL_COERCIBLE);
-      type.set_collation_type(CS_TYPE_BINARY);
+      type.set_geometry();
       type.set_length((ObAccuracy::DDL_DEFAULT_ACCURACY[ObGeometryType]).get_length());
   }
 

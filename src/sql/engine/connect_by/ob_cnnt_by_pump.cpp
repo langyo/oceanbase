@@ -12,9 +12,8 @@
 
 #define USING_LOG_PREFIX SQL_ENG
 
-#include "sql/engine/connect_by/ob_nl_cnnt_by_op.h"
-#include "sql/engine/expr/ob_expr_null_safe_equal.h"
 #include "ob_cnnt_by_pump.h"
+#include "sql/engine/connect_by/ob_nl_cnnt_by_op.h"
 
 using namespace oceanbase::sql;
 using namespace oceanbase::common;
@@ -97,7 +96,8 @@ void ObConnectByOpPump::reset()
   if (true) {
     datum_store_.reset();
     datum_store_constructed_ = false;
-    hash_table_.reset();
+    hash_table_.reuse();
+    use_hash_ = false;
   }
 }
 
@@ -194,7 +194,7 @@ void ObConnectByOpPump::free_pump_node(PumpNode &pop_node)
   pop_node.row_fetcher_.iterator_ = NULL;
 }
 
-int ObConnectByOpPump::free_pump_node_stack(ObIArray<PumpNode> &stack)
+int ObConnectByOpPump::free_pump_node_stack(ObSegmentArray<PumpNode> &stack)
 {
   int ret = OB_SUCCESS;
   PumpNode pop_node;

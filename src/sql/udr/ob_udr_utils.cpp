@@ -12,9 +12,7 @@
 
 #define USING_LOG_PREFIX SQL_QRR
 #include "sql/ob_sql.h"
-#include "share/config/ob_server_config.h"
 #include "sql/resolver/ob_resolver_utils.h"
-#include "sql/ob_sql_utils.h"
 #include "sql/udr/ob_udr_analyzer.h"
 #include "sql/udr/ob_udr_mgr.h"
 #include "sql/udr/ob_udr_utils.h"
@@ -183,9 +181,13 @@ int ObUDRUtils::clac_dynamic_param_store(const DynamicParamInfoArray& dynamic_pa
   ObIArray<ObPCParam *> &raw_params = pc_ctx.fp_result_.raw_params_;
   ObPhysicalPlanCtx *phy_ctx = pc_ctx.exec_ctx_.get_physical_plan_ctx();
   bool enable_decimal_int = false;
+  ObCompatType compat_type = COMPAT_MYSQL57;
+  bool enable_mysql_compatible_dates = false;
   if (OB_ISNULL(session) || OB_ISNULL(phy_ctx)) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid argument", K(ret), KP(session), KP(phy_ctx));
+  } else if (OB_FAIL(session->get_compatibility_control(compat_type))) {
+    LOG_WARN("failed to get compat type", K(ret));
   } else if (OB_FAIL(param_store.reserve(dynamic_param_list.count()))) {
     LOG_WARN("failed to reserve array", K(ret), K(dynamic_param_list.count()));
   } else if (lib::is_oracle_mode() && OB_FAIL(
@@ -193,6 +195,9 @@ int ObUDRUtils::clac_dynamic_param_store(const DynamicParamInfoArray& dynamic_pa
     LOG_WARN("get sys variable failed", K(ret));
   } else if (OB_FAIL(ObSQLUtils::check_enable_decimalint(session, enable_decimal_int))) {
     LOG_WARN("fail to check enable decimal int", K(ret));
+  } else if (OB_FAIL(ObSQLUtils::check_enable_mysql_compatible_dates(session, false,
+                       enable_mysql_compatible_dates))) {
+    LOG_WARN("fail to check enable mysql compatible dates", K(ret));
   } else {
     ObCollationType coll_conn = static_cast<ObCollationType>(session->get_local_collation_connection());
     for (int i = 0; OB_SUCC(ret) && i < dynamic_param_list.count(); ++i) {
@@ -229,14 +234,17 @@ int ObUDRUtils::clac_dynamic_param_store(const DynamicParamInfoArray& dynamic_pa
                                                         session->get_actual_nls_length_semantics(),
                                                         static_cast<ObCollationType>(server_collation),
                                                         NULL, session->get_sql_mode(),
-                                                        enable_decimal_int))) {
+                                                        enable_decimal_int,
+                                                        compat_type,
+                                                        enable_mysql_compatible_dates,
+                                                        session->get_local_ob_enable_plan_cache()))) {
         LOG_WARN("fail to resolve const", K(ret));
       } else if (OB_FAIL(add_param_to_param_store(value, param_store))) {
         LOG_WARN("failed to add param to param store", K(ret), K(value), K(param_store));
       }
     }
     if (OB_SUCC(ret)) {
-      if (phy_ctx->get_param_store_for_update().assign(param_store)) {
+      if (OB_FAIL(phy_ctx->get_param_store_for_update().assign(param_store))) {
         LOG_WARN("failed to assign param store", K(ret));
       } else {
         pc_ctx.fp_result_.cache_params_ = &(phy_ctx->get_param_store_for_update());
@@ -258,7 +266,8 @@ int ObUDRUtils::match_udr_and_refill_ctx(const ObString &pattern,
   bool enable_udr = sql_ctx.get_enable_user_defined_rewrite();
   ObSQLSessionInfo &session = result.get_session();
   ObExecContext &ectx = result.get_exec_context();
-  if (enable_udr && !(pc_ctx.is_inner_sql() || PC_PL_MODE == pc_ctx.mode_)) {
+  if (enable_udr
+      && !(pc_ctx.is_arraybinding_ || pc_ctx.is_inner_sql() || PC_PL_MODE == pc_ctx.mode_)) {
     ObIAllocator &allocator = result.get_mem_pool();
     PatternConstConsList cst_cons_list;
     if (OB_FAIL(match_udr_item(pattern, session, ectx, allocator, item_guard, &cst_cons_list))) {

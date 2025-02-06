@@ -22,6 +22,7 @@
 #include "observer/ob_server_struct.h"
 #include "observer/net/ob_ingress_bw_alloc_service.h"
 #include "observer/ob_srv_rpc_handler.h"
+#include "observer/net/ob_shared_storage_net_throt_service.h"
 
 namespace oceanbase {
 namespace rpc {
@@ -81,8 +82,15 @@ public:
   int net_endpoint_register(const ObNetEndpointKey &endpoint_key, int64_t expire_time);
   int net_endpoint_predict_ingress(const ObNetEndpointKey &endpoint_key, int64_t &predicted_bw);
   int net_endpoint_set_ingress(const ObNetEndpointKey &endpoint_key, int64_t assigned_bw);
+  // share storage net throt
+  rootserver::ObSSNTAllocService *get_SSNT_service();
+  int shared_storage_net_throt_register(const obrpc::ObSSNTEndpointArg &endpoint_storage_infos);
+  int shared_storage_net_throt_predict(
+      const obrpc::ObSSNTEndpointArg &endpoint_storage_infos, ObSharedDeviceResourceArray &predicted_resource);
+  int shared_storage_net_throt_set(const ObSharedDeviceResourceArray &assigned_resource);
 
 private:
+  uint64_t get_root_certificate_table_hash();
   ObGlobalContext &gctx_;
 
   ObSrvXlator xlator_;
@@ -95,6 +103,7 @@ private:
   ObSrvRpcHandler rpc_handler_;
   ObSMHandler mysql_handler_;
   rootserver::ObIngressBWAllocService ingress_service_;
+  rootserver::ObSSNTAllocService SSNT_service_;
 
   rpc::frame::ObNetEasy net_;
   rpc::frame::ObReqTransport *rpc_transport_;
@@ -102,6 +111,7 @@ private:
   rpc::frame::ObReqTransport *mysql_transport_;
   rpc::frame::ObReqTransport *batch_rpc_transport_;
   uint64_t last_ssl_info_hash_;
+  ObSpinLock lock_;
   int64_t standby_fetchlog_bw_limit_;
   uint64_t standby_fetchlog_bytes_;
   int64_t standby_fetchlog_time_;
@@ -131,6 +141,7 @@ static int get_default_net_thread_count()
     cnt = 7;
   } else {
     cnt = max(8, cpu_num / 6);
+    cnt = min(cnt, 64);
   }
   return cnt;
 }

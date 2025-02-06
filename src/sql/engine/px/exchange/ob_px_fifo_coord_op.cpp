@@ -13,16 +13,6 @@
 #define USING_LOG_PREFIX SQL_ENG
 
 #include "ob_px_fifo_coord_op.h"
-#include "share/ob_rpc_share.h"
-#include "share/schema/ob_part_mgr_util.h"
-#include "sql/engine/px/ob_px_util.h"
-#include "sql/dtl/ob_dtl_channel_group.h"
-#include "sql/dtl/ob_dtl_channel_loop.h"
-#include "sql/dtl/ob_dtl_msg_type.h"
-#include "sql/engine/ob_exec_context.h"
-#include "sql/engine/px/ob_px_dtl_msg.h"
-#include "sql/engine/px/ob_px_dtl_proc.h"
-#include "sql/engine/px/ob_px_util.h"
 
 namespace oceanbase
 {
@@ -51,7 +41,10 @@ ObPxFifoCoordOp::ObPxFifoCoordOp(ObExecContext &exec_ctx, const ObOpSpec &spec, 
     rd_wf_piece_msg_proc_(exec_ctx, msg_proc_),
     init_channel_piece_msg_proc_(exec_ctx, msg_proc_),
     reporting_wf_piece_msg_proc_(exec_ctx, msg_proc_),
-    opt_stats_gather_piece_msg_proc_(exec_ctx, msg_proc_)
+    opt_stats_gather_piece_msg_proc_(exec_ctx, msg_proc_),
+    sp_winfunc_px_piece_msg_proc_(exec_ctx, msg_proc_),
+    rd_winfunc_px_piece_msg_proc_(exec_ctx, msg_proc_),
+    join_filter_count_row_piece_msg_proc_(exec_ctx, msg_proc_)
   {}
 
 int ObPxFifoCoordOp::inner_open()
@@ -67,7 +60,7 @@ int ObPxFifoCoordOp::inner_open()
       // use parallel scheduler for ddl to avoid large memory usage because
       // serial scheduler will hold the memory of intermediate result rows
       msg_proc_.set_scheduler(&parallel_scheduler_);
-    } else if (1 == px_dop_) {
+    } else if (use_serial_scheduler_) {
       msg_proc_.set_scheduler(&serial_scheduler_);
     } else {
       msg_proc_.set_scheduler(&parallel_scheduler_);
@@ -102,6 +95,9 @@ int ObPxFifoCoordOp::setup_loop_proc()
       .register_processor(init_channel_piece_msg_proc_)
       .register_processor(reporting_wf_piece_msg_proc_)
       .register_processor(opt_stats_gather_piece_msg_proc_)
+      .register_processor(sp_winfunc_px_piece_msg_proc_)
+      .register_processor(rd_winfunc_px_piece_msg_proc_)
+      .register_processor(join_filter_count_row_piece_msg_proc_)
       .register_interrupt_processor(interrupt_proc_);
   return ret;
 }
@@ -142,10 +138,11 @@ int ObPxFifoCoordOp::fetch_rows(const int64_t row_cnt)
   ObSQLSessionInfo *session = ctx_.get_my_session();
   int64_t query_timeout = 0;
   session->get_query_timeout(query_timeout);
-  if (OB_FAIL(OB_E(EventTable::EN_PX_QC_EARLY_TERMINATE, query_timeout) OB_SUCCESS)) {
-    LOG_WARN("fifo qc not interrupt qc by design", K(ret), K(query_timeout));
+  int ecode = EVENT_CALL(EventTable::EN_PX_QC_EARLY_TERMINATE, query_timeout);
+  if (OB_SUCCESS != ecode && OB_SUCC(ret)) {
+    LOG_WARN("fifo qc not interrupt qc by design", K(ecode), K(query_timeout));
     sleep(14);
-    return ret;
+    return ecode;
   }
 #endif
 
@@ -163,9 +160,13 @@ int ObPxFifoCoordOp::fetch_rows(const int64_t row_cnt)
                                        eval_ctx_);
       } else {
         int64_t read_rows = 0;
-        ret = row_reader_.get_next_batch(MY_SPEC.child_exprs_, MY_SPEC.dynamic_const_exprs_,
+        ret = get_spec().use_rich_format_
+              ? row_reader_.get_next_batch_vec(MY_SPEC.child_exprs_, MY_SPEC.dynamic_const_exprs_,
+                                         eval_ctx_,  row_cnt, read_rows, vector_rows_)
+              : row_reader_.get_next_batch(MY_SPEC.child_exprs_, MY_SPEC.dynamic_const_exprs_,
                                          eval_ctx_,  row_cnt, read_rows, stored_rows_);
         brs_.size_ = read_rows;
+        brs_.all_rows_active_ = true;
       }
       metric_.mark_interval_end(&time_recorder_);
       if (OB_FAIL(ret)) {
@@ -200,12 +201,12 @@ int ObPxFifoCoordOp::fetch_rows(const int64_t row_cnt)
         break;
       }
     }
-
-    if (OB_FAIL(ctx_.fast_check_status())) {
+    if (OB_FAIL(ret)) {
+    } else if (OB_FAIL(ctx_.fast_check_status())) {
       LOG_WARN("fail check status, maybe px query timeout", K(ret));
     } else if (OB_FAIL(msg_loop_.process_any())) {
       LOG_DEBUG("process one failed error", K(ret));
-      if (OB_EAGAIN == ret) {
+      if (OB_DTL_WAIT_EAGAIN == ret) {
         LOG_TRACE("no message, try again", K(ret));
         ret = OB_SUCCESS;
       } else if (OB_ITER_END != ret) {
@@ -227,6 +228,9 @@ int ObPxFifoCoordOp::fetch_rows(const int64_t row_cnt)
         case ObDtlMsgType::DH_INIT_CHANNEL_PIECE_MSG:
         case ObDtlMsgType::DH_SECOND_STAGE_REPORTING_WF_PIECE_MSG:
         case ObDtlMsgType::DH_OPT_STATS_GATHER_PIECE_MSG:
+        case ObDtlMsgType::DH_SP_WINFUNC_PX_PIECE_MSG:
+        case ObDtlMsgType::DH_RD_WINFUNC_PX_PIECE_MSG:
+        case ObDtlMsgType::DH_JOIN_FILTER_COUNT_ROW_PIECE_MSG:
           // all message processed in callback
           break;
         default:
@@ -242,7 +246,8 @@ int ObPxFifoCoordOp::fetch_rows(const int64_t row_cnt)
   } else if (OB_UNLIKELY(OB_SUCCESS != ret)) {
     int ret_terminate = terminate_running_dfos(coord_info_.dfo_mgr_);
     LOG_WARN("QC get error code", K(ret), K(ret_terminate));
-    if (OB_ERR_SIGNALED_IN_PARALLEL_QUERY_SERVER == ret
+    if ((OB_ERR_SIGNALED_IN_PARALLEL_QUERY_SERVER == ret
+        || OB_GOT_SIGNAL_ABORTING == ret)
         && OB_SUCCESS != ret_terminate) {
       ret = ret_terminate;
     }

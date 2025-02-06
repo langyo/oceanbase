@@ -12,10 +12,6 @@
 
 #define USING_LOG_PREFIX SQL_ENG
 #include "ob_expr_quote.h"
-#include "lib/oblog/ob_log.h"
-#include "share/object/ob_obj_cast.h"
-#include "objit/common/ob_item_type.h"
-//#include "sql/engine/expr/ob_expr_promotion_util.h"
 #include "sql/session/ob_sql_session_info.h"
 
 namespace oceanbase
@@ -52,11 +48,12 @@ int ObExprQuote::calc_result_type1(ObExprResType &type, ObExprResType &type1,
   } else {
     type.set_varchar();
     type.set_length(2 * type1.get_length() + 2);
-    if OB_FAIL(aggregate_charsets_for_string_result(type, &type1, 1, type_ctx.get_coll_type())) {
+    if OB_FAIL(aggregate_charsets_for_string_result(type, &type1, 1, type_ctx)) {
       LOG_WARN("aggregate charset for res failed", K(ret));
     } else {
       type1.set_calc_type(ObVarcharType);
       type1.set_calc_collation_type(type.get_collation_type());
+      type1.set_calc_collation_level(type.get_collation_level());
     }
   }
   return ret;
@@ -179,5 +176,13 @@ int ObExprQuote::cg_expr(ObExprCGCtx &expr_cg_ctx, const ObRawExpr &raw_expr,
   rt_expr.eval_func_ = calc_quote_expr;
   return ret;
 }
+
+DEF_SET_LOCAL_SESSION_VARS(ObExprQuote, raw_expr) {
+  int ret = OB_SUCCESS;
+  SET_LOCAL_SYSVAR_CAPACITY(1);
+  EXPR_ADD_LOCAL_SYSVAR(share::SYS_VAR_COLLATION_CONNECTION);
+  return ret;
+}
+
 } //namespace sql
 } //namespace oceanbase

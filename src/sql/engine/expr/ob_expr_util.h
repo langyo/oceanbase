@@ -80,8 +80,6 @@ public:
                              common::ObIArray<size_t> &byte_offset);
   // 将double round到小数点后或者小数点前指定位置
   static double round_double(double val, int64_t dec);
-  // 将double round到小数点后指定位置，.5 -> 1 而不是0
-  static double round_double_nearest(double val, int64_t dec);
   static uint64_t round_uint64(uint64_t val, int64_t dec);
   // 将double trunc到小数点后或者小数点前指定位置
   static double trunc_double(double val, int64_t dec);
@@ -90,11 +88,15 @@ public:
 
   // truncate the decimal part, truncate to INT64_MAX/INT64_MIN too if out of range.
   static int trunc_num2int64(const common::number::ObNumber &nmb, int64_t &v);
+
+  static int trunc_decint2int64(const ObDecimalInt *decint, const int32_t int_bytes, const ObScale scale, int64_t &v);
   // get number out of ObDatum and truncate to int64
   static int trunc_num2int64(const common::ObDatum &datum, int64_t &v)
   {
     return trunc_num2int64(common::number::ObNumber(datum.get_number()), v);
   }
+
+  static int round_decint2int64(const ObDecimalInt *decint, const int32_t int_bytes, const ObScale scale, int64_t &v);
   // round the decimal part, round to INT64_MAX/INT64_MIN too if out of range.
   static int round_num2int64(const common::number::ObNumber &nmb, int64_t &v);
   
@@ -131,6 +133,11 @@ public:
                                       common::ObString &out_str,
                                       const common::ObCollationType &out_collation,
                                       common::ObIAllocator &alloc);
+  static int convert_string_collation_for_regexp(const common::ObString &in_str,
+                                                 const common::ObCollationType &in_collation,
+                                                 common::ObString &out_str,
+                                                 const common::ObCollationType &out_collation,
+                                                 common::ObIAllocator &alloc);
   static int need_convert_string_collation(const common::ObCollationType &in_collation,
                                            const common::ObCollationType &out_collation,
                                            bool &need_convert);
@@ -223,6 +230,65 @@ int calc_##tritype##_expr(const ObExpr &expr, ObEvalCtx &ctx,                 \
   }                                                                           \
   return ret;                                                                 \
 }
+
+class ObSolidifiedVarsContext
+{
+public:
+  ObSolidifiedVarsContext() :
+    local_session_var_(NULL),
+    alloc_(NULL),
+    local_tz_wrap_(NULL)
+  {
+  }
+  ObSolidifiedVarsContext(ObLocalSessionVar *local_var, common::ObIAllocator *alloc) :
+    local_session_var_(local_var),
+    alloc_(alloc),
+    local_tz_wrap_(NULL)
+  {
+  }
+  virtual ~ObSolidifiedVarsContext()
+  {
+    if (NULL != local_tz_wrap_ && NULL != alloc_) {
+      local_tz_wrap_->~ObTimeZoneInfoWrap();
+      alloc_->free(local_tz_wrap_);
+      local_tz_wrap_ = NULL;
+    }
+  }
+  int get_local_tz_info(const sql::ObBasicSessionInfo *session, const common::ObTimeZoneInfo *&tz_info);
+  ObLocalSessionVar *get_local_vars() const { return local_session_var_; }
+  DECLARE_TO_STRING;
+private:
+  ObLocalSessionVar *local_session_var_;
+  common::ObIAllocator *alloc_;
+  //cached vars
+  ObTimeZoneInfoWrap *local_tz_wrap_;
+};
+
+//Get the merged values of solidified vars and current session vars
+//If a var is solidified, return the solidified value. Otherwise return currrent session value.
+//e.g. :
+// ObSolidifiedVarsGetter helper(expr, ctx, session);
+// ObString format;
+// helper.get_local_nls_date_format(format);
+class ObSolidifiedVarsGetter
+{
+public:
+  ObSolidifiedVarsGetter(const ObExpr &expr, const ObEvalCtx &ctx, const ObBasicSessionInfo *session);
+  int get_dtc_params(ObDataTypeCastParams &dtc_params);
+  int get_time_zone_info(const common::ObTimeZoneInfo *&tz_info);
+  int get_sql_mode(ObSQLMode &sql_mode);
+  int get_local_nls_date_format(ObString &format);
+  int get_local_nls_timestamp_format(ObString &format);
+  int get_local_nls_timestamp_tz_format(ObString &format);
+  int get_local_nls_format_by_type(const ObObjType type, ObString &format_str);
+  int get_max_allowed_packet(int64_t &max_size);
+  int get_compat_version(uint64_t &compat_version);
+  //get the specified solidified var
+  int get_local_var(share::ObSysVarClassType var_type, ObSessionSysVar *&sys_var);
+private:
+  const ObSolidifiedVarsContext *local_session_var_;
+  const ObBasicSessionInfo *session_;
+};
 
 }
 }

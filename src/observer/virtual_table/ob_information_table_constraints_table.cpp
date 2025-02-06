@@ -12,10 +12,6 @@
 
 #include "ob_information_table_constraints_table.h"
 
-#include "lib/container/ob_array_serialization.h"
-#include "share/schema/ob_schema_getter_guard.h"
-#include "share/schema/ob_table_schema.h"
-#include "share/schema/ob_schema_utils.h"
 #include "share/schema/ob_constraint.h"
 
 using namespace oceanbase::common;
@@ -253,7 +249,7 @@ int ObInfoSchemaTableConstraintsTable::add_index_constraints(const ObTableSchema
     ret = OB_ERR_UNEXPECTED;
     SERVER_LOG(WARN, "schema guard or cells should not be null", K(ret));
   } else if (OB_FAIL(table_schema.get_simple_index_infos(
-                     simple_index_infos, false))) {
+                     simple_index_infos))) {
     SERVER_LOG(WARN, "get simple_index_infos failed", K(ret));
   }
   for (int64_t i = 0; OB_SUCC(ret) && i < simple_index_infos.count(); i++) {

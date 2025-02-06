@@ -305,24 +305,26 @@ public:
 int ObMicroBlockRawEncoder::build_block(char *&buf, int64_t &size)
 {
   int ret = OB_SUCCESS;
-  int64_t need_size;
-  if (!is_inited_) {
+  int64_t encoders_need_size = 0;
+  const int64_t col_header_size = ctx_.column_cnt_ * (sizeof(ObColumnHeader));
+  char *encoding_meta_buf = nullptr;
+  if (IS_NOT_INIT) {
     ret = OB_NOT_INIT;
     LOG_WARN("not init", K(ret));
-  } else if (datum_rows_.empty()) {
+  } else if (OB_UNLIKELY(datum_rows_.empty())) {
     ret = OB_INNER_STAT_ERROR;
     LOG_WARN("empty micro block", K(ret));
+  } else if (OB_FAIL(set_datum_rows_ptr())) {
+    STORAGE_LOG(WARN, "fail to set datum rows ptr", K(ret));
   } else if (OB_FAIL(pivot())) {
     LOG_WARN("pivot rows to columns failed", K(ret));
   } else if (OB_FAIL(row_indexs_.reserve(datum_rows_.count()))) {
     LOG_WARN("array reserve failed", K(ret), "count", datum_rows_.count());
-  } else if (OB_FAIL(encoder_detection(need_size))) {
+  } else if (OB_FAIL(encoder_detection(encoders_need_size))) {
     LOG_WARN("detect column encoding failed", K(ret));
-  } else if (OB_FAIL(data_buffer_.ensure_space(1<<20))) {
-    STORAGE_LOG(WARN, "fail to ensure space", K(ret), K(data_buffer_));
   } else {
-
-    for (int64_t i = 0; i < ctx_.column_cnt_; ++i) {
+    encoders_need_size = 0;
+    for (int64_t i = 0; OB_SUCC(ret) && i < ctx_.column_cnt_; ++i) {
       const bool force_var_store = false;
       if (NULL != encoders_[i]) {
         free_encoder(encoders_[i]);
@@ -339,12 +341,36 @@ int ObMicroBlockRawEncoder::build_block(char *&buf, int64_t &size)
         encoders_[i] = e;
       }
     }
+    for (int64_t i = 0; OB_SUCC(ret) && i < encoders_.count(); i++) {
+      int64_t need_size = 0;
+      if (OB_FAIL(encoders_.at(i)->get_encoding_store_meta_need_space(need_size))) {
+        STORAGE_LOG(WARN, "fail to get_encoding_store_meta_need_space", K(ret), K(i), K(encoders_));
+      } else {
+        need_size += encoders_.at(i)->calc_encoding_fix_data_need_space();
+        encoders_need_size += need_size;
+      }
+    }
+  }
 
+  if (OB_FAIL(ret)) {
+  } else if (OB_FAIL(data_buffer_.ensure_space(col_header_size + encoders_need_size))) {
+    STORAGE_LOG(WARN, "fail to ensure space", K(ret), K(data_buffer_));
+  } else if (OB_ISNULL(encoding_meta_buf = static_cast<char *>(encoding_meta_allocator_.alloc(encoders_need_size)))) {
+    ret = OB_ALLOCATE_MEMORY_FAILED;
+    STORAGE_LOG(WARN, "fail to alloc fix header buf", K(ret), K(encoders_need_size));
+  } else {
+    STORAGE_LOG(DEBUG, "[debug] build micro block", K_(estimate_size), K_(header_size), K_(expand_pct),
+        K(datum_rows_.count()), K(ctx_));
 
-    // <1> store encoding metas and fix cols data
+    // <1> store encoding metas and fix cols data in encoding_meta_buffer
     int64_t encoding_meta_offset = 0;
-    if (OB_FAIL(store_encoding_meta_and_fix_cols(encoding_meta_offset))) {
+    int64_t encoding_meta_size = 0;
+    ObBufferWriter meta_buf_writer(encoding_meta_buf, encoders_need_size, 0);
+    if (OB_FAIL(store_encoding_meta_and_fix_cols(meta_buf_writer, encoding_meta_offset))) {
       LOG_WARN("failed to store encoding meta and fixed col data", K(ret));
+    } else if (FALSE_IT(encoding_meta_size = meta_buf_writer.length())) {
+    } else if (OB_FAIL(data_buffer_.write_nop(encoding_meta_size))) {
+      STORAGE_LOG(WARN, "failed to write nop", K(ret), K(meta_buf_writer), K(data_buffer_));
     }
 
     // <2> set row data store offset
@@ -353,7 +379,7 @@ int ObMicroBlockRawEncoder::build_block(char *&buf, int64_t &size)
       if (OB_FAIL(set_row_data_pos(fix_data_size))) {
         LOG_WARN("set row data position failed", K(ret));
       } else {
-        get_header(data_buffer_)->var_column_count_ = static_cast<int16_t>(var_data_encoders_.count());
+        get_header(data_buffer_)->var_column_count_ = static_cast<uint16_t>(var_data_encoders_.count());
       }
     }
 
@@ -375,10 +401,12 @@ int ObMicroBlockRawEncoder::build_block(char *&buf, int64_t &size)
         }
         ObIntegerArrayGenerator gen;
         const int64_t row_index_size = row_indexs_.count() * get_header(data_buffer_)->row_index_byte_;
-        if (OB_FAIL(gen.init(data_buffer_.data() + data_buffer_.length(), get_header(data_buffer_)->row_index_byte_))) {
+        if (OB_FAIL(data_buffer_.ensure_space(row_index_size))) {
+          STORAGE_LOG(WARN, "fail to ensure space", K(ret), K(row_index_size), K(data_buffer_));
+        } else if (OB_FAIL(gen.init(data_buffer_.data() + data_buffer_.length(), get_header(data_buffer_)->row_index_byte_))) {
           LOG_WARN("init integer array generator failed",
               K(ret), "byte", get_header(data_buffer_)->row_index_byte_);
-        } else if (OB_FAIL(data_buffer_.write_nop(row_index_size, true))) {
+        } else if (OB_FAIL(data_buffer_.write_nop(row_index_size))) {
           LOG_WARN("advance data buffer failed", K(ret), K(row_index_size));
         } else {
           for (int64_t idx = 0; idx < row_indexs_.count(); ++idx) {
@@ -388,19 +416,20 @@ int ObMicroBlockRawEncoder::build_block(char *&buf, int64_t &size)
       }
     }
 
-    // <5> fill header
+    // <5> fill header, encoding_meta and fix cols data
     if (OB_SUCC(ret)) {
-      get_header(data_buffer_)->row_count_ = static_cast<int16_t>(datum_rows_.count());
+      get_header(data_buffer_)->row_count_ = static_cast<uint32_t>(datum_rows_.count());
       get_header(data_buffer_)->has_string_out_row_ = has_string_out_row_;
       get_header(data_buffer_)->all_lob_in_row_ = !has_lob_out_row_;
-
-
+      get_header(data_buffer_)->max_merged_trans_version_ = max_merged_trans_version_;
       const int64_t header_size = get_header(data_buffer_)->header_size_;
       char *data = data_buffer_.data() + header_size;
       FOREACH(e, encoders_) {
         MEMCPY(data, &(*e)->get_column_header(), sizeof(ObColumnHeader));
         data += sizeof(ObColumnHeader);
       }
+      // fill encoding meta and fix cols data
+      MEMCPY(data_buffer_.data() + encoding_meta_offset, encoding_meta_buf, encoding_meta_size);
     }
 
     if (OB_SUCC(ret)) {
@@ -413,7 +442,7 @@ int ObMicroBlockRawEncoder::build_block(char *&buf, int64_t &size)
         ObIColumnEncoder *e = encoders_.at(idx);
         pe.type_ = static_cast<ObColumnHeader::Type>(e->get_column_header().type_);
         if (ObColumnHeader::is_inter_column_encoder(pe.type_)) {
-          pe.ref_col_idx_ = static_cast<ObColumnEqualEncoder *>(e)->get_ref_col_idx();
+          pe.ref_col_idx_ = static_cast<ObSpanColumnEncoder *>(e)->get_ref_col_idx();
         } else {
           pe.ref_col_idx_ = 0;
         }
@@ -498,6 +527,12 @@ protected:
   void bt_op_test_for_all(const bool is_column_store);
   void bt_op_test_for_simple(const bool is_column_store);
   void bt_op_test_for_general(const bool is_column_store);
+  void init_filter(sql::ObWhiteFilterExecutor &filter,
+    common::ObFixedArray<ObObj, ObIAllocator> &filter_objs,
+    sql::ObExpr *expr_buf, sql::ObExpr **expr_p_buf, ObDatum *datums, void *datum_buf);
+  void init_in_filter(sql::ObWhiteFilterExecutor &filter,
+    common::ObFixedArray<ObObj, ObIAllocator> &filter_objs,
+    sql::ObExpr *expr_buf, sql::ObExpr **expr_p_buf, ObDatum *datums, void *datum_buf);
   int test_filter_pushdown(const bool is_column_store, const uint64_t col_idx,
     ObIMicroBlockDecoder *decoder, sql::ObPushdownWhiteFilterNode &filter_node,
     const int64_t row_start, const int64_t row_count, common::ObBitmap &result_bitmap,
@@ -1091,8 +1126,8 @@ void TestDecoderFilterPerf::init_encoding_ctx(
       } \
     } else { \
       const int64_t cur_column_cnt = full_column_cnt_; \
-      int64_t row_ids[SIMPLE_ROW_CNT]; \
-      for (int64_t i = 0; i < SIMPLE_ROW_CNT; ++i) { \
+      int32_t row_ids[SIMPLE_ROW_CNT]; \
+      for (int32_t i = 0; i < SIMPLE_ROW_CNT; ++i) { \
         row_ids[i] = i; \
       } \
       ObSEArray<int32_t, OB_DEFAULT_SE_ARRAY_COUNT> cols; \
@@ -1103,13 +1138,17 @@ void TestDecoderFilterPerf::init_encoding_ctx(
       char *datum_ptr_buf = reinterpret_cast<char *>(cur_allocator.alloc(SIMPLE_ROW_CNT * cur_column_cnt * sizeof(char) * single_ptr_buf_len)); \
       ObDatum *datum_buf = new ObDatum[SIMPLE_ROW_CNT * cur_column_cnt]; \
       ObSEArray<ObSqlDatumInfo, 16> datum_arr; \
+      void *expr_arr = cur_allocator.alloc(sizeof(sql::ObExpr) * cur_column_cnt); \
+      sql::ObExpr *exprs = reinterpret_cast<sql::ObExpr *>(expr_arr); \
       for (int64_t i = 0; i < cur_column_cnt; ++i) { \
         ASSERT_EQ(OB_SUCCESS, datum_arr.push_back(ObSqlDatumInfo())); \
         datum_arr.at(i).datum_ptr_ = datum_buf + SIMPLE_ROW_CNT * i; \
         if (i == cur_column_cnt - 1) { \
-          datum_arr.at(i).map_type_ = ObObjDatumMapType::OBJ_DATUM_STRING; \
+          exprs[i].obj_datum_map_ = ObObjDatumMapType::OBJ_DATUM_STRING; \
+          datum_arr.at(i).expr_ = exprs + i; \
         } else { \
-          datum_arr.at(i).map_type_ = ObObjDatumMapType::OBJ_DATUM_NUMBER; \
+          exprs[i].obj_datum_map_ = ObObjDatumMapType::OBJ_DATUM_NUMBER; \
+          datum_arr.at(i).expr_ = exprs + i; \
         } \
         cols.push_back(i); \
         col_params.push_back(param); \
@@ -1849,6 +1888,101 @@ void TestDecoderFilterPerf::bt_op_test_for_general(const bool is_column_store)
   }
 }
 
+void TestDecoderFilterPerf::init_filter(
+    sql::ObWhiteFilterExecutor &filter,
+    common::ObFixedArray<ObObj, ObIAllocator> &filter_objs,
+    sql::ObExpr *expr_buf,
+    sql::ObExpr **expr_p_buf,
+    ObDatum *datums,
+    void *datum_buf)
+{
+  int count = filter_objs.count();
+  ObWhiteFilterOperatorType op_type = filter.filter_.get_op_type();
+  if (sql::WHITE_OP_NU == op_type || sql::WHITE_OP_NN == op_type) {
+    count = 1;
+  }
+
+  filter.filter_.expr_ = new (expr_buf) ObExpr();
+  filter.filter_.expr_->arg_cnt_ = count + 1;
+  filter.filter_.expr_->args_ = expr_p_buf;
+  ASSERT_EQ(OB_SUCCESS, filter.datum_params_.init(count));
+
+  for (int64_t i = 0; i <= count; ++i) {
+    filter.filter_.expr_->args_[i] = new (expr_buf + 1 + i) ObExpr();
+    if (i < count) {
+      if (sql::WHITE_OP_NU == op_type || sql::WHITE_OP_NN == op_type) {
+        filter.filter_.expr_->args_[i]->obj_meta_.set_null();
+        filter.filter_.expr_->args_[i]->datum_meta_.type_ = ObNullType;
+      } else {
+        filter.filter_.expr_->args_[i]->obj_meta_ = filter_objs.at(i).get_meta();
+        filter.filter_.expr_->args_[i]->datum_meta_.type_ = filter_objs.at(i).get_meta().get_type();
+        datums[i].ptr_ = reinterpret_cast<char *>(datum_buf) + i * 128;
+        datums[i].from_obj(filter_objs.at(i));
+        ASSERT_EQ(OB_SUCCESS, filter.datum_params_.push_back(datums[i]));
+        if (filter.is_null_param(datums[i], filter_objs.at(i).get_meta())) {
+          filter.null_param_contained_ = true;
+        }
+      }
+    } else {
+      filter.filter_.expr_->args_[i]->type_ = T_REF_COLUMN;
+      filter.filter_.expr_->args_[i]->obj_meta_.set_null(); // unused
+    }
+  }
+  filter.cmp_func_ = get_datum_cmp_func(filter.filter_.expr_->args_[0]->obj_meta_, filter.filter_.expr_->args_[0]->obj_meta_);
+}
+
+void TestDecoderFilterPerf::init_in_filter(
+    sql::ObWhiteFilterExecutor &filter,
+    common::ObFixedArray<ObObj, ObIAllocator> &filter_objs,
+    sql::ObExpr *expr_buf,
+    sql::ObExpr **expr_p_buf,
+    ObDatum *datums,
+    void *datum_buf)
+{
+  int count = filter_objs.count();
+  ASSERT_TRUE(count > 0);
+  filter.filter_.expr_ = new (expr_buf) ObExpr();
+  filter.filter_.expr_->arg_cnt_ = 2;
+  filter.filter_.expr_->args_ = expr_p_buf;
+  filter.filter_.expr_->args_[0] = new (expr_buf + 1) ObExpr();
+  filter.filter_.expr_->args_[1] = new (expr_buf + 2) ObExpr();
+  filter.filter_.expr_->inner_func_cnt_ = count;
+  filter.filter_.expr_->args_[1]->args_ = expr_p_buf + 2;
+
+  ObObjMeta obj_meta = filter_objs.at(0).get_meta();
+  sql::ObExprBasicFuncs *basic_funcs = ObDatumFuncs::get_basic_func(
+    obj_meta.get_type(), obj_meta.get_collation_type(), obj_meta.get_scale(), false, obj_meta.has_lob_header());
+  ObDatumCmpFuncType cmp_func = get_datum_cmp_func(obj_meta, obj_meta);
+
+  filter.filter_.expr_->args_[0]->type_ = T_REF_COLUMN;
+  filter.filter_.expr_->args_[0]->obj_meta_ = obj_meta;
+  filter.filter_.expr_->args_[0]->datum_meta_.type_ = obj_meta.get_type();
+  filter.filter_.expr_->args_[0]->basic_funcs_ = basic_funcs;
+
+  ASSERT_EQ(OB_SUCCESS, filter.datum_params_.init(count));
+  ASSERT_EQ(OB_SUCCESS, filter.param_set_.create(count * 2));
+  filter.param_set_.set_hash_and_cmp_func(basic_funcs->murmur_hash_v2_, basic_funcs->null_first_cmp_);
+  for (int64_t i = 0; i < count; ++i) {
+    filter.filter_.expr_->args_[1]->args_[i] = new (expr_buf + 3 + i) ObExpr();
+    filter.filter_.expr_->args_[1]->args_[i]->obj_meta_ = obj_meta;
+    filter.filter_.expr_->args_[1]->args_[i]->datum_meta_.type_ = obj_meta.get_type();
+    filter.filter_.expr_->args_[1]->args_[i]->basic_funcs_ = basic_funcs;
+    datums[i].ptr_ = reinterpret_cast<char *>(datum_buf) + i * 128;
+    datums[i].from_obj(filter_objs.at(i));
+    if (!filter.is_null_param(datums[i], filter_objs.at(i).get_meta())) {
+      ASSERT_EQ(OB_SUCCESS, filter.add_to_param_set_and_array(datums[i], filter.filter_.expr_->args_[1]->args_[i]));
+    }
+  }
+  std::sort(filter.datum_params_.begin(), filter.datum_params_.end(),
+            [cmp_func] (const ObDatum datum1, const ObDatum datum2) {
+                int cmp_ret = 0;
+                cmp_func(datum1, datum2, cmp_ret);
+                return cmp_ret < 0;
+            });
+  filter.cmp_func_ = cmp_func;
+  filter.param_set_.set_hash_and_cmp_func(basic_funcs->murmur_hash_v2_, filter.cmp_func_);
+}
+
 int TestDecoderFilterPerf::test_filter_pushdown(
     const bool is_column_store,
     const uint64_t col_idx,
@@ -1882,66 +2016,39 @@ int TestDecoderFilterPerf::test_filter_pushdown(
   pd_filter_info.col_capacity_ = full_column_cnt_;
   pd_filter_info.start_ = row_start;
   pd_filter_info.count_ = row_count;
+
   int count = objs.count();
-  int64_t arg_cnt = objs.count() + 1;
-  if (sql::WHITE_OP_NU == filter_node.get_op_type() ||
-      sql::WHITE_OP_NN == filter_node.get_op_type()) {
-    arg_cnt = 2;
+  ObWhiteFilterOperatorType op_type = filter_node.get_op_type();
+  if (sql::WHITE_OP_NU == op_type || sql::WHITE_OP_NN == op_type) {
+    count = 1;
   }
+  int count_expr = WHITE_OP_IN == op_type ? count + 3 : count + 2;
+  int count_expr_p = WHITE_OP_IN == op_type ? count + 2 : count + 1;
+  sql::ObExpr *expr_buf = reinterpret_cast<sql::ObExpr *>(allocator_.alloc(sizeof(sql::ObExpr) * count_expr));
+  sql::ObExpr **expr_p_buf = reinterpret_cast<sql::ObExpr **>(allocator_.alloc(sizeof(sql::ObExpr*) * count_expr_p));
+  void *datum_buf = allocator_.alloc(sizeof(int8_t) * 128 * count);
+  ObDatum datums[count];
+  EXPECT_TRUE(OB_NOT_NULL(expr_buf));
+  EXPECT_TRUE(OB_NOT_NULL(expr_p_buf));
 
-  void *expr_ptr = cur_allocator.alloc(sizeof(sql::ObExpr));
-  void *expr_ptr_arr = cur_allocator.alloc(sizeof(sql::ObExpr*) * arg_cnt);
-  void *expr_arr = cur_allocator.alloc(sizeof(sql::ObExpr) * arg_cnt);
-  if (OB_ISNULL(expr_ptr) || OB_ISNULL(expr_ptr_arr) || OB_ISNULL(expr_arr)) {
-    ret = OB_ALLOCATE_MEMORY_FAILED;
+  if (WHITE_OP_IN == op_type) {
+    init_in_filter(filter, objs, expr_buf, expr_p_buf, datums, datum_buf);
   } else {
-    filter.filter_.expr_ = reinterpret_cast<sql::ObExpr *>(expr_ptr);
-    filter.filter_.expr_->args_ = reinterpret_cast<sql::ObExpr **>(expr_ptr_arr);
-    filter.filter_.expr_->arg_cnt_ = arg_cnt;
-    filter.datum_params_.init(arg_cnt);
-    int64_t datum_buf_size = sizeof(int8_t) * 128 * arg_cnt;
-    void *datum_buf = cur_allocator.alloc(datum_buf_size);
-    MEMSET(datum_buf, '\0', datum_buf_size);
-    EXPECT_TRUE(datum_buf != nullptr);
-    ObDatum datums[arg_cnt];
-    for (int64_t idx = 0; idx < arg_cnt; ++idx) {
-      filter.filter_.expr_->args_[idx] = reinterpret_cast<sql::ObExpr *>(expr_arr) + idx;
-      if (idx < arg_cnt - 1) {
-        if (sql::WHITE_OP_NU == filter_node.get_op_type() ||
-            sql::WHITE_OP_NN == filter_node.get_op_type()) {
-          filter.filter_.expr_->args_[idx]->obj_meta_.set_null();
-          filter.filter_.expr_->args_[idx]->datum_meta_.type_ = ObNullType;
-        } else {
-          filter.filter_.expr_->args_[idx]->obj_meta_ = objs.at(idx).get_meta();
-          filter.filter_.expr_->args_[idx]->datum_meta_.type_ = objs.at(idx).get_meta().get_type();
-          datums[idx].ptr_ = reinterpret_cast<char *>(datum_buf) + idx * 128;
-          datums[idx].from_obj(objs.at(idx));
-          filter.datum_params_.push_back(datums[idx]);
-        }
-      } else {
-        filter.filter_.expr_->args_[idx]->type_ = T_REF_COLUMN;
-      }
-    }
-    if (OB_UNLIKELY(2 > filter.filter_.expr_->arg_cnt_)) {
-      ret = OB_ERR_UNEXPECTED;
-      LOG_WARN("Unexpected filter expr", K(ret), K(filter.filter_.expr_->arg_cnt_));
-    } else {
-      filter.cmp_func_ = get_datum_cmp_func(filter.filter_.expr_->args_[0]->obj_meta_, filter.filter_.expr_->args_[0]->obj_meta_);
-      if (sql::WHITE_OP_IN == filter.get_op_type()) {
-        filter.init_obj_set();
-      }
-
-      uint64_t start_ns = ObTimeUtility::current_time_ns();
-      ret = decoder->filter_pushdown_filter(nullptr, filter, pd_filter_info, result_bitmap);
-      filter_cost_ns = ObTimeUtility::current_time_ns() - start_ns;
-
-      if (nullptr != storage_datum_buf) { cur_allocator.free(storage_datum_buf); }
-      if (nullptr != expr_ptr) { cur_allocator.free(expr_ptr); }
-      if (nullptr != expr_ptr_arr) { cur_allocator.free(expr_ptr_arr); }
-      if (nullptr != expr_arr) { cur_allocator.free(expr_arr); }
-      if (nullptr != datum_buf) { cur_allocator.free(datum_buf); }
-    }
+    init_filter(filter, objs, expr_buf, expr_p_buf, datums, datum_buf);
   }
+
+  if (OB_UNLIKELY(2 > filter.filter_.expr_->arg_cnt_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("Unexpected filter expr", K(ret), K(filter.filter_.expr_->arg_cnt_));
+  } else {
+    uint64_t start_ns = ObTimeUtility::current_time_ns();
+    ret = decoder->filter_pushdown_filter(nullptr, filter, pd_filter_info, result_bitmap);
+    filter_cost_ns = ObTimeUtility::current_time_ns() - start_ns;
+  }
+  if (nullptr != storage_datum_buf) { cur_allocator.free(storage_datum_buf); }
+  if (nullptr != expr_buf) { cur_allocator.free(expr_buf); }
+  if (nullptr != expr_p_buf) { cur_allocator.free(expr_p_buf); }
+  if (nullptr != datum_buf) { cur_allocator.free(datum_buf); }
   return ret;
 }
 

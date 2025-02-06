@@ -11,22 +11,18 @@
  */
 
 #define USING_LOG_PREFIX SHARE
-#include "share/ob_share_util.h"
-#include "common/ob_timeout_ctx.h"
-#include "lib/worker.h"
-#include "lib/time/ob_time_utility.h"
-#include "lib/oblog/ob_log_module.h"
-#include "share/ob_cluster_version.h" // for GET_MIN_DATA_VERSION
 #ifdef OB_BUILD_ARBITRATION
+#include "ob_share_util.h"
 #include "share/arbitration_service/ob_arbitration_service_utils.h" // ObArbitrationServiceUtils
 #endif
-#include "lib/mysqlclient/ob_isql_client.h"
-#include "observer/omt/ob_tenant_config_mgr.h" // ObTenantConfigGuard
-#include "storage/ls/ob_ls.h" //ObLS
+#include "share/inner_table/ob_inner_table_schema_constants.h"
+#include "observer/ob_server_struct.h"
 
 namespace oceanbase
 {
 using namespace common;
+using namespace common::sqlclient;
+using namespace share::schema;
 namespace share
 {
 
@@ -187,30 +183,8 @@ int ObShareUtil::check_compat_version_for_arbitration_service(
     const uint64_t tenant_id,
     bool &is_compatible)
 {
-  int ret = OB_SUCCESS;
-  is_compatible = false;
-  uint64_t data_version = 0;
-  if (OB_UNLIKELY(OB_INVALID_TENANT_ID == tenant_id)) {
-    ret = OB_INVALID_ARGUMENT;
-    LOG_WARN("invalid argument", KR(ret), K(tenant_id));
-  } else if (OB_FAIL(GET_MIN_DATA_VERSION(OB_SYS_TENANT_ID, data_version))) {
-    LOG_WARN("fail to get sys tenant data version", KR(ret));
-  } else if (DATA_VERSION_4_1_0_0 > data_version) {
-    is_compatible = false;
-  } else if (!is_sys_tenant(tenant_id)
-             && OB_FAIL(GET_MIN_DATA_VERSION(gen_user_tenant_id(tenant_id), data_version))) {
-    LOG_WARN("fail to get user tenant data version", KR(ret), "tenant_id", gen_user_tenant_id(tenant_id));
-  } else if (!is_sys_tenant(tenant_id) && DATA_VERSION_4_1_0_0 > data_version) {
-    is_compatible = false;
-  } else if (!is_sys_tenant(tenant_id)
-             && OB_FAIL(GET_MIN_DATA_VERSION(gen_meta_tenant_id(tenant_id), data_version))) {
-     LOG_WARN("fail to get meta tenant data version", KR(ret), "tenant_id", gen_meta_tenant_id(tenant_id));
-  } else if (!is_sys_tenant(tenant_id) && DATA_VERSION_4_1_0_0 > data_version) {
-    is_compatible = false;
-  } else {
-    is_compatible = true;
-  }
-  return ret;
+  return check_compat_data_version_(DATA_VERSION_4_1_0_0, true/*check_meta*/, true/*check_user*/,
+                                    tenant_id, is_compatible);
 }
 
 int ObShareUtil::generate_arb_replica_num(
@@ -240,25 +214,16 @@ int ObShareUtil::check_compat_version_for_readonly_replica(
     const uint64_t tenant_id,
     bool &is_compatible)
 {
-  int ret = OB_SUCCESS;
-  uint64_t data_version = 0;
-  is_compatible = false;
-  if (OB_UNLIKELY(OB_INVALID_TENANT_ID == tenant_id)) {
-    ret = OB_INVALID_ARGUMENT;
-    LOG_WARN("invalid argument", KR(ret), K(tenant_id));
-  } else if (OB_FAIL(GET_MIN_DATA_VERSION(OB_SYS_TENANT_ID, data_version))) {
-    LOG_WARN("fail to get sys tenant data version", KR(ret));
-  } else if (DATA_VERSION_4_2_0_0 > data_version) {
-    is_compatible = false;
-  } else if (!is_sys_tenant(tenant_id)
-             && OB_FAIL(GET_MIN_DATA_VERSION(gen_meta_tenant_id(tenant_id), data_version))) {
-     LOG_WARN("fail to get meta tenant data version", KR(ret), "tenant_id", gen_meta_tenant_id(tenant_id));
-  } else if (!is_sys_tenant(tenant_id) && DATA_VERSION_4_2_0_0 > data_version) {
-    is_compatible = false;
-  } else {
-    is_compatible = true;
-  }
-  return ret;
+  return check_compat_data_version_(DATA_VERSION_4_2_0_0, true/*check_meta*/, false/*check_user*/,
+                                    tenant_id, is_compatible);
+}
+
+int ObShareUtil::check_compat_version_for_columnstore_replica(
+    const uint64_t tenant_id,
+    bool &is_compatible)
+{
+  return check_compat_data_version_(DATA_VERSION_4_3_3_0, true/*check_meta*/, false/*check_user*/,
+                                    tenant_id, is_compatible);
 }
 
 int ObShareUtil::fetch_current_cluster_version(
@@ -311,8 +276,8 @@ int ObShareUtil::fetch_current_data_version(
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("tenant_id is invalid", KR(ret), K(tenant_id), K(exec_tenant_id));
   } else if (OB_FAIL(sql.assign_fmt(
-      "select value from %s where name = '%s'",
-      OB_TENANT_PARAMETER_TNAME, "compatible"))) {
+      "select value from %s where name = '%s' and tenant_id = %lu",
+      OB_TENANT_PARAMETER_TNAME, "compatible", tenant_id))) {
     LOG_WARN("fail to assign fmt", KR(ret), K(tenant_id), K(sql));
   } else if (OB_FAIL(client.read(res, exec_tenant_id, sql.ptr()))) {
     LOG_WARN("execute sql failed", KR(ret), K(tenant_id), K(sql));
@@ -433,74 +398,305 @@ bool ObShareUtil::is_tenant_enable_rebalance(const uint64_t tenant_id)
 bool ObShareUtil::is_tenant_enable_transfer(const uint64_t tenant_id)
 {
   bool bret = false;
-  if (is_valid_tenant_id(tenant_id)) {
+  if (!is_valid_tenant_id(tenant_id)) {
+    bret = false;
+  } else {
     omt::ObTenantConfigGuard tenant_config(TENANT_CONF(tenant_id));
-    if (OB_UNLIKELY(!tenant_config.is_valid())) {
-      LOG_WARN_RET(OB_ERR_UNEXPECTED, "tenant config is invalid", K(tenant_id));
-    } else if (!tenant_config->enable_rebalance) {
-      // if enable_rebalance is disabled, transfer is not allowed
+     if (OB_UNLIKELY(!tenant_config.is_valid())) {
+       LOG_WARN_RET(OB_ERR_UNEXPECTED, "tenant config is invalid", K(tenant_id));
+     } else if (GCONF.in_upgrade_mode()) {
       bret = false;
-    } else {
+      LOG_TRACE("in upgrade, transfer is not allowed", K(tenant_id), K(bret));
+     } else {
       bret = tenant_config->enable_transfer;
-    }
+      LOG_TRACE("show enable_transfer state", K(tenant_id), K(bret),
+          "enable_transfer", tenant_config->enable_transfer);
+     }
   }
+
   return bret;
 }
 
-ERRSIM_POINT_DEF(ERRSIM_USER_LS_SYNC_SCN);
-int ObShareUtil::wait_user_ls_sync_scn_locally(const share::SCN &sys_ls_target_scn, storage::ObLS &ls)
+int ObShareUtil::check_compat_data_version_(
+  const uint64_t required_data_version,
+  const bool check_meta_tenant,
+  const bool check_user_tenant,
+  const uint64_t tenant_id,
+  bool &is_compatible)
 {
   int ret = OB_SUCCESS;
-  logservice::ObLogHandler *log_handler = ls.get_log_handler();
-  transaction::ObKeepAliveLSHandler *keep_alive_handler = ls.get_keep_alive_ls_handler();
-  ObLSID ls_id = ls.get_ls_id();
-  uint64_t tenant_id = ls.get_tenant_id();
-  ObTimeoutCtx ctx;
-  if (OB_ISNULL(keep_alive_handler) || OB_ISNULL(log_handler )) {
-    ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("keep_alive_ls_handler or log_handler is null", KR(ret), K(ls_id),
-        KP(keep_alive_handler), KP(log_handler));
-  } else if (OB_UNLIKELY(!sys_ls_target_scn.is_valid_and_not_min())) {
+  is_compatible = true;
+  uint64_t data_version = 0;
+  if (OB_UNLIKELY(OB_INVALID_TENANT_ID == tenant_id)
+      || OB_UNLIKELY(0 == required_data_version)) {
     ret = OB_INVALID_ARGUMENT;
-    LOG_WARN("invalid sys_ls_target_scn", KR(ret), K(sys_ls_target_scn));
-  } else if (OB_FAIL(ObShareUtil::set_default_timeout_ctx(ctx, GCONF.rpc_timeout))) {
-    LOG_WARN("fail to set timeout", KR(ret));
-  } else {
-    bool need_retry = true;
-    share::SCN curr_end_scn;
-    curr_end_scn.set_min();
-    (void) keep_alive_handler->set_sys_ls_end_scn(sys_ls_target_scn);
-    do {
-      if (OB_UNLIKELY(ctx.is_timeouted())) {
-        ret = OB_TIMEOUT;
-        need_retry = false;
-        LOG_WARN("ctx timeout", KR(ret), K(ctx));
-      } else {
-        if (OB_FAIL(log_handler->get_end_scn(curr_end_scn))) {
-          LOG_WARN("fail to get ls end scn", KR(ret), K(ls_id));
-        } else {
-          // switchover to standby timeout
-          curr_end_scn = ERRSIM_USER_LS_SYNC_SCN ? SCN::scn_dec(sys_ls_target_scn) : curr_end_scn;
-          LOG_TRACE("wait curr_end_scn >= sys_ls_target_scn", K(curr_end_scn), K(sys_ls_target_scn),
-              "is_errsim_opened", ERRSIM_USER_LS_SYNC_SCN ? true : false);
-        }
-        if (OB_SUCC(ret) && curr_end_scn >= sys_ls_target_scn) {
-          LOG_INFO("current user ls end scn >= sys ls target scn now", K(curr_end_scn),
-              K(sys_ls_target_scn), "is_errsim_opened", ERRSIM_USER_LS_SYNC_SCN ? true : false,
-              K(tenant_id), K(ls_id));
-          need_retry = false;
-        }
+    LOG_WARN("invalid argument", KR(ret), K(tenant_id), K(required_data_version));
+  } else if (OB_FAIL(GET_MIN_DATA_VERSION(OB_SYS_TENANT_ID, data_version))) {
+    LOG_WARN("fail to get sys tenant data version", KR(ret));
+  } else if (required_data_version > data_version) {
+    is_compatible = false;
+  } else if (!is_sys_tenant(tenant_id)) {
+    if (check_meta_tenant) {
+      if (OB_FAIL(GET_MIN_DATA_VERSION(gen_meta_tenant_id(tenant_id), data_version))) {
+        LOG_WARN("fail to get meta tenant data version", KR(ret), "tenant_id", gen_meta_tenant_id(tenant_id));
+      } else if (required_data_version > data_version) {
+        is_compatible = false;
       }
-      if (need_retry) {
-        ob_usleep(50 * 1000); // wait 50ms
+    }
+    if (OB_FAIL(ret) || !is_compatible) {
+      // skip
+    } else if (check_user_tenant) {
+      if (OB_FAIL(GET_MIN_DATA_VERSION(gen_user_tenant_id(tenant_id), data_version))) {
+        LOG_WARN("fail to get user tenant data version", KR(ret), "tenant_id", gen_user_tenant_id(tenant_id));
+      } else if (required_data_version > data_version) {
+        is_compatible = false;
       }
-    } while (need_retry && OB_SUCC(ret));
-    if (OB_UNLIKELY(need_retry && OB_SUCC(ret))) {
-      ret = OB_ERR_UNEXPECTED;
-      LOG_WARN("the wait loop should not be terminated", KR(ret), K(curr_end_scn), K(sys_ls_target_scn));
     }
   }
   return ret;
+}
+
+int ObShareUtil::check_compat_version_for_clone_standby_tenant(
+    const uint64_t tenant_id,
+    bool &is_compatible)
+{
+  int ret = OB_SUCCESS;
+  is_compatible = false;
+  uint64_t target_data_version = DATA_VERSION_4_3_2_0;
+  if (OB_UNLIKELY(!is_valid_tenant_id(tenant_id))) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid argument", KR(ret), K(tenant_id));
+  } else if (OB_FAIL(check_compat_data_version_(target_data_version,
+                      true/*check_meta*/, true/*check_user*/, tenant_id, is_compatible))) {
+    LOG_WARN("fail to check data version for clone tenant", KR(ret),
+             K(tenant_id), K(target_data_version));
+  }
+  return ret;
+}
+
+int ObShareUtil::check_compat_version_for_clone_tenant(
+    const uint64_t tenant_id,
+    bool &is_compatible)
+{
+  int ret = OB_SUCCESS;
+  is_compatible = false;
+  uint64_t target_data_version = DATA_VERSION_4_3_0_0;
+  if (OB_UNLIKELY(OB_INVALID_TENANT_ID == tenant_id)) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid argument", KR(ret), K(tenant_id));
+  } else if (OB_FAIL(check_compat_data_version_(target_data_version,
+                      true/*check_meta*/, true/*check_user*/, tenant_id, is_compatible))) {
+    LOG_WARN("fail to check data version for clone tenant", KR(ret),
+             K(tenant_id), K(target_data_version));
+  }
+  return ret;
+}
+
+int ObShareUtil::check_compat_version_for_clone_tenant_with_tenant_role(
+    const uint64_t tenant_id,
+    bool &is_compatible)
+{
+  int ret = OB_SUCCESS;
+  is_compatible = false;
+  ObAllTenantInfo all_tenant_info;
+  if (OB_UNLIKELY(!is_valid_tenant_id(tenant_id))) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid argument", KR(ret), K(tenant_id));
+  } else if (OB_ISNULL(GCTX.sql_proxy_)) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid argument", KR(ret));
+  } else if (OB_FAIL(ObAllTenantInfoProxy::load_tenant_info(
+                         tenant_id, GCTX.sql_proxy_,
+                         false/*for_update*/, all_tenant_info))) {
+    LOG_WARN("failed to load tenant info", KR(ret), K(tenant_id), K(all_tenant_info));
+  } else if (all_tenant_info.is_standby()) {
+    if (OB_FAIL(check_compat_version_for_clone_standby_tenant(tenant_id, is_compatible))) {
+      LOG_WARN("fail to check compatible version for standby tenant", KR(ret), K(tenant_id));
+    }
+  } else if (all_tenant_info.is_primary()) {
+    if (OB_FAIL(check_compat_version_for_clone_tenant(tenant_id, is_compatible))) {
+      LOG_WARN("fail to check compatible version for primary tenant", KR(ret), K(tenant_id));
+    }
+  } else {
+    ret = OB_OP_NOT_ALLOW;
+    LOG_WARN("can not clone tenant with tenant role is neither PRIMARY nor STANDBY",
+              KR(ret), K(all_tenant_info));
+  }
+  return ret;
+}
+
+int ObShareUtil::mtl_get_tenant_role(const uint64_t tenant_id, ObTenantRole::Role &tenant_role)
+{
+  int ret = OB_SUCCESS;
+  tenant_role = ObTenantRole::INVALID_TENANT;
+  if (OB_UNLIKELY(!is_valid_tenant_id(tenant_id))) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid tenant_id", KR(ret), K(tenant_id));
+  } else if (is_sys_tenant(tenant_id) || is_meta_tenant(tenant_id)) {
+    tenant_role = ObTenantRole::PRIMARY_TENANT;
+  } else {
+    MTL_SWITCH(tenant_id) {
+      tenant_role = MTL_GET_TENANT_ROLE_CACHE();
+    }
+  }
+  if (OB_SUCC(ret) && OB_UNLIKELY(is_invalid_tenant(tenant_role))) {
+    ret = OB_NEED_WAIT;
+    LOG_WARN("tenant role is not ready, need wait", KR(ret), K(tenant_id), K(tenant_role));
+  }
+  return ret;
+}
+
+int ObShareUtil::mtl_check_if_tenant_role_is_primary(const uint64_t tenant_id, bool &is_primary)
+{
+  int ret = OB_SUCCESS;
+  is_primary = false;
+  ObTenantRole::Role tenant_role;
+  if (OB_FAIL(mtl_get_tenant_role(tenant_id, tenant_role))) {
+    LOG_WARN("fail to execute mtl_get_tenant_role", KR(ret), K(tenant_id));
+  } else if (is_primary_tenant(tenant_role)) {
+    is_primary = true;
+  }
+  return ret;
+}
+
+int ObShareUtil::mtl_check_if_tenant_role_is_standby(const uint64_t tenant_id, bool &is_standby)
+{
+  int ret = OB_SUCCESS;
+  is_standby = false;
+  ObTenantRole::Role tenant_role;
+  if (OB_FAIL(mtl_get_tenant_role(tenant_id, tenant_role))) {
+    LOG_WARN("fail to execute mtl_get_tenant_role", KR(ret), K(tenant_id));
+  } else if (is_standby_tenant(tenant_role)) {
+    is_standby = true;
+  }
+  return ret;
+}
+int ObShareUtil::table_get_tenant_role(const uint64_t tenant_id, ObTenantRole &tenant_role)
+{
+  int ret = OB_SUCCESS;
+  tenant_role.reset();
+  if (OB_UNLIKELY(!is_valid_tenant_id(tenant_id))) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid tenant_id", KR(ret), K(tenant_id));
+  } else if (is_sys_tenant(tenant_id) || is_meta_tenant(tenant_id)) {
+    tenant_role = ObTenantRole::PRIMARY_TENANT;
+  } else if (OB_ISNULL(GCTX.sql_proxy_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("GCTX.sql_proxy_ is null", KR(ret), KP(GCTX.sql_proxy_));
+  } else if (OB_FAIL(ObAllTenantInfoProxy::get_tenant_role(GCTX.sql_proxy_, tenant_id, tenant_role))) {
+    LOG_WARN("fail to get tenant role", KR(ret), KP(GCTX.sql_proxy_), K(tenant_id));
+  } else if (tenant_role.is_invalid()) {
+    ret = OB_NEED_WAIT;
+    LOG_WARN("tenant role is not ready, need wait", KR(ret), K(tenant_role));
+  }
+  return ret;
+}
+int ObShareUtil::table_check_if_tenant_role_is_primary(const uint64_t tenant_id, bool &is_primary)
+{
+  int ret = OB_SUCCESS;
+  share::ObTenantRole tenant_role;
+  is_primary = false;
+  if (OB_FAIL(table_get_tenant_role(tenant_id, tenant_role))) {
+    LOG_WARN("fail to execute table_get_tenant_role", KR(ret), K(tenant_id));
+  } else if (tenant_role.is_primary()) {
+    is_primary = true;
+  }
+  return ret;
+}
+int ObShareUtil::table_check_if_tenant_role_is_standby(const uint64_t tenant_id, bool &is_standby)
+{
+  int ret = OB_SUCCESS;
+  share::ObTenantRole tenant_role;
+  is_standby = false;
+  if (OB_FAIL(table_get_tenant_role(tenant_id, tenant_role))) {
+    LOG_WARN("fail to execute table_get_tenant_role", KR(ret), K(tenant_id));
+  } else if (tenant_role.is_standby()) {
+    is_standby = true;
+  }
+  return ret;
+}
+int ObShareUtil::table_check_if_tenant_role_is_restore(const uint64_t tenant_id, bool &is_restore)
+{
+  int ret = OB_SUCCESS;
+  share::ObTenantRole tenant_role;
+  is_restore = false;
+  if (OB_FAIL(table_get_tenant_role(tenant_id, tenant_role))) {
+    LOG_WARN("fail to execute table_get_tenant_role", KR(ret), K(tenant_id));
+  } else if (tenant_role.is_restore()) {
+    is_restore = true;
+  }
+  return ret;
+}
+const char *ObShareUtil::replica_type_to_string(const ObReplicaType type)
+{
+  const char *str = NULL;
+  switch (type) {
+    case ObReplicaType::REPLICA_TYPE_FULL: {
+      str = FULL_REPLICA_STR;
+      break;
+    }
+    case ObReplicaType::REPLICA_TYPE_BACKUP: {
+      str = BACKUP_REPLICA_STR;
+      break;
+    }
+    case ObReplicaType::REPLICA_TYPE_LOGONLY: {
+      str = LOGONLY_REPLICA_STR;
+      break;
+    }
+    case ObReplicaType::REPLICA_TYPE_READONLY: {
+      str = READONLY_REPLICA_STR;
+      break;
+    }
+    case ObReplicaType::REPLICA_TYPE_MEMONLY: {
+      str = MEMONLY_REPLICA_STR;
+      break;
+    }
+    case ObReplicaType::REPLICA_TYPE_ENCRYPTION_LOGONLY: {
+      str = ENCRYPTION_LOGONLY_REPLICA_STR;
+      break;
+    }
+    case ObReplicaType::REPLICA_TYPE_COLUMNSTORE: {
+      str = COLUMNSTORE_REPLICA_STR;
+      break;
+    }
+    default: {
+      str = "INVALID";
+      break;
+    }
+  }
+  return str;
+}
+
+// retrun REPLICA_TYPE_INVALID if str is invaild
+ObReplicaType ObShareUtil::string_to_replica_type(const char *str)
+{
+  return string_to_replica_type(ObString(str));
+}
+
+// retrun REPLICA_TYPE_INVALID if str is invaild
+ObReplicaType ObShareUtil::string_to_replica_type(const ObString &str)
+{
+  ObReplicaType replica_type = REPLICA_TYPE_INVALID;
+  if (OB_UNLIKELY(str.empty())) {
+    replica_type = REPLICA_TYPE_INVALID;
+  } else if (0 == str.case_compare(FULL_REPLICA_STR) || 0 == str.case_compare(F_REPLICA_STR)) {
+    replica_type = REPLICA_TYPE_FULL;
+  } else if (0 == str.case_compare(READONLY_REPLICA_STR) || 0 == str.case_compare(R_REPLICA_STR)) {
+    replica_type = REPLICA_TYPE_READONLY;
+  } else if (0 == str.case_compare(COLUMNSTORE_REPLICA_STR) || 0 == str.case_compare(C_REPLICA_STR)) {
+    replica_type = REPLICA_TYPE_COLUMNSTORE;
+  } else if (0 == str.case_compare(LOGONLY_REPLICA_STR) || 0 == str.case_compare(L_REPLICA_STR)) {
+    replica_type = REPLICA_TYPE_LOGONLY;
+  } else if (0 == str.case_compare(ENCRYPTION_LOGONLY_REPLICA_STR) || 0 == str.case_compare(E_REPLICA_STR)) {
+    replica_type = REPLICA_TYPE_ENCRYPTION_LOGONLY;
+  } else if (0 == str.case_compare(BACKUP_REPLICA_STR) || 0 == str.case_compare(B_REPLICA_STR)) {
+    replica_type = REPLICA_TYPE_BACKUP;
+  } else if (0 == str.case_compare(MEMONLY_REPLICA_STR) || 0 == str.case_compare(M_REPLICA_STR)) {
+    replica_type = REPLICA_TYPE_MEMONLY;
+  } else {
+    replica_type = REPLICA_TYPE_INVALID;
+  }
+  return replica_type;
 }
 
 } //end namespace share

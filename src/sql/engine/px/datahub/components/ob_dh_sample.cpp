@@ -12,16 +12,12 @@
 
 #define USING_LOG_PREFIX SQL_ENG
 
-#include "sql/engine/px/datahub/components/ob_dh_sample.h"
-#include "share/schema/ob_multi_version_schema_service.h"
-#include "sql/engine/px/datahub/ob_dh_msg_ctx.h"
-#include "sql/engine/px/ob_dfo.h"
-#include "sql/engine/px/ob_px_util.h"
-#include "sql/engine/px/datahub/ob_dh_msg.h"
+#include "ob_dh_sample.h"
 #include "sql/engine/px/ob_px_coord_op.h"
 #include "sql/engine/px/exchange/ob_px_dist_transmit_op.h"
 #include "sql/engine/px/exchange/ob_px_repart_transmit_op.h"
 #include "sql/engine/px/ob_px_coord_op.h"
+#include "rootserver/ddl_task/ob_ddl_task.h"
 
 using namespace oceanbase::common;
 using namespace oceanbase::share;
@@ -102,6 +98,11 @@ OB_DEF_DESERIALIZE(ObDynamicSamplePieceMsg)
             LOG_WARN("deserialize datum store failed", K(ret), K(i));
           } else if (OB_FAIL(row_stores_.push_back(tmp_store))) {
             LOG_WARN("push back datum store failed", K(ret), K(i));
+          }
+          if (OB_FAIL(ret) && nullptr != tmp_store) {
+            tmp_store->~ObChunkDatumStore();
+            // The corresponding memory does not need to be manually released;
+            // it will be automatically freed upon the destruction of arena_.
           }
         }
       }
@@ -244,12 +245,12 @@ int ObDynamicSamplePieceMsgCtx::alloc_piece_msg_ctx(const ObDynamicSamplePieceMs
     LOG_WARN("spec is NULL", K(ret), K(pkt.op_id_));
   } else {
     if (PHY_PX_DIST_TRANSMIT == op_kit->spec_->type_) {
-      auto spec = static_cast<const ObPxDistTransmitSpec *>(op_kit->spec_);
+      const ObPxDistTransmitSpec *spec = static_cast<const ObPxDistTransmitSpec *>(op_kit->spec_);
       sort_def.exprs_ = &spec->dist_exprs_;
       sort_def.collations_ = &spec->sort_collations_;
       sort_def.cmp_funs_ = &spec->sort_cmp_funs_;
     } else if (PHY_PX_REPART_TRANSMIT == op_kit->spec_->type_) {
-      auto spec = static_cast<const ObPxRepartTransmitSpec *>(op_kit->spec_);
+      const ObPxRepartTransmitSpec *spec = static_cast<const ObPxRepartTransmitSpec *>(op_kit->spec_);
       sort_def.exprs_ = &spec->dist_exprs_;
       sort_def.collations_ = &spec->sort_collations_;
       sort_def.cmp_funs_ = &spec->sort_cmp_funs_;
@@ -431,6 +432,9 @@ int ObDynamicSamplePieceMsgCtx::append_object_sample_data(
 int ObDynamicSamplePieceMsgCtx::build_whole_msg(ObDynamicSampleWholeMsg &whole_msg)
 {
   int ret = OB_SUCCESS;
+  const ObPhysicalPlanCtx *plan_ctx = NULL;
+  const ObPhysicalPlan *phy_plan = nullptr;
+  int64_t ddl_task_id = 0;
   if (OB_UNLIKELY(!is_inited_)) {
     ret = OB_NOT_INIT;
     LOG_WARN("not init", K(ret), K(is_inited_));
@@ -440,6 +444,13 @@ int ObDynamicSamplePieceMsgCtx::build_whole_msg(ObDynamicSampleWholeMsg &whole_m
   } else if (task_cnt_ != succ_count_) {
     ret = OB_PARTIAL_FAILED;
     LOG_WARN("partial failed", K(ret));
+  } else if (OB_ISNULL(plan_ctx = GET_PHY_PLAN_CTX(exec_ctx_))) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("phy plan ctx is null", K(ret));
+  } else if (OB_ISNULL(phy_plan = plan_ctx->get_phy_plan())) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("error unexpected, phy plan must not be nullptr", K(ret));
+  } else if (FALSE_IT(ddl_task_id = phy_plan->get_ddl_task_id())) {
   } else {
     ObPxTabletRange partition_range;
     // Both pkey range and range shuffle will use the sampling function
@@ -452,6 +463,24 @@ int ObDynamicSamplePieceMsgCtx::build_whole_msg(ObDynamicSampleWholeMsg &whole_m
         LOG_WARN("cut range failed", K(ret), K(i), K(tablet_ids_.at(i)), K(expect_range_count_));
       } else if (OB_FAIL(whole_msg.part_ranges_.push_back(partition_range))) {
         LOG_WARN("push back sample range cut failed", K(ret), K(partition_range));
+      }
+    }
+    if (OB_SUCC(ret) && ddl_task_id > 0) {
+      // persist ddl slice info
+      rootserver::ObDDLSliceInfo ddl_slice_info;
+      bool is_idempotent_mode = false;
+      if (OB_FAIL(ddl_slice_info.part_ranges_.assign(whole_msg.part_ranges_))) {
+        LOG_WARN("assign part ranges failed", K(ret), K(tenant_id_), K(ddl_task_id), K(whole_msg.part_ranges_));
+      } else if (OB_FAIL(rootserver::ObDDLTaskRecordOperator::get_or_insert_schedule_info(tenant_id_, ddl_task_id, exec_ctx_.get_allocator(), ddl_slice_info, is_idempotent_mode))) {
+        LOG_WARN("insert slice info failed", K(ret), K(tenant_id_), K(ddl_task_id), K(ddl_slice_info));
+      } else if (is_idempotent_mode) {
+        if (OB_UNLIKELY(!ddl_slice_info.is_valid())) {
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("invalid ddl slice info", K(ret), K(tenant_id_), K(ddl_task_id), K(ddl_slice_info));
+        } else if (OB_FAIL(whole_msg.part_ranges_.assign(ddl_slice_info.part_ranges_))) {
+          LOG_WARN("assign part ranges failed", K(ret), K(tenant_id_), K(ddl_task_id), K(ddl_slice_info.part_ranges_));
+        }
+        LOG_TRACE("build whole msg with ddl task record", K(ret), K(tenant_id_), K(ddl_task_id), K(ddl_slice_info));
       }
     }
   }
@@ -479,8 +508,19 @@ int ObDynamicSamplePieceMsgCtx::split_range(
       LOG_WARN("reserve datum key failed", K(ret), K(sort_def_.exprs_->count()));
     }
     for (int64_t i = 0; OB_SUCC(ret) && i < sort_def_.exprs_->count(); ++i) {
-      if (OB_FAIL(copied_key.push_back(ObDatum()))) {
-        LOG_WARN("push back empty datum failed", K(ret), K(i));
+      ObExpr *expr = sort_def_.exprs_->at(i);
+      if (coord_.get_spec().use_rich_format_ &&
+          !is_uniform_format(expr->get_format(coord_.get_eval_ctx()))) {
+        if (OB_FAIL(expr->init_vector(coord_.get_eval_ctx(),
+                          expr->is_const_expr() ? VEC_UNIFORM_CONST : VEC_UNIFORM,
+                          coord_.get_eval_ctx().get_batch_size()))) {
+          LOG_WARN("expr init vector failed", K(ret), K(i));
+        }
+      }
+      if (OB_SUCC(ret)) {
+        if (OB_FAIL(copied_key.push_back(ObDatum()))) {
+          LOG_WARN("push back empty datum failed", K(ret), K(i));
+        }
       }
     }
     while (OB_SUCC(ret) && !sort_iter_end && tmp_key_count < expect_range_count) {

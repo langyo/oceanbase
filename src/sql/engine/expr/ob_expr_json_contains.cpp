@@ -48,10 +48,11 @@ int ObExprJsonContains::calc_result_typeN(ObExprResType& type,
     type.set_int32();
     type.set_precision(DEFAULT_PRECISION_FOR_BOOL);
     type.set_scale(ObAccuracy::DDL_DEFAULT_ACCURACY[ObIntType].scale_);
-    
-    // set type for json_doc and json_candidate
+
     for (int64_t i = 0; OB_SUCC(ret) && i < 2; i++) {
-      if (OB_FAIL(ObJsonExprHelper::is_valid_for_json(types_stack, i, N_JSON_CONTAINS))) {
+      ObObjType in_type = types_stack[i].get_type();
+      if (!ob_is_string_type(in_type)) {
+      } else if (OB_FAIL(ObJsonExprHelper::is_valid_for_json(types_stack, i, N_JSON_CONTAINS))) {
         LOG_WARN("wrong type for json doc.", K(ret), K(types_stack[i].get_type()));
       }
     }
@@ -73,10 +74,14 @@ int ObExprJsonContains::eval_json_contains(const ObExpr &expr, ObEvalCtx &ctx, O
   ObIJsonBase *json_candidate = NULL;
   bool is_null_result = false;
   ObEvalCtx::TempAllocGuard tmp_alloc_g(ctx);
-  common::ObArenaAllocator &temp_allocator = tmp_alloc_g.get_allocator();
+  uint64_t tenant_id = ObMultiModeExprHelper::get_tenant_id(ctx.exec_ctx_.get_my_session());
+  MultimodeAlloctor temp_allocator(tmp_alloc_g.get_allocator(), expr.type_, tenant_id, ret);
   if (OB_FAIL(ObJsonExprHelper::get_json_doc(expr, ctx, temp_allocator, 0,
                                              json_target, is_null_result))) {
     LOG_WARN("get_json_doc failed", K(ret));
+  } else if (!ObJsonExprHelper::is_convertible_to_json(expr.args_[1]->datum_meta_.type_)) {
+    ret = OB_ERR_INVALID_TYPE_FOR_JSON;
+    LOG_USER_ERROR(OB_ERR_INVALID_TYPE_FOR_JSON, 2, N_JSON_CONTAINS);
   } else if (!is_null_result && OB_FAIL(ObJsonExprHelper::get_json_doc(expr, ctx, temp_allocator, 1,
                                                                        json_candidate, is_null_result))) {
     LOG_WARN("get_json_doc failed", K(ret));
@@ -91,12 +96,12 @@ int ObExprJsonContains::eval_json_contains(const ObExpr &expr, ObEvalCtx &ctx, O
       path_cache = ((path_cache != NULL) ? path_cache : &ctx_cache);
 
       ObDatum *path_data = NULL;
-      if (OB_FAIL(expr.args_[2]->eval(ctx, path_data))) {
+      if (OB_FAIL(temp_allocator.eval_arg(expr.args_[2], ctx, path_data))) {
         LOG_WARN("eval json path datum failed", K(ret));
       } else if (expr.args_[2]->datum_meta_.type_ == ObNullType || path_data->is_null()) {
         is_null_result = true;
       } else {
-        ObJsonBaseVector sub_json_targets;
+        ObJsonSeekResult sub_json_targets;
         ObString path_val = path_data->get_string();
         ObJsonPath *json_path;
         if (OB_FAIL(ObJsonExprHelper::get_json_or_str_data(expr.args_[2], ctx, temp_allocator, path_val, is_null_result))) {

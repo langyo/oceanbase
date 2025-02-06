@@ -13,10 +13,7 @@
 #define USING_LOG_PREFIX SQL_ENG
 
 #include "sql/engine/expr/ob_expr_substring_index.h"
-#include "sql/engine/expr/ob_expr_util.h"
 #include "sql/engine/ob_exec_context.h"
-#include "lib/string/ob_string.h"
-#include "sql/session/ob_sql_session_info.h"
 #include "sql/engine/ob_exec_context.h"
 
 namespace oceanbase
@@ -70,8 +67,7 @@ inline int ObExprSubstringIndex::calc_result_type3(ObExprResType &type,
     ObExprResType types[2] = {alloc, alloc};
     types[0] = str;
     types[1] = delim;
-    if (OB_FAIL(aggregate_charsets_for_string_result_with_comparison(
-                type, types, 2, type_ctx.get_coll_type()))) {
+    if (OB_FAIL(aggregate_charsets_for_string_result_with_comparison(type, types, 2, type_ctx))) {
       LOG_WARN("aggregate_charsets_for_string_result_with_comparison failed", K(ret));
 
     } else {
@@ -203,6 +199,13 @@ int ObExprSubstringIndex::eval_substring_index_batch(const ObExpr &expr,
       eval_flags.set(i);
     }
   }
+  return ret;
+}
+
+DEF_SET_LOCAL_SESSION_VARS(ObExprSubstringIndex, raw_expr) {
+  int ret = OB_SUCCESS;
+  SET_LOCAL_SYSVAR_CAPACITY(1);
+  EXPR_ADD_LOCAL_SYSVAR(share::SYS_VAR_COLLATION_CONNECTION);
   return ret;
 }
 

@@ -53,15 +53,16 @@ enum SelectParserOffset
   PARSE_SELECT_FORMER,
   PARSE_SELECT_LATER,
   PARSE_SELECT_ORDER,
+  PARSE_SELECT_APPROX,
   PARSE_SELECT_LIMIT,
   PARSE_SELECT_FOR_UPD,
   PARSE_SELECT_HINTS,
-  PARSE_SELECT_WHEN,
+  PARSE_SELECT_WHEN, // I find that it is no longer used.
   PARSE_SELECT_FETCH,
   PARSE_SELECT_FETCH_TEMP, //use to temporary store fetch clause in parser
   PARSE_SELECT_WITH_CHECK_OPTION,
   PARSE_SELECT_INTO_EXTRA,// ATTENTION!! SELECT_INTO_EXTRA must be the last one
-  PARSE_SELECT_MAX_IDX
+  PARSE_SELECT_MAX_IDX  // = 24, ATTENTION!! adjust malloc_select_node(node, malloc_pool) after adding a new enum value
 };
 
 enum GrantParseOffset
@@ -219,6 +220,7 @@ typedef struct _PLParseInfo
   bool is_forbid_pl_fp_;
   bool is_inner_parse_;
   int last_pl_symbol_pos_; //上一个pl变量的结束位置
+  bool is_parse_dynamic_sql_;
   int plsql_line_;
   /*for mysql pl*/
   void *pl_ns_; //ObPLBlockNS
@@ -270,6 +272,11 @@ typedef struct _ParenthesesOffset
   struct _ParenthesesOffset *next_;
 } ParenthesesOffset;
 
+typedef struct _ParseNodeOptParens {
+  struct _ParseNode *select_node_;
+  bool is_parenthesized_;
+} ParseNodeOptParens;
+
 //dml base runtime context definition
 typedef struct _InsMultiValuesResult
 {
@@ -317,6 +324,9 @@ typedef struct
     uint32_t is_for_remap_                     : 1;
     uint32_t contain_sensitive_data_           : 1;
     uint32_t may_contain_sensitive_data_       : 1;
+    uint32_t is_external_table_                : 1;
+    uint32_t is_returning_                     : 1;
+    uint32_t is_into_cluster_                  : 1;
   };
 
   ParseNode *result_tree_;
@@ -341,6 +351,7 @@ typedef struct
   int connection_collation_;//connection collation
   bool mysql_compatible_comment_; //whether the parser is parsing "/*! xxxx */"
   bool enable_compatible_comment_;
+  int semicolon_start_col_;
 
   InsMultiValuesResult *ins_multi_value_res_;
 
@@ -384,8 +395,11 @@ extern int64_t str_remove_space(char *buff, int64_t len);
 extern ParseNode *new_node(void *malloc_pool, ObItemType type, int num);
 extern ParseNode *new_non_terminal_node(void *malloc_pool, ObItemType node_tag, int num, ...);
 extern ParseNode *new_terminal_node(void *malloc_pool, ObItemType type);
+extern ParseNode *new_list_node(void *malloc_pool, ObItemType node_tag, int capacity, int num, ...);
 
 extern int obpl_parser_check_stack_overflow();
+extern int check_mem_status();
+extern int try_check_mem_status(int64_t check_try_times);
 
 int get_deep_copy_size(const ParseNode *node, int64_t *size);
 int deep_copy_parse_node(void *malloc_pool, const ParseNode *src, ParseNode *dst);
@@ -410,6 +424,12 @@ extern bool parsenode_equal(const ParseNode *node1, const ParseNode *node2, int 
 
 extern int64_t get_question_mark(ObQuestionMarkCtx *ctx, void *malloc_pool, const char *name);
 extern int64_t get_question_mark_by_defined_name(ObQuestionMarkCtx *ctx, const char *name);
+extern int64_t get_need_reserve_capacity(int64_t n);
+extern ParseNode *push_back_child(void *malloc_pool, int *error_code, ParseNode *left_node, ParseNode *node);
+extern ParseNode *push_front_child(void *malloc_pool, int *error_code, ParseNode *right_node, ParseNode *node);
+extern ParseNode *append_child(void *malloc_pool, int *error_code, ParseNode *left_node, ParseNode *right_node);
+extern ParseNode *adjust_inner_join_inner(int *error_code, ParseNode *inner_join, ParseNode *table_node);
+extern ParseNodeOptParens *new_parse_node_opt_parens(void *malloc_pool);
 
 // compare ParseNode str_value_ to pattern
 // @param [in] node        ParseNode
@@ -417,6 +437,7 @@ extern int64_t get_question_mark_by_defined_name(ObQuestionMarkCtx *ctx, const c
 // @param [in] pat_len     length of pattern
 extern bool nodename_equal(const ParseNode *node, const char *pattern, int64_t pat_len);
 
+extern bool nodename_is_sdo_geometry_type(const ParseNode *node);
 #define OB_NODE_CAST_TYPE_IDX 0
 #define OB_NODE_CAST_COLL_IDX 1
 #define OB_NODE_CAST_N_PREC_IDX 2
@@ -424,6 +445,7 @@ extern bool nodename_equal(const ParseNode *node, const char *pattern, int64_t p
 #define OB_NODE_CAST_NUMBER_TYPE_IDX 1
 #define OB_NODE_CAST_C_LEN_IDX 1
 #define OB_NODE_CAST_GEO_TYPE_IDX 1
+#define OB_NODE_CAST_CS_LEVEL_IDX 2
 
 typedef enum ObNumberParseType
 {

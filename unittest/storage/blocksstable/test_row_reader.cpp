@@ -10,22 +10,12 @@
  * See the Mulan PubL v2 for more details.
  */
 
-#include <gtest/gtest.h>
 #define protected public
 #define private public
-#include "storage/ob_i_store.h"
-#include "storage/blocksstable/ob_block_sstable_struct.h"
-#include "lib/number/ob_number_v2.h"
 #include "ob_row_generate.h"
-#include "share/object/ob_obj_cast.h"
-#include "share/ob_simple_mem_limit_getter.h"
 
 
-#include "storage/blocksstable/ob_macro_block_writer.h"
-#include "storage/blocksstable/ob_row_writer.h"
-#include "storage/blocksstable/ob_row_reader.h"
 #include "ob_data_file_prepare.h"
-#include "storage/memtable/ob_nop_bitmap.h"
 #include "unittest/storage/mock_ob_table_read_info.h"
 
 #ifndef INT24_MIN
@@ -57,9 +47,10 @@ public:
   // Every ObObjType from ObTinyIntType to ObHexStringType inclusive.
   // Skip ObNullType and ObExtendType because for external usage, a column type
   // can't be NULL or NOP.
-  ObObjType not_test_type[9] = {
+  ObObjType not_test_type[13] = {
       ObNullType, ObExtendType, ObUnknownType, ObEnumInnerType, ObSetInnerType,
-      ObNumberFloatType, ObURowIDType, ObLobType, ObUserDefinedSQLType};
+      ObNumberFloatType, ObURowIDType, ObLobType, ObUserDefinedSQLType, ObDecimalIntType,
+      ObCollectionSQLType, ObMySQLDateType, ObMySQLDateTimeType};
   static const int64_t column_num = ObMaxType - sizeof(not_test_type) / sizeof(ObObjType);
 public:
   TestNewRowReader()
@@ -69,6 +60,17 @@ public:
   virtual ~TestNewRowReader() {}
   virtual void SetUp();
   virtual void TearDown();
+  static void SetUpTestCase()
+  {
+    int ret = ObTimerService::get_instance().start();
+    ASSERT_TRUE(OB_SUCCESS == ret || OB_INIT_TWICE == ret);
+  }
+  static void TearDownTestCase()
+  {
+    ObTimerService::get_instance().stop();
+    ObTimerService::get_instance().wait();
+    ObTimerService::get_instance().destroy();
+  }
   char *get_serialize_buf() { return serialize_buf_; }
   int64_t get_serialize_size() { return 2 * 1024 * 1024; }
   void append_col(ObDatumRow &row, int64_t col_cnt = INT64_MAX);
@@ -371,39 +373,6 @@ void TestNewRowReader::check_read_datums(const char* buf, const int64_t buf_len,
     ASSERT_TRUE(reader_row.storage_datums_[j] == writer_row.storage_datums_[j]);
   }
 }
-/*
-void TestNewRowReader::check_write_with_update_idx(const ObDatumRow &writer_row)
-{
-  int ret = OB_SUCCESS;
-  ObArray<int64_t> update_idx;
-  int rowkey_cnt[] = {1, 5, 19, 35};
-
-  for (int j = 0; j < ARRAYSIZEOF(rowkey_cnt) && rowkey_cnt[j] < writer_row.count_; ++j){
-    int i = rowkey_cnt[j];
-    update_idx.reset();
-    while (i < writer_row.count_) {
-      if (!writer_row.storage_datums_[i].is_nop()) {
-        update_idx.push_back(i);
-        i += 2;
-      } else {
-        i++;
-      }
-    }
-
-    ObRowWriter row_writer;
-    char *buf = nullptr;
-    int64_t len = 0;
-    ret = row_writer.write(rowkey_cnt[j], writer_row, &update_idx, buf, len);
-    ASSERT_EQ(ret, OB_SUCCESS);
-    ObDatumRow datum_row;
-    ASSERT_EQ(OB_SUCCESS, datum_row.init(allocator_, writer_row.count_));
-    check_read_datum_row(buf, len, datum_row, rowkey_cnt[j], &update_idx);
-
-    allocator_.free(buf);
-    buf = nullptr;
-  }
-}
-*/
 
 void TestNewRowReader::append_col(ObDatumRow &row, int64_t col_cnt)
 {
@@ -1325,30 +1294,30 @@ TEST_F(TestNewRowReader, test_write_update_row)
   const int64_t num = 200;
   const int64_t write_col_cnt = 80;
     const int64_t rowkey_cnt = 5;
-  oceanbase::common::ObObj objs[num];
-  ObStoreRow writer_row;
-  writer_row.row_val_.cells_ = objs;
-  writer_row.row_val_.count_ = column_num;
+  blocksstable::ObStorageDatum objs[num];
+  ObDatumRow writer_row;
+  writer_row.storage_datums_ = objs;
+  writer_row.count_ = column_num;
   ASSERT_EQ(OB_SUCCESS, row_generate_.get_next_row(writer_row));
 
-  for (int i = writer_row.row_val_.count_; i < write_col_cnt; ++i) {
-     writer_row.row_val_.cells_[i] = writer_row.row_val_.cells_[i - writer_row.row_val_.count_];
+  for (int i = writer_row.count_; i < write_col_cnt; ++i) {
+     writer_row.storage_datums_[i] = writer_row.storage_datums_[i - writer_row.count_];
   }
-  writer_row.row_val_.count_ = write_col_cnt;
+  writer_row.count_ = write_col_cnt;
 
   memtable::ObNopBitMap nop_bitmap;
   bool read_finished = false;
-  ret = nop_bitmap.init(writer_row.row_val_.count_, rowkey_cnt);
+  ret = nop_bitmap.init(writer_row.count_, rowkey_cnt);
 
   ObDatumRow reader_row;
-  ASSERT_EQ(OB_SUCCESS, reader_row.init(allocator_, writer_row.row_val_.count_));
-  for (int i = 0; i < writer_row.row_val_.count_; ++i) {
+  ASSERT_EQ(OB_SUCCESS, reader_row.init(allocator_, writer_row.count_));
+  for (int i = 0; i < writer_row.count_; ++i) {
     reader_row.storage_datums_[i].set_nop();
   }
 
   int64_t array[] = {5, 18, 29, 45, 75, 78};
-  writer_row.row_val_.cells_[array[2]].set_int(0);
-  writer_row.row_val_.cells_[array[4]].set_int(0);
+  writer_row.storage_datums_[array[2]].set_int(0);
+  writer_row.storage_datums_[array[4]].set_int(0);
   build_column_read_info(rowkey_cnt, writer_row);
 
   STORAGE_LOG(INFO, "write_row", K(writer_row));
@@ -1362,11 +1331,11 @@ TEST_F(TestNewRowReader, test_write_update_row)
     int64_t len = 0;
     char *buf = nullptr;
 
-    writer_row.flag_.set_flag(ObDmlFlag::DF_UPDATE);
-    writer_row.row_val_.cells_[array[2]].set_int(100 * i);
-    writer_row.row_val_.cells_[array[4]].set_int(100 * i);
+    writer_row.row_flag_.set_flag(ObDmlFlag::DF_UPDATE);
+    writer_row.storage_datums_[array[2]].set_int(100 * i);
+    writer_row.storage_datums_[array[4]].set_int(100 * i);
     if (i == 4) {
-      writer_row.flag_.set_flag(ObDmlFlag::DF_INSERT);
+      writer_row.row_flag_.set_flag(ObDmlFlag::DF_INSERT);
       ret = row_writer[i].write(rowkey_cnt, writer_row, nullptr, buf, len);
     } else {
       ret = row_writer[i].write(rowkey_cnt, writer_row, &update_idx, buf, len);
@@ -1386,7 +1355,7 @@ TEST_F(TestNewRowReader, test_write_update_row)
 
   STORAGE_LOG(INFO, "chaser check writer row", K(read_info_));
   int update_pos = 0;
-  for (int i = 0; i < writer_row.row_val_.count_; ++i) {
+  for (int i = 0; i < writer_row.count_; ++i) {
     bool check_cell_flag = false;
     if (i < rowkey_cnt) {
       check_cell_flag = true;
@@ -1396,12 +1365,10 @@ TEST_F(TestNewRowReader, test_write_update_row)
     }
     if (check_cell_flag) {
       STORAGE_LOG(INFO, "check", K(i), K(update_pos), K(reader_row.storage_datums_[i]));
-      if (ObNumberFloatType != writer_row.row_val_.cells_[i].get_type()) {
-        if (i == array[2] || i == array[4]) {
-          ASSERT_TRUE(reader_row.storage_datums_[i].get_int() == 0);
-        } else {
-          ASSERT_TRUE(reader_row.storage_datums_[i] == writer_row.row_val_.cells_[i]);
-        }
+      if (i == array[2] || i == array[4]) {
+        ASSERT_TRUE(reader_row.storage_datums_[i].get_int() == 0);
+      } else {
+        ASSERT_TRUE(reader_row.storage_datums_[i] == writer_row.storage_datums_[i]);
       }
     } else {
       ASSERT_TRUE(!reader_row.storage_datums_[i].is_nop());
@@ -1415,28 +1382,28 @@ TEST_F(TestNewRowReader, test_write_write_nop_val)
   const int64_t num = 400;
   const int64_t write_col_cnt = 302;
   const int64_t rowkey_cnt = 3;
-  oceanbase::common::ObObj objs[num];
-  ObStoreRow writer_row;
-  writer_row.row_val_.cells_ = objs;
-  writer_row.row_val_.count_ = column_num;
+  blocksstable::ObStorageDatum objs[num];
+  ObDatumRow writer_row;
+  writer_row.storage_datums_ = objs;
+  writer_row.count_ = column_num;
   ASSERT_EQ(OB_SUCCESS, row_generate_.get_next_row(writer_row));
 
   int64_t idx = 0;
-  writer_row.row_val_.cells_[idx++].set_int(14);
-  writer_row.row_val_.cells_[idx++].set_int(-1658240586131896801);
-  writer_row.row_val_.cells_[idx++].set_int(-INT64_MAX);
+  writer_row.storage_datums_[idx++].set_int(14);
+  writer_row.storage_datums_[idx++].set_int(-1658240586131896801);
+  writer_row.storage_datums_[idx++].set_int(-INT64_MAX);
   for (int i = idx; i < write_col_cnt; ++i) {
-     writer_row.row_val_.cells_[i].set_nop_value();
+     writer_row.storage_datums_[i].set_nop();
   }
-  writer_row.row_val_.count_ = write_col_cnt;
+  writer_row.count_ = write_col_cnt;
 
   memtable::ObNopBitMap nop_bitmap;
   bool read_finished = false;
-  ret = nop_bitmap.init(writer_row.row_val_.count_, rowkey_cnt);
+  ret = nop_bitmap.init(writer_row.count_, rowkey_cnt);
 
   ObDatumRow reader_row;
   ASSERT_EQ(OB_SUCCESS, reader_row.init(allocator_, num));
-  reader_row.count_ = writer_row.row_val_.count_;
+  reader_row.count_ = writer_row.count_;
   build_column_read_info(rowkey_cnt, writer_row);
 
   int64_t len = 0;
@@ -1448,11 +1415,9 @@ TEST_F(TestNewRowReader, test_write_write_nop_val)
   ret = row_reader.read_row(buf, len, &read_info_, reader_row);
 
   STORAGE_LOG(INFO, "chaser check writer row", K(read_info_), K(reader_row));
-  for (int i = 0; i < writer_row.row_val_.count_; ++i) {
+  for (int i = 0; i < writer_row.count_; ++i) {
     STORAGE_LOG(INFO, "check", K(i), K(reader_row.storage_datums_[i]));
-    if (ObNumberFloatType != writer_row.row_val_.cells_[i].get_type()) {
-      ASSERT_TRUE(reader_row.storage_datums_[i] == writer_row.row_val_.cells_[i]);
-    }
+    ASSERT_TRUE(reader_row.storage_datums_[i] == writer_row.storage_datums_[i]);
   }
 }
 
@@ -1503,10 +1468,10 @@ TEST_F(TestNewRowReader, test_update_idx_with_rowkey)
   const int64_t write_col_cnt = 80;
   const int64_t rowkey_cnt = 3;
 
-  oceanbase::common::ObObj objs[num];
-  ObStoreRow writer_row;
-  writer_row.row_val_.cells_ = objs;
-  writer_row.row_val_.count_ = column_num;
+  blocksstable::ObStorageDatum objs[num];
+  ObDatumRow writer_row;
+  writer_row.storage_datums_ = objs;
+  writer_row.count_ = column_num;
   ASSERT_EQ(OB_SUCCESS, row_generate_.get_next_row(writer_row));
 
   int64_t update_array[] = {0, 1, 2, 5, 18};
@@ -1514,9 +1479,9 @@ TEST_F(TestNewRowReader, test_update_idx_with_rowkey)
   build_column_read_info(rowkey_cnt, writer_row);
 
   int64_t array_idx = 0;
-  for (int i = 0; i < writer_row.row_val_.count_; ++i) {
+  for (int i = 0; i < writer_row.count_; ++i) {
     if (i != update_array[array_idx]) {
-      writer_row.row_val_.cells_[i].set_nop_value();
+      writer_row.storage_datums_[i].set_nop();
     } else {
       update_idx.push_back(update_array[array_idx]);
       ++array_idx;

@@ -35,8 +35,10 @@ public:
                       ObExpr &rt_expr) const override;
 
   static int eval_space(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &expr_datum);
-
+  DECLARE_SET_LOCAL_SESSION_VARS;
 private:
+  int calc_result_type(ObExprTypeCtx &type_ctx, const ObObj &obj, ObObjType &res_type) const;
+
   DISALLOW_COPY_AND_ASSIGN(ObExprSpace);
 };
 

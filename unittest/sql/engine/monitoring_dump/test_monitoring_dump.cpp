@@ -108,7 +108,8 @@ protected:
       ret = OB_ERR_UNEXPECTED;
       _OB_LOG(WARN, "get physical operator context failed, ret=%d", ret);
     } else {
-      _OB_LOG(DEBUG, "inner_get_next_row, row=%s", to_cstring(*input_row));
+      ObCStringHelper helper;
+      _OB_LOG(DEBUG, "inner_get_next_row, row=%s", helper.convert(*input_row));
       ObNewRow &cur_row = phy_op_ctx->get_cur_row();
       OB_ASSERT(input_row->count_ <= cur_row.count_);
       for (int64_t i = 0; i < input_row->count_; ++i) {
@@ -269,7 +270,7 @@ TEST_F(ObMonitoringDumpTest, test_get_next_row)
   ObExecContext ctx;
   ObTableScanFake table_scan;
   ObMonitoringDump root(ctx.get_allocator());
-  root.set_flags(ObMonitorHint::OB_MONITOR_STAT | ObMonitorHint::OB_MONITOR_TRACING);
+  root.set_flags(ObAllocOpHint::OB_MONITOR_STAT | ObAllocOpHint::OB_MONITOR_TRACING);
   ObPhysicalPlan physical_plan;
   int64_t op_size = 2;
   ObSQLSessionInfo origin_session;
@@ -303,7 +304,8 @@ TEST_F(ObMonitoringDumpTest, test_get_next_row)
   std::string trace_id_str(trace_id_result.ptr(), trace_id_result.length());
   for (int64_t i = 0; i < 100; ++i) {
     ASSERT_EQ(OB_SUCCESS, root.get_next_row(ctx, row));
-    printf("row=%s\n", to_cstring(*row));
+    ObCStringHelper helper;
+    printf("row=%s\n", helper.convert(*row));
     of_result << trace_id_str << " " << row->cells_[0].get_int() << std::endl;
   }
   ASSERT_EQ(OB_SUCCESS, root.close(ctx));

@@ -56,7 +56,8 @@ struct ObPlanCacheKey : public ObILibCacheKey
         db_id_(common::OB_INVALID_ID),
         sessid_(0),
         mode_(PC_TEXT_MODE),
-        is_weak_read_(false) {}
+        flag_(0),
+        sys_var_config_hash_val_(0) {}
 
   inline void reset()
   {
@@ -67,8 +68,9 @@ struct ObPlanCacheKey : public ObILibCacheKey
     mode_ = PC_TEXT_MODE;
     sys_vars_str_.reset();
     config_str_.reset();
-    is_weak_read_ = false;
+    flag_ = 0;
     namespace_ = NS_INVALID;
+    sys_var_config_hash_val_ = 0;
   }
 
   virtual inline int deep_copy(common::ObIAllocator &allocator,
@@ -92,7 +94,8 @@ struct ObPlanCacheKey : public ObILibCacheKey
       sessid_ = pc_key.sessid_;
       mode_ = pc_key.mode_;
       namespace_ = pc_key.namespace_;
-      is_weak_read_ = pc_key.is_weak_read_;
+      flag_ = pc_key.flag_;
+      sys_var_config_hash_val_ = pc_key.sys_var_config_hash_val_;
     }
     return ret;
   }
@@ -111,15 +114,15 @@ struct ObPlanCacheKey : public ObILibCacheKey
   }
   virtual inline uint64_t hash() const
   {
-    uint64_t hash_ret = name_.hash();
+    int ret = common::OB_SUCCESS;
+    uint64_t hash_ret = sys_var_config_hash_val_;
+    hash_ret = name_.hash(hash_ret);
     hash_ret = common::murmurhash(&key_id_, sizeof(uint64_t), hash_ret);
     hash_ret = common::murmurhash(&db_id_, sizeof(uint64_t), hash_ret);
     hash_ret = common::murmurhash(&sessid_, sizeof(uint32_t), hash_ret);
     hash_ret = common::murmurhash(&mode_, sizeof(PlanCacheMode), hash_ret);
-    hash_ret = sys_vars_str_.hash(hash_ret);
-    hash_ret = config_str_.hash(hash_ret);
+    hash_ret = common::murmurhash(&flag_, sizeof(flag_), hash_ret);
     hash_ret = common::murmurhash(&namespace_, sizeof(ObLibCacheNameSpace), hash_ret);
-
     return hash_ret;
   }
 
@@ -133,8 +136,9 @@ struct ObPlanCacheKey : public ObILibCacheKey
                    mode_ == pc_key.mode_ &&
                    sys_vars_str_ == pc_key.sys_vars_str_ &&
                    config_str_ == pc_key.config_str_ &&
-                   is_weak_read_ == pc_key.is_weak_read_ &&
-                   namespace_ == pc_key.namespace_;
+                   flag_ == pc_key.flag_ &&
+                   namespace_ == pc_key.namespace_&&
+                   sys_var_config_hash_val_ == pc_key.sys_var_config_hash_val_;
 
     return cmp_ret;
   }
@@ -145,7 +149,7 @@ struct ObPlanCacheKey : public ObILibCacheKey
                K_(mode),
                K_(sys_vars_str),
                K_(config_str),
-               K_(is_weak_read),
+               K_(flag),
                K_(namespace));
   //通过name来进行查找，一般是shared sql/procedure
   //cursor用这种方式，对应的namespace是CRSR
@@ -158,7 +162,19 @@ struct ObPlanCacheKey : public ObILibCacheKey
   PlanCacheMode mode_;
   common::ObString sys_vars_str_;
   common::ObString config_str_;
-  bool is_weak_read_;
+  union
+  {
+    uint16_t flag_;
+    struct
+    {
+      uint16_t is_weak_read_ : 1;
+      uint16_t use_rich_vector_format_ : 1;
+      uint16_t config_use_rich_format_ : 1;
+      uint16_t enable_mysql_compatible_dates_ : 1;
+      uint16_t reserved_ : 12; // reserved
+    };
+  };
+  uint64_t sys_var_config_hash_val_;
 };
 
 //记录快速化参数后不需要扣参数的原始字符串及相关信息
@@ -211,7 +227,6 @@ private:
 public:
   ObFastParserResult()
     : inner_alloc_("FastParserRes"),
-      raw_params_(&inner_alloc_),
       parameterized_params_(&inner_alloc_),
       cache_params_(NULL),
       values_token_pos_(0),
@@ -220,7 +235,7 @@ public:
     reset_question_mark_ctx();
   }
   ObPlanCacheKey pc_key_; //plan cache key, parameterized by fast parser
-  common::ObFixedArray<ObPCParam *, common::ObIAllocator> raw_params_;
+  common::ObSEArray<ObPCParam *, 4> raw_params_;
   common::ObFixedArray<const common::ObObjParam *, common::ObIAllocator> parameterized_params_;
   ParamStore *cache_params_;
   ObQuestionMarkCtx question_mark_ctx_;
@@ -250,7 +265,6 @@ public:
   {
     int ret = OB_SUCCESS;
     pc_key_ = other.pc_key_;
-    raw_params_.set_allocator(&inner_alloc_);
     parameterized_params_.set_allocator(&inner_alloc_);
     cache_params_ = other.cache_params_;
     question_mark_ctx_ = other.question_mark_ctx_;
@@ -386,7 +400,11 @@ struct ObPlanCacheCtx : public ObILibCacheCtx
       dynamic_param_info_list_(allocator),
       tpl_sql_const_cons_(allocator),
       need_retry_add_plan_(true),
-      insert_batch_opt_info_(allocator)
+      insert_batch_opt_info_(allocator),
+      is_max_curr_limit_(false),
+      is_batch_insert_opt_(false),
+      is_arraybinding_(false),
+      exist_local_plan_(false)
   {
     fp_result_.pc_key_.mode_ = mode_;
   }
@@ -459,7 +477,11 @@ struct ObPlanCacheCtx : public ObILibCacheCtx
     K(is_original_ps_mode_),
     K(new_raw_sql_),
     K(need_retry_add_plan_),
-    K(insert_batch_opt_info_)
+    K(insert_batch_opt_info_),
+    K(is_max_curr_limit_),
+    K(is_batch_insert_opt_),
+    K(is_arraybinding_),
+    K(exist_local_plan_)
     );
   PlanCacheMode mode_; //control use which variables to do match
 
@@ -521,6 +543,12 @@ struct ObPlanCacheCtx : public ObILibCacheCtx
   // when schema version of cache node is old, whether remove this node and retry add cache obj.
   bool need_retry_add_plan_;
   ObInsertBatchOptInfo insert_batch_opt_info_;
+  bool is_max_curr_limit_;
+  bool is_batch_insert_opt_;
+
+  bool is_arraybinding_;
+  bool exist_local_plan_;
+  common::ObBitSet<common::OB_DEFAULT_BITSET_SIZE, common::ModulePageAllocator, true> formalize_prec_index_;
 };
 
 struct ObPlanCacheStat

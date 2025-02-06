@@ -11,13 +11,10 @@
  */
 
 #define USING_LOG_PREFIX SQL_ENG
-#include "lib/utility/ob_tracepoint.h"
-#include "sql/engine/expr/ob_expr_util.h"
-#include "sql/session/ob_sql_session_info.h"
-#include "sql/ob_sql_utils.h"
-#include "common/ob_smart_call.h"
+#include "ob_expr_util.h"
 #include "sql/engine/expr/ob_expr_lob_utils.h"
-#include "lib/charset/ob_charset.h"
+#include "observer/omt/ob_tenant_timezone_mgr.h"
+#include "sql/engine/ob_exec_context.h"
 
 using namespace oceanbase::common;
 using namespace oceanbase::sql;
@@ -38,6 +35,12 @@ int ObExprUtil::get_int64_from_obj(const ObObj &obj,
   } else if (OB_UNLIKELY(obj.is_number())) {
     number::ObNumber nmb = obj.get_number();
     ret = get_int64_from_num(nmb, expr_ctx, is_trunc, out);
+  } else if (ob_is_decimal_int(obj.get_type())) {
+    bool is_valid_int64 = false;
+    ret = wide::check_range_valid_int64(obj.get_decimal_int(), obj.get_int_bytes(), is_valid_int64, out);
+    if (OB_SUCC(ret) && !is_valid_int64) {
+      out = INT64_MAX;
+    }
   } else {
     // 除了 number 之外的类型，强制转换成 number
     // 并 trunc 成一个整数
@@ -144,6 +147,41 @@ int ObExprUtil::trunc_num2int64(const common::number::ObNumber &nmb, int64_t &v)
   return ret;
 }
 
+int ObExprUtil::trunc_decint2int64(const ObDecimalInt *decint, const int32_t int_bytes, const ObScale scale, int64_t &v)
+{
+#define TRUNC_DECINT_CASE(len, int_type)                                                           \
+  case len: {                                                                                      \
+    ret = wide::scale_down_decimalint_for_trunc(*reinterpret_cast<const int_type *>(decint),       \
+                                                scale, tmp_res);                                   \
+  } break
+
+  int ret = OB_SUCCESS;
+  ObDecimalIntBuilder tmp_res;
+  bool is_valid = false;
+  switch (int_bytes) {
+  TRUNC_DECINT_CASE(4, int32_t);
+  TRUNC_DECINT_CASE(8, int64_t);
+  TRUNC_DECINT_CASE(16, int128_t);
+  TRUNC_DECINT_CASE(32, int256_t);
+  TRUNC_DECINT_CASE(64, int512_t);
+  default: {
+    ret = OB_ERR_UNEXPECTED;
+  }
+  }
+  if (OB_FAIL(ret)) {
+    LOG_WARN("scale down decimal int for truncating failed", K(ret), K(int_bytes), K(scale));
+  } else if (OB_FAIL(wide::check_range_valid_int64(tmp_res.get_decimal_int(), tmp_res.get_int_bytes(), is_valid, v))) {
+    LOG_WARN("check valid int64_t failed", K(ret));
+  } else if (is_valid) {
+    // do nothing
+  } else {
+    v = wide::is_negative(tmp_res.get_decimal_int(), tmp_res.get_int_bytes()) ? INT64_MIN : INT64_MAX;
+  }
+
+  return ret;
+#undef TRUNC_DECINT_CASE
+}
+
 int ObExprUtil::round_num2int64(const common::number::ObNumber &nmb, int64_t &v)
 {
   int ret = OB_SUCCESS;
@@ -170,6 +208,41 @@ int ObExprUtil::round_num2int64(const common::number::ObNumber &nmb, int64_t &v)
     }
   }
   return ret;
+}
+
+int ObExprUtil::round_decint2int64(const ObDecimalInt *decint, const int32_t int_bytes, const ObScale scale, int64_t &v)
+{
+#define ROUND_DECINT_CASE(len, int_byte)                                                           \
+  case len: {                                                                                      \
+    ret = wide::scale_down_decimalint_for_round(*reinterpret_cast<const int_byte *>(decint),       \
+                                                scale, tmp_res);                                   \
+  } break
+
+  int ret = OB_SUCCESS;
+  ObDecimalIntBuilder tmp_res;
+  bool is_valid_int64 = false;
+  switch (int_bytes) {
+  ROUND_DECINT_CASE(4, int32_t);
+  ROUND_DECINT_CASE(8, int64_t);
+  ROUND_DECINT_CASE(16, int128_t);
+  ROUND_DECINT_CASE(32, int256_t);
+  ROUND_DECINT_CASE(64, int512_t);
+  default: {
+    ret = OB_ERR_UNEXPECTED;
+  }
+  }
+  if (OB_FAIL(ret)) {
+    LOG_WARN("scale down decimalint for rounding failed", K(ret), K(int_bytes), K(scale));
+  } else if (OB_FAIL(wide::check_range_valid_int64(tmp_res.get_decimal_int(),
+                                                   tmp_res.get_int_bytes(), is_valid_int64, v))) {
+    LOG_WARN("check valid int64 failed", K(ret));
+  } else if (is_valid_int64) {
+    // do nothing
+  } else {
+    v = v = wide::is_negative(tmp_res.get_decimal_int(), tmp_res.get_int_bytes()) ? INT64_MIN : INT64_MAX;
+  }
+  return ret;
+#undef ROUND_DECINT_CASE
 }
 
 int ObExprUtil::get_int_param_val(ObDatum *datum, bool is_decint, int64_t &int_val)
@@ -381,33 +454,16 @@ int ObExprUtil::get_mb_str_info(const ObString &str,
 
 double ObExprUtil::round_double(double val, int64_t dec)
 {
-  const double pow_val = std::pow(10, static_cast<double>(std::abs(dec)));
-  volatile double val_div_tmp = val / pow_val;
-  volatile double val_mul_tmp = val * pow_val;
-  volatile double res = 0.0;
+  const double pow_val = std::pow(10.0, static_cast<double>(std::abs(dec)));
+  double val_div_tmp = val / pow_val;
+  double val_mul_tmp = val * pow_val;
+  double res = 0.0;
   if (dec < 0 && std::isinf(pow_val)) {
     res = 0.0;
-  } else if (dec >= 0 && std::isinf(val_mul_tmp)) {
+  } else if (dec >= 0 && !std::isfinite(val_mul_tmp)) {
     res = val;
   } else {
     res = dec < 0 ? rint(val_div_tmp) * pow_val : rint(val_mul_tmp) / pow_val;
-  }
-  LOG_DEBUG("round double done", K(val), K(dec), K(res));
-  return res;
-}
-
-double ObExprUtil::round_double_nearest(double val, int64_t dec)
-{
-  const double pow_val = std::pow(10, static_cast<double>(std::abs(dec)));
-  volatile double val_div_tmp = val / pow_val;
-  volatile double val_mul_tmp = val * pow_val;
-  volatile double res = 0.0;
-  if (dec < 0 && std::isinf(pow_val)) {
-    res = 0.0;
-  } else if (dec >= 0 && std::isinf(val_mul_tmp)) {
-    res = val;
-  } else {
-    res = dec < 0 ? std::round(val_div_tmp) * pow_val : std::round(val_mul_tmp) / pow_val;
   }
   LOG_DEBUG("round double done", K(val), K(dec), K(res));
   return res;
@@ -446,7 +502,7 @@ double ObExprUtil::trunc_double(double val, int64_t dec)
   volatile double res = 0.0;
   if (dec < 0 && std::isinf(pow_val)) {
     res = 0.0;
-  } else if (dec >= 0 && std::isinf(val_mul_tmp)) {
+  } else if (dec >= 0 && !std::isfinite(val_mul_tmp)) {
     res = val;
   } else {
     if (val >= 0) {
@@ -588,6 +644,40 @@ int ObExprUtil::convert_string_collation(const ObString &in_str,
   return ret;
 }
 
+int ObExprUtil::convert_string_collation_for_regexp(const ObString &in_str,
+                                                    const ObCollationType &in_collation,
+                                                    ObString &out_str,
+                                                    const ObCollationType &out_collation,
+                                                    ObIAllocator &alloc)
+{
+  int ret = OB_SUCCESS;
+  if (in_str.empty()) {
+    out_str.reset();
+  } else if (OB_UNLIKELY(!ObCharset::is_valid_collation(in_collation) ||
+                         !ObCharset::is_valid_collation(out_collation))) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid argument", K(ret), K(in_collation), K(out_collation));
+  } else if (ObCharset::charset_type_by_coll(in_collation) ==
+             ObCharset::charset_type_by_coll(out_collation)) {
+    out_str = in_str;
+  } else {
+    char *buf = NULL;
+    int32_t buf_len = in_str.length() * ObCharset::CharConvertFactorNum;
+    uint32_t result_len = 0;
+    if (OB_ISNULL(buf = static_cast<char*>(alloc.alloc(buf_len)))) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+      LOG_WARN("alloc memory failed", K(ret));
+    } else if (OB_FAIL(ObCharset::charset_convert(in_collation, in_str.ptr(), in_str.length(),
+                                                  out_collation, buf, buf_len,
+                                                  result_len))) {
+      LOG_WARN("charset convert failed", K(ret));
+    } else {
+      out_str.assign_ptr(buf, result_len);
+    }
+  }
+  return ret;
+}
+
 int ObExprUtil::deep_copy_str(const ObString &src, ObString &out, ObIAllocator &alloc)
 {
   int ret = OB_SUCCESS;
@@ -665,6 +755,243 @@ int ObExprUtil::convert_utf8_charset(ObIAllocator& allocator,
     LOG_WARN("charset convert failed", K(ret), K(from_collation), K(CS_TYPE_UTF8MB4_BIN));
   } else {
     to_string.assign(buf, static_cast<int32_t>(result_len));
+  }
+  return ret;
+}
+
+int ObSolidifiedVarsContext::get_local_tz_info(const sql::ObBasicSessionInfo *session, const common::ObTimeZoneInfo *&tz_info)
+{
+  int ret = OB_SUCCESS;
+  tz_info = NULL;
+  if (NULL != local_session_var_ && NULL == local_tz_wrap_) {
+    ObSessionSysVar *local_var = NULL;
+    //init local tz_wrap
+    if (OB_FAIL(local_session_var_->get_local_var(SYS_VAR_TIME_ZONE, local_var))) {
+      LOG_WARN("get local var failed", K(ret));
+    } else if (NULL != local_var) {
+      const ObTZInfoMap *tz_info_map = NULL;
+      if (OB_ISNULL(tz_info_map = session->get_timezone_info()->get_tz_info_map())) {
+        ObTZMapWrap tz_map_wrap;
+        if (OB_SUCC(OTTZ_MGR.get_tenant_tz(session->get_effective_tenant_id(), tz_map_wrap))) {
+          tz_info_map = tz_map_wrap.get_tz_map();
+        } else {
+          LOG_WARN("get tz info map failed", K(ret));
+        }
+      }
+      if (OB_SUCC(ret)) {
+        if (OB_ISNULL(local_tz_wrap_ = OB_NEWx(ObTimeZoneInfoWrap, alloc_))) {
+          ret = OB_ALLOCATE_MEMORY_FAILED;
+          LOG_WARN("alloc tz wrap failed", K(ret));
+        } else if (OB_FAIL(local_tz_wrap_->init_time_zone(local_var->val_.get_string(),
+                                        OB_INVALID_VERSION,
+                                        *(const_cast<ObTZInfoMap *>(tz_info_map))))) {
+          LOG_WARN("tz_wrap init_time_zone failed", K(ret), K(local_var->val_.get_string()));
+        }
+      }
+    }
+  }
+  if (NULL != local_tz_wrap_) {
+    tz_info = local_tz_wrap_->get_time_zone_info();
+  }
+  return ret;
+}
+
+DEF_TO_STRING(ObSolidifiedVarsContext)
+{
+  int64_t pos = 0;
+  J_OBJ_START();
+  J_KV(K_(local_session_var));
+  J_OBJ_END();
+  return pos;
+}
+
+ObSolidifiedVarsGetter::ObSolidifiedVarsGetter(const ObExpr &expr, const ObEvalCtx &ctx, const ObBasicSessionInfo *session)
+  : local_session_var_(NULL),
+  session_(session)
+{
+  ObPhysicalPlanCtx * phy_ctx = ctx.exec_ctx_.get_physical_plan_ctx();
+  if (OB_NOT_NULL(phy_ctx)) {
+    if (OB_SUCCESS == (phy_ctx->get_local_session_vars(expr.local_session_var_id_, local_session_var_))) {
+    }
+  }
+}
+
+int ObSolidifiedVarsGetter::get_dtc_params(ObDataTypeCastParams &dtc_params)
+{
+  int ret = OB_SUCCESS;
+  bool is_valid = false;
+  const common::ObTimeZoneInfo *tz_info = NULL;
+  dtc_params = ObBasicSessionInfo::create_dtc_params(session_);
+  if (OB_ISNULL(session_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected null", K(ret));
+  } else if (OB_FAIL(get_time_zone_info(tz_info))) {
+    LOG_WARN("get time zone info failed", K(ret));
+  } else if (NULL != local_session_var_
+             && OB_FAIL(ObSQLUtils::merge_solidified_var_into_dtc_params(local_session_var_->get_local_vars(),
+                                                                  tz_info,
+                                                                  dtc_params))) {
+    LOG_WARN("fail to create local dtc params", K(ret));
+  }
+  return ret;
+}
+
+int ObSolidifiedVarsGetter::get_time_zone_info(const common::ObTimeZoneInfo *&tz_info)
+{
+  int ret = OB_SUCCESS;
+  bool is_valid = false;
+  ObSessionSysVar *local_var = NULL;
+  tz_info = NULL;
+  if (OB_ISNULL(session_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected null", K(ret));
+  } else if (NULL != local_session_var_
+             && OB_FAIL(const_cast<ObSolidifiedVarsContext *>(local_session_var_)->get_local_tz_info(session_, tz_info))) {
+    LOG_WARN("get local tz_info failed", K(ret));
+  } else if (NULL == tz_info) {
+    tz_info = session_->get_timezone_info();
+  }
+  return ret;
+}
+
+int ObSolidifiedVarsGetter::get_sql_mode(ObSQLMode &sql_mode)
+{
+  int ret = OB_SUCCESS;
+  bool is_valid = false;
+  if (OB_ISNULL(session_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected null", K(ret));
+  } else if (FALSE_IT(sql_mode = session_->get_sql_mode())) {
+  } else if (NULL != local_session_var_
+             && OB_FAIL(ObSQLUtils::merge_solidified_var_into_sql_mode(local_session_var_->get_local_vars(),
+                                                                       sql_mode))) {
+    LOG_WARN("try get local sql mode failed", K(ret));
+  }
+  return ret;
+}
+
+int ObSolidifiedVarsGetter::get_local_nls_date_format(ObString &format)
+{
+  int ret = OB_SUCCESS;
+  ObSessionSysVar *sys_var = NULL;
+  if (OB_ISNULL(session_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected null", K(ret));
+  } else if (OB_FAIL(get_local_var(SYS_VAR_NLS_DATE_FORMAT, sys_var))) {
+    LOG_WARN("fail to get local var", K(ret));
+  } else if (NULL != sys_var) {
+    if (OB_FAIL(sys_var->val_.get_string(format))) {
+      LOG_WARN("fail to get nls_timestamp_tz_format str value", K(ret), KPC(sys_var));
+    }
+  } else {
+    format = session_->get_local_nls_date_format();
+  }
+  return ret;
+}
+
+int ObSolidifiedVarsGetter::get_local_nls_timestamp_format(ObString &format)
+{
+  int ret = OB_SUCCESS;
+  ObSessionSysVar *sys_var = NULL;
+  if (OB_ISNULL(session_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected null", K(ret));
+  } else if (OB_FAIL(get_local_var(SYS_VAR_NLS_TIMESTAMP_FORMAT, sys_var))) {
+    LOG_WARN("fail to get local var", K(ret));
+  } else if (NULL != sys_var) {
+    if (OB_FAIL(sys_var->val_.get_string(format))) {
+      LOG_WARN("fail to get nls_timestamp_tz_format str value", K(ret), KPC(sys_var));
+    }
+  } else {
+    format = session_->get_local_nls_timestamp_format();
+  }
+  return ret;
+}
+int ObSolidifiedVarsGetter::get_local_nls_timestamp_tz_format(ObString &format)
+{
+  int ret = OB_SUCCESS;
+  ObSessionSysVar *sys_var = NULL;
+  if (OB_ISNULL(session_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected null", K(ret));
+  } else if (OB_FAIL(get_local_var(SYS_VAR_NLS_TIMESTAMP_TZ_FORMAT, sys_var))) {
+    LOG_WARN("fail to get local var", K(ret));
+  } else if (NULL != sys_var) {
+    if (OB_FAIL(sys_var->val_.get_string(format))) {
+      LOG_WARN("fail to get nls_timestamp_tz_format str value", K(ret), KPC(sys_var));
+    }
+  } else {
+    format = session_->get_local_nls_timestamp_tz_format();
+  }
+  return ret;
+}
+int ObSolidifiedVarsGetter::get_local_var(ObSysVarClassType var_type, ObSessionSysVar *&sys_var)
+{
+  int ret = OB_SUCCESS;
+  sys_var = NULL;
+  if (NULL != local_session_var_
+      && NULL != local_session_var_->get_local_vars()
+      && OB_FAIL(local_session_var_->get_local_vars()->get_local_var(var_type, sys_var))) {
+    LOG_WARN("fail to get local var", K(ret));
+  }
+  return ret;
+}
+
+int ObSolidifiedVarsGetter::get_local_nls_format_by_type(const ObObjType type, ObString &format_str)
+{
+  int ret = OB_SUCCESS;
+  switch (type) {
+    case ObDateTimeType:
+      if (OB_FAIL(get_local_nls_date_format(format_str))) {
+        LOG_WARN("failed to get local nls date format", K(ret));
+      }
+      break;
+    case ObTimestampNanoType:
+    case ObTimestampLTZType:
+      if (OB_FAIL(get_local_nls_timestamp_format(format_str))) {
+        LOG_WARN("failed to get local nls timestamp format", K(ret));
+      }
+      break;
+    case ObTimestampTZType:
+      if (OB_FAIL(get_local_nls_timestamp_tz_format(format_str))) {
+        LOG_WARN("failed to get local nls timestamp_tz format", K(ret));
+      }
+      break;
+    default:
+      ret = OB_INVALID_DATE_VALUE;
+      SQL_SESSION_LOG(WARN, "invalid argument. wrong type for source.", K(ret), K(type));
+      break;
+  }
+  return ret;
+}
+
+int ObSolidifiedVarsGetter::get_max_allowed_packet(int64_t &max_size)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(session_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected null", K(ret));
+  } else if (FALSE_IT(session_->get_max_allowed_packet(max_size))) {
+  } else if (NULL != local_session_var_
+             && OB_FAIL(ObSQLUtils::merge_solidified_var_into_max_allowed_packet(local_session_var_->get_local_vars(),
+                                                                              max_size))) {
+    LOG_WARN("try get local max allowed packet failed", K(ret));
+  }
+  return ret;
+}
+
+int ObSolidifiedVarsGetter::get_compat_version(uint64_t &compat_version)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(session_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected null", K(ret));
+  } else if (OB_FAIL(session_->get_compatibility_version(compat_version))) {
+    LOG_WARN("failed to get compat version", K(ret));
+  } else if (NULL != local_session_var_
+             && OB_FAIL(ObSQLUtils::merge_solidified_var_into_compat_version(local_session_var_->get_local_vars(),
+                                                                             compat_version))) {
+    LOG_WARN("try get local compat version failed", K(ret));
   }
   return ret;
 }

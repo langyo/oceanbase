@@ -10,17 +10,11 @@
  * See the Mulan PubL v2 for more details.
  */
 #define USING_LOG_PREFIX STORAGE
-#include <gtest/gtest.h>
 #define private public
 #define protected public
 
-#include "lib/random/ob_random.h"
 #include "storage/access/ob_sstable_row_multi_scanner.h"
-#include "storage/column_store/ob_co_prefetcher.h"
-#include "storage/column_store/ob_co_sstable_row_scanner.h"
-#include "storage/tablet/ob_tablet.h"
 #include "ob_index_block_data_prepare.h"
-#include "lib/container/ob_se_array.h"
 
 
 namespace oceanbase
@@ -49,6 +43,7 @@ public:
   virtual void SetUp();
   virtual void TearDown();
   virtual void prepare_schema();
+  void prepare_co_query_param(const bool is_reverse);
   void generate_range(
       const int64_t start,
       const int64_t end,
@@ -135,6 +130,14 @@ void TestCOSSTableRowScanner::TearDown()
   TestIndexBlockDataPrepare::TearDown();
 }
 
+void TestCOSSTableRowScanner::prepare_co_query_param(const bool is_reverse)
+{
+  prepare_query_param(is_reverse);
+  iter_param_.pd_storage_flag_.set_blockscan_pushdown(true);
+  iter_param_.pd_storage_flag_.set_filter_pushdown(true);
+  iter_param_.vectorized_enabled_ = true;
+}
+
 void TestCOSSTableRowScanner::prepare_schema()
 {
   ObColumnSchemaV2 column;
@@ -154,6 +157,7 @@ void TestCOSSTableRowScanner::prepare_schema()
   table_schema_.set_compress_func_name("none");
   table_schema_.set_row_store_type(row_store_type_);
   table_schema_.set_storage_format_version(OB_STORAGE_FORMAT_VERSION_V4);
+  table_schema_.set_micro_index_clustered(false);
 
   index_schema_.reset();
 
@@ -382,8 +386,8 @@ void TestCOSSTableRowScanner::test_row_scan_only(const bool is_reverse)
   int64_t start = 0;
   int64_t end = row_cnt_ - 1;
   generate_range(start, end, range_);
-  prepare_query_param(is_reverse);
-  OK(scanner_.inner_open(iter_param_, context_, &sstable_, &range_));
+  prepare_co_query_param(is_reverse);
+  OK(scanner_.init(iter_param_, context_, &sstable_, &range_));
   scanner_.block_row_store_ = &block_row_store_;
   if (is_reverse) {
     consume_rows_by_row_store(&scanner_, end, start, is_reverse);
@@ -400,8 +404,8 @@ void TestCOSSTableRowScanner::test_row_scan_and_column_scan(const bool is_revers
   int64_t start = 0;
   int64_t end = row_cnt_ - 1;
   generate_range(start, end, range_);
-  prepare_query_param(is_reverse);
-  OK(scanner_.inner_open(iter_param_, context_, &sstable_, &range_));
+  prepare_co_query_param(is_reverse);
+  OK(scanner_.init(iter_param_, context_, &sstable_, &range_));
   scanner_.block_row_store_ = &block_row_store_;
 
   if (!is_reverse) {
@@ -445,8 +449,8 @@ void TestCOSSTableRowScanner::test_row_scan_and_column_scan_with_multi_range1()
   const bool is_reverse = false;
   prepare_test_case(level_cnt);
   generate_ranges_case1(is_reverse);
-  prepare_query_param(is_reverse);
-  OK(multi_scanner_.inner_open(iter_param_, context_, &sstable_, &ranges_));
+  prepare_co_query_param(is_reverse);
+  OK(multi_scanner_.init(iter_param_, context_, &sstable_, &ranges_));
   multi_scanner_.block_row_store_ = &block_row_store_;
   consume_rows_by_row_store(&multi_scanner_, range_row_ids_[0].start_row_id_,
                              range_row_ids_[0].start_row_id_, is_reverse);
@@ -494,8 +498,8 @@ void TestCOSSTableRowScanner::test_reverse_row_scan_and_column_scan_with_multi_r
   const bool is_reverse = true;
   prepare_test_case(level_cnt);
   generate_ranges_case1(is_reverse);
-  prepare_query_param(is_reverse);
-  OK(multi_scanner_.inner_open(iter_param_, context_, &sstable_, &ranges_));
+  prepare_co_query_param(is_reverse);
+  OK(multi_scanner_.init(iter_param_, context_, &sstable_, &ranges_));
   multi_scanner_.block_row_store_ = &block_row_store_;
   consume_rows_by_row_store(&multi_scanner_, range_row_ids_[0].end_row_id_,
                              range_row_ids_[0].end_row_id_, is_reverse);
@@ -539,8 +543,8 @@ void TestCOSSTableRowScanner::test_row_scan_and_column_scan_with_multi_range2()
   const bool is_reverse = false;
   prepare_test_case(level_cnt);
   generate_ranges_case2(is_reverse);
-  prepare_query_param(is_reverse);
-  OK(multi_scanner_.inner_open(iter_param_, context_, &sstable_, &ranges_));
+  prepare_co_query_param(is_reverse);
+  OK(multi_scanner_.init(iter_param_, context_, &sstable_, &ranges_));
   multi_scanner_.block_row_store_ = &block_row_store_;
 
   consume_rows_by_row_store(&multi_scanner_, range_row_ids_[0].start_row_id_,
@@ -599,7 +603,7 @@ void TestCOSSTableRowScanner::test_row_scan_and_column_scan_with_multi_range2()
   OK(multi_scanner_.get_blockscan_start(start_row_id, range_idx, block_scan_state));
   ASSERT_EQ(range_row_ids_[4].start_row_id_, start_row_id);
   ASSERT_EQ(4, range_idx);
-  ASSERT_EQ(PENDING_BLOCK_SCAN, multi_scanner_.prefetcher_.block_scan_state_);
+  ASSERT_TRUE(PENDING_BLOCK_SCAN == multi_scanner_.prefetcher_.block_scan_state_ || IN_END_OF_RANGE == multi_scanner_.prefetcher_.block_scan_state_);
   ASSERT_EQ(BLOCKSCAN_RANGE, block_scan_state);
 
   forward_blockscan_to_end(&multi_scanner_, end_row_id, block_scan_state, is_reverse);
@@ -616,8 +620,8 @@ void TestCOSSTableRowScanner::test_reverse_row_scan_and_column_scan_with_multi_r
   const bool is_reverse = true;
   prepare_test_case(level_cnt);
   generate_ranges_case2(is_reverse);
-  prepare_query_param(is_reverse);
-  OK(multi_scanner_.inner_open(iter_param_, context_, &sstable_, &ranges_));
+  prepare_co_query_param(is_reverse);
+  OK(multi_scanner_.init(iter_param_, context_, &sstable_, &ranges_));
   multi_scanner_.block_row_store_ = &block_row_store_;
 
   consume_rows_by_row_store(&multi_scanner_, range_row_ids_[0].end_row_id_,
@@ -676,14 +680,13 @@ void TestCOSSTableRowScanner::test_reverse_row_scan_and_column_scan_with_multi_r
   OK(multi_scanner_.get_blockscan_start(start_row_id, range_idx, block_scan_state));
   ASSERT_EQ(range_row_ids_[4].end_row_id_, start_row_id);
   ASSERT_EQ(4, range_idx);
-  ASSERT_EQ(PENDING_BLOCK_SCAN, multi_scanner_.prefetcher_.block_scan_state_);
+  ASSERT_TRUE(PENDING_BLOCK_SCAN == multi_scanner_.prefetcher_.block_scan_state_ || IN_END_OF_RANGE == multi_scanner_.prefetcher_.block_scan_state_);
   ASSERT_EQ(BLOCKSCAN_RANGE, block_scan_state);
 
   forward_blockscan_to_end(&multi_scanner_, end_row_id, block_scan_state, is_reverse);
   ASSERT_EQ(border_id1 + 1, end_row_id);
   ASSERT_EQ(BLOCKSCAN_FINISH, block_scan_state);
-  consume_rows_by_row_store(&multi_scanner_, border_id1, range_row_ids_[4].start_row_id_,
-                             is_reverse);
+  consume_rows_by_row_store(&multi_scanner_, border_id1, range_row_ids_[4].start_row_id_, is_reverse);
   check_iter_end(&multi_scanner_);
 }
 

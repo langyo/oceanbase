@@ -17,8 +17,9 @@
 #include "sql/optimizer/ob_log_join.h"
 #include "sql/resolver/dml/ob_sql_hint.h"
 #include "sql/engine/px/ob_px_basic_info.h"
-#include "sql/engine/join/ob_join_filter_op.h"
 #include "sql/engine/expr/ob_expr_join_filter.h"
+#include "sql/engine/join/ob_join_filter_material_control_info.h"
+
 namespace oceanbase
 {
 namespace sql
@@ -39,7 +40,12 @@ public:
       is_null_safe_cmps_(),
       filter_type_(JoinFilterSharedType::INVALID_TYPE),
       calc_tablet_id_expr_(NULL),
-      skip_subpart_(false)
+      skip_subpart_(false),
+      rf_prefix_col_idxs_(),
+      probe_table_id_(OB_INVALID_ID),
+      range_column_cnt_(-1),
+      jf_material_control_info_(),
+      rf_max_wait_time_(0)
   { }
   virtual ~ObLogJoinFilter() = default;
   const char *get_name() const;
@@ -62,7 +68,8 @@ public:
   }
   inline int64_t get_filter_length() const { return filter_len_; }
   inline void set_paired_join_filter(ObLogicalOperator *paired_join_filter) { paired_join_filter_ = paired_join_filter; }
-  inline ObLogicalOperator *get_paired_join_filter() const { return paired_join_filter_; }
+  inline ObLogicalOperator *get_paired_join_filter() { return paired_join_filter_; }
+  inline const ObLogicalOperator *get_paired_join_filter() const { return paired_join_filter_; }
   inline void set_is_use_filter_shuffle(bool flag) { is_use_filter_shuffle_ = flag; }
   inline bool is_use_filter_shuffle() { return is_use_filter_shuffle_; }
   inline bool is_partition_filter() const
@@ -74,7 +81,7 @@ public:
       { return join_filter_exprs_.push_back(filter_expr); }
   const common::ObIArray<ObRawExpr *> &get_join_filter_exprs()
       { return join_filter_exprs_; }
-common::ObIArray<ObRawExpr *> &get_join_filter_exprs_for_update()
+  common::ObIArray<ObRawExpr *> &get_join_filter_exprs_for_update()
       { return join_filter_exprs_; }
   int add_join_filter_cmp_funcs(const common::ObDatumCmpFuncType &cmp_fun)
       { return join_filter_cmp_funcs_.push_back(cmp_fun);}
@@ -108,12 +115,58 @@ common::ObIArray<ObRawExpr *> &get_join_filter_exprs_for_update()
   virtual int inner_replace_op_exprs(ObRawExprReplacer &replacer) override;
   virtual int get_plan_item_info(PlanText &plan_text,
                                 ObSqlPlanItem &plan_item) override;
+
+  inline int set_rf_prefix_col_idxs(const ObIArray<int64_t> &rf_prefix_col_idxs)
+  {
+    return rf_prefix_col_idxs_.assign(rf_prefix_col_idxs);
+  }
+  inline const ObIArray<int64_t> &get_rf_prefix_col_idxs() const { return  rf_prefix_col_idxs_; }
+
+  inline void set_probe_table_id(int64_t probe_table_id) { probe_table_id_ = probe_table_id; }
+  inline int64_t get_probe_table_id() const { return probe_table_id_; }
+
+  inline void set_range_column_cnt(int64_t range_column_cnt)
+  {
+    range_column_cnt_ = range_column_cnt;
+  }
+  inline int64_t get_range_column_cnt() const { return range_column_cnt_; }
+  inline bool use_realistic_runtime_bloom_filter_size()
+  {
+    return jf_material_control_info_.enable_material_;
+  }
+
+  inline const ObJoinFilterMaterialControlInfo &get_jf_material_control_info() const
+  {
+    return jf_material_control_info_;
+  }
+
+  inline ObJoinFilterMaterialControlInfo &get_jf_material_control_info()
+  {
+    return jf_material_control_info_;
+  }
+  inline int64_t get_rf_max_wait_time() const {
+    return rf_max_wait_time_;
+  }
+  inline void set_rf_max_wait_time(int64_t rf_max_wait_time) {
+    rf_max_wait_time_ = rf_max_wait_time;
+  }
+
+  const common::ObIArray<ObRawExpr *> &get_all_join_key_left_exprs()
+  {
+    return all_join_key_left_exprs_;
+  }
+  int set_all_join_key_left_exprs(const common::ObIArray<ObRawExpr *> &exprs)
+  {
+    return all_join_key_left_exprs_.assign(exprs);
+  }
+
 private:
   bool is_create_;   //判断是否是create算子
   int64_t filter_id_; //设置filter_id
   int64_t filter_len_; //设置filter长度
+  //ObLogJoinFilter *paired_join_filter_; //if this is a create op, set paired_join_filter_ as use open, vice versa
   // if this is a join filter create op, the paired_join_filter_ is join filter use op, vice versa
-  // if this is a partition join filter create op, the paired_join_filter_ is partition filter gi
+   //if this is a partition join filter create op, the paired_join_filter_ is partition filter gi
   ObLogicalOperator *paired_join_filter_;
   //equal join condition expr
   common::ObSEArray<ObRawExpr *, 8, common::ModulePageAllocator, true> join_exprs_;
@@ -127,6 +180,14 @@ private:
   JoinFilterSharedType filter_type_;
   ObRawExpr *calc_tablet_id_expr_; // 计算tablet_id的expr
   bool skip_subpart_; // Ignore 2-level subpart_id when calculating partition id
+
+  // for runtime filter extract query range
+  ObSEArray<int64_t, 4, common::ModulePageAllocator, true> rf_prefix_col_idxs_;
+  int64_t probe_table_id_;
+  int64_t range_column_cnt_;
+  ObJoinFilterMaterialControlInfo jf_material_control_info_;
+  int64_t rf_max_wait_time_;
+  common::ObSEArray<ObRawExpr *, 8, common::ModulePageAllocator, true> all_join_key_left_exprs_;
   DISALLOW_COPY_AND_ASSIGN(ObLogJoinFilter);
 };
 

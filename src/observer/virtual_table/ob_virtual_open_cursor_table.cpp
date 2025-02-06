@@ -13,10 +13,7 @@
 #define USING_LOG_PREFIX SERVER
 
 #include "ob_virtual_open_cursor_table.h"
-#include "sql/session/ob_sql_session_mgr.h"
 #include "observer/ob_server.h"
-#include "sql/session/ob_sql_session_info.h"
-#include "sql/privilege_check/ob_ora_priv_check.h"
 #include "sql/plan_cache/ob_ps_cache.h"
 
 using namespace oceanbase::common;
@@ -153,6 +150,7 @@ bool ObVirtualOpenCursorTable::FillScanner::operator()(sql::ObSQLSessionMgr::Key
         pl::ObPLCursorInfo *cursor_info = iter->second;
         if (OB_ISNULL(cursor_info)) {
           // do not report error
+          // ignore ret
           SERVER_LOG(WARN, "get a NULL cursor when record for v$open_cursor.");
         } else {
           OZ (fill_session_cursor_cell(*sess_info, cursor_info->get_id()));

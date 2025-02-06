@@ -12,7 +12,6 @@
 
 #include "log_loop_thread.h"
 #include "palf_env_impl.h"
-#include "lib/thread/ob_thread_name.h"
 
 namespace oceanbase
 {
@@ -142,14 +141,16 @@ void LogLoopThread::log_loop_()
       PALF_LOG_RET(WARN, tmp_ret, "for_each try_freeze_log_func failed", K(tmp_ret));
     }
 
+    palf_env_impl_->period_calc_disk_usage();
+
     const int64_t round_cost_time = ObTimeUtility::current_time() - start_ts;
     int32_t sleep_ts = run_interval_ - static_cast<const int32_t>(round_cost_time);
     if (sleep_ts < 0) {
       sleep_ts = 0;
     }
-    ob_usleep(sleep_ts);
+    ob_usleep(sleep_ts, true/*is_idle_sleep*/);
 
-    if (REACH_TENANT_TIME_INTERVAL(5 * 1000 * 1000)) {
+    if (REACH_THREAD_TIME_INTERVAL(5 * 1000 * 1000)) {
       PALF_LOG(INFO, "LogLoopThread round_cost_time(us)", K(round_cost_time));
     }
   }

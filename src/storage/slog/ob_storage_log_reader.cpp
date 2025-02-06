@@ -12,17 +12,8 @@
 
 #define USING_LOG_PREFIX STORAGE_REDO
 
-#include "common/log/ob_log_constants.h"
-#include "common/log/ob_log_generator.h"
-#include "lib/oblog/ob_log_module.h"
-#include "lib/utility/ob_macro_utils.h"
-#include "share/ob_force_print_log.h"
-#include "share/ob_force_print_log.h"
-#include "share/redolog/ob_log_file_handler.h"
-#include "storage/meta_mem/ob_meta_obj_struct.h"
 #include "storage/slog/ob_storage_log_reader.h"
 #include "storage/slog/ob_storage_log_replayer.h"
-#include "share/rc/ob_tenant_base.h"
 
 namespace oceanbase
 {
@@ -66,7 +57,7 @@ int ObStorageLogReader::init(
       STORAGE_REDO_LOG(WARN, "Log buffer's data has been set",
           K(ret), KP(log_buffer_.get_data()));
     } else {
-      const ObMemAttr attr(OB_SERVER_TENANT_ID, ObModIds::OB_LOG_READER);
+      const ObMemAttr attr(tenant_id, ObModIds::OB_LOG_READER);
       char *buf = static_cast<char *>(ob_malloc_align(OB_DIRECT_IO_ALIGN,
           ObLogConstants::LOG_ITEM_MAX_LENGTH, attr));
       if (nullptr == buf) {

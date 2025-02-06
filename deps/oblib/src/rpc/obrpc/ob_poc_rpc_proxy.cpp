@@ -10,8 +10,7 @@
  * See the Mulan PubL v2 for more details.
  */
 
-#include "rpc/obrpc/ob_poc_rpc_proxy.h"
-#include "rpc/obrpc/ob_poc_rpc_server.h"
+#include "ob_poc_rpc_proxy.h"
 #include "rpc/obrpc/ob_rpc_proxy.h"
 #include "rpc/obrpc/ob_net_keepalive.h"
 extern "C" {
@@ -32,9 +31,11 @@ common::ObCompressorType get_proxy_compressor_type(ObRpcProxy& proxy) {
 int ObSyncRespCallback::handle_resp(int io_err, const char* buf, int64_t sz)
 {
   if (PNIO_OK != io_err) {
-    if (PNIO_TIMEOUT == io_err) {
+    if (PNIO_TIMEOUT == io_err || PNIO_DISCONNECT == io_err || PNIO_PKT_TERMINATE == io_err) {
+      // these pnio error means not sure rpc was successfully sent
       send_ret_ = OB_TIMEOUT;
     } else {
+      // OB_RPC_SEND_ERROR means the rpc must not have been sent out
       send_ret_ = OB_RPC_SEND_ERROR;
       RPC_LOG_RET(WARN, send_ret_, "pnio error", KP(buf), K(sz), K(io_err));
     }
@@ -42,6 +43,8 @@ int ObSyncRespCallback::handle_resp(int io_err, const char* buf, int64_t sz)
     send_ret_ = OB_TIMEOUT;
     RPC_LOG_RET(WARN, send_ret_, "response is null", KP(buf), K(sz), K(io_err));
   } else {
+    EVENT_INC(RPC_PACKET_IN);
+    EVENT_ADD(RPC_PACKET_IN_BYTES, sz);
     buf = buf + easy_head_size;
     sz = sz - easy_head_size; // skip easy header
     sz_ = sz;
@@ -58,10 +61,26 @@ int ObSyncRespCallback::handle_resp(int io_err, const char* buf, int64_t sz)
   rk_futex_wake(&cond_, 1);
   return ret;
 }
-int ObSyncRespCallback::wait()
+int ObSyncRespCallback::wait(const int64_t wait_timeout_us, const int64_t pcode, const int64_t req_sz)
 {
+  ObWaitEventGuard wait_guard(ObWaitEventIds::SYNC_RPC, wait_timeout_us / 1000, pcode, req_sz);
+  const struct timespec ts = {1, 0};
+  bool has_terminated = false;
   while(ATOMIC_LOAD(&cond_) == 0) {
-    rk_futex_wait(&cond_, 0, NULL);
+    if (OB_UNLIKELY((obrpc::OB_REMOTE_SYNC_EXECUTE == pcode || obrpc::OB_REMOTE_EXECUTE == pcode
+                      || proxy_.is_detect_session_killed())
+                    && !has_terminated
+                    && OB_ERR_SESSION_INTERRUPTED == THIS_WORKER.check_status())) {
+      RPC_LOG(INFO, "check session killed, will execute pn_terminate_pkt", K(gtid_), K(pkt_id_));
+      int err = 0;
+      if ((err = pn_terminate_pkt(gtid_, pkt_id_)) != 0) {
+        int tmp_ret = tranlate_to_ob_error(err);
+        RPC_LOG_RET(WARN, tmp_ret, "pn_terminate_pkt failed", K(err));
+      } else {
+        has_terminated = true;
+      }
+    }
+    rk_futex_wait(&cond_, 0, &ts);
   }
   return send_ret_;
 }
@@ -110,8 +129,10 @@ int ObAsyncRespCallback::handle_resp(int io_err, const char* buf, int64_t sz)
   int64_t after_decode_time = 0;
   int64_t after_process_time = 0;
   ObRpcPacketCode pcode = OB_INVALID_RPC_CODE;
-  ObRpcPacket* ret_pkt = NULL;
+  ObRpcPacket ret_pkt;
   if (buf != NULL && sz > easy_head_size) {
+    EVENT_INC(RPC_PACKET_IN);
+    EVENT_ADD(RPC_PACKET_IN_BYTES, sz);
     sz = sz - easy_head_size;
     buf = buf + easy_head_size;
   } else {
@@ -121,6 +142,7 @@ int ObAsyncRespCallback::handle_resp(int io_err, const char* buf, int64_t sz)
   if (ucb_ == NULL) {
     // do nothing
   } else {
+    ucb_->record_stat(buf == NULL);
     bool cb_cloned = ucb_->get_cloned();
     pcode = ucb_->get_pcode();
     if (0 != io_err) {
@@ -130,22 +152,24 @@ int ObAsyncRespCallback::handle_resp(int io_err, const char* buf, int64_t sz)
       }
     } else if (NULL == buf) {
       ucb_->on_timeout();
-    } else if (OB_FAIL(rpc_decode_ob_packet(pool_, buf, sz, ret_pkt))) {
+    } else if (OB_FAIL(rpc_decode_ob_packet(buf, sz, ret_pkt))) {
+      ucb_->set_error(ret);
       ucb_->on_invalid();
       RPC_LOG(WARN, "rpc_decode_ob_packet fail", K(ret));
-    } else if (OB_FALSE_IT(ObCurTraceId::set(ret_pkt->get_trace_id()))) {
+    } else if (OB_FALSE_IT(ObCurTraceId::set(ret_pkt.get_trace_id()))) {
     }
 #ifdef ERRSIM
-    else if (OB_FALSE_IT(THIS_WORKER.set_module_type(ret_pkt->get_module_type()))) {
+    else if (OB_FALSE_IT(THIS_WORKER.set_module_type(ret_pkt.get_module_type()))) {
     }
 #endif
-    else if (OB_FAIL(ucb_->decode(ret_pkt))) {
+    else if (OB_FAIL(ucb_->decode(&ret_pkt))) {
+      ucb_->set_error(ret);
       ucb_->on_invalid();
       RPC_LOG(WARN, "ucb.decode fail", K(ret));
     } else {
       after_decode_time = ObTimeUtility::current_time();
       int tmp_ret = OB_SUCCESS;
-      pcode = ret_pkt->get_pcode();
+      pcode = ret_pkt.get_pcode();
       if (OB_SUCCESS != (tmp_ret = ucb_->process())) {
         RPC_LOG(WARN, "ucb.process fail", K(tmp_ret));
       }
@@ -157,6 +181,7 @@ int ObAsyncRespCallback::handle_resp(int io_err, const char* buf, int64_t sz)
   }
   pool_.destroy();
   ObCurTraceId::reset();
+  THIS_WORKER.get_sql_arena_allocator().reset();
   const int64_t cur_time = ObTimeUtility::current_time();
   const int64_t total_time = cur_time  - start_time;
   const int64_t decode_time = after_decode_time - start_time;
@@ -208,8 +233,8 @@ int32_t ObPocClientStub::get_proxy_group_id(ObRpcProxy& proxy) {
 void ObPocClientStub::set_rcode(ObRpcProxy& proxy, const ObRpcResultCode& rcode) {
   proxy.set_result_code(rcode);
 }
-void ObPocClientStub::set_handle(ObRpcProxy& proxy, Handle* handle, const ObRpcPacketCode& pcode, const ObRpcOpts& opts, bool is_stream_next, int64_t session_id) {
-  proxy.set_handle_attr(handle, pcode, opts, is_stream_next, session_id);
+void ObPocClientStub::set_handle(ObRpcProxy& proxy, Handle* handle, const ObRpcPacketCode& pcode, const ObRpcOpts& opts, bool is_stream_next, int64_t session_id, int64_t pkt_id, int64_t send_ts) {
+  proxy.set_handle_attr(handle, pcode, opts, is_stream_next, session_id, pkt_id, send_ts);
 }
 int ObPocClientStub::translate_io_error(int io_err) {
   return tranlate_to_ob_error(io_err);

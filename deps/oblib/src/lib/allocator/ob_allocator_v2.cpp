@@ -11,8 +11,6 @@
  */
 
 #include "lib/allocator/ob_allocator_v2.h"
-#include "lib/alloc/alloc_failed_reason.h"
-#include "lib/alloc/memory_sanity.h"
 #include "lib/allocator/ob_mem_leak_checker.h"
 
 using namespace oceanbase::lib;
@@ -37,15 +35,14 @@ void *ObAllocator::alloc(const int64_t size, const ObMemAttr &attr)
     auto ta = lib::ObMallocAllocator::get_instance()->get_tenant_ctx_allocator(inner_attr.tenant_id_,
                                                                                 inner_attr.ctx_id_);
     if (OB_LIKELY(NULL != ta)) {
-      ptr = ObTenantCtxAllocator::common_alloc(size, inner_attr, *(ta.ref_allocator()), os_);
+      ptr = ObTenantCtxAllocator::common_realloc(NULL, size, inner_attr, *(ta.ref_allocator()), os_);
     } else if (FORCE_MALLOC_FOR_ABSENT_TENANT()) {
       inner_attr.tenant_id_ = OB_SERVER_TENANT_ID;
       ta = lib::ObMallocAllocator::get_instance()->get_tenant_ctx_allocator(inner_attr.tenant_id_,
                                                                             inner_attr.ctx_id_);
-      if (NULL != ta) {
-        ptr = ObTenantCtxAllocator::common_alloc(size, inner_attr, *(ta.ref_allocator()), nos_);
-      }
+      ptr = ObTenantCtxAllocator::common_realloc(NULL, size, inner_attr, *(ta.ref_allocator()), nos_);
     }
+
   }
   return ptr;
 }
@@ -104,7 +101,7 @@ void ObParallelAllocator::free(void *ptr)
     lib::ABlock *block = obj->block();
     abort_unless(block);
     abort_unless(block->is_valid());
-    ObjectSet *os = block->obj_set_;
+    ObjectSet *os = (ObjectSet*)block->obj_set_;
     // The locking process is driven by obj_set
     os->free_object(obj);
   }

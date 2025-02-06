@@ -13,17 +13,20 @@
 #ifndef OB_STORAGE_BLOCKSSTABLE_DATUM_ROWKEY_H
 #define OB_STORAGE_BLOCKSSTABLE_DATUM_ROWKEY_H
 
-#include "ob_datum_row.h"
+#include "ob_storage_datum.h"
 #include "lib/utility/ob_print_kv.h"
 //to be removed
 #include "common/rowkey/ob_store_rowkey.h"
-#include "share/schema/ob_table_param.h"
 
 namespace oceanbase
 {
 namespace blocksstable
 {
 struct ObDatumRange;
+class ObRowkeyVector;
+struct ObDiscreteDatumRowkey;
+struct ObCommonDatumRowkey;
+struct ObDatumRow;
 
 struct ObDatumRowkey
 {
@@ -53,7 +56,7 @@ public:
   OB_INLINE void set_max_rowkey() { *this = MAX_ROWKEY; store_rowkey_.set_max(); }
   OB_INLINE void set_min_rowkey() { *this = MIN_ROWKEY; store_rowkey_.set_min(); }
   OB_INLINE bool is_static_rowkey() const { return datums_ == &MIN_DATUM || datums_ == &MAX_DATUM; }
-  OB_INLINE void set_group_idx(const int32_t group_idx) { group_idx_ = group_idx; }
+  OB_INLINE void set_group_idx(const int64_t group_idx) { group_idx_ = group_idx; }
   OB_INLINE int64_t get_group_idx() const { return group_idx_; }
   OB_INLINE const common::ObStoreRowkey &get_store_rowkey() const { return store_rowkey_; }
   //only for unittest
@@ -76,6 +79,10 @@ public:
   int equal(const ObDatumRowkey &rhs, const ObStorageDatumUtils &datum_utils, bool &is_equal) const;
   int compare(const ObDatumRowkey &rhs, const ObStorageDatumUtils &datum_utils, int &cmp_ret,
               const bool compare_datum_cnt = true) const;
+  int compare(const ObDiscreteDatumRowkey &rhs, const ObStorageDatumUtils &datum_utils, int &cmp_ret,
+              const bool compare_datum_cnt = true) const;
+  int compare(const ObCommonDatumRowkey &rhs, const ObStorageDatumUtils &datum_utils, int &cmp_ret,
+              const bool compare_datum_cnt = true) const;
   int from_rowkey(const ObRowkey &rowkey, common::ObIAllocator &allocator);
   int from_rowkey(const ObRowkey &rowkey, ObStorageDatumBuffer &datum_buffer);
   int to_store_rowkey(const common::ObIArray<share::schema::ObColDesc> &col_descs,
@@ -90,7 +97,7 @@ public:
   DECLARE_TO_STRING;
 public:
   int32_t datum_cnt_;
-  int32_t group_idx_;
+  int64_t group_idx_;
   mutable uint64_t hash_;
   ObStorageDatum *datums_;
   common::ObStoreRowkey store_rowkey_;
@@ -116,6 +123,10 @@ public:
   int convert_store_rowkey(const ObDatumRowkey &datum_rowkey,
                            const common::ObIArray<share::schema::ObColDesc> &col_descs,
                            common::ObStoreRowkey &rowkey);
+  int prepare_datum_rowkey(const ObDatumRow &datum_row,
+                           const int key_datum_cnt,
+                           const ObIArray<share::schema::ObColDesc> &col_descs,
+                           ObDatumRowkey &datum_rowkey);
   int reserve(const int64_t rowkey_cnt);
   OB_INLINE ObStorageDatum *get_datums() { return datum_buffer_.get_datums(); }
   OB_INLINE int64_t get_capacity() const { return datum_buffer_.get_capacity(); }
@@ -139,7 +150,6 @@ public:
   const ObDatumRowkey *get_rowkey() const { return rowkey_; }
   int compare(const ObDatumRowkeyWrapper &other, int &cmp) const { return rowkey_->compare(*(other.get_rowkey()), *datum_utils_, cmp); }
   const ObStorageDatum *get_ptr() const { return rowkey_->get_datum_ptr(); }
-  const char *repr() const { return to_cstring(rowkey_); }
   TO_STRING_KV(KPC_(rowkey), KPC_(datum_utils));
   const ObDatumRowkey *rowkey_;
   const ObStorageDatumUtils *datum_utils_;
@@ -221,6 +231,66 @@ private:
     uint8_t row_mark_;
   };
   ObDatumRowkey rowkey_;
+};
+
+struct ObDiscreteDatumRowkey
+{
+  ObDiscreteDatumRowkey() : row_idx_(-1), rowkey_vector_(nullptr) {}
+  ~ObDiscreteDatumRowkey() = default;
+  OB_INLINE bool is_valid() const { return row_idx_ >= 0 && nullptr != rowkey_vector_; }
+  int compare(const ObDatumRowkey &rhs, const ObStorageDatumUtils &datum_utils, int &cmp_ret,
+              const bool compare_datum_cnt = true) const;
+  int compare(const ObDiscreteDatumRowkey &rhs, const ObStorageDatumUtils &datum_utils, int &cmp_ret,
+              const bool compare_datum_cnt = true) const;
+  int compare(const ObCommonDatumRowkey &rhs, const ObStorageDatumUtils &datum_utils, int &cmp_ret,
+              const bool compare_datum_cnt = true) const;
+  int deep_copy(ObDatumRowkey &dest, common::ObIAllocator &allocator) const;
+  int get_column_int(const int64_t col_idx, int64_t &int_val) const;
+  TO_STRING_KV(K_(row_idx), KP_(rowkey_vector));
+  int64_t row_idx_;
+  const ObRowkeyVector *rowkey_vector_;
+};
+
+struct ObCommonDatumRowkey
+{
+  enum RowkeyType {
+    NONE,
+    COMPACT,
+    DISCRETE,
+  };
+  ObCommonDatumRowkey() : type_(NONE), key_ptr_(nullptr) {}
+  ~ObCommonDatumRowkey() = default;
+  OB_INLINE void reset() { type_ = NONE; key_ptr_ = nullptr; }
+  OB_INLINE bool is_valid() const { return (COMPACT == type_ || DISCRETE == type_) && (nullptr != key_ptr_); }
+  OB_INLINE bool is_compact_rowkey() const { return COMPACT == type_; }
+  OB_INLINE bool is_discrete_rowkey() const { return DISCRETE == type_; }
+  OB_INLINE void set_compact_rowkey(const ObDatumRowkey *rowkey)
+  {
+    type_ = COMPACT;
+    rowkey_ = rowkey;
+  }
+  OB_INLINE const ObDatumRowkey *get_compact_rowkey() const { return rowkey_; }
+  OB_INLINE void set_discrete_rowkey(const ObDiscreteDatumRowkey *discrete_rowkey)
+  {
+    type_ = DISCRETE;
+    discrete_rowkey_ = discrete_rowkey;
+  }
+  OB_INLINE const ObDiscreteDatumRowkey *get_discrete_rowkey() const { return discrete_rowkey_; }
+  int compare(const ObDatumRowkey &rhs, const ObStorageDatumUtils &datum_utils, int &cmp_ret,
+              const bool compare_datum_cnt = true) const;
+  int compare(const ObDiscreteDatumRowkey &rhs, const ObStorageDatumUtils &datum_utils, int &cmp_ret,
+              const bool compare_datum_cnt = true) const;
+  int compare(const ObCommonDatumRowkey &rhs, const ObStorageDatumUtils &datum_utils, int &cmp_ret,
+              const bool compare_datum_cnt = true) const;
+  int deep_copy(ObDatumRowkey &dest, common::ObIAllocator &allocator) const;
+  int get_column_int(const int64_t col_idx, int64_t &int_val) const;
+  DECLARE_TO_STRING;
+  RowkeyType type_;
+  union {
+    const void *key_ptr_;
+    const ObDatumRowkey *rowkey_;
+    const ObDiscreteDatumRowkey *discrete_rowkey_;
+  };
 };
 
 /*

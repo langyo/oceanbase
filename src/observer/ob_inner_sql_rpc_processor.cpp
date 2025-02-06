@@ -13,15 +13,8 @@
 #define USING_LOG_PREFIX SERVER
 
 #include "ob_inner_sql_rpc_processor.h"
-#include "ob_inner_sql_connection.h"
-#include "ob_inner_sql_connection_pool.h"
 #include "ob_inner_sql_result.h"
 #include "ob_resource_inner_sql_connection_pool.h"
-#include "observer/omt/ob_multi_tenant.h"
-#include "lib/oblog/ob_log_module.h"
-#include "lib/container/ob_iarray.h"
-#include "storage/tx/ob_multi_data_source.h"
-#include "sql/plan_cache/ob_plan_cache_util.h"
 #include "storage/tablelock/ob_lock_inner_connection_util.h"
 
 using namespace oceanbase::common;
@@ -64,9 +57,12 @@ int ObInnerSqlRpcP::process_register_mds(sqlclient::ObISQLConnection *conn,
   int64_t pos = 0;
   if (OB_FAIL(mds_str.deserialize(arg.get_inner_sql().ptr(), arg.get_inner_sql().length(), pos))) {
     LOG_WARN("deserialize multi data source str failed", K(ret), K(arg), K(pos));
-  } else if (OB_FAIL(inner_conn->register_multi_data_source(
-                 arg.get_tenant_id(), mds_str.get_ls_id(), mds_str.get_msd_type(),
-                 mds_str.get_msd_buf(), mds_str.get_msd_buf_len(), mds_str.get_register_flag()))) {
+  } else if (OB_FAIL(inner_conn->register_multi_data_source(arg.get_tenant_id(),
+                                                            mds_str.get_ls_id(),
+                                                            mds_str.get_msd_type(),
+                                                            mds_str.get_msd_buf(),
+                                                            mds_str.get_msd_buf_len(),
+                                                            mds_str.get_register_flag()))) {
     LOG_WARN("register multi data source failed", K(ret), K(arg.get_tenant_id()), K(mds_str));
   }
 
@@ -105,7 +101,7 @@ int ObInnerSqlRpcP::process_write(
 {
   int ret = OB_SUCCESS;
   int64_t affected_rows = -1;
-  ResourceGroupGuard guard(transmit_arg.get_consumer_group_id());
+  CONSUMER_GROUP_ID_GUARD(transmit_arg.get_consumer_group_id());
   if (OB_FAIL(conn->execute_write(transmit_arg.get_tenant_id(), write_sql.ptr(), affected_rows))) {
     LOG_WARN("execute write failed", K(ret), K(transmit_arg), K(write_sql));
   } else {
@@ -126,7 +122,7 @@ int ObInnerSqlRpcP::process_read(
   int ret = OB_SUCCESS;
   common::ObScanner &scanner = transmit_result.get_scanner();
   scanner.set_found_rows(0);
-
+  CONSUMER_GROUP_ID_GUARD(transmit_arg.get_consumer_group_id());
   SMART_VAR(ObMySQLProxy::MySQLResult, res) {
     sqlclient::ObMySQLResult *sql_result = NULL;
     if (OB_FAIL(conn->execute_read(GCONF.cluster_id, transmit_arg.get_tenant_id(), read_sql.ptr(), res))) {
@@ -173,7 +169,7 @@ int ObInnerSqlRpcP::process_read(
           if (OB_SUCC(ret)) {
             if (need_flush) { // last row is not be used
               if (OB_FAIL(obrpc::ObRpcProcessor< obrpc::ObInnerSQLRpcProxy::ObRpc<
-                  obrpc::OB_INNER_SQL_SYNC_TRANSMIT> >::flush(THIS_WORKER.get_timeout_remain()))) {
+                  obrpc::OB_INNER_SQL_SYNC_TRANSMIT> >::flush(THIS_WORKER.get_timeout_remain(), &arg_.get_ctrl_svr()))) {
                 LOG_WARN("fail to flush", K(ret));
               } else {
                 LOG_DEBUG("flush scanner successfully", K(scanner), K(scanner.get_found_rows()));
@@ -261,7 +257,6 @@ void ObInnerSqlRpcP::cleanup_tmp_session(
     tmp_session = NULL;
     GCTX.session_mgr_->mark_sessid_unused(free_session_ctx.sessid_);
   }
-  ObActiveSessionGuard::setup_default_ash(); // enforce cleanup for future RPC cases
 }
 
 int ObInnerSqlRpcP::process()
@@ -340,7 +335,9 @@ int ObInnerSqlRpcP::process()
         LOG_WARN("tenant schema is null", K(ret));
       } else {
         tmp_session->set_current_trace_id(ObCurTraceId::get_trace_id());
+        tmp_session->init_use_rich_format();
         tmp_session->switch_tenant_with_name(transmit_arg.get_tenant_id(), tenant_schema->get_tenant_name_str());
+        tmp_session->set_thread_id(GETTID());
         ObString sql_stmt(sql_str.ptr());
         if (OB_FAIL(tmp_session->set_session_active(
             sql_stmt,
@@ -415,8 +412,9 @@ int ObInnerSqlRpcP::process()
           case ObInnerSQLTransmitArg::OPERATION_TYPE_LOCK_ALONE_TABLET:
           case ObInnerSQLTransmitArg::OPERATION_TYPE_UNLOCK_ALONE_TABLET:
           case ObInnerSQLTransmitArg::OPERATION_TYPE_LOCK_OBJS:
-          case ObInnerSQLTransmitArg::OPERATION_TYPE_UNLOCK_OBJS: {
-
+          case ObInnerSQLTransmitArg::OPERATION_TYPE_UNLOCK_OBJS:
+          case ObInnerSQLTransmitArg::OPERATION_TYPE_REPLACE_LOCK:
+          case ObInnerSQLTransmitArg::OPERATION_TYPE_REPLACE_LOCKS: {
             if (OB_FAIL(ObInnerConnectionLockUtil::process_lock_rpc(transmit_arg, conn))) {
               LOG_WARN("process lock rpc failed", K(ret), K(transmit_arg.get_operation_type()));
             }
@@ -480,23 +478,6 @@ int ObInnerSqlRpcP::set_session_param_to_conn(
     }
   }
   return ret;
-}
-
-ResourceGroupGuard::ResourceGroupGuard(const int32_t group_id)
-  : group_change_(false), old_group_id_(0)
-{
-  if (is_user_group(group_id)) {
-    old_group_id_ = THIS_WORKER.get_group_id();
-    THIS_WORKER.set_group_id(group_id);
-    group_change_ = true;
-  }
-}
-
-ResourceGroupGuard::~ResourceGroupGuard()
-{
-  if (group_change_) {
-    THIS_WORKER.set_group_id(old_group_id_);
-  }
 }
 
 }

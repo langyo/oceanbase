@@ -12,15 +12,7 @@
 
 #define USING_LOG_PREFIX RS
 #include "ob_drop_primary_key_task.h"
-#include "lib/rc/context.h"
-#include "share/schema/ob_multi_version_schema_service.h"
-#include "share/ob_ddl_error_message_table_operator.h"
-#include "share/ob_autoincrement_service.h"
-#include "share/ob_ddl_checksum.h" 
-#include "rootserver/ddl_task/ob_ddl_scheduler.h"
 #include "rootserver/ob_root_service.h"
-#include "rootserver/ddl_task/ob_ddl_redefinition_task.h"
-#include "storage/tablelock/ob_table_lock_service.h"
 
 using namespace oceanbase::lib;
 using namespace oceanbase::common;
@@ -38,18 +30,20 @@ ObDropPrimaryKeyTask::~ObDropPrimaryKeyTask()
 {
 }
 
-int ObDropPrimaryKeyTask::init(const uint64_t tenant_id, const int64_t task_id, const share::ObDDLType &ddl_type,
-    const int64_t data_table_id, const int64_t dest_table_id, const int64_t schema_version, const int64_t parallelism,
-    const int64_t consumer_group_id, const obrpc::ObAlterTableArg &alter_table_arg, const int64_t task_status, const int64_t snapshot_version)
+int ObDropPrimaryKeyTask::init(const ObTableSchema* src_table_schema, const ObTableSchema* dst_table_schema,
+                               const int64_t task_id, const share::ObDDLType &ddl_type, const int64_t parallelism,
+                               const int64_t consumer_group_id, const int32_t sub_task_trace_id,
+                               const obrpc::ObAlterTableArg &alter_table_arg, const uint64_t tenant_data_version,
+                               const int64_t task_status,const int64_t snapshot_version )
 {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(ObTableRedefinitionTask::init(tenant_id, tenant_id, task_id, ddl_type, data_table_id,
-                                            dest_table_id, schema_version, schema_version, parallelism, consumer_group_id,
-                                            alter_table_arg, task_status, snapshot_version))) {
+  if (OB_FAIL(ObTableRedefinitionTask::init(src_table_schema, dst_table_schema, 0, task_id, ddl_type, parallelism, consumer_group_id,
+                                            sub_task_trace_id, alter_table_arg, tenant_data_version, task_status, snapshot_version))) {
     LOG_WARN("fail to init ObDropPrimaryKeyTask", K(ret));
   } else {
     set_gmt_create(ObTimeUtility::current_time());
     consumer_group_id_ = consumer_group_id;
+    sub_task_trace_id_ = sub_task_trace_id;
     task_version_ = OB_DROP_PRIMARY_KEY_TASK_VERSION;
     ddl_tracing_.open();
   }
@@ -118,57 +112,10 @@ int ObDropPrimaryKeyTask::process()
         break;
     }
     ddl_tracing_.release_span_hierarchy();
+    if (OB_FAIL(ret)) {
+      add_event_info("drop primary key task process fail");
+      LOG_INFO("drop primary key task process fail", "ddl_event_info", ObDDLEventInfo());
+    }
   }
   return ret;
-}
-void ObDropPrimaryKeyTask::flt_set_task_span_tag() const
-{
-  FLT_SET_TAG(ddl_task_id, task_id_, ddl_parent_task_id, parent_task_id_,
-              ddl_data_table_id, object_id_, ddl_schema_version, schema_version_);
-}
-
-void ObDropPrimaryKeyTask::flt_set_status_span_tag() const
-{
-  switch (task_status_) {
-  case ObDDLTaskStatus::PREPARE: {
-    FLT_SET_TAG(ddl_ret_code, ret_code_);
-    break;
-  }
-  case ObDDLTaskStatus::OBTAIN_SNAPSHOT: {
-    FLT_SET_TAG(ddl_ret_code, ret_code_);
-    break;
-  }
-  case ObDDLTaskStatus::WAIT_TRANS_END: {
-    FLT_SET_TAG(ddl_data_table_id, object_id_, ddl_schema_version, schema_version_,
-                ddl_snapshot_version, snapshot_version_, ddl_ret_code, ret_code_);
-    break;
-  }
-  case ObDDLTaskStatus::REDEFINITION: {
-    FLT_SET_TAG(ddl_ret_code, ret_code_);
-    break;
-  }
-  case ObDDLTaskStatus::COPY_TABLE_DEPENDENT_OBJECTS: {
-    FLT_SET_TAG(ddl_ret_code, ret_code_);
-    break;
-  }
-  case ObDDLTaskStatus::MODIFY_AUTOINC: {
-    FLT_SET_TAG(ddl_ret_code, ret_code_);
-    break;
-  }
-  case ObDDLTaskStatus::TAKE_EFFECT: {
-    FLT_SET_TAG(ddl_ret_code, ret_code_);
-    break;
-  }
-  case ObDDLTaskStatus::FAIL: {
-    FLT_SET_TAG(ddl_ret_code, ret_code_);
-    break;
-  }
-  case ObDDLTaskStatus::SUCCESS: {
-    FLT_SET_TAG(ddl_ret_code, ret_code_);
-    break;
-  }
-  default: {
-    break;
-  }
-  }
 }

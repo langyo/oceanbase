@@ -16,9 +16,13 @@ set_target_properties(rocksdb PROPERTIES
 add_library(obcdc_base INTERFACE)
 target_include_directories(obcdc_base INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(obcdc_base
-  INTERFACE ob_base
+  INTERFACE -Wl,--whole-archive mock_di -Wl,--no-whole-archive ob_base
   obcdc_msg rocksdb
   ${OB_RELRO_FLAG} -Wl,-T,${CMAKE_SOURCE_DIR}/rpm/ld.lds)
+
+if( ${ARCHITECTURE} STREQUAL "x86_64" )
+  add_definitions(-DARC_X86)
+endif()
 
 ob_set_subtarget(obcdc_object_list common
   libobcdc.cpp
@@ -31,6 +35,8 @@ ob_set_subtarget(obcdc_object_list common
   ob_cdc_global_info.cpp
   ob_cdc_lob_aux_table_schema_info.cpp
   ob_cdc_lob_aux_table_parse.cpp
+  ob_cdc_malloc_sample_info.cpp
+  ob_cdc_miss_log_handler.cpp
   ob_cdc_server_endpoint_access_info.cpp
   ob_cdc_tenant_endpoint_provider.cpp
   ob_cdc_udt.cpp
@@ -117,6 +123,7 @@ ob_set_subtarget(obcdc_object_list common
   ob_log_table_id_cache.cpp
   ob_log_table_matcher.cpp
   ob_log_tenant.cpp
+  ob_log_tic_update_info.cpp
   ob_log_tenant_mgr.cpp
   ob_log_tenant_task_queue.cpp
   ob_log_timer.cpp
@@ -189,8 +196,11 @@ ob_add_new_object_target(obcdc_objects_miner obcdc_object_list)
 
 target_link_libraries(obcdc_objects_miner PUBLIC obcdc_base)
 add_library(obcdc_static
-  STATIC
-  ${CMAKE_BINARY_DIR}/src/observer/ob_version.cpp)
+    STATIC
+    ${CMAKE_BINARY_DIR}/src/observer/ob_version.cpp)
+if (BUILD_CDC_ONLY)
+  set_target_properties(obcdc_static PROPERTIES EXCLUDE_FROM_ALL TRUE)
+endif()
 
 target_link_libraries(obcdc_static
   PUBLIC obcdc_objects

@@ -14,12 +14,9 @@
 
 #define USING_LOG_PREFIX OBLOG
 
-#include "lib/string/ob_string.h"                // ObString
 #include "ob_log_storager.h"
 #include "ob_log_instance.h"
 #include "ob_log_store_service.h"
-#include "ob_log_store_key.h"
-#include "ob_log_store_task.h"
 #include "ob_log_factory.h"                      // ObLogStoreTaskFactory
 #include "ob_log_trace_id.h"                     // ObLogTraceIdGuard
 
@@ -274,7 +271,7 @@ int ObLogStorager::handle_task_(IObLogBatchBufTask &batch_task,
           LOG_ERROR("get_tenant_guard fail", KR(ret), K(tenant_id));
         } else {
           tenant = guard.get_tenant();
-          void *column_family_handle = tenant->get_cf();
+          void *column_family_handle = tenant->get_redo_storage_cf_handle();
 
           if (OB_FAIL(store_key.get_key(key))) {
             LOG_ERROR("store_key get_key fail", KR(ret));

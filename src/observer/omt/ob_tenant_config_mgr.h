@@ -48,6 +48,7 @@ public:
    * Requires: check is_valid().
    */
   ObTenantConfig *operator->() { return config_; }
+  void trace_all_config() const;
 private:
   ObTenantConfig *config_;
 };
@@ -57,11 +58,12 @@ struct TenantConfigInfo {
 
   TenantConfigInfo() : TenantConfigInfo(common::OB_INVALID_TENANT_ID) {}
   TenantConfigInfo(uint64_t tenant_id) : tenant_id_(tenant_id),
-    name_(), value_(), info_(), section_(),
+    name_(), data_type_(), value_(), info_(), section_(),
     scope_(), source_(), edit_level_() {}
   virtual ~TenantConfigInfo() {}
   void set_tenant_id(uint64_t tenant_id) { tenant_id_ = tenant_id; }
   int set_name(const char *name) { return name_.assign(name); }
+  int set_data_type(const char *data_type) { return data_type_.assign(data_type); }
   int set_value(const char *value) { return value_.assign(value); }
   int set_info(const char *info) { return info_.assign(info); }
   int set_section(const char *section) { return section_.assign(section); }
@@ -73,6 +75,7 @@ struct TenantConfigInfo {
 
   uint64_t tenant_id_;
   ConfigString name_;
+  ConfigString data_type_;
   ConfigString value_;
   ConfigString info_;
   ConfigString section_;
@@ -101,6 +104,7 @@ using UpdateTenantConfigCb = common::ObFunction<void(uint64_t tenant_id)>;
 
 class ObTenantConfigMgr
 {
+  friend class ObTenantConfig;
 public:
   static ObTenantConfigMgr &get_instance();
   virtual ~ObTenantConfigMgr();
@@ -140,7 +144,8 @@ public:
   int64_t get_tenant_config_version(uint64_t tenant_id);
   void get_lease_request(share::ObLeaseRequest &lease_request);
   int get_lease_response(share::ObLeaseResponse &lease_response);
-  int get_all_tenant_config_info(common::ObArray<TenantConfigInfo> &config_info);
+  int get_all_tenant_config_info(common::ObArray<TenantConfigInfo> &config_info,
+                                 common::ObIAllocator *allocator);
   int got_versions(const common::ObIArray<std::pair<uint64_t, int64_t> > &versions);
   int got_version(uint64_t tenant_id, int64_t version, const bool remove_repeat = true);
   int update_local(uint64_t tenant_id, int64_t expected_version);
@@ -171,6 +176,8 @@ public:
 private:
   static const int64_t RECYCLE_LATENCY = 30L * 60L * 1000L * 1000L;
   ObTenantConfigMgr();
+  // whitout lock, only used inner
+  int dump2file_unsafe();
   bool inited_;
   common::ObAddr self_;
   common::ObMySQLProxy *sql_proxy_;

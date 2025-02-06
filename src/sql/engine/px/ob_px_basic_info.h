@@ -22,7 +22,8 @@ namespace sql
 #define IS_PX_COORD(type) \
      ((type) == PHY_PX_FIFO_COORD || \
       (type) == PHY_PX_MERGE_SORT_COORD ||\
-      (type) == PHY_PX_ORDERED_COORD)
+      (type) == PHY_PX_ORDERED_COORD ||\
+      (type) == PHY_VEC_PX_MERGE_SORT_COORD)
 
 
 // NOTE：可能会有多种 receive op type，这里都需要判断. 目前只有一种
@@ -30,6 +31,8 @@ namespace sql
      ((type) == PHY_PX_FIFO_RECEIVE || \
       (type) == PHY_PX_MERGE_SORT_RECEIVE || \
       (type) == PHY_PX_MERGE_SORT_COORD || \
+      (type) == PHY_VEC_PX_MERGE_SORT_COORD || \
+      (type) == PHY_VEC_PX_MERGE_SORT_RECEIVE || \
       (type) == PHY_PX_FIFO_COORD || \
       (type) == PHY_PX_ORDERED_COORD)
 
@@ -48,14 +51,14 @@ namespace sql
 #define IS_PX_MODIFY(type) \
   ((type) == PHY_PX_MULTI_PART_UPDATE || \
    (type) == PHY_PX_MULTI_PART_DELETE || \
-   (type) == PHY_PX_MULTI_PART_INSERT)
+   (type) == PHY_PX_MULTI_PART_INSERT || \
+   (type) == PHY_TABLE_DIRECT_INSERT)
 
 
 
 // 判断一个运算符是否为Transmit的子类，用于切分Job
 #define IS_TRANSMIT(type) \
-    ((type) == PHY_ROOT_TRANSMIT || \
-     (type) == PHY_DIRECT_TRANSMIT || \
+    ((type) == PHY_DIRECT_TRANSMIT || \
      (type) == PHY_DISTRIBUTED_TRANSMIT || \
      (type) == PHY_PX_DIST_TRANSMIT || \
      (type) == PHY_PX_REPART_TRANSMIT || \
@@ -90,7 +93,8 @@ namespace sql
    (type) == PHY_PX_MULTI_PART_UPDATE || \
    (type) == PHY_MERGE || \
    (type) == PHY_PX_MULTI_PART_SSTABLE_INSERT || \
-   (type) == PHY_LOCK)
+   (type) == PHY_LOCK || \
+   (type) == PHY_TABLE_DIRECT_INSERT)
 
 enum JoinFilterMode
 {

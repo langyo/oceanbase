@@ -15,15 +15,8 @@
 #include "ob_dbms_job_utils.h"
 #include "ob_dbms_job_executor.h"
 
-#include "lib/oblog/ob_log.h"
-#include "lib/mysqlclient/ob_isql_connection.h"
-#include "share/ob_define.h"
-#include "share/ob_errno.h"
-#include "share/schema/ob_schema_getter_guard.h"
 
 #include "observer/ob_inner_sql_connection_pool.h"
-#include "sql/session/ob_sql_session_info.h"
-#include "sql/ob_sql.h"
 #ifdef OB_BUILD_AUDIT_SECURITY
 #include "pl/sys_package/ob_dbms_audit_mgmt.h"
 #endif
@@ -96,6 +89,8 @@ int ObDBMSJobExecutor::init_session(
   OZ (session.set_user(
     user_info->get_user_name(), user_info->get_host_name_str(), user_info->get_user_id()));
   OX (session.set_user_priv_set(OB_PRIV_ALL | OB_PRIV_GRANT));
+  OX (session.init_use_rich_format());
+
   OZ (exec_env.store(session));
   return ret;
 }

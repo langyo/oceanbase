@@ -11,9 +11,6 @@
  */
 
 #include "ob_mock_tx_log_adapter.h"
-#include "logservice/ob_log_handler.h"
-#include "storage/tx/ob_trans_submit_log_cb.h"
-#include "logservice/ob_log_base_type.h"
 
 namespace oceanbase
 {
@@ -108,7 +105,8 @@ int MockTxLogAdapter::submit_log(const char *buf,
                                  const int64_t size,
                                  const share::SCN &base_ts,
                                  ObTxBaseLogCb *cb,
-                                 const bool need_nonblock)
+                                 const bool need_nonblock,
+                                 const int64_t retry_timeout_us)
 {
   int ret = OB_SUCCESS;
   int64_t ts = 0;

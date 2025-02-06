@@ -12,8 +12,7 @@
 
 #define USING_LOG_PREFIX SQL_RESV
 #include "sql/resolver/expr/ob_expr_relation_analyzer.h"
-#include "lib/oblog/ob_log_module.h"
-#include "sql/resolver/dml/ob_select_stmt.h"
+#include "src/sql/resolver/expr/ob_raw_expr.h"
 #include "common/ob_smart_call.h"
 namespace oceanbase
 {
@@ -50,7 +49,10 @@ int ObExprRelationAnalyzer::visit_expr(ObRawExpr &expr)
   int64_t param_count = expr.has_flag(IS_ONETIME) ? 1 : expr.get_param_count();
   if (!expr.is_column_ref_expr() &&
       T_PSEUDO_EXTERNAL_FILE_COL != expr.get_expr_type() &&
-      T_ORA_ROWSCN != expr.get_expr_type()) {
+      T_PSEUDO_EXTERNAL_FILE_URL != expr.get_expr_type() &&
+      T_PSEUDO_PARTITION_LIST_COL != expr.get_expr_type() &&
+      T_ORA_ROWSCN != expr.get_expr_type() &&
+      T_PSEUDO_OLD_NEW_COL != expr.get_expr_type()) {
     expr.get_relation_ids().reuse();
   }
   // not sure whether we should visit onetime exec param

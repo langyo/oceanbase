@@ -25,10 +25,12 @@
 #include "storage/backup/ob_backup_data_struct.h"
 #include "storage/backup/ob_backup_tmp_file.h"
 #include "storage/backup/ob_backup_utils.h"
+#include "storage/backup/ob_backup_iterator.h"
 #include "storage/blocksstable/ob_data_buffer.h"
 #include "storage/blocksstable/ob_logic_macro_id.h"
 #include "storage/backup/ob_backup_file_writer_ctx.h"
 #include "lib/oblog/ob_log_module.h"
+#include "lib/hash/ob_hashset.h"
 
 namespace oceanbase {
 namespace backup {
@@ -56,8 +58,8 @@ public:
       const uint64_t tenant_id, const share::ObLSID &ls_id);
   int mark_begin(const share::ObBackupDataType &backup_data_type);
   int mark_end(const share::ObBackupDataType &backup_data_type);
-  int add_macro_block(const share::ObBackupDataType &backup_data_type, const blocksstable::ObLogicMacroBlockId &logic_id);
-  int add_sstable_meta(const share::ObBackupDataType &backup_data_type, const storage::ObITable::TableKey &table_key);
+  int add_macro_block(const share::ObBackupDataType &backup_data_type, const blocksstable::ObLogicMacroBlockId &logic_id, const bool need_copy);
+  int add_sstable_meta(const share::ObBackupDataType &backup_data_type, const common::ObTabletID &tablet_id);
   int add_tablet_meta(const share::ObBackupDataType &backup_data_type, const common::ObTabletID &tablet_id);
   int add_bytes(const share::ObBackupDataType &backup_data_type, const int64_t bytes);
   int do_compare(const ObSimpleBackupStatMgr &other);
@@ -77,7 +79,7 @@ private:
   int print_missing_items_(const common::ObIArray<T> &list);
 
 private:
-  static const int64_t STAT_ARRAY_SIZE = 3;
+  static const int64_t STAT_ARRAY_SIZE = 2;
   mutable lib::ObMutex mutex_;
   bool is_inited_;
   share::ObBackupDest backup_dest_;
@@ -133,12 +135,14 @@ struct ObBackupDataCtx {
 public:
   ObBackupDataCtx();
   virtual ~ObBackupDataCtx();
-  int open(const ObLSBackupDataParam &param, const share::ObBackupDataType &type, const int64_t file_id);
+  int open(const ObLSBackupDataParam &param, const share::ObBackupDataType &type, const int64_t file_id,
+      common::ObInOutBandwidthThrottle &bandwidth_throttle);
   int write_backup_file_header(const ObBackupFileHeader &file_header);
-  int write_macro_block_data(const blocksstable::ObBufferReader &macro_data,
+  int write_macro_block_data(const blocksstable::ObBufferReader &macro_data, const storage::ObITable::TableKey &table_key,
       const blocksstable::ObLogicMacroBlockId &logic_id, ObBackupMacroBlockIndex &macro_index);
   int write_meta_data(const blocksstable::ObBufferReader &meta_data, const common::ObTabletID &tablet_id,
       const ObBackupMetaType &meta_type, ObBackupMetaIndex &meta_index);
+  int write_other_block(const blocksstable::ObBufferReader &reader, int64_t &offset, int64_t &length);
   int64_t get_file_size() const
   {
     return file_write_ctx_.get_file_size();
@@ -148,18 +152,24 @@ public:
 private:
   int64_t get_data_file_size() const
   {
-    return GCONF.backup_data_file_size;
+    omt::ObTenantConfigGuard tenant_config(TENANT_CONF(MTL_ID()));
+    if (!tenant_config.is_valid()) {
+      return share::DEFAULT_BACKUP_DATA_FILE_SIZE;
+    } else {
+      return tenant_config->backup_data_file_size;
+    }
   }
   int open_file_writer_(const share::ObBackupPath &backup_path);
   int prepare_file_write_ctx_(
-      const ObLSBackupDataParam &param, const share::ObBackupDataType &type, const int64_t file_id);
+      const ObLSBackupDataParam &param, const share::ObBackupDataType &type, const int64_t file_id,
+      common::ObInOutBandwidthThrottle &bandwidth_throttle);
   int get_macro_block_backup_path_(const int64_t file_id, share::ObBackupPath &backup_path);
-  int write_macro_block_data_(const blocksstable::ObBufferReader &buffer, const blocksstable::ObLogicMacroBlockId &logic_id,
-      ObBackupMacroBlockIndex &macro_index);
+  int write_macro_block_data_(const blocksstable::ObBufferReader &buffer, const storage::ObITable::TableKey &table_key,
+      const blocksstable::ObLogicMacroBlockId &logic_id, ObBackupMacroBlockIndex &macro_index);
   int write_meta_data_(const blocksstable::ObBufferReader &buffer, const common::ObTabletID &tablet_id,
       const ObBackupMetaType &meta_type, ObBackupMetaIndex &meta_index);
-  int build_macro_block_index_(const blocksstable::ObLogicMacroBlockId &logic_id, const int64_t offset, const int64_t length,
-      ObBackupMacroBlockIndex &macro_index);
+  int build_macro_block_index_(const storage::ObITable::TableKey &table_key, const blocksstable::ObLogicMacroBlockId &logic_id,
+      const int64_t offset, const int64_t length, ObBackupMacroBlockIndex &macro_index);
   int build_meta_index_(const common::ObTabletID &tablet_id, const ObBackupMetaType &meta_type, const int64_t offset,
       const int64_t length, ObBackupMetaIndex &meta_index);
   int append_macro_block_index_(const ObBackupMacroBlockIndex &macro_index);
@@ -175,8 +185,8 @@ private:
   int write_meta_index_list_(const common::ObIArray<ObBackupMetaIndex> &index_list);
   template <class IndexType>
   int write_index_list_(const ObBackupBlockType &index_type, const common::ObIArray<IndexType> &index_list);
-  int build_common_header_(const ObBackupBlockType &block_type, const int64_t data_length, const int64_t align_lenght,
-      share::ObBackupCommonHeader *&common_header);
+  int build_common_header_(const ObBackupBlockType &block_type, const int64_t data_length, const int64_t data_zlength,
+      const int64_t align_length, const ObCompressorType &compressor_type, share::ObBackupCommonHeader *&common_header);
   int write_data_align_(
       const blocksstable::ObBufferReader &buffer, const ObBackupBlockType &block_type, const int64_t alignment);
   int check_trailer_(const ObBackupDataFileTrailer &trailer);
@@ -201,23 +211,62 @@ public:
   DISALLOW_COPY_AND_ASSIGN(ObBackupDataCtx);
 };
 
-struct ObBackupRecoverRetryCtx {
-  ObBackupRecoverRetryCtx();
-  virtual ~ObBackupRecoverRetryCtx();
+class ObBackupMetaIndexIterator;
+class ObBackupUnorderedMacroBlockIndexIterator;
+
+struct ObBackupRetryCtx {
+  ObBackupRetryCtx();
+  virtual ~ObBackupRetryCtx();
   void reuse();
   void reset();
+  int set(const ObLSBackupParam &param,
+      const share::ObBackupDataType &backup_data_type,
+      common::ObMySQLProxy *sql_proxy);
+  int recover_last_retry_ctx();
   TO_STRING_KV(
-      K_(has_need_skip_tablet_id),
-      K_(need_skip_tablet_id),
-      K_(has_need_skip_logic_id),
-      K_(need_skip_logic_id),
+      K_(has_last_tablet_id),
+      K_(last_tablet_id),
+      K_(last_tablet_meta_retry_ctx),
       K_(reused_pair_list));
 
-  bool has_need_skip_tablet_id_;
-  bool has_need_skip_logic_id_;
-  common::ObTabletID need_skip_tablet_id_;
-  blocksstable::ObLogicMacroBlockId need_skip_logic_id_;
-  common::ObArray<ObBackupMacroBlockIDPair> reused_pair_list_;
+private:
+  struct BackupRetryCmp {
+    bool operator()(const ObBackupRetryDesc &lhs, const ObBackupRetryDesc &rhs)
+    {
+      return lhs.retry_id_ < rhs.retry_id_;
+    }
+  };
+
+private:
+  int check_and_sort_retry_list_(
+      const int64_t cur_turn_id, const int64_t cur_retry_id, common::ObArray<ObBackupRetryDesc> &retry_list);
+  int do_recover_last_retry_ctx_(common::ObArray<ObBackupRetryDesc> &retry_list);
+  int inner_do_recover_last_retry_ctx_(const ObBackupRetryDesc &retry_desc, bool &found);
+  int get_last_persist_macro_block_(const ObBackupRetryDesc &retry_desc, bool &found);
+  int init_backup_meta_iterator_(const ObBackupRetryDesc &retry_desc, ObBackupMetaIndexIterator &iter);
+  int get_last_persist_tablet_meta_(const ObBackupRetryDesc &retry_desc, bool &found);
+  int inner_get_last_persist_tablet_meta_(
+      const common::ObIArray<ObBackupMetaIndex> &meta_index_list, common::ObTabletID &tablet_id, bool &found);
+  int get_all_retries_of_turn_(const int64_t turn_id, common::ObIArray<ObBackupRetryDesc> &retry_list);
+  int inner_get_all_retries_(common::ObIArray<ObBackupRetryDesc> &retry_list);
+  int recover_need_reuse_macro_block_(const common::ObIArray<ObBackupRetryDesc> &retry_list);
+  int init_backup_macro_index_iterator_(const ObBackupRetryDesc &retry_desc, ObBackupUnorderedMacroBlockIndexIterator &iter);
+  int inner_recover_need_reuse_macro_block_(const ObBackupRetryDesc &retry_desc, bool &is_end);
+  int check_need_stop_recover_file_(const ObBackupRetryDesc &cur_retry_desc, const int64_t cur_file_id, bool &need_stop);
+  int add_recover_retry_ctx_event_(const common::ObIArray<ObBackupRetryDesc> &retry_list);
+
+private:
+  bool is_inited_;
+  ObLSBackupParam param_;
+  share::ObBackupDataType backup_data_type_;
+  common::ObMySQLProxy *sql_proxy_;
+
+public:
+  bool has_last_tablet_id_;
+  common::ObTabletID last_tablet_id_;
+  ObBackupMetaIndex last_tablet_meta_index_;
+  ObBackupRetryDesc last_tablet_meta_retry_ctx_;
+  common::ObArray<ObBackupMacroBlockIDPair> reused_pair_list_; // need be sorted
 };
 class ObILSTabletIdReader;
 struct ObLSBackupCtx {
@@ -225,11 +274,12 @@ public:
   ObLSBackupCtx();
   virtual ~ObLSBackupCtx();
   int open(
-      const ObLSBackupParam &param, const share::ObBackupDataType &backup_data_type, common::ObMySQLProxy &sql_proxy);
+      const ObLSBackupParam &param, const share::ObBackupDataType &backup_data_type, common::ObMySQLProxy &sql_proxy,
+      common::ObInOutBandwidthThrottle &bandwidth_throttle);
   int next(common::ObTabletID &tablet_id);
   void set_backup_data_type(const share::ObBackupDataType &backup_data_type);
-  int hold_tablet(const common::ObTabletID &tablet_id, storage::ObTabletHandle &tablet_handle);
-  int get_tablet(const common::ObTabletID &tablet_id, storage::ObTabletHandle &tablet_handle);
+  int set_tablet(const common::ObTabletID &tablet_id, ObBackupTabletHandleRef *tablet_handle);
+  int get_tablet(const common::ObTabletID &tablet_id, ObBackupTabletHandleRef *&tablet_handle);
   int release_tablet(const common::ObTabletID &tablet_id);
   void set_result_code(const int64_t result, bool &is_set);
   int64_t get_result_code() const;
@@ -250,39 +300,26 @@ public:
     return tablet_holder_;
   }
 
-private:
-  struct BackupRetryCmp {
-    bool operator()(const ObBackupRetryDesc &lhs, const ObBackupRetryDesc &rhs)
-    {
-      return lhs.retry_id_ < rhs.retry_id_;
-    }
-  };
-  int recover_last_retry_ctx_();
-  int check_and_sort_retry_list_(
-      const int64_t cur_turn_id, const int64_t cur_retry_id, common::ObArray<ObBackupRetryDesc> &retry_list);
-  int recover_last_minor_retry_ctx_(common::ObArray<ObBackupRetryDesc> &retry_list);
-  int recover_last_major_retry_ctx_(common::ObArray<ObBackupRetryDesc> &retry_list);
-  int inner_recover_last_minor_retry_ctx_(const ObBackupRetryDesc &retry_desc, bool &found);
-  int inner_recover_last_major_retry_ctx_(const ObBackupRetryDesc &retry_desc, bool &found);
-  int get_last_persist_macro_block_(const ObBackupRetryDesc &retry_desc, bool &found);
-  int get_last_persist_tablet_meta_(const ObBackupRetryDesc &retry_desc, bool &found);
-  int inner_get_last_persist_tablet_meta_(
-      const common::ObIArray<ObBackupMetaIndex> &meta_index_list, common::ObTabletID &tablet_id, bool &found);
-  int get_all_retries_of_turn_(const int64_t turn_id, common::ObIArray<ObBackupRetryDesc> &retry_list);
-  int recover_need_reuse_macro_block_(const common::ObIArray<ObBackupRetryDesc> &retry_list);
-  int inner_recover_need_reuse_macro_block_(const ObBackupRetryDesc &retry_desc, bool &is_end);
+  int check_is_major_compaction_mview_dep_tablet(const common::ObTabletID &tablet_id, share::SCN &mview_dep_scn, bool &is_major_compaction_mview_dep_tablet) const;
+  void add_wait_reuse_across_sstable_time(int64_t cost_time);
 
 private:
+  int recover_last_retry_ctx_();
   int prepare_tablet_id_reader_(ObILSTabletIdReader *&reader);
   int get_all_tablet_id_list_(ObILSTabletIdReader *reader, common::ObIArray<common::ObTabletID> &tablet_list);
+  int get_backup_scn_(const ObLSBackupParam &param, const share::ObBackupDataType &backup_data_type, share::SCN &backup_scn);
+  int prepare_mview_dep_tablet_set_(const ObLSBackupParam &param, const share::ObBackupDataType &backup_data_type);
+  int check_mview_tablet_set_(const uint64_t tenant_id, common::ObMySQLProxy &sql_proxy);
   int seperate_tablet_id_list_(const common::ObIArray<common::ObTabletID> &tablet_id_list,
-      common::ObIArray<common::ObTabletID> &sys_tablet_list, common::ObIArray<common::ObTabletID> &data_tablet_id_list);
+      common::ObArray<common::ObTabletID> &sys_tablet_list, common::ObArray<common::ObTabletID> &data_tablet_id_list);
   int inner_do_next_(common::ObTabletID &tablet_id);
   int check_need_skip_(const common::ObTabletID &tablet_id, bool &need_skip);
-  int check_need_skip_minor_(const common::ObTabletID &tablet_id, bool &need_skip);
   int check_need_skip_major_(const common::ObTabletID &tablet_id, bool &need_skip);
   int get_next_tablet_(common::ObTabletID &tablet_id);
-  void add_recover_retry_ctx_event_(const ObBackupRetryDesc &retry_desc);
+
+private:
+  static const int64_t DEFAULT_FINISH_TABLET_SET_SIZE = 10000;
+  static const int64_t DEFAULT_MVIEW_DEP_TABLET_SET_SIZE = 10000;
 
 public:
   bool is_inited_;
@@ -302,11 +339,16 @@ public:
   ObSimpleBackupStatMgr stat_mgr_;
   common::ObArray<common::ObTabletID> sys_tablet_id_list_;
   common::ObArray<common::ObTabletID> data_tablet_id_list_;
-  ObBackupRecoverRetryCtx backup_retry_ctx_;
+  ObBackupRetryCtx backup_retry_ctx_;
   common::ObMySQLProxy *sql_proxy_;
   int64_t rebuild_seq_; // rebuild seq of backup ls meta
   int64_t check_tablet_info_cost_time_;
   share::SCN backup_tx_table_filled_tx_scn_;
+  ObBackupTabletIndexBlockBuilderMgr index_builder_mgr_;
+  common::ObInOutBandwidthThrottle *bandwidth_throttle_;
+  common::hash::ObHashMap<common::ObTabletID, share::SCN> mview_dep_tablet_map_;
+  int64_t wait_reuse_across_sstable_time_;
+  mutable lib::ObMutex mv_mutex_;
   DISALLOW_COPY_AND_ASSIGN(ObLSBackupCtx);
 };
 

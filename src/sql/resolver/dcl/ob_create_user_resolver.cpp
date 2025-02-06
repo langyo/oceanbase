@@ -14,8 +14,6 @@
 #include "sql/resolver/dcl/ob_create_user_resolver.h"
 #include "sql/resolver/ddl/ob_database_resolver.h"
 #include "sql/resolver/dcl/ob_set_password_resolver.h"
-#include "sql/session/ob_sql_session_info.h"
-#include "objit/common/ob_item_type.h"
 
 using namespace oceanbase::sql;
 using namespace oceanbase::common;
@@ -97,47 +95,17 @@ int ObCreateUserResolver::resolve(const ParseNode &parse_tree)
                    OB_UNLIKELY(lib::is_mysql_mode() && 5 != user_pass->num_child_ )) {
           ret = OB_ERR_PARSE_SQL;
           LOG_WARN("sql_parser parse user_identification error", K(ret));
-        } else if (OB_ISNULL(user_pass->children_[0])) {
-          ret = OB_INVALID_ARGUMENT;
-          LOG_WARN("Child 0 of user_pass should not be NULL", K(ret));
         } else {
-          ObString user_name(user_pass->children_[0]->str_len_, user_pass->children_[0]->str_value_);
+          ObString user_name;
           ObString host_name;
 
-          if (user_pass->children_[0]->type_ != T_IDENT
-              && OB_FAIL(ObSQLUtils::convert_sql_text_to_schema_for_storing(
-                           *allocator_, session_info_->get_dtc_params(), user_name))) {
-            LOG_WARN("fail to convert user name to utf8", K(ret), K(user_name),
-                     KPHEX(user_name.ptr(), user_name.length()));
-          } else if (!session_info_->is_inner() && (0 == user_name.case_compare(OB_RESTORE_USER_NAME))) {
-            ret = OB_ERR_NO_PRIVILEGE;
-            LOG_WARN("__oceanbase_inner_restore_user is reserved", K(ret));
-          } else if (NULL == user_pass->children_[3]) {
-            host_name.assign_ptr(OB_DEFAULT_HOST_NAME, static_cast<int32_t>(STRLEN(OB_DEFAULT_HOST_NAME)));
-          } else {
-            host_name.assign_ptr(user_pass->children_[3]->str_value_,
-                                 static_cast<int32_t>(user_pass->children_[3]->str_len_));
+          if (OB_FAIL(resolve_user_host(user_pass, user_name, host_name))) {
+            LOG_WARN("fail to resolve user_host");
           }
-          if (OB_SUCC(ret) && lib::is_mysql_mode() && NULL != user_pass->children_[4]) {
-            /* here code is to mock a auth plugin check. */
-            ObString auth_plugin(static_cast<int32_t>(user_pass->children_[4]->str_len_),
-                                  user_pass->children_[4]->str_value_);
-            ObString default_auth_plugin;
-            if (OB_FAIL(session_info_->get_sys_variable(SYS_VAR_DEFAULT_AUTHENTICATION_PLUGIN,
-                                                        default_auth_plugin))) {
-              LOG_WARN("fail to get block encryption variable", K(ret));
-            } else if (0 != auth_plugin.compare(default_auth_plugin)) {
-              ret = OB_ERR_PLUGIN_IS_NOT_LOADED;
-              LOG_USER_ERROR(OB_ERR_PLUGIN_IS_NOT_LOADED, auth_plugin.length(), auth_plugin.ptr());
-            } else {/* do nothing */}
-          }
-          if (OB_SUCC(ret) && lib::is_oracle_mode() && 0 != host_name.compare(OB_DEFAULT_HOST_NAME)) {
-            ret = OB_NOT_SUPPORTED;
-            LOG_USER_ERROR(OB_NOT_SUPPORTED, "create user with hostname");
-            LOG_WARN("create user should not use hostname in oracle mode", K(ret));
-          }
+
           ObString password;
           ObString need_enc_str = ObString::make_string("NO");
+          bool need_enc = true;
           if (OB_SUCC(ret)) {
             if (user_name.empty()) {
               ret = OB_CANNOT_USER;
@@ -153,7 +121,7 @@ int ObCreateUserResolver::resolve(const ParseNode &parse_tree)
             } else {
               password.assign_ptr(user_pass->children_[1]->str_value_,
                                   static_cast<int32_t>(user_pass->children_[1]->str_len_));
-              bool need_enc = (1 == user_pass->children_[2]->value_);
+              need_enc = (1 == user_pass->children_[2]->value_);
               if (need_enc) {
                 need_enc_str = ObString::make_string("YES");
               } else {
@@ -184,7 +152,7 @@ int ObCreateUserResolver::resolve(const ParseNode &parse_tree)
             }
           }
           create_user_stmt->set_profile_id(profile_id);  //只有oracle模式profile id是有效的
-          if (OB_SUCC(ret)) {
+          if (OB_SUCC(ret) && need_enc) {
             if (!lib::is_oracle_mode() && OB_FAIL(check_password_strength(password))) {
               LOG_WARN("password don't satisfied current policy", K(ret));
             } else if (lib::is_oracle_mode() && OB_FAIL(check_oracle_password_strength(

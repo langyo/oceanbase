@@ -57,7 +57,16 @@ public:
                             const common::ObString &table_name, bool cte_table_fisrt, uint64_t& table_id);
   int validate_stmt(ObLoadDataStmt* stmt);
   int resolve_hints(const ParseNode &node);
+
+  int resolve_filename(ObLoadDataStmt *load_stmt, ParseNode *node);
+  int local_infile_enabled(bool &enabled) const;
+  int resolve_partitions(const ParseNode &node, ObLoadDataStmt &load_stmt);
+
   int check_trigger_constraint(const ObTableSchema *table_schema);
+  int check_collection_sql_type(const ObTableSchema *table_schema);
+private:
+  int pattern_match(const ObString& str, const ObString& pattern, bool &matched);
+  bool exist_wildcard(const ObString& str);
 private:
   enum ParameterEnum {
     ENUM_OPT_LOCAL = 0,
@@ -72,6 +81,8 @@ private:
     ENUM_OPT_SET_FIELD,
     ENUM_OPT_HINT,
     ENUM_OPT_EXTENDED_OPTIONS,
+    ENUM_OPT_COMPRESSION,
+    ENUM_OPT_USE_PARTITION,
     ENUM_TOTAL_COUNT
   };
   ObStmtScope current_scope_;

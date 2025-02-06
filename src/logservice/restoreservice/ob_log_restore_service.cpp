@@ -11,17 +11,10 @@
  */
 
 #define USING_LOG_PREFIX CLOG
-#include "share/restore/ob_log_restore_source.h"    //TODO delete
 
 #include "ob_log_restore_service.h"
-#include "lib/ob_errno.h"
-#include "lib/ob_define.h"                    // is_user_tenant
-#include "lib/utility/ob_macro_utils.h"       // K*
-#include "share/ob_ls_id.h"                   // ObLSID
-#include "storage/tx_storage/ob_ls_service.h" // ObLSService
 #include "logservice/ob_log_service.h"        // ObLogService
-#include "ob_log_restore_handler.h"           // ObTenantRole
-#include "observer/ob_server_struct.h"        // GCTX
+#include "lib/ash/ob_active_session_guard.h"
 
 namespace oceanbase
 {
@@ -33,8 +26,6 @@ using namespace oceanbase::storage;
 using namespace oceanbase::palf;
 ObLogRestoreService::ObLogRestoreService() :
   inited_(false),
-  last_normal_work_ts_(OB_INVALID_TIMESTAMP),
-  last_update_restore_upper_limit_ts_(OB_INVALID_TIMESTAMP),
   ls_svr_(NULL),
   proxy_(),
   location_adaptor_(),
@@ -110,8 +101,6 @@ void ObLogRestoreService::destroy()
   allocator_.destroy();
   scheduler_.destroy();
   ls_svr_ = NULL;
-  last_normal_work_ts_ = OB_INVALID_TIMESTAMP;
-  last_update_restore_upper_limit_ts_ = OB_INVALID_TIMESTAMP;
 }
 
 int ObLogRestoreService::start()
@@ -166,13 +155,14 @@ void ObLogRestoreService::run1()
     LOG_ERROR_RET(OB_NOT_INIT, "ObLogRestoreService not init", "tenant_id", MTL_ID());
   } else {
     while (! has_set_stop()) {
-      int64_t begin_stamp = ObTimeUtility::current_time();
+      int64_t begin_stamp = ObTimeUtility::fast_current_time();
       const bool is_primary = MTL_GET_TENANT_ROLE_CACHE() == share::ObTenantRole::PRIMARY_TENANT;
       const int64_t thread_interval = is_primary ? PRIMARY_THREAD_RUN_INTERVAL : STANDBY_THREAD_RUN_INTERVAL;
       do_thread_task_();
       int64_t end_tstamp = ObTimeUtility::fast_current_time();
       int64_t wait_interval = thread_interval - (end_tstamp - begin_stamp);
       if (wait_interval > 0) {
+        common::ObBKGDSessInActiveGuard inactive_guard;
         cond_.timedwait(wait_interval);
       }
     }
@@ -184,25 +174,22 @@ void ObLogRestoreService::do_thread_task_()
 {
   int ret = OB_SUCCESS;
   if (is_user_tenant(MTL_ID())) {
-    if (need_schedule_()) {
-      share::ObLogRestoreSourceItem source;
-      bool source_exist = false;
+    share::ObLogRestoreSourceItem source;
+    bool source_exist = false;
 
-      if (OB_FAIL(update_upstream_(source, source_exist))) {
-        LOG_WARN("update_upstream_ failed");
-      } else if (source_exist) {
-        // log restore source exist, do schedule
-        // source_exist means tenant_role is standby or restore and log_restore_source exists
-        schedule_fetch_log_(source);
-      } else {
-        // tenant_role not match or log_restore_source not exist
-        clean_resource_();
-      }
-
-      schedule_resource_(source.type_);
-      report_error_();
-      last_normal_work_ts_ = common::ObTimeUtility::fast_current_time();
+    if (OB_FAIL(update_upstream_(source, source_exist))) {
+      LOG_WARN("update_upstream_ failed");
+    } else if (source_exist) {
+      // log restore source exist, do schedule
+      // source_exist means tenant_role is standby or restore and log_restore_source exists
+      schedule_fetch_log_(source);
+    } else {
+      // tenant_role not match or log_restore_source not exist
+      clean_resource_();
     }
+
+    schedule_resource_(source.type_);
+    report_error_();
     update_restore_upper_limit_();
     refresh_error_context_();
     set_compressor_type_();
@@ -296,11 +283,6 @@ void ObLogRestoreService::refresh_error_context_()
       }
     }
   }
-}
-
-bool ObLogRestoreService::need_schedule_() const
-{
-  return common::ObTimeUtility::fast_current_time() - last_normal_work_ts_ > SCHEDULE_INTERVAL;
 }
 } // namespace logservice
 } // namespace oceanbase

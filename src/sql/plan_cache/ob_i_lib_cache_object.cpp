@@ -11,7 +11,7 @@
  */
 
 #define USING_LOG_PREFIX SQL_PC
-#include "sql/plan_cache/ob_i_lib_cache_object.h"
+#include "ob_i_lib_cache_object.h"
 #include "sql/plan_cache/ob_plan_cache.h"
 
 using namespace oceanbase::common;
@@ -98,6 +98,7 @@ int64_t ObILibCacheObject::inc_ref_count(const CacheRefHandleID ref_handle)
   if (GCONF._enable_plan_cache_mem_diagnosis) {
     ObPlanCache *lib_cache = MTL(ObPlanCache*);
     if (OB_ISNULL(lib_cache)) {
+      // ignore ret
       LOG_ERROR("invalid null lib cache", K(ret));
     } else {
       lib_cache->get_ref_handle_mgr().record_ref_op(ref_handle);
@@ -112,6 +113,7 @@ int64_t ObILibCacheObject::dec_ref_count(const CacheRefHandleID ref_handle)
   if (GCONF._enable_plan_cache_mem_diagnosis) {
     ObPlanCache *lib_cache = MTL(ObPlanCache*);
     if (OB_ISNULL(lib_cache)) {
+      // ignore ret
       LOG_ERROR("invalid null lib cache", K(ret));
     } else {
       lib_cache->get_ref_handle_mgr().record_deref_op(ref_handle);

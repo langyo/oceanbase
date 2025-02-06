@@ -50,8 +50,8 @@ public:
                       const ObRawExpr &raw_expr,
                       ObExpr &rt_expr) const override;
   static int calc(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &expr_datum,
-                  int32_t type, bool with_date, bool is_dayofmonth = false);
-  virtual int is_valid_for_generated_column(const ObRawExpr*expr, const common::ObIArray<ObRawExpr *> &exprs, bool &is_valid) const;
+                  int32_t type, bool with_date, bool is_allow_incomplete_dates = false);
+  DECLARE_SET_LOCAL_SESSION_VARS;
 private :
   int32_t dt_type_;
   //disallow copy
@@ -65,10 +65,10 @@ inline int ObExprTimeBase::calc_result_type1(ObExprResType &type,
   type.set_precision(4);
   type.set_scale(0);
   common::ObObjTypeClass tc1 = ob_obj_type_class(type1.get_type());
-  if (common::ObEnumSetTC == tc1) {
+  if (ob_is_enum_or_set_type(type1.get_type()) || ob_is_string_type(type1.get_type())) {
     type1.set_calc_type_default_varchar();
   } else if ((common::ObFloatTC == tc1) || (common::ObDoubleTC == tc1)) {
-    type1.set_calc_type(common::ObIntType);
+    type1.set_calc_type(common::ObNumberType);
   }
   return common::OB_SUCCESS;
 }
@@ -79,6 +79,7 @@ public:
   explicit ObExprHour(common::ObIAllocator &alloc);
   virtual ~ObExprHour();
   static int calc_hour(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &expr_datum);
+  static int calc_hour_vector(const ObExpr &expr, ObEvalCtx &ctx, const ObBitVector &skip, const EvalBound &bound);
 private :
   //disallow copy
   DISALLOW_COPY_AND_ASSIGN(ObExprHour);
@@ -91,6 +92,7 @@ public:
   explicit ObExprMinute(common::ObIAllocator &alloc);
   virtual ~ObExprMinute();
   static int calc_minute(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &expr_datum);
+  static int calc_minute_vector(const ObExpr &expr, ObEvalCtx &ctx, const ObBitVector &skip, const EvalBound &bound);
 private:
   DISALLOW_COPY_AND_ASSIGN(ObExprMinute);
 };
@@ -101,29 +103,10 @@ public:
   ObExprSecond();
   explicit ObExprSecond(common::ObIAllocator &alloc);
   virtual ~ObExprSecond();
-  virtual int calc_result_type1(ObExprResType &type,
-                                ObExprResType &type1,
-                                common::ObExprTypeCtx &type_ctx) const;
   static int calc_second(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &expr_datum);
 private:
   DISALLOW_COPY_AND_ASSIGN(ObExprSecond);
 };
-
-inline int ObExprSecond::calc_result_type1(ObExprResType &type,
-                                           ObExprResType &type1,
-                                           common::ObExprTypeCtx &type_ctx) const
-{
-  type.set_int32();
-  type.set_precision(4);
-  type.set_scale(0);
-  common::ObObjTypeClass tc1 = ob_obj_type_class(type1.get_type());
-  if ((common::ObEnumSetTC == tc1)) {
-    type1.set_calc_type_default_varchar();
-  } else if ((common::ObFloatTC == tc1) || (common::ObDoubleTC == tc1)) {
-    type1.set_calc_type(common::ObNumberType);
-  }
-  return common::OB_SUCCESS;
-}
 
 class ObExprMicrosecond: public ObExprTimeBase
 {
@@ -131,29 +114,10 @@ public:
   ObExprMicrosecond();
   explicit ObExprMicrosecond(common::ObIAllocator &alloc);
   virtual ~ObExprMicrosecond();
-  virtual int calc_result_type1(ObExprResType &type,
-                                ObExprResType &type1,
-                                common::ObExprTypeCtx &type_ctx) const;
   static int calc_microsecond(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &expr_datum);
 private:
   DISALLOW_COPY_AND_ASSIGN(ObExprMicrosecond);
 };
-
-inline int ObExprMicrosecond::calc_result_type1(ObExprResType &type,
-                                           ObExprResType &type1,
-                                           common::ObExprTypeCtx &type_ctx) const
-{
-  type.set_int32();
-  type.set_precision(4);
-  type.set_scale(0);
-  common::ObObjTypeClass tc1 = ob_obj_type_class(type1.get_type());
-  if ((common::ObEnumSetTC == tc1)) {
-    type1.set_calc_type_default_varchar();
-  } else if ((common::ObFloatTC == tc1) || (common::ObDoubleTC == tc1)) {
-    type1.set_calc_type(common::ObNumberType);
-  }
-  return common::OB_SUCCESS;
-}
 
 class ObExprYear: public ObExprTimeBase
 {
@@ -162,6 +126,7 @@ public:
   explicit ObExprYear(common::ObIAllocator &alloc);
   virtual ~ObExprYear();
   static int calc_year(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &expr_datum);
+  static int calc_year_vector(const ObExpr &expr, ObEvalCtx &ctx, const ObBitVector &skip, const EvalBound &bound);
 private:
   DISALLOW_COPY_AND_ASSIGN(ObExprYear);
 };
@@ -173,6 +138,7 @@ public:
   explicit ObExprMonth(common::ObIAllocator &alloc);
   virtual ~ObExprMonth();
   static int calc_month(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &expr_datum);
+  static int calc_month_vector(const ObExpr &expr, ObEvalCtx &ctx, const ObBitVector &skip, const EvalBound &bound);
 private:
   DISALLOW_COPY_AND_ASSIGN(ObExprMonth);
 };
@@ -187,6 +153,7 @@ public:
                                 ObExprResType &type1,
                                 common::ObExprTypeCtx &type_ctx) const;
   static int calc_month_name(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &expr_datum);
+  static int calc_month_name_vector(const ObExpr &expr, ObEvalCtx &ctx, const ObBitVector &skip, const EvalBound &bound);
   static const char* get_month_name(int month);
 private:
   DISALLOW_COPY_AND_ASSIGN(ObExprMonthName);

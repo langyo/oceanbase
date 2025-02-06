@@ -12,21 +12,7 @@
 
 #define USING_LOG_PREFIX CLOG
 #include "ob_log_restore_archive_driver.h"
-#include "ob_remote_fetch_log.h"
-#include "lib/allocator/ob_allocator.h"       // ObMemAttr
-#include "share/ob_ls_id.h"                   // ObLSID
-#include "share/ls/ob_ls_recovery_stat_operator.h"
-#include "storage/tx_storage/ob_ls_map.h"     // ObLSIterator
-#include "storage/tx_storage/ob_ls_service.h" // ObLSService
-#include "logservice/palf/lsn.h"              // LSN
 #include "logservice/ob_log_service.h"        // ObLogService
-#include "logservice/palf_handle_guard.h"     // PalfHandleGuard
-#include "ob_log_restore_handler.h"           // ObTenantRole
-#include "ob_remote_fetch_log_worker.h"       // ObRemoteFetchWorker
-#include "ob_fetch_log_task.h"                // ObFetchLogTask
-#include "ob_log_restore_define.h"            // MAX_LS_FETCH_LOG_TASK_CONCURRENCY
-#include "observer/omt/ob_tenant_config_mgr.h"  // tenant_config
-#include "logservice/archiveservice/ob_archive_define.h"
 namespace oceanbase
 {
 namespace logservice
@@ -93,6 +79,7 @@ int ObLogRestoreArchiveDriver::do_fetch_log_(ObLS &ls)
           version, max_fetch_lsn, last_fetch_ts, task_count))) {
     LOG_WARN("check need schedule failed", K(ret), K(id));
   } else if (! need_schedule) {
+    LOG_TRACE("no need_schedule in do_fetch_log", K(need_schedule));
   } else if (OB_FAIL(get_fetch_log_base_lsn_(ls, max_fetch_lsn, last_fetch_ts, pre_scn, lsn))) {
     LOG_WARN("get fetch log base lsn failed", K(ret), K(id));
   } else if (OB_FAIL(submit_fetch_log_task_(ls, pre_scn, lsn, task_count, proposal_id, version))) {
@@ -126,16 +113,23 @@ int ObLogRestoreArchiveDriver::check_need_schedule_(ObLS &ls,
   } else if (OB_FAIL(restore_handler->need_schedule(need_schedule, proposal_id, context))) {
     LOG_WARN("get fetch log context failed", K(ret), K(ls));
   } else if (! need_schedule) {
+    LOG_TRACE("no need_schedule in check_need_schedule_", K(need_schedule));
     // do nothing
+  } else if (context.max_fetch_scn_ >= global_recovery_scn_) {
+    need_schedule = false;
+    LOG_WARN("max_fetch_scn reach global_recovery_scn, no need to schedule fetch task",
+     K_(context.max_fetch_scn), K_(global_recovery_scn));
   } else if (OB_FAIL(worker_->get_thread_count(fetch_log_worker_count))) {
     LOG_WARN("get_thread_count from worker_ failed", K(ret), K(ls));
   } else if (FALSE_IT(concurrency = std::min(fetch_log_worker_count, MAX_LS_FETCH_LOG_TASK_CONCURRENCY))) {
   } else if (context.issue_task_num_ >= concurrency) {
     need_schedule = false;
+    LOG_TRACE("concurrency not enough check_need_schedule", K_(context.issue_task_num), K(concurrency));
   } else if (OB_FAIL(check_need_delay_(ls.get_ls_id(), need_delay))) {
     LOG_WARN("check need delay failed", K(ret), K(ls));
   } else if (need_delay) {
     need_schedule = false;
+    LOG_TRACE("need_delay in check_need_schedule", K(need_delay));
   } else {
     version = context.issue_version_;
     lsn = context.max_submit_lsn_;

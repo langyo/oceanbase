@@ -1,3 +1,6 @@
+// owner: gengli.wzy
+// owner group: transaction
+
 /**
  * Copyright (c) 2021 OceanBase
  * OceanBase CE is licensed under Mulan PubL v2.
@@ -11,29 +14,12 @@
  */
 
 #include <gtest/gtest.h>
-#include <stdlib.h>
 #define USING_LOG_PREFIX STORAGE
 #define protected public
 #define private public
 
 #include "env/ob_simple_cluster_test_base.h"
 #include "env/ob_simple_server_restart_helper.h"
-#include "lib/mysqlclient/ob_mysql_result.h"
-#include "storage/access/ob_rows_info.h"
-#include "storage/checkpoint/ob_data_checkpoint.h"
-#include "storage/compaction/ob_schedule_dag_func.h"
-#include "storage/compaction/ob_tablet_merge_task.h"
-#include "storage/ls/ob_freezer.h"
-#include "storage/ls/ob_ls.h"
-#include "storage/ls/ob_ls_meta.h"
-#include "storage/ls/ob_ls_tablet_service.h"
-#include "storage/ls/ob_ls_tx_service.h"
-#include "storage/meta_mem/ob_tablet_handle.h"
-#include "storage/meta_mem/ob_tenant_meta_mem_mgr.h"
-#include "storage/ob_relative_table.h"
-#include "storage/ob_storage_table_guard.h"
-#include "storage/tx_storage/ob_ls_map.h"
-#include "storage/tx_storage/ob_ls_service.h"
 #include "storage/tx/ob_trans_part_ctx.h"
 
 #undef private
@@ -85,7 +71,7 @@ int ObTxCtxMemtableScanIterator::serialize_next_tx_ctx_(ObTxLocalBuffer &buffer,
   if (OB_FAIL(ret)) {
     STORAGE_LOG(INFO, "get next tx ctx table info failed", KR(ret), KPC(tx_ctx));
   } else if (SLEEP_BEFORE_DUMP_TX_CTX) {
-    fprintf(stdout, "ready to dump tx ctx, undo status node ptr : %p\n", tx_ctx->ctx_tx_data_.tx_data_guard_.tx_data()->undo_status_list_.head_);
+    fprintf(stdout, "ready to dump tx ctx, undo status node ptr : %p\n", tx_ctx->ctx_tx_data_.tx_data_guard_.tx_data()->op_guard_->get_undo_status_list().head_);
     fprintf(stdout, "sleep 20 seconds before dump\n");
     HAS_GOT_TX_CTX = true;
     SLEEP_BEFORE_DUMP_TX_CTX = false;

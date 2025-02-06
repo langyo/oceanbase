@@ -11,15 +11,8 @@
  */
 
 #define USING_LOG_PREFIX SQL_RESV
-#include "sql/ob_sql_context.h"
-#include <algorithm>
-#include "lib/container/ob_se_array_iterator.h"
-#include "sql/resolver/dml/ob_sql_hint.h"
-#include "sql/ob_sql_define.h"
+#include "ob_sql_context.h"
 #include "sql/optimizer/ob_log_plan.h"
-#include "share/schema/ob_schema_getter_guard.h"
-#include "sql/dblink/ob_dblink_utils.h"
-#include "src/storage/tx/ob_trans_define_v4.h"
 
 using namespace ::oceanbase::common;
 namespace oceanbase
@@ -140,6 +133,7 @@ void ObQueryRetryInfo::reset()
   last_query_retry_err_ = OB_SUCCESS;
   retry_cnt_ = 0;
   query_switch_leader_retry_timeout_ts_ = 0;
+  query_retry_ash_diag_info_.reset();
 }
 
 void ObQueryRetryInfo::clear()
@@ -188,6 +182,7 @@ ObSqlCtx::ObSqlCtx()
     all_expr_constraints_(nullptr),
     all_priv_constraints_(nullptr),
     need_match_all_params_(false),
+    all_local_session_vars_(nullptr),
     is_ddl_from_primary_(false),
     cur_stmt_(NULL),
     cur_plan_(nullptr),
@@ -197,9 +192,7 @@ ObSqlCtx::ObSqlCtx()
     flashback_query_expr_(nullptr),
     is_execute_call_stmt_(false),
     enable_sql_resource_manage_(false),
-    res_map_rule_id_(OB_INVALID_ID),
-    res_map_rule_param_idx_(OB_INVALID_INDEX),
-    res_map_rule_version_(0),
+    resource_map_rule_(),
     is_text_ps_mode_(false),
     first_plan_hash_(0),
     is_bulk_(false),
@@ -209,6 +202,8 @@ ObSqlCtx::ObSqlCtx()
 {
   sql_id_[0] = '\0';
   sql_id_[common::OB_MAX_SQL_ID_LENGTH] = '\0';
+  format_sql_id_[0] = '\0';
+  format_sql_id_[common::OB_MAX_SQL_ID_LENGTH] = '\0';
 }
 
 void ObSqlCtx::reset()
@@ -224,6 +219,8 @@ void ObSqlCtx::reset()
   retry_times_ = OB_INVALID_COUNT;
   sql_id_[0] = '\0';
   sql_id_[common::OB_MAX_SQL_ID_LENGTH] = '\0';
+  format_sql_id_[0] = '\0';
+  format_sql_id_[common::OB_MAX_SQL_ID_LENGTH] = '\0';
   exec_type_ = InvalidType;
   is_prepare_protocol_ = false;
   is_pre_execute_ = false;
@@ -239,13 +236,12 @@ void ObSqlCtx::reset()
   all_expr_constraints_ = nullptr;
   all_priv_constraints_ = nullptr;
   need_match_all_params_ = false;
+  all_local_session_vars_ = nullptr;
   is_ddl_from_primary_ = false;
   can_reroute_sql_ = false;
   is_sensitive_ = false;
   enable_sql_resource_manage_ = false;
-  res_map_rule_id_ = OB_INVALID_ID;
-  res_map_rule_param_idx_ = OB_INVALID_INDEX;
-  res_map_rule_version_ = 0;
+  resource_map_rule_.reset();
   is_protocol_weak_read_ = false;
   first_plan_hash_ = 0;
   first_outline_data_.reset();
@@ -280,6 +276,7 @@ void ObSqlCtx::clear()
   cur_stmt_ = nullptr;
   is_text_ps_mode_ = false;
   ins_opt_ctx_.clear();
+  cur_plan_ = nullptr;
 }
 
 OB_SERIALIZE_MEMBER(ObSqlCtx, stmt_type_);
@@ -480,6 +477,17 @@ int ObSqlSchemaGuard::get_table_schema(uint64_t table_id,
   return ret;
 }
 
+int ObSqlSchemaGuard::get_database_schema(const uint64_t database_id,
+                                          const ObDatabaseSchema *&database_schema)
+{
+  int ret = OB_SUCCESS;
+  database_schema = NULL;
+  const uint64_t tenant_id = MTL_ID();
+  OV (OB_NOT_NULL(schema_guard_));
+  OZ (schema_guard_->get_database_schema(tenant_id, database_id, database_schema), tenant_id, database_id);
+  return ret;
+}
+
 int ObSqlSchemaGuard::get_column_schema(uint64_t table_id, const ObString &column_name,
                                           const ObColumnSchemaV2 *&column_schema,
                                           bool is_link /* = false */) const
@@ -530,7 +538,8 @@ int ObSqlSchemaGuard::get_can_read_index_array(uint64_t table_id,
                                                  bool with_mv,
                                                  bool with_global_index,
                                                  bool with_domain_index,
-                                                 bool with_spatial_index)
+                                                 bool with_spatial_index,
+                                                 bool with_vector_index)
 {
   int ret = OB_SUCCESS;
   const uint64_t tenant_id = MTL_ID();
@@ -538,7 +547,17 @@ int ObSqlSchemaGuard::get_can_read_index_array(uint64_t table_id,
   OZ (schema_guard_->get_can_read_index_array(tenant_id, table_id,
                                               index_tid_array, size, with_mv,
                                               with_global_index, with_domain_index,
-                                              with_spatial_index));
+                                              with_spatial_index, with_vector_index));
+  return ret;
+}
+
+int ObSqlSchemaGuard::get_table_mlog_schema(const uint64_t table_id,
+                                            const ObTableSchema *&mlog_schema)
+{
+  int ret = OB_SUCCESS;
+  const uint64_t tenant_id = MTL_ID();
+  OV (OB_NOT_NULL(schema_guard_));
+  OZ (schema_guard_->get_table_mlog_schema(tenant_id, table_id, mlog_schema));
   return ret;
 }
 
@@ -729,6 +748,21 @@ int ObSqlCtx::set_multi_stmt_rowkey_pos(const common::ObIArray<int64_t> &multi_s
     } else if (OB_FAIL(append(multi_stmt_rowkey_pos_, multi_stmt_rowkey_pos))) {
       LOG_WARN("failed to append multi stmt rowkey pos", K(ret));
     } else { /*do nothing*/ }
+  }
+  return ret;
+}
+
+int ObQueryCtx::add_local_session_vars(ObIAllocator *alloc, const ObLocalSessionVar &local_session_var, int64_t &idx) {
+  int ret = OB_SUCCESS;
+  if (OB_FAIL(all_local_session_vars_.push_back(ObLocalSessionVar()))) {
+    LOG_WARN("push back local session var failed", K(ret));
+  } else {
+    idx = all_local_session_vars_.count() - 1;
+    ObLocalSessionVar &local_var = all_local_session_vars_.at(idx);
+    local_var.set_allocator(alloc);
+    if (OB_FAIL(local_var.deep_copy(local_session_var))) {
+      LOG_WARN("deep copy local session var failed", K(ret));
+    }
   }
   return ret;
 }

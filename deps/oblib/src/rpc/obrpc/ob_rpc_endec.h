@@ -16,6 +16,9 @@
 #include "rpc/obrpc/ob_rpc_mem_pool.h"
 #include "rpc/obrpc/ob_rpc_packet.h"
 #include "rpc/obrpc/ob_rpc_result_code.h"
+#include "lib/compress/ob_compressor_pool.h"
+#include "lib/ash/ob_active_session_guard.h"
+#include "lib/stat/ob_diagnostic_info_guard.h"
 
 namespace oceanbase
 {
@@ -43,11 +46,18 @@ template <typename T>
       int64_t session_id = 0
     )
 {
+  ACTIVE_SESSION_FLAG_SETTER_GUARD(in_rpc_encode);
   int ret = common::OB_SUCCESS;
   ObRpcPacket pkt;
   const int64_t header_sz = pkt.get_header_size();
   int64_t extra_payload_size = calc_extra_payload_size();
+#ifdef ENABLE_SERIALIZATION_CHECK
+  lib::begin_record_serialization();
   int64_t args_len = common::serialization::encoded_length(args);
+  lib::finish_record_serialization();
+#else
+  int64_t args_len = common::serialization::encoded_length(args);
+#endif
   int64_t payload_sz = extra_payload_size + args_len;
   const int64_t reserve_bytes_for_pnio = 0;
   char* header_buf = (char*)pool.alloc(reserve_bytes_for_pnio + header_sz + payload_sz) + reserve_bytes_for_pnio;
@@ -65,6 +75,11 @@ template <typename T>
                          payload_buf, payload_sz, pos, args))) {
     RPC_OBRPC_LOG(WARN, "serialize argument fail", K(pos), K(payload_sz), K(ret));
   } else if (OB_UNLIKELY(args_len < pos)) {
+#ifdef ENABLE_SERIALIZATION_CHECK
+    lib::begin_check_serialization();
+    common::serialization::encoded_length(args);
+    lib::finish_check_serialization();
+#endif
     ret = OB_ERR_UNEXPECTED;
     RPC_OBRPC_LOG(ERROR, "arg encoded length greater than arg length", K(ret), K(payload_sz),
                   K(args_len), K(extra_payload_size), K(pos), K(pcode));
@@ -73,15 +88,17 @@ template <typename T>
                   K(extra_payload_size), K(pcode));
   } else {
     const common::ObCompressorType &compressor_type = get_proxy_compressor_type(proxy);
-    bool need_compressed = ObCompressorPool::get_instance().need_common_compress(compressor_type);
+    bool need_compressed = common::ObCompressorPool::get_instance().need_common_compress(compressor_type);
     if (need_compressed) {
       // compress
+      EVENT_INC(RPC_COMPRESS_ORIGINAL_PACKET_CNT);
+      EVENT_ADD(RPC_COMPRESS_ORIGINAL_SIZE, payload_sz);
       int tmp_ret = OB_SUCCESS;
       common::ObCompressor *compressor = NULL;
       char *compressed_buf = NULL;
       int64_t dst_data_size = 0;
       int64_t max_overflow_size = 0;
-      if (OB_FAIL(ObCompressorPool::get_instance().get_compressor(compressor_type, compressor))) {
+      if (OB_FAIL(common::ObCompressorPool::get_instance().get_compressor(compressor_type, compressor))) {
         RPC_OBRPC_LOG(WARN, "get_compressor failed", K(ret), K(compressor_type));
       } else if (OB_FAIL(compressor->get_max_overflow_size(payload_sz, max_overflow_size))) {
         RPC_OBRPC_LOG(WARN, "get_max_overflow_size failed", K(ret), K(payload_sz), K(max_overflow_size));
@@ -101,6 +118,8 @@ template <typename T>
         pkt.set_original_len(static_cast<int32_t>(payload_sz));
         memcpy(payload_buf, compressed_buf, dst_data_size);
         payload_sz = dst_data_size;
+        EVENT_INC(RPC_COMPRESS_COMPRESSED_PACKET_CNT);
+        EVENT_ADD(RPC_COMPRESS_COMPRESSED_SIZE, dst_data_size);
       }
       if (NULL != compressed_buf) {
         ob_free(compressed_buf);
@@ -121,12 +140,12 @@ template <typename T>
       if (session_id) {
         pkt.set_session_id(session_id);
       }
-    }
-    if (OB_FAIL(pkt.encode_header(header_buf, header_sz, header_pos))) {
-      RPC_OBRPC_LOG(WARN, "encode header fail", K(ret));
-    } else {
-      req = header_buf;
-      req_sz = header_sz + payload_sz;
+      if (OB_FAIL(pkt.encode_header(header_buf, header_sz, header_pos))) {
+        RPC_OBRPC_LOG(WARN, "encode header fail", K(ret));
+      } else {
+        req = header_buf;
+        req_sz = header_sz + payload_sz;
+      }
     }
   }
   return ret;
@@ -135,6 +154,7 @@ template <typename T>
 template <typename T>
 int rpc_decode_resp(const char* resp_buf, int64_t resp_sz, T& result, ObRpcPacket &pkt, ObRpcResultCode &rcode)
 {
+  ACTIVE_SESSION_FLAG_SETTER_GUARD(in_rpc_decode);
   int ret = common::OB_SUCCESS;
   int64_t pos = 0;
   if (OB_FAIL(pkt.decode(resp_buf, resp_sz))) {
@@ -159,7 +179,7 @@ int rpc_decode_resp(const char* resp_buf, int64_t resp_sz, T& result, ObRpcPacke
   return ret;
 }
 
-int rpc_decode_ob_packet(ObRpcMemPool& pool, const char* buf, int64_t sz, ObRpcPacket*& ret_pkt);
+int rpc_decode_ob_packet(const char* buf, int64_t sz, ObRpcPacket& ret_pkt);
 int rpc_encode_ob_packet(ObRpcMemPool& pool, ObRpcPacket* pkt, char*& buf, int64_t& sz, int64_t reserve_buf_size);
 
 }; // end namespace obrpc

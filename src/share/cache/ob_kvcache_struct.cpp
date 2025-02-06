@@ -30,6 +30,7 @@ void ObKVCacheConfig::reset()
 {
   is_valid_ = false;
   priority_ = 0;
+  mem_limit_pct_ = 100;
   MEMSET(cache_name_, 0, MAX_CACHE_NAME_LENGTH);
 }
 
@@ -81,7 +82,6 @@ ObKVStoreMemBlock::ObKVStoreMemBlock(char *buffer, const int64_t size)
 
 ObKVStoreMemBlock::~ObKVStoreMemBlock()
 {
-  reuse();
 }
 
 void ObKVStoreMemBlock::reuse()

@@ -10,21 +10,10 @@
  * See the Mulan PubL v2 for more details.
  */
 
-#include "storage/tx_table/ob_tx_table_iterator.h"
 
-#include "lib/ob_define.h"
-#include "lib/ob_errno.h"
-#include "lib/utility/ob_macro_utils.h"
-#include "lib/utility/serialization.h"
-#include "storage/blocksstable/ob_datum_range.h"
-#include "storage/tablet/ob_table_store_util.h"
-#include "storage/tx/ob_trans_ctx_mgr.h"
+#include "ob_tx_table_iterator.h"
 #include "storage/tx/ob_trans_part_ctx.h"
-#include "storage/tx_storage/ob_ls_service.h"
-#include "storage/tx_table/ob_tx_ctx_memtable.h"
-#include "storage/tx_table/ob_tx_table.h"
-#include <cmath>
-#include "storage/tablet/ob_tablet.h"
+#include "src/storage/ls/ob_ls.h"
 
 namespace oceanbase
 {
@@ -73,6 +62,10 @@ int ObTxDataMemtableScanIterator::TxData2DatumRowConverter::init(ObTxData *tx_da
     ret = OB_INVALID_ARGUMENT;
     STORAGE_LOG(ERROR, "tx data is null", KR(ret));
   } else if (INT64_MAX != tx_data->tx_id_.get_id()) {// normal tx data need local buffer to serialize
+    SpinRLockManualGuard tx_op_guard;
+    if (tx_data->op_guard_.is_valid()) {
+      tx_op_guard.lock(tx_data->op_guard_->get_lock());
+    }
     buffer_len_ = tx_data->get_serialize_size();
     if (nullptr == (serialize_buffer_ = (char *)DEFAULT_TX_DATA_ALLOCATOR.alloc(buffer_len_))) {
       ret = OB_ALLOCATE_MEMORY_FAILED;
@@ -203,7 +196,6 @@ int ObTxDataMemtableScanIterator::init(ObTxDataMemtable *tx_data_memtable)
   } else {
     STORAGE_LOG(INFO, "[TX DATA MERGE]init tx data dump iter finish", KR(ret), KPC(this), KPC(tx_data_memtable_));
   }
-
   return ret;
 }
 
@@ -341,10 +333,12 @@ int ObTxDataMemtableScanIterator::drop_and_get_tx_data_(ObTxData *&tx_data)
       drop_tx_data_cnt_++;
       if (OB_UNLIKELY(next_tx_data->end_scn_ > tx_data->end_scn_)) {
         // pointer to next_tx_data cause its end_log_ts is larger
-        STORAGE_LOG(DEBUG, "drop one rollback tx data", "droped : ", to_cstring(tx_data), "keeped", to_cstring(next_tx_data));
+        ObCStringHelper helper;
+        STORAGE_LOG(DEBUG, "drop one rollback tx data", "droped : ", helper.convert(tx_data), "keeped", helper.convert(next_tx_data));
         tx_data = next_tx_data;
       } else {
-        STORAGE_LOG(DEBUG, "drop one rollback tx data", "droped : ", to_cstring(next_tx_data), "keeped", to_cstring(tx_data));
+        ObCStringHelper helper;
+        STORAGE_LOG(DEBUG, "drop one rollback tx data", "droped : ", helper.convert(next_tx_data), "keeped", helper.convert(tx_data));
       }
     } else {
       break;
@@ -589,7 +583,7 @@ int ObTxDataSingleRowGetter::deserialize_tx_data_from_store_buffers_(ObTxData &t
       p_dest += tx_data_buffers_[idx].get_ob_string().length();
     }
     tx_data.tx_id_ = tx_id_;
-    if (OB_FAIL(tx_data.deserialize(merge_buffer, total_buffer_size, pos, slice_allocator_))) {
+    if (OB_FAIL(tx_data.deserialize(merge_buffer, total_buffer_size, pos, tx_data_allocator_))) {
       STORAGE_LOG(WARN, "deserialize tx data failed",
                         KR(ret), KPHEX(merge_buffer, total_buffer_size));
       hex_dump(merge_buffer, total_buffer_size, true, OB_LOG_LEVEL_WARN);
@@ -645,7 +639,7 @@ int ObCommitVersionsGetter::get_next_row(ObCommitVersionsArray &commit_versions)
         STORAGE_LOG(ERROR, "Unexpected empty commit versions array.", KR(ret), KPC(row));
       } else if (!commit_versions.is_valid()) {
         ret = OB_ERR_UNEXPECTED;
-        STORAGE_LOG(ERROR, "invalid cache", KR(ret));
+        STORAGE_LOG(ERROR, "invalid cache", KR(ret), K(commit_versions), KPC(table_));
       } else {
         // get commit versions from tx data sstable done.
       }

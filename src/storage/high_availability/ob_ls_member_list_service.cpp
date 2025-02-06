@@ -10,13 +10,11 @@
  * See the Mulan PubL v2 for more details.
  */
 
-#include "storage/ls/ob_ls.h"
+#include "ob_ls_member_list_service.h"
 #include "storage/tx_storage/ob_ls_service.h"
-#include "storage/high_availability/ob_storage_ha_utils.h"
-#include "storage/high_availability/ob_ls_member_list_service.h"
 #include "storage/high_availability/ob_storage_ha_src_provider.h"
-#include "storage/meta_mem/ob_tenant_meta_mem_mgr.h"
 #include "storage/tablet/ob_tablet_iterator.h"
+#include "observer/ob_server_event_history_table_operator.h"
 
 namespace oceanbase
 {
@@ -173,15 +171,17 @@ int ObLSMemberListService::get_max_tablet_transfer_scn(share::SCN &transfer_scn)
 {
   int ret = OB_SUCCESS;
   const bool need_initial_state = false;
-  ObHALSTabletIDIterator iter(ls_->get_ls_id(), need_initial_state);
+  const bool need_sorted_tablet_id = false;
+  ObHALSTabletIDIterator iter(ls_->get_ls_id(), need_initial_state, need_sorted_tablet_id);
   share::SCN max_transfer_scn = share::SCN::min_scn();
   static const int64_t LOCK_TIMEOUT = 100_ms; // 100ms
+  const int64_t abs_timeout_us = ObTimeUtility::current_time() + LOCK_TIMEOUT;
   if (OB_UNLIKELY(!is_inited_)) {
     ret = OB_NOT_INIT;
     STORAGE_LOG(WARN, "not inited", K(ret), K_(is_inited));
   } else if (OB_FAIL(ls_->build_tablet_iter(iter))) {
     STORAGE_LOG(WARN, "failed to build tablet iter", K(ret));
-  } else if (OB_FAIL(transfer_scn_iter_lock_.lock(LOCK_TIMEOUT))) {
+  } else if (OB_FAIL(transfer_scn_iter_lock_.lock(abs_timeout_us))) {
     STORAGE_LOG(WARN, "failed to lock transfer scn iter lock", K(ret));
   } else {
     ObTenantMetaMemMgr *t3m = MTL(ObTenantMetaMemMgr*);
@@ -203,7 +203,7 @@ int ObLSMemberListService::get_max_tablet_transfer_scn(share::SCN &transfer_scn)
       } else if (OB_FALSE_IT(key.tablet_id_ = tablet_id)) {
       } else if (OB_FAIL(t3m->get_tablet(priority, key, tablet_handle))) {
         STORAGE_LOG(WARN, "failed to get tablet", K(ret), K(key));
-      } else if (OB_FAIL(tablet_handle.get_obj()->ObITabletMdsInterface::get_tablet_status(share::SCN::max_scn(), mds_data, 0/*timeout*/))) {
+      } else if (OB_FAIL(tablet_handle.get_obj()->get_latest_committed(mds_data))) {
         if (OB_EMPTY_RESULT == ret) {
           STORAGE_LOG(INFO, "committed tablet_status does not exist", K(ret), K(key));
           ret = OB_SUCCESS;
@@ -237,45 +237,69 @@ int ObLSMemberListService::get_leader_config_version_and_transfer_scn_(
     share::SCN &leader_transfer_scn)
 {
   int ret = OB_SUCCESS;
+  int tmp_ret = OB_SUCCESS;
   ObLSService *ls_svr = NULL;
   common::ObAddr addr;
   const bool need_get_config_version = true;
+  storage::ObHAChangeMemberProxy proxy(
+      *(GCTX.storage_rpc_proxy_), &obrpc::ObStorageRpcProxy::get_config_version_and_transfer_scn);
   if (OB_ISNULL(ls_svr = (MTL(ObLSService *)))) {
     ret = OB_ERR_UNEXPECTED;
     STORAGE_LOG(WARN, "ls service should not be NULL", K(ret), KP(ls_svr));
   } else if (OB_FAIL(ObStorageHAUtils::get_ls_leader(ls_->get_tenant_id(), ls_->get_ls_id(), addr))) {
     STORAGE_LOG(WARN, "failed to get ls leader", K(ret), KPC(ls_));
-  } else if (OB_FAIL(get_config_version_and_transfer_scn_(need_get_config_version, addr, leader_config_version, leader_transfer_scn))) {
+  } else if (OB_FAIL(get_config_version_and_transfer_scn_(proxy,
+                                                          addr,
+                                                          need_get_config_version,
+                                                          ls_->get_tenant_id(),
+                                                          ls_->get_ls_id()))) {
     STORAGE_LOG(WARN, "failed to get config version and transfer scn", K(ret), K(addr));
+  }
+  ObArray<int> return_code_array;
+  if (OB_TMP_FAIL(proxy.wait_all(return_code_array))) {
+    STORAGE_LOG(WARN, "fail to wait all batch result", KR(ret), KR(tmp_ret));
+    ret = OB_SUCC(ret) ? tmp_ret : ret;
+  }
+  int64_t check_pass_count = 0;
+  if (OB_FAIL(ret)) {
+  } else if (1 != return_code_array.count()) {
+    ret = OB_ERR_UNEXPECTED;
+    STORAGE_LOG(WARN, "cnt not match", KR(ret),
+                      "return_cnt", return_code_array.count());
+  } else if (OB_FAIL(process_result_from_async_rpc_(proxy,
+                                                    addr,
+                                                    return_code_array,
+                                                    false/*for_standby*/,
+                                                    check_pass_count,
+                                                    leader_config_version,
+                                                    leader_transfer_scn))) {
+    STORAGE_LOG(WARN, "failed to process result from async rpc", KR(ret), KR(tmp_ret));
   }
   return ret;
 }
 
 int ObLSMemberListService::get_config_version_and_transfer_scn_(
-    const bool need_get_config_version,
+    ObHAChangeMemberProxy &proxy,
     const common::ObAddr &addr,
-    palf::LogConfigVersion &config_version,
-    share::SCN &transfer_scn)
+    const bool need_get_config_version,
+    const uint64_t tenant_id,
+    const share::ObLSID &ls_id)
 {
   int ret = OB_SUCCESS;
-  ObLSService *ls_svr = NULL;
-  ObStorageRpc *storage_rpc = NULL;
-  ObStorageHASrcInfo src_info;
-  src_info.cluster_id_ = GCONF.cluster_id;
-  src_info.src_addr_ = addr;
-  if (OB_ISNULL(ls_svr = (MTL(ObLSService *)))) {
-    ret = OB_ERR_UNEXPECTED;
-    STORAGE_LOG(WARN, "ls service should not be NULL", K(ret), KP(ls_svr));
-  } else if (OB_ISNULL(storage_rpc = ls_svr->get_storage_rpc())) {
-    ret = OB_ERR_UNEXPECTED;
-    STORAGE_LOG(WARN, "storage rpc should not be NULL", K(ret), KP(storage_rpc));
-  } else if (OB_FAIL(storage_rpc->get_config_version_and_transfer_scn(ls_->get_tenant_id(),
-                                                                      src_info,
-                                                                      ls_->get_ls_id(),
-                                                                      need_get_config_version,
-                                                                      config_version,
-                                                                      transfer_scn))) {
-    STORAGE_LOG(WARN, "failed to get config version and transfer scn", K(ret), KPC(ls_));
+  ObStorageChangeMemberArg arg;
+  arg.tenant_id_ = tenant_id;
+  arg.ls_id_ = ls_id;
+  arg.need_get_config_version_ = need_get_config_version;
+  const int64_t cluster_id = GCONF.cluster_id;
+  const int64_t timeout = GCONF.sys_bkgd_migration_change_member_list_timeout;
+  const uint64_t group_id = share::OBCG_STORAGE;
+  if (OB_FAIL(proxy.call(addr,
+                         timeout,
+                         cluster_id,
+                         tenant_id,
+                         group_id,
+                         arg))) {
+    STORAGE_LOG(WARN, "failed to call get config version and transfer scn", K(ret), K(addr), K(timeout), K(tenant_id), K(arg));
   }
   return ret;
 }
@@ -303,8 +327,7 @@ int ObLSMemberListService::check_ls_transfer_scn_(const share::SCN &transfer_scn
 int ObLSMemberListService::get_ls_member_list_(common::ObIArray<common::ObAddr> &addr_list)
 {
   int ret = OB_SUCCESS;
-  ObStorageHASrcProvider provider;
-  ObMigrationOpType::TYPE type = ObMigrationOpType::MIGRATE_LS_OP;
+  ObStorageHAGetMemberHelper get_member_helper;
   ObLSService *ls_svr = NULL;
   ObStorageRpc *storage_rpc = NULL;
   if (OB_ISNULL(ls_)) {
@@ -316,9 +339,9 @@ int ObLSMemberListService::get_ls_member_list_(common::ObIArray<common::ObAddr> 
   } else if (OB_ISNULL(storage_rpc = ls_svr->get_storage_rpc())) {
     ret = OB_ERR_UNEXPECTED;
     STORAGE_LOG(WARN, "storage rpc should not be NULL", K(ret), KP(storage_rpc));
-  } else if (OB_FAIL(provider.init(ls_->get_tenant_id(), type, storage_rpc))) {
-    STORAGE_LOG(WARN, "failed to init src provider", K(ret), KP_(ls));
-  } else if (OB_FAIL(provider.get_ls_member_list(ls_->get_tenant_id(), ls_->get_ls_id(), addr_list))) {
+  } else if (OB_FAIL(get_member_helper.init(storage_rpc))) {
+    STORAGE_LOG(WARN, "failed to init palf helper", K(ret), KP_(ls));
+  } else if (OB_FAIL(get_member_helper.get_ls_member_list(ls_->get_tenant_id(), ls_->get_ls_id(), addr_list))) {
     STORAGE_LOG(WARN, "failed to get ls member list", K(ret), KP_(ls));
   }
   return ret;
@@ -335,6 +358,10 @@ int ObLSMemberListService::check_ls_transfer_scn_validity_(palf::LogConfigVersio
       STORAGE_LOG(WARN, "failed to check ls transfer scn validity for primary", K(ret), KP_(ls));
     }
   } else {//standby restore
+    SERVER_EVENT_SYNC_ADD("storage_ha", "before_check_ls_transfer_scn_validity_for_standby",
+                          "tenant_id", ls_->get_tenant_id(),
+                          "ls_id", ls_->get_ls_id().id());
+    DEBUG_SYNC(BEFORE_CHECK_LS_TRANSFER_SCN_FOR_STANDBY);
     if (OB_FAIL(check_ls_transfer_scn_validity_for_standby_(leader_config_version))) {
       STORAGE_LOG(WARN, "failed to check ls transfer scn validity for standby", K(ret), KP_(ls));
     }
@@ -374,33 +401,59 @@ int ObLSMemberListService::check_ls_transfer_scn_validity_for_standby_(palf::Log
     STORAGE_LOG(WARN, "failed to get ls leader", K(ret), KPC(ls_));
   } else {
     int64_t check_pass_count = 0;
+    storage::ObHAChangeMemberProxy batch_proxy(
+        *(GCTX.storage_rpc_proxy_), &obrpc::ObStorageRpcProxy::get_config_version_and_transfer_scn);
     for (int64_t i = 0; OB_SUCC(ret) && i < addr_list.count(); ++i) {
       const ObAddr &addr = addr_list.at(i);
       bool check_pass = false;
       share::SCN transfer_scn;
       palf::LogConfigVersion config_version;
       bool need_get_config_version = (addr == leader_addr);
-      if (OB_TMP_FAIL(get_config_version_and_transfer_scn_(need_get_config_version, addr, config_version, transfer_scn))) {
+      if (OB_TMP_FAIL(get_config_version_and_transfer_scn_(batch_proxy,
+                                                           addr,
+                                                           need_get_config_version,
+                                                           ls_->get_tenant_id(),
+                                                           ls_->get_ls_id()))) {
         STORAGE_LOG(WARN, "failed to get config version and transfer scn", K(ret), K(addr));
-      } else if (OB_FAIL(check_ls_transfer_scn_(transfer_scn, check_pass))) {
-        STORAGE_LOG(WARN, "failed to check ls transfer scn", K(ret), K(transfer_scn));
-      } else {
-        if (addr == leader_addr) {
-          if (!config_version.is_valid()) {
-            ret = OB_ERR_UNEXPECTED;
-            STORAGE_LOG(WARN, "config version is not valid", K(ret), K(config_version));
-          } else {
-            leader_config_version = config_version;
-          }
-        }
-        check_pass_count++;
       }
+    }
+    ObArray<int> return_code_array;
+    if (OB_TMP_FAIL(batch_proxy.wait_all(return_code_array))) {
+      STORAGE_LOG(WARN, "fail to wait all batch result", KR(ret), KR(tmp_ret));
+      ret = OB_SUCC(ret) ? tmp_ret : ret;
+    }
+    share::SCN leader_transfer_scn;
+    if (OB_FAIL(ret)) {
+    } else if (return_code_array.count() != addr_list.count()
+               || return_code_array.count() != batch_proxy.get_results().count()) {
+      ret = OB_ERR_UNEXPECTED;
+      STORAGE_LOG(WARN, "cnt not match", KR(ret),
+                        "return_cnt", return_code_array.count(),
+                        "result_cnt", batch_proxy.get_results().count(),
+                        "server_cnt", addr_list.count());
+    } else if (OB_FAIL(process_result_from_async_rpc_(batch_proxy,
+                                                      leader_addr,
+                                                      return_code_array,
+                                                      true/*for_standby*/,
+                                                      check_pass_count,
+                                                      leader_config_version,
+                                                      leader_transfer_scn))) {
+      STORAGE_LOG(WARN, "failed to process result from async rpc", KR(ret), KR(tmp_ret));
+    } else {
+      STORAGE_LOG(INFO, "process result from async rpc", KR(ret), K(return_code_array), K(addr_list), K(batch_proxy.get_results()));
     }
     if (OB_SUCC(ret)) {
       // standby check transfer scn need reach majority
       if (check_pass_count < (addr_list.count() / 2 + 1)) {
         ret = OB_LS_TRANSFER_SCN_TOO_SMALL;
         STORAGE_LOG(WARN, "transfer scn compare do not reach majority", K(ret), K(addr_list));
+#ifdef ERRSIM
+        SERVER_EVENT_ADD("storage_ha", "standby_check_transfer_scn_too_small",
+                         "tenant_id", ls_->get_tenant_id(),
+                         "ls_id", ls_->get_ls_id().id(),
+                         "member_list_count", addr_list.count(),
+                         "check_pass_count", check_pass_count);
+#endif
       } else {
         STORAGE_LOG(INFO, "passed transfer scn check for standby", K(ret), K(addr_list), K(check_pass_count));
       }
@@ -408,6 +461,57 @@ int ObLSMemberListService::check_ls_transfer_scn_validity_for_standby_(palf::Log
   }
   return ret;
 }
+
+int ObLSMemberListService::process_result_from_async_rpc_(
+    ObHAChangeMemberProxy &proxy,
+    const common::ObAddr &leader_addr,
+    const common::ObIArray<int> &return_code_array,
+    const bool for_standby,
+    int64_t &pass_count,
+    palf::LogConfigVersion &leader_config_version,
+    share::SCN &leader_transfer_scn)
+{
+  int ret = OB_SUCCESS;
+  int tmp_ret = OB_SUCCESS;
+  ARRAY_FOREACH_X(proxy.get_results(), idx, cnt, OB_SUCC(ret)) {
+    const ObStorageChangeMemberRes *response = proxy.get_results().at(idx);
+    const int res_ret = return_code_array.at(idx);
+    bool check_pass = false;
+    if (OB_SUCCESS != res_ret) {
+#ifdef ERRSIM
+      SERVER_EVENT_ADD("storage_ha", "check_ls_transfer_scn_validity_for_standby_failed",
+                      "tenant_id", ls_->get_tenant_id(),
+                      "ls_id", ls_->get_ls_id().id(),
+                      "result", res_ret);
+#endif
+    } else if (OB_ISNULL(response)) {
+      tmp_ret = OB_ERR_UNEXPECTED;
+      STORAGE_LOG(WARN, "hb_response is null", KR(ret), KR(tmp_ret));
+    } else if (for_standby && OB_FAIL(check_ls_transfer_scn_(response->transfer_scn_, check_pass))) {
+      STORAGE_LOG(WARN, "failed to check ls transfer scn", K(ret));
+    } else if (for_standby && !check_pass) {
+      continue;
+    } else {
+      const palf::LogConfigVersion &config_version = response->config_version_;
+      const ObAddr &addr = proxy.get_dests().at(idx);
+      if (addr == leader_addr) {
+        if (!config_version.is_valid()) {
+          ret = OB_ERR_UNEXPECTED;
+          STORAGE_LOG(WARN, "config version is not valid", K(ret), K(config_version));
+        } else {
+          leader_config_version = config_version;
+          leader_transfer_scn = response->transfer_scn_;
+        }
+      }
+      if (OB_SUCC(ret)) {
+        pass_count++;
+      }
+    }
+  }
+  return ret;
+}
+
+
 
 }
 }

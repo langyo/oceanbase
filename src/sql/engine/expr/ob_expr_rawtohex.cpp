@@ -11,43 +11,14 @@
  */
 
 #define USING_LOG_PREFIX SQL_ENG
-#include <string.h>
-#include "objit/common/ob_item_type.h"
 #include "sql/engine/expr/ob_expr_rawtohex.h"
-#include "sql/engine/expr/ob_expr_hex.h"
 #include "sql/engine/expr/ob_datum_cast.h"
-#include "sql/engine/expr/ob_expr_operator.h"
-#include "share/object/ob_obj_cast.h"
-#include "lib/oblog/ob_log.h"
-#include "sql/session/ob_sql_session_info.h"
 using namespace oceanbase::common;
 
 namespace oceanbase
 {
 namespace sql
 {
-
-int internal_calc_result_type(common::ObObj &result, const ObObj &text,
-                              const ObExprResType &result_type, ObExprCtx &expr_ctx)
-{
-  int ret = OB_SUCCESS;
-  if (OB_ISNULL(expr_ctx.calc_buf_)) {
-    ret = OB_NOT_INIT;
-    LOG_WARN("varchar buffer not init", K(ret));
-  } else {
-    EXPR_DEFINE_CAST_CTX(expr_ctx, CM_NONE);
-    if (OB_FAIL(ObHexUtils::rawtohex(text, cast_ctx, result))) {
-      LOG_WARN("fail to calc", K(ret), K(text));
-    } else if (OB_LIKELY(!result.is_null())) {
-      if (!ObCharset::is_cs_nonascii(result_type.get_collation_type())) {
-        result.set_collation(result_type);
-      } else {
-        OZ (ObStringExprOperator::convert_result_collation(result_type, result, expr_ctx.calc_buf_));
-      }
-    }
-  }
-  return ret;
-}
 
 int internal_calc_result_length(ObExprResType &type, ObExprResType &text)
 {
@@ -57,7 +28,7 @@ int internal_calc_result_length(ObExprResType &type, ObExprResType &text)
   if (ob_is_text_tc(param_type) && lib::is_oracle_mode()) {
     ret = OB_ERR_INVALID_TYPE_FOR_OP;
     LOG_USER_ERROR(OB_ERR_INVALID_TYPE_FOR_OP, "RAW", ob_obj_type_str(param_type));
-    LOG_WARN("ORA-00932: inconsistent datatypes: expected - got LOB", K(ret));
+    LOG_WARN("OBE-00932: inconsistent datatypes: expected - got LOB", K(ret));
   } else if (ob_is_string_type(param_type) || ob_is_raw(param_type)) {
     length = 2 * text.get_length();
     if (text.get_length_semantics() == LS_CHAR) {
@@ -94,7 +65,7 @@ int ObExprRawtohex::calc_result_type1(ObExprResType &type, ObExprResType &text,
   } else {
     type.set_varchar();
     type.set_collation_level(CS_LEVEL_IMPLICIT);
-    type.set_collation_type(get_default_collation_type(type.get_type(), *type_ctx.get_session()));
+    type.set_collation_type(get_default_collation_type(type.get_type(), type_ctx));
     type.set_length_semantics(type_ctx.get_session()->get_actual_nls_length_semantics());
   }
   //calc length now...

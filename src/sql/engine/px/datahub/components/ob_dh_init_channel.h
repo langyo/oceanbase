@@ -58,7 +58,7 @@ class ObInitChannelWholeMsg
 {
   OB_UNIS_VERSION_V(1);
 public:
-  using WholeMsgProvider = ObWholeMsgProvider<ObInitChannelWholeMsg>;
+  using WholeMsgProvider = ObWholeMsgProvider<ObInitChannelPieceMsg, ObInitChannelWholeMsg>;
 public:
   ObInitChannelWholeMsg() : ready_state_(0)
   {}
@@ -86,7 +86,6 @@ public:
                                  ObExecContext &ctx,
                                  int64_t task_cnt,
                                  ObPieceMsgCtx *&msg_ctx);
-  static bool enable_dh_channel_sync(const bool channel_sync_enabled);
   int received_; // 已经收到的 piece 数量
   int64_t tenant_id_;
   ObInitChannelWholeMsg whole_msg_;

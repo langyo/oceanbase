@@ -12,25 +12,11 @@
 
 #define USING_LOG_PREFIX RS
 #include "ob_tenant_thread_helper.h"
-#include "lib/profile/ob_trace_id.h"
-#include "lib/thread/thread_mgr.h"//TG
-#include "share/ob_errno.h"
-#include "share/schema/ob_schema_struct.h"//ObTenantInfo
-#include "share/schema/ob_schema_service.h"//ObMultiSchemaService
-#include "share/schema/ob_schema_getter_guard.h"//ObSchemaGetterGuard
-#include "share/ob_share_util.h"//ObShareUtil
-#include "share/ob_tenant_info_proxy.h"//ObAllTenantInfo
 #include "share/restore/ob_physical_restore_table_operator.h"//restore_job
-#include "share/restore/ob_physical_restore_info.h"//restore_info
+#include "share/restore/ob_tenant_clone_table_operator.h" // clone_job
 #include "share/ob_primary_zone_util.h"//get_ls_primary_zone_priority
-#include "observer/ob_server_struct.h"//GCTX
-#include "share/ls/ob_ls_recovery_stat_operator.h" //ObLSRecoveryStatOperator
-#include "logservice/ob_log_service.h"//get_palf_role
-#include "src/logservice/palf_handle_guard.h"//palf_handle
-#include "share/scn.h"//SCN
-
-#include "ob_tenant_info_loader.h"  // ObTenantInfoLoader
-
+#include "src/logservice/applyservice/ob_log_apply_service.h"
+#include "lib/ash/ob_active_session_guard.h"
 
 namespace oceanbase
 {
@@ -248,6 +234,7 @@ void ObTenantThreadHelper::run1() {
 void ObTenantThreadHelper::idle(const int64_t idle_time_us)
 {
   ObThreadCondGuard guard(thread_cond_);
+  ObBKGDSessInActiveGuard inactive_guard;
   thread_cond_.wait_us(idle_time_us);
 }
 
@@ -313,7 +300,7 @@ int ObTenantThreadHelper::check_can_do_recovery_(const uint64_t tenant_id)
         if (OB_ISNULL(GCTX.sql_proxy_)) {
           ret = OB_ERR_UNEXPECTED;
           LOG_WARN("sql can't null", K(ret), K(GCTX.sql_proxy_));
-        } else if (OB_FAIL(restore_table_operator.init(GCTX.sql_proxy_, tenant_id))) {
+        } else if (OB_FAIL(restore_table_operator.init(GCTX.sql_proxy_, tenant_id, share::OBCG_STORAGE /*group_id*/))) {
           LOG_WARN("fail to init restore table operator", KR(ret), K(tenant_id));
         } else if (OB_FAIL(restore_table_operator.get_job_by_tenant_id(tenant_id,
                 job_info))) {
@@ -323,6 +310,29 @@ int ObTenantThreadHelper::check_can_do_recovery_(const uint64_t tenant_id)
         } else {
           ret = OB_NEED_WAIT;
           LOG_WARN("restore tenant not valid to recovery", KR(ret), K(job_info));
+        }
+      } else if (is_clone_tenant(tenant_role)) {
+        //need to check success to create init ls
+        share::ObTenantCloneTableOperator clone_table_operator;
+        ObArray<share::ObCloneJob> job_arr;
+        if (OB_ISNULL(GCTX.sql_proxy_)) {
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("sql can't null", KR(ret), K(GCTX.sql_proxy_));
+        } else if (OB_FAIL(clone_table_operator.init(tenant_id, GCTX.sql_proxy_))) {
+          LOG_WARN("fail to init clone table operator", KR(ret), K(tenant_id));
+        } else if (OB_FAIL(clone_table_operator.get_all_clone_jobs(job_arr))) {
+          LOG_WARN("fail to get clone job", KR(ret), K(tenant_id));
+        } else if (job_arr.empty()) {
+          ret = OB_NEED_WAIT;
+          LOG_WARN("clone job is empty", KR(ret), K(tenant_id));
+        } else if (job_arr.count()!=1) {
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("clone job's count is unexpected", KR(ret), K(job_arr));
+        } else if (job_arr.at(0).is_valid_status_allows_user_tenant_to_do_ls_recovery()) {
+          //can do recovery
+        } else {
+          ret = OB_NEED_WAIT;
+          LOG_WARN("clone tenant not valid to recovery", KR(ret), K(job_arr));
         }
       } else if (is_invalid_tenant(tenant_role)) {
         ret = OB_NEED_WAIT;

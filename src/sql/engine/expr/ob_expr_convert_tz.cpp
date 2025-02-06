@@ -12,10 +12,6 @@
 
 #define USING_LOG_PREFIX SQL_ENG
 #include "sql/engine/expr/ob_expr_convert_tz.h"
-#include "lib/timezone/ob_time_convert.h"
-#include "lib/timezone/ob_timezone_info.h"
-#include "lib/ob_name_def.h"
-#include "sql/session/ob_sql_session_info.h"
 #include "sql/engine/ob_exec_context.h"
 
 namespace oceanbase
@@ -47,8 +43,8 @@ int ObExprConvertTZ::calc_result_type3(ObExprResType &type,
     input1.set_calc_type(ObDateTimeType);
     input2.set_calc_type(ObVarcharType);
     input3.set_calc_type(ObVarcharType);
-    input2.set_calc_collation_type(session->get_nls_collation());
-    input3.set_calc_collation_type(session->get_nls_collation());
+    input2.set_calc_collation_ascii_compatible();
+    input3.set_calc_collation_ascii_compatible();
   }
   return ret;
 }

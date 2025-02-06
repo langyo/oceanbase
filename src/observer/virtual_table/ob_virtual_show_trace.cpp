@@ -14,13 +14,8 @@
  * ---------------------------------------------------------------------------------------
  */
 #define USING_LOG_PREFIX SERVER
-#include "observer/virtual_table/ob_virtual_span_info.h"
 #include "observer/ob_sql_client_decorator.h"
-#include "lib/oblog/ob_log_module.h"
-#include "lib/trace/ob_trace.h"
 #include "observer/virtual_table/ob_virtual_show_trace.h"
-#include "lib/mysqlclient/ob_mysql_transaction.h"
-#include "observer/ob_server_struct.h"
 #include "sql/session/ob_sql_session_info.h"
 
 using namespace oceanbase::common;
@@ -84,7 +79,6 @@ int ObVirtualShowTrace::retrive_all_span_info()
 {
   int ret = OB_SUCCESS;
   ObMySQLTransaction trans;
-  bool with_snap_shot = true;
   ObMySQLProxy *mysql_proxy = GCTX.sql_proxy_;
   ObString trace_id;
   if (OB_ISNULL(mysql_proxy)) {
@@ -93,8 +87,6 @@ int ObVirtualShowTrace::retrive_all_span_info()
   } else if (OB_ISNULL(session_)) {
     ret = OB_NOT_INIT;
     SERVER_LOG(WARN, "session is null", K(ret));
-  } else if (OB_FAIL(trans.start(mysql_proxy, effective_tenant_id_, with_snap_shot))) {
-    SERVER_LOG(WARN, "failed to start transaction", K(ret), K(effective_tenant_id_));
   } else {
     int sql_len = 0;
     is_row_format_ = session_->is_row_traceformat();
@@ -122,8 +114,8 @@ int ObVirtualShowTrace::retrive_all_span_info()
 
         { // make sure %res destructed before execute other sql in the same transaction
           SMART_VAR(ObMySQLProxy::MySQLResult, res) {
-            ObMySQLResult *result = NULL;
-            ObISQLClient *sql_client = &trans;
+            common::sqlclient::ObMySQLResult *result = NULL;
+            ObISQLClient *sql_client = mysql_proxy;
             uint64_t table_id = OB_ALL_VIRTUAL_TRACE_SPAN_INFO_TID;
             ObSQLClientRetryWeak sql_client_retry_weak(sql_client,
                                                      exec_tenant_id,
@@ -335,7 +327,7 @@ int ObVirtualShowTrace::merge_span_info() {
     // do nothing
   } else {
     ObSEArray<sql::ObFLTShowTraceRec*, 16> tmp_arr;
-    std::sort(&show_trace_arr_.at(0), &show_trace_arr_.at(0) + show_trace_arr_.count(),
+    lib::ob_sort(&show_trace_arr_.at(0), &show_trace_arr_.at(0) + show_trace_arr_.count(),
         [](const sql::ObFLTShowTraceRec* rec1, const sql::ObFLTShowTraceRec* rec2) {
           if (NULL == rec1) {
             return true;
@@ -560,7 +552,8 @@ int ObVirtualShowTrace::find_child_span_info(sql::ObFLTShowTraceRec::trace_forma
          */
        }
 
-       if (OB_FAIL(tmp_arr.push_back(show_trace_arr_.at(i)))) {
+       if(OB_FAIL(ret)){
+       } else if (OB_FAIL(tmp_arr.push_back(show_trace_arr_.at(i)))) {
          LOG_WARN("failed to push back show trace value", K(ret), K(i));
        }
      } else {
@@ -572,7 +565,7 @@ int ObVirtualShowTrace::find_child_span_info(sql::ObFLTShowTraceRec::trace_forma
   if (tmp_arr.count() == 0) {
     // skipp sort
   } else {
-    std::sort(&tmp_arr.at(0), &tmp_arr.at(0) + tmp_arr.count(),
+    lib::ob_sort(&tmp_arr.at(0), &tmp_arr.at(0) + tmp_arr.count(),
         [](const sql::ObFLTShowTraceRec *rec1, const sql::ObFLTShowTraceRec *rec2) {
           if (NULL == rec1) {
             return true;
@@ -629,7 +622,8 @@ int ObVirtualShowTrace::find_child_span_info(sql::ObFLTShowTraceRec::trace_forma
                                     = sql::ObFLTShowTraceRec::trace_formatter::LineType::LT_NODE;
       }
     }
-    if (OB_ISNULL(tmp_arr.at(tmp_arr.count()-1))) {
+    if (OB_FAIL(ret)) {
+    } else if (OB_ISNULL(tmp_arr.at(tmp_arr.count()-1))) {
       ret = OB_ERR_UNEXPECTED;
       SERVER_LOG(WARN, "record ptr is null");
     } else {
@@ -639,6 +633,7 @@ int ObVirtualShowTrace::find_child_span_info(sql::ObFLTShowTraceRec::trace_forma
   }
 
 
+  // invalid span check
   for (int64_t i = 0; OB_SUCC(ret) && i < tmp_arr.count(); ++i) {
     if (arr.count() > 0) {
       if (OB_ISNULL(arr.at(arr.count() - 1))) {
@@ -646,9 +641,11 @@ int ObVirtualShowTrace::find_child_span_info(sql::ObFLTShowTraceRec::trace_forma
       } else if (OB_ISNULL(tmp_arr.at(i))) {
          // do nothing
       } else {
-        if (arr.at(arr.count() - 1)->data_.start_ts_ > tmp_arr.at(i)->data_.start_ts_) {
-          ret = OB_ERR_UNEXPECTED;
+        // There is a 2s clock error between machines
+        if (arr.at(arr.count() - 1)->data_.start_ts_ - tmp_arr.at(i)->data_.start_ts_ > 10000000 &&
+           arr.at(arr.count() - 1)->data_.span_id_ == tmp_arr.at(i)->data_.parent_span_id_) {
           LOG_WARN("invalid trace span", K(arr.at(arr.count() - 1)->data_), K(tmp_arr.at(i)->data_));
+          LOG_USER_ERROR(OB_ERR_UNEXPECTED, "invalid trace span");
         }
       }
     }

@@ -16,10 +16,6 @@
 #include "observer/table_load/ob_table_load_table_ctx.h"
 #include "observer/table_load/ob_table_load_service.h"
 #include "observer/table_load/ob_table_load_store.h"
-#include "sql/engine/ob_exec_context.h"
-#include "sql/engine/ob_physical_plan.h"
-#include "sql/optimizer/ob_optimizer_context.h"
-#include "sql/resolver/dml/ob_insert_stmt.h"
 
 namespace oceanbase
 {
@@ -27,34 +23,33 @@ using namespace observer;
 
 namespace sql
 {
-bool ObTableDirectInsertService::is_direct_insert(const ObPhysicalPlan &phy_plan)
-{
-  return (phy_plan.get_enable_append() && (0 != phy_plan.get_append_table_id()));
-}
 
 int ObTableDirectInsertService::start_direct_insert(ObExecContext &ctx,
     ObPhysicalPlan &phy_plan)
 {
   int ret = OB_SUCCESS;
-  if (!GCONF._ob_enable_direct_load) { // recheck
-    phy_plan.set_enable_append(false);
-    phy_plan.set_append_table_id(0);
+  ObTableDirectInsertCtx &table_direct_insert_ctx = ctx.get_table_direct_insert_ctx();
+  const bool is_inc_direct_load = phy_plan.get_enable_inc_direct_load();
+  const bool is_inc_replace = phy_plan.get_enable_replace();
+  const bool is_insert_overwrite = phy_plan.get_is_insert_overwrite();
+  const double online_sample_precent = phy_plan.get_online_sample_percent();
+  ObSQLSessionInfo *session = GET_MY_SESSION(ctx);
+  bool auto_commit = false;
+  CK (OB_NOT_NULL(session));
+  if (OB_FAIL(ret)) {
+  } else if (OB_FAIL(session->get_autocommit(auto_commit))) {
+    LOG_WARN("failed to get auto commit", KR(ret));
+  } else if (is_insert_overwrite && (!auto_commit || session->is_in_transaction())) {
+    ret = OB_NOT_SUPPORTED;
+    LOG_USER_ERROR(OB_NOT_SUPPORTED, "using insert overwrite within a transaction is");
+  } else if (!is_inc_direct_load && (!auto_commit || session->is_in_transaction())) {
+    ret = OB_NOT_SUPPORTED;
+    LOG_USER_ERROR(OB_NOT_SUPPORTED, "using full direct-insert within a transaction is");
   } else {
-    ObSQLSessionInfo *session = GET_MY_SESSION(ctx);
-    CK (OB_NOT_NULL(session));
-    bool auto_commit = false;
-    if (OB_FAIL(session->get_autocommit(auto_commit))) {
-      LOG_WARN("failed to get auto commit", KR(ret));
-    } else if (!auto_commit || session->is_in_transaction()) {
-      ret = OB_NOT_SUPPORTED;
-      LOG_USER_ERROR(OB_NOT_SUPPORTED, "using direct-insert within a transaction is");
-    } else {
-      ObTableDirectInsertCtx &table_direct_insert_ctx = ctx.get_table_direct_insert_ctx();
-      uint64_t table_id = phy_plan.get_append_table_id();
-      int64_t parallel = phy_plan.get_px_dop();
-      if (OB_FAIL(table_direct_insert_ctx.init(&ctx, table_id, parallel))) {
-        LOG_WARN("failed to init table direct insert ctx", KR(ret), K(table_id), K(parallel));
-      }
+    uint64_t table_id = phy_plan.get_append_table_id();
+    int64_t parallel = phy_plan.get_px_dop();
+    if (OB_FAIL(table_direct_insert_ctx.init(&ctx, phy_plan, table_id, parallel, is_inc_direct_load, is_inc_replace, is_insert_overwrite, online_sample_precent))) {
+      LOG_WARN("failed to init table direct insert ctx", KR(ret), K(table_id), K(parallel), K(is_inc_direct_load), K(is_inc_replace), K(is_insert_overwrite));
     }
   }
   return ret;
@@ -72,22 +67,24 @@ int ObTableDirectInsertService::commit_direct_insert(ObExecContext &ctx,
 }
 
 int ObTableDirectInsertService::finish_direct_insert(ObExecContext &ctx,
-    ObPhysicalPlan &phy_plan)
+    ObPhysicalPlan &phy_plan, const bool commit)
 {
   int ret = OB_SUCCESS;
   ObTableDirectInsertCtx &table_direct_insert_ctx = ctx.get_table_direct_insert_ctx();
-  if (OB_FAIL(table_direct_insert_ctx.finish())) {
+  if (commit && OB_FAIL(table_direct_insert_ctx.finish())) {
     LOG_WARN("failed to finish table direct insert ctx", KR(ret));
   }
+  table_direct_insert_ctx.destroy();
   return ret;
 }
 
 int ObTableDirectInsertService::open_task(const uint64_t table_id,
-                                          const int64_t task_id,
+                                          const int64_t px_task_id,
+                                          const int64_t ddl_task_id,
                                           ObTableLoadTableCtx *&table_ctx)
 {
   int ret = OB_SUCCESS;
-  ObTableLoadKey key(MTL_ID(), table_id);
+  ObTableLoadUniqueKey key(table_id, ddl_task_id);
   if (OB_NOT_NULL(table_ctx)) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("table_ctx should be null", KR(ret), KP(table_ctx));
@@ -103,7 +100,7 @@ int ObTableDirectInsertService::open_task(const uint64_t table_id,
     LOG_WARN("not the master of store", KR(ret), K(key));
   } else {
     table::ObTableLoadTransId trans_id;
-    trans_id.segment_id_ = task_id;
+    trans_id.segment_id_ = px_task_id;
     trans_id.trans_gid_ = 1;
     ObTableLoadStore store(table_ctx);
     if (OB_FAIL(store.init())) {
@@ -120,14 +117,15 @@ int ObTableDirectInsertService::open_task(const uint64_t table_id,
 }
 
 int ObTableDirectInsertService::close_task(const uint64_t table_id,
-                                           const int64_t task_id,
+                                           const int64_t px_task_id,
+                                           const int64_t ddl_task_id,
                                            ObTableLoadTableCtx *table_ctx,
                                            const int error_code)
 {
   int ret = OB_SUCCESS;
   if (OB_NOT_NULL(table_ctx)) {
     table::ObTableLoadTransId trans_id;
-    trans_id.segment_id_ = task_id;
+    trans_id.segment_id_ = px_task_id;
     trans_id.trans_gid_ = 1;
     if (OB_SUCC(error_code)) {
       ObTableLoadStore store(table_ctx);

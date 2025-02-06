@@ -13,10 +13,7 @@
 #define USING_LOG_PREFIX STORAGE
 
 #include "ob_rle_decoder.h"
-#include "ob_dict_decoder.h"
-#include "storage/blocksstable/ob_block_sstable_struct.h"
 #include "storage/access/ob_pushdown_aggregate.h"
-#include "ob_bit_stream.h"
 
 namespace oceanbase
 {
@@ -75,7 +72,7 @@ int ObRLEDecoder::update_pointer(const char *old_block, const char *cur_block)
 int ObRLEDecoder::batch_decode(
     const ObColumnDecoderCtx &ctx,
     const ObIRowIndex* row_index,
-    const int64_t *row_ids,
+    const int32_t *row_ids,
     const char **cell_datas,
     const int64_t row_cap,
     common::ObDatum *datums) const
@@ -99,10 +96,46 @@ int ObRLEDecoder::batch_decode(
   return ret;
 }
 
+int ObRLEDecoder::decode_vector(
+    const ObColumnDecoderCtx &decoder_ctx,
+    const ObIRowIndex *row_index,
+    ObVectorDecodeCtx &vector_ctx) const
+{
+  UNUSED(row_index);
+  int ret = OB_SUCCESS;
+  int64_t null_cnt = 0;
+  if (OB_UNLIKELY(!is_inited())) {
+    ret = OB_NOT_INIT;
+    LOG_WARN("Not inited", K(ret));
+  } else if (OB_FAIL(extract_ref_and_null_count(
+      vector_ctx.row_ids_, vector_ctx.row_cap_, vector_ctx.len_arr_, null_cnt))) {
+    LOG_WARN("Failed to extract refs",K(ret));
+  } else {
+    if (0 == null_cnt) {
+      if (OB_FAIL(dict_decoder_.batch_decode_dict<false>(
+          decoder_ctx.obj_meta_,
+          decoder_ctx.col_header_->get_store_obj_type(),
+          decoder_ctx.col_header_->length_ - meta_header_->offset_,
+          vector_ctx))) {
+        LOG_WARN("Failed to batch decode dict", K(ret), K(decoder_ctx), K(vector_ctx));
+      }
+    } else {
+      if (OB_FAIL(dict_decoder_.batch_decode_dict<true>(
+          decoder_ctx.obj_meta_,
+          decoder_ctx.col_header_->get_store_obj_type(),
+          decoder_ctx.col_header_->length_ - meta_header_->offset_,
+          vector_ctx))) {
+        LOG_WARN("Failed to batch decode dict", K(ret), K(decoder_ctx), K(vector_ctx));
+      }
+    }
+  }
+  return ret;
+}
+
 int ObRLEDecoder::get_null_count(
     const ObColumnDecoderCtx &ctx,
     const ObIRowIndex *row_index,
-    const int64_t *row_ids,
+    const int32_t *row_ids,
     const int64_t row_cap,
     int64_t &null_count) const
 {
@@ -168,8 +201,14 @@ int ObRLEDecoder::pushdown_operator(
         break;
       }
       case sql::WHITE_OP_IN: {
-        if (OB_FAIL(in_operator(parent, col_ctx, filter, pd_filter_info, result_bitmap))) {
-          LOG_WARN("Failed to run IN operator", K(ret), K(filter));
+        if (filter.is_filter_dynamic_node()) {
+          if (OB_FAIL(in_operator<sql::ObDynamicFilterExecutor>(parent, col_ctx, static_cast<const sql::ObDynamicFilterExecutor &>(filter), pd_filter_info, result_bitmap))) {
+            LOG_WARN("Failed to run IN operator", K(ret), K(filter));
+          }
+        } else {
+          if (OB_FAIL(in_operator<sql::ObWhiteFilterExecutor>(parent, col_ctx, filter, pd_filter_info, result_bitmap))) {
+            LOG_WARN("Failed to run IN operator", K(ret), K(filter));
+          }
         }
         break;
       }
@@ -371,10 +410,11 @@ int ObRLEDecoder::bt_operator(
   return ret;
 }
 
+template <typename ObFilterExecutor>
 int ObRLEDecoder::in_operator(
     const sql::ObPushdownFilterExecutor *parent,
     const ObColumnDecoderCtx &col_ctx,
-    const sql::ObWhiteFilterExecutor &filter,
+    const ObFilterExecutor &filter,
     const sql::PushdownFilterInfo &pd_filter_info,
     ObBitmap &result_bitmap) const
 {
@@ -398,10 +438,7 @@ int ObRLEDecoder::in_operator(
       int64_t dict_ref = 0;
       bool is_exist = false;
       while (OB_SUCC(ret) && traverse_it != end_it) {
-        ObObj cur_obj;
-        if (OB_FAIL((*traverse_it).to_obj(cur_obj, col_ctx.obj_meta_))) {
-          LOG_WARN("convert datum to obj failed", K(ret), K(*traverse_it), K(col_ctx.obj_meta_));
-        } else if (OB_FAIL(filter.exist_in_obj_set(cur_obj, is_exist))) {
+        if (OB_FAIL(filter.exist_in_set(*traverse_it, is_exist))) {
           LOG_WARN("Failed to check object in hashset", K(ret), K(*traverse_it));
         } else if (is_exist) {
           found = true;
@@ -489,12 +526,12 @@ int ObRLEDecoder::set_res_with_bitset(
   return ret;
 }
 
+template<typename T>
 int ObRLEDecoder::extract_ref_and_null_count(
-    const int64_t *row_ids,
+    const int32_t *row_ids,
     const int64_t row_cap,
-    common::ObDatum *datums,
-    int64_t &null_count,
-    uint32_t *ref_buf) const
+    T ref_buf,
+    int64_t &null_count) const
 {
   int ret = OB_SUCCESS;
   const ObIntArrayFuncTable &row_id_array
@@ -534,12 +571,8 @@ int ObRLEDecoder::extract_ref_and_null_count(
       }
       curr_ref = ref_array.at_(meta_header_->payload_ + ref_offset_, ref_table_pos - 1);
     }
-    if (nullptr != datums) {
-      datums[trav_idx].pack_ = static_cast<uint32_t>(curr_ref);
-    }
-    if (nullptr != ref_buf) {
-      ref_buf[trav_idx] = static_cast<uint32_t>(curr_ref);
-    }
+
+    load_ref_to_buf(ref_buf, trav_idx, curr_ref);
     if (curr_ref >= dict_count) {
       null_count++;
     }
@@ -548,6 +581,24 @@ int ObRLEDecoder::extract_ref_and_null_count(
     trav_idx += step;
   }
   return ret;
+}
+
+template<>
+void ObRLEDecoder::load_ref_to_buf(std::nullptr_t ref_buf, const int64_t trav_idx, const uint32_t ref) const
+{
+  return;
+}
+
+template<>
+void ObRLEDecoder::load_ref_to_buf(ObDatum *ref_buf, const int64_t trav_idx, const uint32_t ref) const
+{
+  ref_buf[trav_idx].pack_ = ref;
+}
+
+template<>
+void ObRLEDecoder::load_ref_to_buf(uint32_t *ref_buf, const int64_t trav_idx, const uint32_t ref) const
+{
+  ref_buf[trav_idx] = ref;
 }
 
 int ObRLEDecoder::get_distinct_count(int64_t &distinct_count) const
@@ -561,7 +612,7 @@ int ObRLEDecoder::get_distinct_count(int64_t &distinct_count) const
 int ObRLEDecoder::read_distinct(
     const ObColumnDecoderCtx &ctx,
     const char **cell_datas,
-    storage::ObGroupByCell &group_by_cell) const
+    storage::ObGroupByCellBase &group_by_cell) const
 {
   int ret = OB_SUCCESS;
   if (OB_FAIL(dict_decoder_.batch_read_distinct(
@@ -570,22 +621,38 @@ int ObRLEDecoder::read_distinct(
       ctx.col_header_->length_ - meta_header_->offset_,
       group_by_cell))) {
     LOG_WARN("Failed to load dict", K(ret));
+  } else if (has_null_value()) {
+    group_by_cell.add_distinct_null_value();
   }
   return ret;
 }
 
 int ObRLEDecoder::read_reference(
     const ObColumnDecoderCtx &ctx,
-    const int64_t *row_ids,
+    const int32_t *row_ids,
     const int64_t row_cap,
-    storage::ObGroupByCell &group_by_cell) const
+    storage::ObGroupByCellBase &group_by_cell) const
 {
   int ret = OB_SUCCESS;
   int64_t null_cnt = 0;
-  if (OB_FAIL(extract_ref_and_null_count(row_ids, row_cap, nullptr, null_cnt, group_by_cell.get_refs_buf()))) {
+  if (OB_FAIL(extract_ref_and_null_count(row_ids, row_cap, group_by_cell.get_refs_buf(), null_cnt))) {
     LOG_WARN("Failed to extract refs",K(ret));
   }
   return ret;
+}
+
+bool ObRLEDecoder::has_null_value() const
+{
+  int ret = OB_SUCCESS;
+  bool has_null = false;
+  int64_t ref;
+  const int64_t dict_count = dict_decoder_.get_dict_header()->count_;
+  const ObIntArrayFuncTable &refs = ObIntArrayFuncTable::instance(meta_header_->ref_byte_);
+  for (int64_t i = 0; !has_null && i < meta_header_->count_; ++i) {
+    ref = refs.at_(meta_header_->payload_ + ref_offset_, i);
+    has_null = ref >= dict_count;
+  }
+  return has_null;
 }
 
 } // end namespace blocksstable

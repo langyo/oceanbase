@@ -15,14 +15,22 @@
 #include "lib/lock/ob_spin_lock.h"
 #include "lib/task/ob_timer.h"
 #include "lib/hash/ob_cuckoo_hashmap.h"
-#include "ob_lob_meta.h"
-#include "ob_lob_piece.h"
+#include "storage/lob/ob_lob_access_param.h"
+#include "storage/lob/ob_lob_meta.h"
+#include "storage/lob/ob_lob_piece.h"
+#include "storage/lob/ob_lob_cursor.h"
+#include "storage/lob/ob_lob_constants.h"
+#include "storage/lob/ob_lob_iterator.h"
+#include "storage/lob/ob_lob_meta_manager.h"
 #include "storage/ob_storage_rpc.h"
 
 namespace oceanbase
 {
 namespace storage
 {
+
+class ObLobDiskLocatorBuilder;
+class ObLobDataInsertTask;
 
 struct ObLobCtx
 {
@@ -32,123 +40,22 @@ struct ObLobCtx
   TO_STRING_KV(KPC(lob_meta_mngr_), KPC(lob_piece_mngr_));
 };
 
-struct ObLobQueryResult {
-  ObLobMetaScanResult meta_result_;
-  ObLobPieceInfo piece_info_;
-  TO_STRING_KV(K_(meta_result), K_(piece_info));
-};
-
-struct ObLobCompareParams {
-
-  ObLobCompareParams()
-    : collation_left_(CS_TYPE_INVALID),
-      collation_right_(CS_TYPE_INVALID),
-      offset_left_(0),
-      offset_right_(0),
-      compare_len_(0),
-      timeout_(0),
-      tx_desc_(nullptr)
-  {
-  }
-
-  TO_STRING_KV(K(collation_left_),
-               K(collation_right_),
-               K(offset_left_),
-               K(offset_right_),
-               K(compare_len_),
-               K(timeout_),
-               K(tx_desc_));
-
-  ObCollationType collation_left_;
-  ObCollationType collation_right_;
-  uint64_t offset_left_;
-  uint64_t offset_right_;
-
-  // compare length
-  uint64_t compare_len_;
-  int64_t timeout_;
-  transaction::ObTxDesc *tx_desc_;
-};
-
-class ObLobQueryRemoteReader
-{
-public:
-  ObLobQueryRemoteReader() : rpc_buffer_pos_(0), data_buffer_() {}
-  ~ObLobQueryRemoteReader() {}
-  int open(ObLobAccessParam& param, common::ObDataBuffer &rpc_buffer);
-  int get_next_block(ObLobAccessParam& param,
-                     common::ObDataBuffer &rpc_buffer,
-                     obrpc::ObStorageRpcProxy::SSHandle<obrpc::OB_LOB_QUERY> &handle,
-                     ObLobQueryBlock &block,
-                     ObString &data);
-private:
-  int do_fetch_rpc_buffer(ObLobAccessParam& param,
-                          common::ObDataBuffer &rpc_buffer,
-                          obrpc::ObStorageRpcProxy::SSHandle<obrpc::OB_LOB_QUERY> &handle);
-private:
-  int64_t rpc_buffer_pos_;
-  ObString data_buffer_;
-};
-
-class ObLobQueryIter
-{
-public:
-  ObLobQueryIter() : is_reverse_(false), cs_type_(CS_TYPE_BINARY), is_end_(false),
-                     meta_iter_(), lob_ctx_(), param_(), last_data_(), last_data_ptr_(nullptr), last_data_buf_len_(0),
-                     inner_data_(), cur_pos_(0), is_in_row_(false), is_inited_(false),
-                     is_remote_(false), handle_(), rpc_buffer_(), query_arg_(), remote_reader_() {}
-  int open(ObLobAccessParam &param, ObLobCtx& lob_ctx); // outrow open
-  int open(ObString &data, uint32_t byte_offset, uint32_t byte_len, ObCollationType cs, bool is_reverse = false); // inrow open
-  int open(ObLobAccessParam &param, common::ObAddr dst_addr); // remote open
-  int get_next_row(ObString& data);
-  uint64_t get_cur_pos() { return meta_iter_.get_cur_pos(); }
-  void reset();
-  bool is_end() const { return is_end_; }
-private:
-  int get_next_row(ObLobQueryResult &result); // for test
-  bool fill_buffer_to_data(ObString& data);
-private:
-  // common
-  bool is_reverse_;
-  ObCollationType cs_type_;
-  bool is_end_;
-  // outrow ctx
-  ObLobMetaScanIter meta_iter_;
-  ObLobCtx lob_ctx_;
-  ObLobAccessParam param_;
-  ObString last_data_;
-  char *last_data_ptr_;
-  uint64_t last_data_buf_len_;
-  // inrow ctx
-  ObString inner_data_;
-  uint64_t cur_pos_;
-  bool is_in_row_;
-  bool is_inited_;
-  // remote ctx
-  bool is_remote_;
-  obrpc::ObStorageRpcProxy::SSHandle<obrpc::OB_LOB_QUERY> handle_;
-  common::ObDataBuffer rpc_buffer_;
-  ObLobQueryArg query_arg_;
-  ObLobQueryRemoteReader remote_reader_;
-};
-
 class ObLobManager
 {
 public:
   static const int64_t LOB_AUX_TABLE_COUNT = 2; // lob aux table count for each table
   static const int64_t LOB_WITH_OUTROW_CTX_SIZE = sizeof(ObLobCommon) + sizeof(ObLobData) + sizeof(ObLobDataOutRowCtx);
-  static const int64_t LOB_OUTROW_FULL_SIZE = sizeof(ObLobCommon) + sizeof(ObLobData) + sizeof(ObLobDataOutRowCtx) + sizeof(uint64_t);
+  static const int64_t LOB_OUTROW_FULL_SIZE = ObLobLocatorV2::DISK_LOB_OUTROW_FULL_SIZE;
   static const uint64_t LOB_READ_BUFFER_LEN = 1024L*1024L; // 1M
-  static const uint64_t REMOTE_LOB_QUERY_RETRY_MAX = 10L; // 1M
+  static const ObLobCommon ZERO_LOB; // static empty lob for zero val
 private:
   explicit ObLobManager(const uint64_t tenant_id)
     : tenant_id_(tenant_id),
       is_inited_(false),
       allocator_(tenant_id),
-      lob_ctxs_(),
       lob_ctx_(),
-      meta_manager_(),
-      piece_manager_()
+      meta_manager_(tenant_id),
+      piece_manager_(tenant_id)
   {}
 public:
   ~ObLobManager() { destroy(); }
@@ -164,6 +71,7 @@ public:
 
   // Only use for default lob col val
   static int fill_lob_header(ObIAllocator &allocator, ObString &data, ObString &out);
+  static int fill_lob_header(ObIAllocator &allocator, ObStorageDatum &datum);
   static int fill_lob_header(ObIAllocator &allocator,
                              const ObIArray<share::schema::ObColDesc> &column_ids,
                              blocksstable::ObDatumRow &datum_row);
@@ -182,26 +90,34 @@ public:
                                         const ObString &data,
                                         common::ObCollationType coll_type,
                                         ObLobLocatorV2 &out);
-  int lob_remote_query_with_retry(
-    ObLobAccessParam &param,
-    common::ObAddr& dst_addr,
-    ObLobQueryArg& arg,
-    int64_t timeout,
-    common::ObDataBuffer& rpc_buffer,
-    obrpc::ObStorageRpcProxy::SSHandle<obrpc::OB_LOB_QUERY>& handle);
-  bool is_remote_ret_can_retry(int ret);
+
   // Tmp Delta Lob locator interface
   int process_delta(ObLobAccessParam& param,
                     ObLobLocatorV2& lob_locator);
+
   // Lob data interface
   int append(ObLobAccessParam& param,
              ObString& data);
+  int append(ObLobAccessParam& param,
+             ObLobLocatorV2& lob,
+             ObLobMetaWriteIter &iter);
   int append(ObLobAccessParam& param,
              ObLobLocatorV2 &lob);
   int query(ObLobAccessParam& param,
             ObString& data);
   int query(ObLobAccessParam& param,
             ObLobQueryIter *&result);
+
+  int query(ObString& data,
+            ObLobQueryIter *&result);
+  int query(
+      ObIAllocator *allocator,
+      ObLobLocatorV2 &locator,
+      int64_t query_timeout_ts,
+      bool is_load_all,
+      ObLobPartialData *partial_data,
+      ObLobCursor *&cursor);
+
   int write(ObLobAccessParam& param,
             ObString& data);
   int write(ObLobAccessParam& param,
@@ -223,12 +139,12 @@ public:
               ObLobLocatorV2& lob_right,
               ObLobCompareParams& cmp_params,
               int64_t& result);
-
+  int equal(ObLobLocatorV2& lob_left,
+            ObLobLocatorV2& lob_right,
+            ObLobCompareParams& cmp_params,
+            bool& result);
   // int insert(const common::ObTabletID &tablet_id, ObObj *obj, uint64_t offset, char *data, uint64_t len);
   // int erase(const common::ObTabletID &tablet_id, ObObj *obj, uint64_t offset, uint64_t len);
-  int get_real_data(ObLobAccessParam& param,
-                    const ObLobQueryResult& result,
-                    ObString& data);
   int erase(ObLobAccessParam& param);
   int getlength(ObLobAccessParam& param, uint64_t &len);
   int build_lob_param(ObLobAccessParam& param,
@@ -238,93 +154,64 @@ public:
                       uint64_t len,
                       int64_t timeout,
                       ObLobLocatorV2 &lob);
-  inline bool can_write_inrow(uint64_t len) { return len <= LOB_IN_ROW_MAX_LENGTH; }
+
+  common::ObIAllocator& get_ext_info_log_allocator() { return ext_info_log_allocator_; }
+  inline bool can_write_inrow(uint64_t len, int64_t inrow_threshold) { return len <= inrow_threshold; }
+
+  static void transform_lob_id(uint64_t src, uint64_t &dst);
+  int insert(ObLobAccessParam& param, const ObLobLocatorV2 &src_data_locator, ObArray<ObLobMetaInfo> &lob_meta_list);
+  int prepare_insert_task(
+      ObLobAccessParam& param,
+      bool &is_outrow,
+      ObLobDataInsertTask &task);
+
 private:
   // private function
   int write_inrow_inner(ObLobAccessParam& param, ObString& data, ObString& old_data);
   int write_inrow(ObLobAccessParam& param, ObLobLocatorV2& lob, uint64_t offset, ObString& old_data);
-  int write_outrow_result(ObLobAccessParam& param, ObLobMetaWriteIter &write_iter);
-  int write_outrow_inner(ObLobAccessParam& param, ObLobQueryIter *iter, ObString& read_buf, ObString& old_data);
   int write_outrow(ObLobAccessParam& param, ObLobLocatorV2& lob, uint64_t offset, ObString& old_data);
 
   int query_inrow_get_iter(ObLobAccessParam& param, ObString &data, uint32_t offset, bool scan_backward, ObLobQueryIter *&result);
-  int erase_imple_inner(ObLobAccessParam& param);
-  // write mini unit, write lob data, write meta tablet, write piece tablet
-  int write_one_piece(ObLobAccessParam& param,
-                      common::ObTabletID& piece_tablet_id,
-                      ObLobCtx& lob_ctx,
-                      ObLobMetaInfo& meta_info,
-                      ObString& data,
-                      bool need_alloc_macro_id);
-
-  int update_one_piece(ObLobAccessParam& param,
-                       ObLobCtx& lob_ctx,
-                       ObLobMetaInfo& old_meta_info,
-                       ObLobMetaInfo& new_meta_info,
-                       ObLobPieceInfo& piece_info,
-                       ObString& data);
-
-  int erase_one_piece(ObLobAccessParam& param,
-                      ObLobCtx& lob_ctx,
-                      ObLobMetaInfo& meta_info,
-                      ObLobPieceInfo& piece_info);
-
-  void transform_query_result_charset(const common::ObCollationType& coll_type,
-                                      const char* data,
-                                      uint32_t len,
-                                      uint32_t &byte_len,
-                                      uint32_t &byte_st);
+  int erase_outrow(ObLobAccessParam& param);
   int check_need_out_row(ObLobAccessParam& param,
                          int64_t add_len,
                          ObString &data,
                          bool need_combine_data,
                          bool alloc_inside,
                          bool &need_out_row);
-  int init_out_row_ctx(ObLobAccessParam& param, uint64_t len, ObLobDataOutRowCtx::OpType op);
-  int update_out_ctx(ObLobAccessParam& param, ObLobMetaInfo *old_info, ObLobMetaInfo& new_info);
-  int check_handle_size(ObLobAccessParam& param);
-  int erase_process_meta_info(ObLobAccessParam& param, ObLobMetaScanIter &meta_iter, ObLobQueryResult &result, ObString &tmp_buff);
   int prepare_for_write(ObLobAccessParam& param,
                         ObString &old_data,
                         bool &need_out_row);
-  int prepare_write_buffers(ObLobAccessParam& param, ObString &remain_buf, ObString &tmp_buf);
-  int replace_process_meta_info(ObLobAccessParam& param,
-                                ObLobMetaScanIter &meta_iter,
-                                ObLobQueryResult &result,
-                                ObLobQueryIter *iter,
-                                ObString& read_buf,
-                                ObString &remain_data,
-                                ObString &tmp_buf);
-  int get_inrow_data(ObLobAccessParam& param, ObString& data);
-  int get_ls_leader(ObLobAccessParam& param, const uint64_t tenant_id, const share::ObLSID &ls_id, common::ObAddr &leader);
-  int is_remote(ObLobAccessParam& param, bool& is_remote, common::ObAddr& dst_addr);
-  int query_remote(ObLobAccessParam& param, common::ObAddr& dst_addr, ObString& data);
-  int getlength_remote(ObLobAccessParam& param, common::ObAddr& dst_addr, uint64_t &len);
-  int do_delete_one_piece(ObLobAccessParam& param, ObLobQueryResult &result, ObString &tmp_buff);
-  int prepare_erase_buffer(ObLobAccessParam& param, ObString &tmp_buff);
+
   int fill_zero(char *ptr, uint64_t length, bool is_char,
                 const ObCollationType coll_type, uint32_t byte_len, uint32_t byte_offset, uint32_t &char_len);
   int prepare_lob_common(ObLobAccessParam& param, bool &alloc_inside);
-  bool lob_handle_has_char_len(ObLobAccessParam& param);
-  int64_t* get_char_len_ptr(ObLobAccessParam& param);
   int fill_lob_locator_extern(ObLobAccessParam& param);
 
   int compare(ObLobAccessParam& param_left,
               ObLobAccessParam& param_right,
               int64_t& result);
+  int load_all(ObLobAccessParam &param, ObLobPartialData &partial_data);
+  int append_outrow(ObLobAccessParam& param, ObLobLocatorV2& lob, int64_t append_lob_len, ObString& ori_inrow_data);
+  int append_outrow(ObLobAccessParam& param, bool ori_is_inrow, ObString &data);
 
+  int query_outrow(ObLobAccessParam& param, ObLobQueryIter *&result);
+  int query_outrow(ObLobAccessParam& param, ObString &data);
+  int process_diff(ObLobAccessParam& param, ObLobLocatorV2& lob_locator, ObLobDiffHeader *diff_header);
+  int prepare_outrow_locator(ObLobAccessParam& param, ObLobDataInsertTask &task);
+  int prepare_char_len(ObLobAccessParam& param, ObLobDiskLocatorBuilder &locator_builder, ObLobDataInsertTask &task);
+  int prepare_lob_id(ObLobAccessParam& param, ObLobDiskLocatorBuilder &locator_builder);
+  int alloc_lob_id(ObLobAccessParam& param, ObLobId &lob_id);
+  int prepare_seq_no(ObLobAccessParam& param, ObLobDiskLocatorBuilder &locator_builder, ObLobDataInsertTask &task);
 private:
-  static const int64_t DEFAULT_LOB_META_BUCKET_CNT = 1543;
-  static const int64_t LOB_IN_ROW_MAX_LENGTH = 4096; // 4K
   const uint64_t tenant_id_;
   bool is_inited_;
   common::ObFIFOAllocator allocator_;
-  // key是主表的tablet_id
-  common::hash::ObCuckooHashMap<common::ObTabletID, ObLobCtx> lob_ctxs_;
   // global ctx
   ObLobCtx lob_ctx_;
   ObLobMetaManager meta_manager_;
   ObLobPieceManager piece_manager_;
+  common::ObFIFOAllocator ext_info_log_allocator_;
 };
 
 } // storage

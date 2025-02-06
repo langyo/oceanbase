@@ -12,12 +12,9 @@
 
 #define USING_LOG_PREFIX STORAGE
 #include "ob_sstable_row_scanner.h"
-#include "ob_sstable_index_filter.h"
-#include "ob_block_row_store.h"
-#include "storage/blocksstable/ob_datum_row.h"
-#include "storage/column_store/ob_co_sstable_rows_filter.h"
-#include "lib/statistic_event/ob_stat_event.h"
-#include "lib/stat/ob_diagnose_info.h"
+#include "ob_aggregated_store.h"
+#include "ob_aggregated_store_vec.h"
+#include "storage/blocksstable/ob_micro_block_row_lock_checker.h"
 
 namespace oceanbase
 {
@@ -27,20 +24,20 @@ namespace storage
 template<typename PrefetchType>
 ObSSTableRowScanner<PrefetchType>::~ObSSTableRowScanner()
 {
-  FREE_PTR_FROM_CONTEXT(access_ctx_, micro_scanner_, ObIMicroBlockRowScanner);
+  FREE_ITER_FROM_ALLOCATOR(long_life_allocator_, micro_scanner_, ObIMicroBlockRowScanner);
 }
 
 template<typename PrefetchType>
 void ObSSTableRowScanner<PrefetchType>::reset()
 {
-  ObStoreRowIterator::reset();
-  FREE_PTR_FROM_CONTEXT(access_ctx_, micro_scanner_, ObIMicroBlockRowScanner);
+  FREE_ITER_FROM_ALLOCATOR(long_life_allocator_, micro_scanner_, ObIMicroBlockRowScanner);
   is_opened_ = false;
   cur_range_idx_ = -1;
   sstable_ = nullptr;
   iter_param_ = nullptr;
   access_ctx_ = nullptr;
   prefetcher_.reset();
+  ObStoreRowIterator::reset();
 }
 
 template<typename PrefetchType>
@@ -49,6 +46,7 @@ void ObSSTableRowScanner<PrefetchType>::reuse()
   ObStoreRowIterator::reuse();
   is_opened_ = false;
   cur_range_idx_ = -1;
+  sstable_ = nullptr;
   if (nullptr != micro_scanner_) {
     micro_scanner_->reuse();
   }
@@ -56,6 +54,40 @@ void ObSSTableRowScanner<PrefetchType>::reuse()
     block_row_store_->reuse();
   }
   prefetcher_.reuse();
+}
+
+template<typename PrefetchType>
+void ObSSTableRowScanner<PrefetchType>::reclaim()
+{
+  is_opened_ = false;
+  cur_range_idx_ = -1;
+  sstable_ = nullptr;
+  iter_param_ = nullptr;
+  access_ctx_ = nullptr;
+  prefetcher_.reclaim();
+  if (nullptr != micro_scanner_) {
+    micro_scanner_->reuse();
+  }
+  ObStoreRowIterator::reset();
+  is_reclaimed_ = true;
+}
+
+template<typename PrefetchType>
+bool ObSSTableRowScanner<PrefetchType>::can_blockscan() const
+{
+  return is_scan(type_) &&
+         nullptr != block_row_store_ &&
+         block_row_store_->can_blockscan();
+}
+
+template<typename PrefetchType>
+bool ObSSTableRowScanner<PrefetchType>::can_batch_scan() const
+{
+    return can_blockscan() &&
+          block_row_store_->filter_applied() &&
+          !access_ctx_->is_mview_query() &&
+          // can batch scan when only enable_pd_aggregate, as it uses own datum buffer and only return aggregated result
+          (iter_param_->vectorized_enabled_ || iter_param_->enable_pd_aggregate());
 }
 
 template<typename PrefetchType>
@@ -78,6 +110,7 @@ int ObSSTableRowScanner<PrefetchType>::inner_open(
     sstable_ = static_cast<ObSSTable *>(table);
     iter_param_ = &iter_param;
     access_ctx_ = &access_ctx;
+    ObSampleFilterExecutor *sample_executor = static_cast<ObSampleFilterExecutor *>(access_ctx.get_sample_executor());
     if (!prefetcher_.is_valid()) {
       if (OB_FAIL(prefetcher_.init(
                   type_, *sstable_, iter_param, access_ctx, query_range))) {
@@ -88,12 +121,24 @@ int ObSSTableRowScanner<PrefetchType>::inner_open(
     }
     if (OB_SUCC(ret)) {
       if (iter_param_->enable_pd_aggregate() &&
+          !iter_param_->is_use_column_store() &&
           nullptr != block_row_store_ &&
           iter_param_->enable_skip_index() &&
           !sstable_->is_multi_version_table()) {
-        prefetcher_.agg_row_store_ = reinterpret_cast<ObAggregatedStore *>(block_row_store_);
+        if (block_row_store_->is_vec2()) {
+          prefetcher_.agg_store_ = static_cast<ObAggStoreBase *>(static_cast<ObAggregatedStoreVec *>(block_row_store_));
+        } else {
+          prefetcher_.agg_store_ = static_cast<ObAggStoreBase *>(static_cast<ObAggregatedStore *>(block_row_store_));
+        }
       }
-      if (OB_FAIL(prefetcher_.prefetch())) {
+      if (nullptr != sample_executor
+          && sstable_->is_major_sstable()
+          && OB_FAIL(sample_executor->build_row_id_handle(
+                          prefetcher_.get_index_tree_height(),
+                          prefetcher_.get_index_prefetch_depth(),
+                          prefetcher_.get_micro_data_pefetch_depth()))) {
+        LOG_WARN("Failed to build row id handle", K(ret), KPC(sample_executor));
+      } else if (OB_FAIL(prefetcher_.prefetch())) {
         LOG_WARN("ObSSTableRowScanner prefetch failed", K(ret));
       } else {
         is_opened_ = true;
@@ -115,15 +160,15 @@ int ObSSTableRowScanner<PrefetchType>::init_micro_scanner()
   } else {
     if (sstable_->is_multi_version_minor_sstable()) {
       if (nullptr == (micro_scanner_ = OB_NEWx(ObMultiVersionMicroBlockRowScanner,
-                                               access_ctx_->stmt_allocator_,
-                                               *access_ctx_->stmt_allocator_))) {
+                                               long_life_allocator_,
+                                               *long_life_allocator_))) {
         ret = OB_ALLOCATE_MEMORY_FAILED;
         LOG_WARN("Fail to allocate memory for micro block row scanner", K(ret));
       }
     } else {
       if (nullptr == (micro_scanner_ = OB_NEWx(ObMicroBlockRowScanner,
-                                               access_ctx_->stmt_allocator_,
-                                               *access_ctx_->stmt_allocator_))) {
+                                               long_life_allocator_,
+                                               *long_life_allocator_))) {
         ret = OB_ALLOCATE_MEMORY_FAILED;
         LOG_WARN("Fail to allocate memory for micro block row scanner", K(ret));
       }
@@ -187,6 +232,13 @@ int ObSSTableRowScanner<PrefetchType>::open_cur_data_block(ObSSTableReadHandle &
       } else if (can_blockscan && nullptr != block_row_store_ && !block_row_store_->is_disabled()) {
         // Apply pushdown filter and block scan
         sql::ObPushdownFilterExecutor *filter = block_row_store_->get_pd_filter();
+        ObSampleFilterExecutor *sample_executor = static_cast<ObSampleFilterExecutor *>(access_ctx_->get_sample_executor());
+        if (nullptr != sample_executor && sstable_->is_major_sstable()) {
+          sample_executor->set_block_row_range(prefetcher_.cur_micro_data_fetch_idx_,
+                                               micro_scanner_->get_current_pos(),
+                                               micro_scanner_->get_last_pos(),
+                                               prefetcher_.current_micro_info().get_row_count());
+        }
         if (nullptr != filter) {
           micro_info.pre_process_filter(*filter);
         }
@@ -200,11 +252,20 @@ int ObSSTableRowScanner<PrefetchType>::open_cur_data_block(ObSSTableReadHandle &
         if (nullptr != filter) {
           micro_info.post_process_filter(*filter);
         }
+        if (nullptr != sample_executor && can_batch_scan()) {
+          if (sstable_->is_major_sstable()) {
+          } else if (OB_FAIL(sample_executor->increase_row_num(access_ctx_->query_flag_.is_reverse_scan() ?
+                                                               micro_scanner_->get_current_pos() - micro_scanner_->get_last_pos() + 1 :
+                                                               micro_scanner_->get_last_pos() - micro_scanner_->get_current_pos() + 1))) {
+            LOG_WARN("Failed to increase row num in sample filter", K(micro_scanner_->get_last_pos()), K(micro_scanner_->get_current_pos()), KPC(sample_executor));
+          }
+        }
         EVENT_INC(ObStatEventIds::BLOCKSCAN_BLOCK_CNT);
         LOG_TRACE("[PUSHDOWN] pushdown for block scan", K(prefetcher_.cur_micro_data_fetch_idx_), K(micro_info), KPC(block_row_store_));
       }
       if (OB_SUCC(ret)) {
         access_ctx_->inc_micro_access_cnt();
+        REALTIME_MONITOR_ADD_SSSTORE_READ_BYTES(access_ctx_, micro_scanner_->get_data_length());
         LOG_DEBUG("Success to open micro block", K(ret), K(read_handle), K(prefetcher_.cur_micro_data_fetch_idx_),
                   K(micro_info), K(micro_handle), KPC(this), K(common::lbt()));
       }
@@ -235,8 +296,7 @@ int ObSSTableRowScanner<PrefetchType>::inner_get_next_row(const ObDatumRow *&sto
   if (OB_UNLIKELY(!is_opened_)) {
     ret = OB_NOT_INIT;
    LOG_WARN("ObSSTableRowScanner has not been opened", K(ret));
-  } else if (nullptr != block_row_store_ && !block_row_store_->is_disabled() && prefetcher_.switch_to_columnar_scan()) {
-    block_row_store_->set_filter_applied(true);
+  } else if (can_batch_scan()) {
     ret = OB_PUSHDOWN_STATUS_CHANGED;
   } else {
     while(OB_SUCC(ret)) {
@@ -272,10 +332,17 @@ int ObSSTableRowScanner<PrefetchType>::inner_get_next_row(const ObDatumRow *&sto
     ObDatumRow &datum_row = *const_cast<ObDatumRow *>(store_row);
     if (!store_row->row_flag_.is_not_exist() &&
       iter_param_->need_scn_ &&
-      OB_FAIL(set_row_scn(*iter_param_, store_row))) {
+      OB_FAIL(set_row_scn(access_ctx_->use_fuse_row_cache_, *iter_param_, store_row))) {
       LOG_WARN("failed to set row scn", K(ret));
     }
     EVENT_INC(ObStatEventIds::SSSTORE_READ_ROW_COUNT);
+    if (OB_NOT_NULL(sstable_)) {
+      if (sstable_->is_minor_sstable()) {
+        EVENT_INC(ObStatEventIds::MINOR_SSSTORE_READ_ROW_COUNT);
+      } else if (sstable_->is_major_sstable()) {
+        EVENT_INC(ObStatEventIds::MAJOR_SSSTORE_READ_ROW_COUNT);
+      }
+    }
     LOG_DEBUG("[INDEX BLOCK] inner get next row", KPC(store_row));
   }
   LOG_DEBUG("chaser debug", K(ret), KPC(store_row), KPC(iter_param_));
@@ -307,7 +374,7 @@ int ObSSTableRowScanner<PrefetchType>::fetch_row(ObSSTableReadHandle &read_handl
         if (OB_UNLIKELY(OB_ITER_END != ret)) {
           LOG_WARN("Fail to open cur data block", K(ret), KPC(this));
         }
-      } else if (can_vectorize()) {
+      } else if (can_batch_scan()) {
         ret = OB_PUSHDOWN_STATUS_CHANGED;
         LOG_TRACE("[Vectorized|Aggregate] pushdown status changed, fuse=>pushdown", K(ret),
                   K(prefetcher_.cur_micro_data_fetch_idx_));
@@ -320,6 +387,11 @@ int ObSSTableRowScanner<PrefetchType>::fetch_row(ObSSTableReadHandle &read_handl
           LOG_WARN("Fail to get next row", K(ret));
         } else if (prefetcher_.cur_micro_data_fetch_idx_ >= read_handle.micro_end_idx_) {
           ret = OB_ITER_END;
+          if (ObStoreRowIterator::IteratorRowLockAndDuplicationCheck == type_ ||
+              ObStoreRowIterator::IteratorRowLockCheck == type_) {
+            ObMicroBlockRowLockChecker *checker = static_cast<ObMicroBlockRowLockChecker *>(micro_scanner_);
+            checker->inc_empty_read(read_handle.get_rowkey().get_datum_cnt());
+          }
           LOG_DEBUG("[INDEX BLOCK] Open data block handle iter end", K(ret),
                     K(prefetcher_.cur_micro_data_fetch_idx_), K(read_handle));
         } else if (FALSE_IT(prefetcher_.inc_cur_micro_data_fetch_idx())) {
@@ -327,7 +399,7 @@ int ObSSTableRowScanner<PrefetchType>::fetch_row(ObSSTableReadHandle &read_handl
           if (OB_UNLIKELY(OB_ITER_END != ret)) {
             LOG_WARN("Fail to open cur data block", K(ret), KPC(this));
           }
-        } else if (can_vectorize()) {
+        } else if (can_batch_scan()) {
           ret = OB_PUSHDOWN_STATUS_CHANGED;
           LOG_TRACE("[Vectorized|Aggregate] pushdown status changed, fuse=>pushdown", K(ret),
                     K(prefetcher_.cur_micro_data_fetch_idx_));
@@ -350,13 +422,6 @@ int ObSSTableRowScanner<PrefetchType>::refresh_blockscan_checker(const blockssta
     LOG_WARN("Failed to prepare blockscan check info", K(ret), K(rowkey), KPC(this));
   }
   return ret;
-}
-
-template<typename PrefetchType>
-bool ObSSTableRowScanner<PrefetchType>::can_vectorize() const
-{
-  return (iter_param_->vectorized_enabled_ || iter_param_->enable_pd_aggregate()) &&
-      nullptr != block_row_store_ && block_row_store_->filter_applied();
 }
 
 template<typename PrefetchType>
@@ -421,7 +486,7 @@ int ObSSTableRowScanner<PrefetchType>::fetch_rows(ObSSTableReadHandle &read_hand
         if (OB_UNLIKELY(OB_ITER_END != ret)) {
           LOG_WARN("Fail to open cur data block", K(ret), KPC(this));
         }
-      } else if (!can_vectorize()) {
+      } else if (!can_batch_scan()) {
         ret = OB_PUSHDOWN_STATUS_CHANGED;
         LOG_TRACE("[Vectorized] pushdown status changed, pushdown=>fuse", K(ret),
                   K(prefetcher_.cur_micro_data_fetch_idx_));
@@ -444,7 +509,7 @@ int ObSSTableRowScanner<PrefetchType>::fetch_rows(ObSSTableReadHandle &read_hand
           }
         } else if (need_prefetch && OB_FAIL(prefetcher_.prefetch())) {
           LOG_WARN("Fail to do prefetch", K(ret), K_(prefetcher));
-        } else if (!can_vectorize()) {
+        } else if (!can_batch_scan()) {
           ret = OB_PUSHDOWN_STATUS_CHANGED;
           LOG_TRACE("[Vectorized] pushdown status changed, pushdown=>fuse", K(ret),
                     K(prefetcher_.cur_micro_data_fetch_idx_));
@@ -459,6 +524,23 @@ int ObSSTableRowScanner<PrefetchType>::fetch_rows(ObSSTableReadHandle &read_hand
 }
 
 /***************             For columnar store              ****************/
+
+template<>
+bool ObSSTableRowScanner<ObCOPrefetcher>::can_blockscan() const
+{
+  return is_scan(type_) &&
+         nullptr != block_row_store_ &&
+         prefetcher_.switch_to_columnar_scan() &&
+         !sstable_->is_ddl_merge_sstable();
+}
+
+template<>
+bool ObSSTableRowScanner<ObCOPrefetcher>::can_batch_scan() const
+{
+  return can_blockscan() &&
+         !block_row_store_->is_disabled() &&
+         iter_param_->vectorized_enabled_ && iter_param_->enable_pd_filter();
+}
 
 template<typename PrefetchType>
 int ObSSTableRowScanner<PrefetchType>::get_blockscan_start(
@@ -580,7 +662,7 @@ int ObSSTableRowScanner<PrefetchType>::forward_blockscan(
         // 1. There are more undetected rows in current range for columnar scan.
         // 2. The number of detected rows is less than defualt batch size.
         if ((IN_END_OF_RANGE != state && PENDING_BLOCK_SCAN != state)
-              || (end - begin + 1) >= OB_CS_SCAN_GROUP_SIZE) {
+              || (end - begin + 1) >= iter_param_->get_storage_rowsets_size()) {
           break;
         }
       }
@@ -728,18 +810,18 @@ int ObSSTableRowScanner<PrefetchType>::prepare_micro_scanner_for_column_store(Ob
     } else {
       prefetcher_.cur_micro_data_fetch_idx_ = read_handle.micro_begin_idx_;
       cur_range_idx_ = read_handle.range_idx_;
-    }
-    blocksstable::ObMicroIndexInfo &micro_info = co_prefetcher->current_micro_info();
-    ObMicroBlockDataHandle &micro_handle = co_prefetcher->current_micro_handle();
-    ObMicroBlockData block_data;
-    if (OB_FAIL(micro_handle.get_micro_block_data(&macro_block_reader_, block_data))) {
-      LOG_WARN("Fail to get block data", K(ret), K(micro_handle));
-    } else if (OB_FAIL(micro_scanner_->open(
-                micro_handle.macro_block_id_,
-                block_data,
-                micro_info.is_left_border(),
-                micro_info.is_right_border()))) {
-      LOG_WARN("Failed to open micro_scanner", K(ret), K(micro_info), K(micro_handle), KPC(this));
+      blocksstable::ObMicroIndexInfo &micro_info = co_prefetcher->current_micro_info();
+      ObMicroBlockDataHandle &micro_handle = co_prefetcher->current_micro_handle();
+      ObMicroBlockData block_data;
+      if (OB_FAIL(micro_handle.get_micro_block_data(&macro_block_reader_, block_data))) {
+        LOG_WARN("Fail to get block data", K(ret), K(micro_handle));
+      } else if (OB_FAIL(micro_scanner_->open(
+                  micro_handle.macro_block_id_,
+                  block_data,
+                  micro_info.is_left_border(),
+                  micro_info.is_right_border()))) {
+        LOG_WARN("Failed to open micro_scanner", K(ret), K(micro_info), K(micro_handle), KPC(this));
+      }
     }
   } else {
     // micro_scanner_ is already prepared.

@@ -175,7 +175,8 @@ public:
   static inline bool is_show_stmt(stmt::StmtType stmt_type)
   {
     return (stmt_type >= stmt::T_SHOW_TABLES && stmt_type <= stmt::T_SHOW_GRANTS)
-           || stmt_type == stmt::T_SHOW_TRIGGERS;
+           || stmt_type == stmt::T_SHOW_TRIGGERS
+           || stmt_type == stmt::T_SHOW_CREATE_USER;
   }
 
   static inline bool is_dml_write_stmt(stmt::StmtType stmt_type)
@@ -306,6 +307,9 @@ public:
             // index
             || stmt_type == stmt::T_CREATE_INDEX
             || stmt_type == stmt::T_DROP_INDEX
+            // materialized view log
+            || stmt_type == stmt::T_CREATE_MLOG
+            || stmt_type == stmt::T_DROP_MLOG
             // flashback
             || stmt_type == stmt::T_FLASHBACK_TENANT
             || stmt_type == stmt::T_FLASHBACK_DATABASE
@@ -474,6 +478,7 @@ public:
             || stmt_type == stmt::T_ALTER_PROFILE
             || stmt_type == stmt::T_DROP_PROFILE
             || stmt_type == stmt::T_ALTER_USER_PROFILE
+            || stmt_type == stmt::T_ALTER_USER_PROXY
             || stmt_type == stmt::T_ALTER_USER_PRIMARY_ZONE
             || stmt_type == stmt::T_ALTER_USER
             //
@@ -498,7 +503,8 @@ public:
            || stmt_type == stmt::T_EMPTY_QUERY
            // TODO: When T_LOCK_TABLE is actually implemented, needs to be checked for legitimacy
            || stmt_type == stmt::T_LOCK_TABLE
-           || stmt_type == stmt::T_CHANGE_TENANT;
+           || stmt_type == stmt::T_CHANGE_TENANT
+           || stmt_type == stmt::T_CHANGE_EXTERNAL_STORAGE_DEST;
   }
 
   // following stmt don't do retry
@@ -538,6 +544,10 @@ public:
   const share::schema::ObReferenceObjTable *get_ref_obj_table() const;
   share::schema::ObReferenceObjTable *get_ref_obj_table();
   virtual int init_stmt(TableHashAllocator &table_hash_alloc, ObWrapperAllocator &wrapper_alloc) { return common::OB_SUCCESS; }
+  virtual int check_is_simple_lock_stmt(bool &is_valid) const {
+    is_valid = false;
+    return common::OB_SUCCESS;
+  };
 protected:
   void print_indentation(FILE *fp, int32_t level) const;
 

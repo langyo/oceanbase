@@ -38,6 +38,7 @@ public:
   friend class PalfEnvImpl;
   friend class PalfHandleGuard;
   PalfHandle();
+  PalfHandle(const PalfHandle &rhs);
   ~PalfHandle();
   bool is_valid() const;
 
@@ -80,8 +81,6 @@ public:
                               const int64_t paxos_replica_num,
                               const common::GlobalLearnerList &learner_list);
 #endif
-  int set_region(const common::ObRegion &region);
-  int set_paxos_member_region_map(const common::ObArrayHashMap<common::ObAddr, common::ObRegion> &region_map);
   //================ 文件访问相关接口 =======================
   int append(const PalfAppendOptions &opts,
              const void *buffer,
@@ -94,6 +93,34 @@ public:
                 const LSN &lsn,
                 const void *buffer,
                 const int64_t nbytes);
+
+  // @brief: read up to 'nbytes' from palf at offset of 'lsn' into the 'read_buf', and
+  //         there are alignment restrictions on the length and address of user-space buffers
+  //         and the file offset.
+  //
+  // @param[in] lsn, the start offset to be read, must be aligned with LOG_DIO_ALIGN_SIZE
+  // @param[in] buffer, the start of 'buffer', must be aligned with LOG_DIO_ALIGN_SIZE.
+  // @param[in] nbytes, the read size, must aligned with LOG_DIO_ALIGN_SIZE
+  // @param[out] read_size, the number of bytes read return.
+  // @param[out] io_ctx, io context
+  //
+  // @return value
+  // OB_SUCCESS.
+  // OB_INVALID_ARGUMENT.
+  // OB_ERR_OUT_OF_LOWER_BOUND, the lsn is out of lower bound.
+  // OB_ERR_OUT_OF_UPPER_BOUND, the lsn is out of upper bound.
+  // OB_NEED_RETRY, there is a flashback operation during raw_read.
+  // others.
+  //
+  // 1. use oceanbase::share::mtl_malloc_align or oceanbase::common::ob_malloc_align
+  //    with LOG_DIO_ALIGN_SIZE to allocate aligned buffer.
+  // 2. use oceanbase::common::lower_align or oceanbase::common::upper_align with
+  //    LOG_DIO_ALIGN_SIZE to get aligned lsn or nbytes.
+  int raw_read(const palf::LSN &lsn,
+               void *buffer,
+               const int64_t nbytes,
+               int64_t &read_size,
+               LogIOContext &io_ctx);
 
   // iter->next返回的是append调用写入的值，不会在返回的buf中携带Palf增加的header信息
   //           返回的值不包含未确认日志
@@ -109,7 +136,7 @@ public:
 
   int seek(const LSN &lsn, PalfGroupBufferIterator &iter);
 
-  // @desc: seek a group buffer iterator by scn, the first log A in iterator must meet
+  // @desc: seek a buffer(group buffer) iterator by scn, the first log A in iterator must meet
   // one of the following conditions:
   // 1. scn of log A equals to scn
   // 2. scn of log A is higher than scn and A is the first log which scn is higher
@@ -125,6 +152,7 @@ public:
   // - OB_ERR_OUT_OF_LOWER_BOUND: scn is too old, log files may have been recycled
   // - others: bug
   int seek(const share::SCN &scn, PalfGroupBufferIterator &iter);
+  int seek(const share::SCN &scn, PalfBufferIterator &iter);
 
   // @desc: query coarse lsn by scn, that means there is a LogGroupEntry in disk,
   // its lsn and scn are result_lsn and result_scn, and result_scn <= scn.
@@ -182,6 +210,11 @@ public:
   int get_max_lsn(LSN &lsn) const;
   int get_max_scn(share::SCN &scn) const;
   int get_last_rebuild_lsn(LSN &last_rebuild_lsn) const;
+  // @brief get readable end lsn for this replica, all logs before it can be readable.
+  // @param[out] lsn, readable end lsn.
+  // -- OB_NOT_INIT           not_init
+  // -- OB_SUCCESS
+  int get_readable_end_lsn(LSN &lsn) const;
 
   //================= 分布式相关接口 =========================
 
@@ -194,6 +227,7 @@ public:
  	// @return :TODO
   int get_role(common::ObRole &role, int64_t &proposal_id, bool &is_pending_state) const;
   int get_palf_id(int64_t &palf_id) const;
+  int get_palf_epoch(int64_t &palf_epoch) const;
 
   int get_global_learner_list(common::GlobalLearnerList &learner_list) const;
   int get_paxos_member_list(common::ObMemberList &member_list, int64_t &paxos_replica_num) const;
@@ -201,7 +235,12 @@ public:
   int get_paxos_member_list_and_learner_list(common::ObMemberList &member_list,
                                              int64_t &paxos_replica_num,
                                              GlobalLearnerList &learner_list) const;
+  int get_stable_membership(LogConfigVersion &config_version,
+                            common::ObMemberList &member_list,
+                            int64_t &paxos_replica_num,
+                            common::GlobalLearnerList &learner_list) const;
   int get_election_leader(common::ObAddr &addr) const;
+  int get_parent(common::ObAddr &parent) const;
 
   // @brief: a special config change interface, change replica number of paxos group
   // @param[in] common::ObMemberList: current memberlist, for pre-check
@@ -416,8 +455,12 @@ public:
   // - OB_SUCCESS
   // - OB_NOT_INIT
   int get_arbitration_member(common::ObMember &arb_member) const;
+  int set_election_silent_flag(const bool election_silent_flag);
+  bool is_election_silent() const;
 #endif
-  int revoke_leader(const int64_t proposal_id);
+  int advance_election_epoch_and_downgrade_priority(const int64_t proposal_id,
+                                                    const int64_t downgrade_priority_time_us,
+                                                    const char *reason);
   int change_leader_to(const common::ObAddr &dst_addr);
   // @brief: change AccessMode of palf.
   // @param[in] const int64_t &proposal_id: current proposal_id of leader
@@ -447,6 +490,7 @@ public:
   //   OB_SUCCESS
   int get_access_mode(int64_t &mode_version, AccessMode &access_mode) const;
   int get_access_mode(AccessMode &access_mode) const;
+  int get_access_mode_version(int64_t &mode_version) const;
   int get_access_mode_ref_scn(int64_t &mode_version,
                               AccessMode &access_mode,
                               SCN &ref_scn) const;
@@ -500,6 +544,10 @@ public:
   int reset_location_cache_cb();
   int set_election_priority(election::ElectionPriority *priority);
   int reset_election_priority();
+  int set_locality_cb(palf::PalfLocalityInfoCb *locality_cb);
+  int reset_locality_cb();
+  int set_reconfig_checker_cb(palf::PalfReconfigCheckerCb *reconfig_checker);
+  int reset_reconfig_checker_cb();
   int stat(PalfStat &palf_stat) const;
 
   //---------config change lock related--------//
@@ -527,7 +575,9 @@ public:
   // -- OB_EAGAIN             is_locking or unlocking
   int get_config_change_lock_stat(int64_t &lock_owner, bool &is_locked);
 
-	// @param [out] diagnose info, current diagnose info of palf
+
+
+  // @param [out] diagnose info, current diagnose info of palf
   int diagnose(PalfDiagnoseInfo &diagnose_info) const;
 
   TO_STRING_KV(KP(palf_handle_impl_), KP(rc_cb_), KP(fs_cb_));

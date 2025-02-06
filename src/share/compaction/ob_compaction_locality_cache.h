@@ -14,6 +14,7 @@
 #include "share/ls/ob_ls_table_operator.h"
 #include "deps/oblib/src/lib/net/ob_addr.h"
 #include "deps/oblib/src/common/ob_zone.h"
+#include "rootserver/freeze/ob_major_merge_info_manager.h"
 namespace oceanbase
 {
 namespace common
@@ -33,16 +34,15 @@ class ObCompactionLocalityCache
 public:
   ObCompactionLocalityCache();
   ~ObCompactionLocalityCache();
-  int init(const uint64_t tenant_id);
+  int init(const uint64_t tenant_id, rootserver::ObMajorMergeInfoManager *merge_info_mgr = nullptr);
   void destroy();
   bool empty() const { return ls_infos_map_.empty(); }
-  int refresh_ls_locality(const bool force_refresh = false);
+  int refresh_ls_locality(const bool force_refresh);
   int get_ls_info(const share::ObLSID &ls_id, share::ObLSInfo &ls_info);
   TO_STRING_KV(K_(is_inited), K_(tenant_id));
-
 private:
   const int64_t CHECK_LS_LOCALITY_INTERVAL = 5 * 60 * 1000 * 1000L; // 5 mins
-  int get_zone_list(ObIArray<common::ObZone> &zone_list);
+  int get_zone_list_from_inner_table(ObIArray<common::ObZone> &zone_list);
   int str2zone_list(
       const char *str,
       ObIArray<common::ObZone> &zone_list);
@@ -53,11 +53,29 @@ private:
       const ObLSReplica &ls_replica,
       const ObIArray<common::ObZone> &zone_list);
   int inner_refresh_ls_locality();
-
+  int build_member_list_set(
+    const ObLSReplica &tmp_replica,
+    ObIArray<common::ObAddr> &member_list_set);
 private:
   bool is_inited_;
   uint64_t tenant_id_;
+  rootserver::ObMajorMergeInfoManager *merge_info_mgr_;
   common::hash::ObHashMap<share::ObLSID, share::ObLSInfo> ls_infos_map_;
+};
+
+struct ObMemberListInfo
+{
+  ObMemberListInfo(const uint64_t tenant_id)
+    : member_list_array_()
+  {
+    member_list_array_.set_attr(ObMemAttr(tenant_id, "MemListInfo"));
+  }
+  ~ObMemberListInfo() {}
+  int build(const ObLSReplica &tmp_replica);
+  bool check_exist(const common::ObAddr &addr);
+  bool empty() { return member_list_array_.empty(); }
+  TO_STRING_KV("member_list_cnt", member_list_array_.count(), K(member_list_array_));
+  ObSEArray<common::ObAddr, 6> member_list_array_; // including member_list & learner_list
 };
 
 } // namespace share

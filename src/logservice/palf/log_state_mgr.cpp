@@ -12,12 +12,8 @@
 
 #define USING_LOG_PREFIX PALF
 #include "log_state_mgr.h"
-#include "common/ob_clock_generator.h"
-#include "rpc/obrpc/ob_rpc_net_handler.h"
-#include "palf_callback_wrapper.h"
 #include "log_io_task_cb_utils.h"
 #include "log_engine.h"
-#include "log_meta_info.h"
 #include "log_config_mgr.h"
 #include "log_reconfirm.h"
 #include "log_sliding_window.h"
@@ -859,6 +855,7 @@ bool LogStateMgr::is_reconfirm_timeout_()
     if (bool_ret) {
       if (palf_reach_time_interval(1 * 1000 * 1000, check_reconfirm_timeout_time_)) {
         PALF_LOG_RET(WARN, OB_TIMEOUT, "leader reconfirm timeout", K_(palf_id), K(start_id), K(is_sw_timeout), K_(reconfirm));
+        LOG_DBA_WARN_V2(OB_LOG_LEADER_RECONFIRM_TIMEOUT, OB_TIMEOUT, "leader reconfirm timeout");
         (void) sw_->report_log_task_trace(start_id);
       }
     } else if (palf_reach_time_interval(100 * 1000, check_reconfirm_timeout_time_)) {
@@ -928,6 +925,7 @@ bool LogStateMgr::check_leader_log_sync_state_()
     if (now_us - last_check_start_id_time_us_ > PALF_LEADER_ACTIVE_SYNC_TIMEOUT_US) {
       if (palf_reach_time_interval(10 * 1000 * 1000, log_sync_timeout_warn_time_)) {
         PALF_LOG_RET(WARN, OB_TIMEOUT, "log sync timeout on leader", K_(palf_id), K_(self), K(now_us), K(last_check_start_id_time_us_), K(start_id));
+        LOG_DBA_WARN_V2(OB_LOG_LEADER_LOG_SYNC_TIMEOUT, OB_TIMEOUT, "log sync timeout on leader");
         (void) sw_->report_log_task_trace(start_id);
       }
     }

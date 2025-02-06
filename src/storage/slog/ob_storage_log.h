@@ -173,13 +173,13 @@ public:
   DECLARE_TO_STRING;
   OB_UNIS_VERSION_V(1);
 
-private:
+protected:
   share::ObLSID &ls_id_;
 };
 
 using ObCreateLSPrepareSlog = ObLSMetaLog;
-using ObCreateLSCommitSLog = ObLSIDLog;
 using ObCreateLSAbortSLog = ObLSIDLog;
+using ObCreateLSCommitSLog = ObLSIDLog;
 using ObDeleteLSLog = ObLSIDLog;
 
 struct ObCreateTabletLog : public ObIBaseStorageLogEntry

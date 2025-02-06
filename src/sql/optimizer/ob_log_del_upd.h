@@ -36,6 +36,7 @@ public:
     part_ids_(),
     is_update_unique_key_(false),
     is_update_part_key_(false),
+    is_update_primary_key_(false),
     distinct_algo_(T_DISTINCT_NONE),
     lookup_part_id_expr_(NULL),
     old_part_id_expr_(NULL),
@@ -65,6 +66,7 @@ public:
     part_ids_.reset();
     is_update_unique_key_ = false;
     is_update_part_key_ = false;
+    is_update_primary_key_ = false;
     distinct_algo_ = T_DISTINCT_NONE;
     lookup_part_id_expr_ = NULL;
     old_part_id_expr_ = NULL;
@@ -156,6 +158,7 @@ public:
   common::ObSEArray<ObObjectID, 1, common::ModulePageAllocator, true> part_ids_;
   bool is_update_unique_key_;
   bool is_update_part_key_;
+  bool is_update_primary_key_;
   DistinctType distinct_algo_;
   ObRawExpr *lookup_part_id_expr_; // for replace and insert_up conflict scene
   ObRawExpr *old_part_id_expr_;
@@ -188,6 +191,7 @@ public:
                K_(ck_cst_exprs),
                K_(is_update_unique_key),
                K_(is_update_part_key),
+               K_(is_update_primary_key),
                K_(distinct_algo),
                K_(related_index_ids));
 };
@@ -331,7 +335,16 @@ public:
   int replace_dml_info_exprs(
         ObRawExprReplacer &replacer,
         const ObIArray<IndexDMLInfo *> &index_dml_infos);
-  virtual int is_my_fixed_expr(const ObRawExpr *expr, bool &is_fixed) override;
+  virtual int is_my_fixed_expr(const ObRawExpr *expr, bool &is_fixed) override = 0;
+  virtual int check_use_child_ordering(bool &used, int64_t &inherit_child_ordering_index)override;
+  void set_das_dop(int64_t dop) { das_dop_ = dop; }
+  int64_t get_das_dop() { return das_dop_; }
+  virtual int op_is_update_pk_with_dop(bool &is_update)
+  {
+    is_update = false;
+    return OB_SUCCESS;
+  }
+
 protected:
   virtual int generate_rowid_expr_for_trigger() = 0;
   virtual int generate_part_id_expr_for_foreign_key(ObIArray<ObRawExpr*> &all_exprs) = 0;
@@ -354,6 +367,9 @@ protected:
                                     const ObIArray<ObRawExpr *> &dml_new_values,
                                     ObRawExpr *cur_value,
                                     ObRawExpr *&new_value);
+  int is_dml_fixed_expr(const ObRawExpr *expr,
+                        const ObIArray<IndexDMLInfo *> &index_dml_infos,
+                        bool &is_fixed);
 
   static int get_update_exprs(const IndexDMLInfo &dml_info,
                               ObIArray<ObRawExpr *> &dml_columns,
@@ -366,6 +382,7 @@ protected:
    // 当前的DML算子作为partition id expr的consumer添加到ctx中
   // partition id 列是pdml操作中特有的一个column.
   int generate_pdml_partition_id_expr();
+  int generate_ddl_slice_id_expr();
 
   int print_table_infos(const ObString &prefix,
                         char *buf,
@@ -385,9 +402,11 @@ protected:
 
   // The pseudo partition_id for PDML may be produced by repart exchange or TSC.
   // set %producer to NULL if not found
-  static int find_pdml_part_id_producer(ObLogicalOperator &op,
-                                        const uint64_t tid,
-                                        ObLogicalOperator *&producer);
+  static int find_pdml_part_id_producer(ObLogicalOperator *op,
+                                        const uint64_t loc_tid,
+                                        const uint64_t ref_tid,
+                                        ObLogExchange *&producer,
+                                        ObLogTableScan *&src_tsc);
 
   virtual int get_plan_item_info(PlanText &plan_text,
                                 ObSqlPlanItem &plan_item) override;
@@ -419,9 +438,11 @@ protected:
   //
   bool table_location_uncertain_;
   bool is_pdml_update_split_; // 标记delete, insert op是否由update拆分而来
+  int64_t das_dop_; // zero marks not use parallel_das_dml
 private:
   // 如果是PDML，那么对应的DML算子（insert，update，delete）需要一个partition id expr
   ObRawExpr *pdml_partition_id_expr_;
+  ObRawExpr *ddl_slice_id_expr_;
   bool pdml_is_returning_; // 如果计划是pdml计划，表示当前逻辑算子转化为的物理算子是否需要吐/返回行
   // add for error logging
   ObErrLogDefine err_log_define_;

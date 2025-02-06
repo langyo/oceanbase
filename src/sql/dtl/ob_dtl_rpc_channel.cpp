@@ -12,15 +12,7 @@
 
 #define USING_LOG_PREFIX SQL_DTL
 #include "ob_dtl_rpc_channel.h"
-#include "share/interrupt/ob_global_interrupt_call.h"
-#include "lib/oblog/ob_log.h"
-#include "lib/lock/ob_thread_cond.h"
-#include "common/row/ob_row.h"
-#include "sql/dtl/ob_dtl_rpc_proxy.h"
-#include "sql/dtl/ob_dtl.h"
-#include "sql/dtl/ob_dtl_flow_control.h"
 #include "sql/dtl/ob_dtl_channel_agent.h"
-#include "share/rc/ob_context.h"
 #include "sql/dtl/ob_dtl_channel_watcher.h"
 
 using namespace oceanbase::common;
@@ -175,16 +167,18 @@ void ObDtlRpcChannel::SendBCMsgCB::destroy()
 ObDtlRpcChannel::ObDtlRpcChannel(
     const uint64_t tenant_id,
     const uint64_t id,
-    const ObAddr &peer)
-    : ObDtlBasicChannel(tenant_id, id, peer), recv_sqc_fin_res_(false)
+    const ObAddr &peer,
+    DtlChannelType type)
+    : ObDtlBasicChannel(tenant_id, id, peer, type), recv_sqc_fin_res_(false)
 {}
 
 ObDtlRpcChannel::ObDtlRpcChannel(
     const uint64_t tenant_id,
     const uint64_t id,
     const ObAddr &peer,
-    const int64_t hash_val)
-    : ObDtlBasicChannel(tenant_id, id, peer, hash_val), recv_sqc_fin_res_(false)
+    const int64_t hash_val,
+    DtlChannelType type)
+    : ObDtlBasicChannel(tenant_id, id, peer, hash_val, type), recv_sqc_fin_res_(false)
 {}
 
 ObDtlRpcChannel::~ObDtlRpcChannel()
@@ -214,7 +208,7 @@ int ObDtlRpcChannel::feedup(ObDtlLinkedBuffer *&buffer)
   ObDtlMsgHeader header;
   const bool keep_buffer_pos = true;
   MTL_SWITCH(tenant_id_) {
-    if (OB_FAIL(ObDtlLinkedBuffer::deserialize_msg_header(*buffer, header, keep_buffer_pos))) {
+    if (!buffer->is_data_msg() && OB_FAIL(ObDtlLinkedBuffer::deserialize_msg_header(*buffer, header, keep_buffer_pos))) {
       LOG_WARN("failed to deserialize msg", K(ret));
     } else if (header.is_drain()) {
       // drain msg
@@ -230,9 +224,9 @@ int ObDtlRpcChannel::feedup(ObDtlLinkedBuffer *&buffer)
     } else if (OB_ISNULL(linked_buffer = alloc_buf(buffer->size()))){
       ret = OB_ALLOCATE_MEMORY_FAILED;
       LOG_WARN("failed to allocate buffer", K(ret));
+    } else if (OB_FAIL(ObDtlLinkedBuffer::assign(*buffer, linked_buffer))) {
+      LOG_WARN("failed to assign buffer", K(ret));
     } else {
-      LOG_TRACE("DTL feedup a new msg to msg loop", K(buffer->size()), KP(id_), K(peer_));
-      ObDtlLinkedBuffer::assign(*buffer, linked_buffer);
       if (1 == linked_buffer->seq_no() && linked_buffer->is_data_msg()
           && 0 != get_recv_buffer_cnt()) {
         ret = OB_ERR_UNEXPECTED;
@@ -320,9 +314,21 @@ int ObDtlRpcChannel::send_message(ObDtlLinkedBuffer *&buf)
           K(buf->timeout_ts()));
     } else if (OB_FAIL(msg_response_.start())) {
       LOG_WARN("start message process fail", K(ret));
-    } else if (OB_FAIL(DTL.get_rpc_proxy().to(peer_).timeout(timeout_us)
+    } else if (send_by_tenant()
+               && OB_FAIL(DTL.get_rpc_proxy().to(peer_).timeout(timeout_us)
+        .group_id(share::OBCG_DTL)
         .compressed(compressor_type_)
+        .by(tenant_id_)
         .ap_send_message(ObDtlSendArgs{peer_id_, *buf}, &cb))) {
+      LOG_WARN("send message failed", K_(peer), K(ret));
+      int tmp_ret = msg_response_.on_start_fail();
+      if (OB_SUCCESS != tmp_ret) {
+        LOG_WARN("set start fail failed", K(tmp_ret));
+      }
+    } else if (!send_by_tenant()
+               && OB_FAIL(DTL.get_rpc_proxy().to(peer_).timeout(timeout_us)
+                     .compressed(compressor_type_)
+                     .ap_send_message(ObDtlSendArgs{peer_id_, *buf}, &cb))) {
       LOG_WARN("send message failed", K_(peer), K(ret));
       int tmp_ret = msg_response_.on_start_fail();
       if (OB_SUCCESS != tmp_ret) {

@@ -13,7 +13,7 @@
 #define USING_LOG_PREFIX LIB_MYSQLC
 #include "lib/mysqlclient/ob_isql_connection_pool.h"
 #include "lib/mysqlclient/ob_server_connection_pool.h"
-#include "lib/mysqlclient/ob_mysql_connection_pool.h"
+#include "lib/mysqlclient/ob_dblink_error_trans.h"
 
 namespace oceanbase
 {
@@ -26,6 +26,7 @@ ObServerConnectionPool::ObServerConnectionPool() :
     connection_pool_ptr_(NULL),
     root_(NULL),
     dblink_id_(OB_INVALID_ID),
+    port_(0),
     server_(),
     pool_lock_(common::ObLatchIds::INNER_CONN_POOL_LOCK),
     last_renew_timestamp_(0),
@@ -88,17 +89,20 @@ int ObServerConnectionPool::acquire(ObMySQLConnection *&conn, uint32_t sessid)
   }
   if (OB_SUCC(ret)) {
     conn = connection;
-    conn->set_sessid(sessid);
     if (conn->connection_version() != connection_version_) {
       conn->set_connection_version(connection_version_);
+      conn->close();
+    } else if (sessid != conn->get_sessid()) {
+      LOG_TRACE("get connection from other session, close it", K(ret), K(sessid), K(conn->get_sessid()));
       conn->close();
     } else if (false == conn->is_closed()) {
       if (OB_SUCCESS != conn->ping()) {
         conn->close();
       }
     }
+    conn->set_sessid(sessid);
   }
-  LOG_TRACE("acquire connection from server conn pool", KP(this), K(busy_conn_count_), K(free_conn_count_), KP(connection), K(ret), K(lbt()));
+  LOG_TRACE("acquire connection from server conn pool", KP(this), K(busy_conn_count_), K(free_conn_count_), KP(connection), K(ret), K(sessid), K(lbt()));
   return ret;
 }
 
@@ -111,20 +115,27 @@ int ObServerConnectionPool::release(common::sqlclient::ObISQLConnection *conn, c
     LOG_WARN("invalid connection", K(connection), K(ret));
   } else {
     connection->set_busy(false);
-    ObSpinLockGuard lock(pool_lock_);
     if (succ) {
       connection->succ_times_++;
+      if (!get_dblink_reuse_connection_cfg()) {
+        connection->close();
+        LOG_TRACE("close dblink connection when release it", K(ret), K(succ), KP(conn));
+      }
     } else {
-      LOG_TRACE("release! err", K(succ));
+      LOG_TRACE("release oci connection, close it caused by err", K(succ));
       connection->error_times_++;
       connection->close();
     }
-    if (OB_FAIL(connection_pool_ptr_->put_cached(connection, connection->get_sessid()))) {
-      ATOMIC_DEC(&busy_conn_count_);
-      LOG_WARN("connection object failed to put to cache. destroyed", K(ret));
-    } else {
-      ATOMIC_DEC(&busy_conn_count_);
-      ATOMIC_INC(&free_conn_count_);
+    {
+      // Do not perform any operations on the network after thread holding a lock
+      ObSpinLockGuard lock(pool_lock_);
+      if (OB_FAIL(connection_pool_ptr_->put_cached(connection, connection->get_sessid()))) {
+        ATOMIC_DEC(&busy_conn_count_);
+        LOG_WARN("connection object failed to put to cache. destroyed", K(ret));
+      } else {
+        ATOMIC_DEC(&busy_conn_count_);
+        ATOMIC_INC(&free_conn_count_);
+      }
     }
   }
   LOG_TRACE("release connection to server conn pool", KP(this),
@@ -191,7 +202,7 @@ void ObServerConnectionPool::dump()
            "max_allowed_conn_count_", max_allowed_conn_count_, "server_not_available_", server_not_available_);
 }
 
-int ObServerConnectionPool::init_dblink(uint64_t tenant_id, uint64_t dblink_id, const ObAddr &server,
+int ObServerConnectionPool::init_dblink(uint64_t tenant_id, uint64_t dblink_id, const ObString &host_name, int32_t port,
                                         const ObString &db_tenant, const ObString &db_user,
                                         const ObString &db_pass, const ObString &db_name,
                                         const common::ObString &conn_str,
@@ -199,23 +210,35 @@ int ObServerConnectionPool::init_dblink(uint64_t tenant_id, uint64_t dblink_id, 
                                         ObMySQLConnectionPool *root, int64_t max_allowed_conn_count)
 {
   UNUSED(conn_str);
+  UNUSED(max_allowed_conn_count);
   int ret = OB_SUCCESS;
-  if (OB_FAIL(init(root, server, max_allowed_conn_count))) {
+  if (OB_ISNULL(root)) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("fail to init server connection pool. root=NULL", K(ret));
+  } else if (OB_FAIL(dblink_connection_pool_.init())) {
     LOG_WARN("fail to init", K(ret));
   } else if (OB_INVALID_ID == dblink_id
+             || 0 == port
              || db_tenant.empty() || db_user.empty() || db_pass.empty()
              || (!lib::is_oracle_mode() && db_name.empty())
              || OB_UNLIKELY(cluster_str.length() >= OB_MAX_CLUSTER_NAME_LENGTH)
              || OB_UNLIKELY(db_tenant.length() >= OB_MAX_TENANT_NAME_LENGTH)
              || OB_UNLIKELY(db_user.length() >= OB_MAX_USER_NAME_LENGTH)
              || OB_UNLIKELY(db_pass.length() >= OB_MAX_PASSWORD_LENGTH)
-             || OB_UNLIKELY(db_name.length() >= OB_MAX_DATABASE_NAME_LENGTH)) {
+             || OB_UNLIKELY(db_name.length() >= OB_MAX_DATABASE_NAME_LENGTH)
+             || OB_UNLIKELY(host_name.length() > OB_MAX_DOMIN_NAME_LENGTH)) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("db param buffer is not enough", K(ret),
-             K(dblink_id), K(db_tenant), K(db_user), K(db_pass), K(db_name));
+             K(dblink_id), K(db_tenant), K(db_user), K(db_pass), K(db_name), K(port), K(host_name));
   } else {
     dblink_id_ = dblink_id;
     tenant_id_  = tenant_id;
+    port_ = port;
+    root_ = root;
+    last_renew_timestamp_ = ::oceanbase::common::ObTimeUtility::current_time();
+    server_not_available_ = false;
+    max_allowed_conn_count_ = get_max_dblink_conn_per_observer();
+    connection_pool_ptr_ = &dblink_connection_pool_;
     if (cluster_str.empty()) {
       (void)snprintf(db_user_, sizeof(db_user_), "%.*s@%.*s", db_user.length(), db_user.ptr(),
                     db_tenant.length(), db_tenant.ptr());
@@ -225,11 +248,12 @@ int ObServerConnectionPool::init_dblink(uint64_t tenant_id, uint64_t dblink_id, 
                     cluster_str.length(), cluster_str.ptr());
     }
     (void)snprintf(db_pass_, sizeof(db_pass_), "%.*s", db_pass.length(), db_pass.ptr());
+    (void)snprintf(host_name_, sizeof(host_name_), "%.*s", host_name.length(), host_name.ptr());
     // if db is NULL, the default database is used.
     if (!db_name.empty()) {
       (void)snprintf(db_name_, sizeof(db_name_), "%.*s", db_name.length(), db_name.ptr());
     }
-    connection_pool_ptr_ = &dblink_connection_pool_;
+    server_.reset(); //server_ will be invlid, then mysqlconnnection will use host_name_
   }
   return ret;
 }

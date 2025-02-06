@@ -12,11 +12,7 @@
 
 #define USING_LOG_PREFIX SQL_REWRITE
 #include "sql/rewrite/ob_transform_project_pruning.h"
-#include "lib/allocator/ob_allocator.h"
-#include "sql/resolver/expr/ob_raw_expr.h"
-#include "sql/resolver/expr/ob_raw_expr_util.h"
 #include "sql/rewrite/ob_transform_utils.h"
-#include "common/ob_smart_call.h"
 
 namespace oceanbase
 {
@@ -84,7 +80,8 @@ int ObTransformProjectPruning::transform_table_items(ObDMLStmt *&stmt,
       if (OB_ISNULL(table_item = table_items.at(idx))) {
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("Table item is NULL in table items", K(ret));
-      } else if (table_item->is_generated_table()) {
+      } else if (table_item->is_generated_table() ||
+                 table_item->is_lateral_table()) {
         ObSelectStmt *ref_query = NULL;
         OPT_TRACE("try to prune preject for view:", table_item);
         if (OB_ISNULL(ref_query = table_item->ref_query_)) {
@@ -232,7 +229,8 @@ int ObTransformProjectPruning::check_hint_status(const ObDMLStmt &stmt, bool &ne
       if (OB_ISNULL(table = stmt.get_table_item(i))) {
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("table item is null", K(ret));
-      } else if (!table->is_generated_table()) {
+      } else if (!table->is_generated_table() &&
+                 !table->is_lateral_table()) {
         /*do nothing*/
       } else if (OB_ISNULL(table->ref_query_)) {
         ret = OB_ERR_UNEXPECTED;

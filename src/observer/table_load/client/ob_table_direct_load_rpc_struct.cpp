@@ -27,7 +27,11 @@ OB_SERIALIZE_MEMBER_SIMPLE(ObTableDirectLoadBeginArg,
                            dup_action_,
                            timeout_,
                            heartbeat_timeout_,
-                           force_create_);
+                           force_create_,
+                           is_async_,
+                           load_method_,
+                           column_names_,
+                           part_names_);
 
 OB_SERIALIZE_MEMBER_SIMPLE(ObTableDirectLoadBeginRes,
                            table_id_,

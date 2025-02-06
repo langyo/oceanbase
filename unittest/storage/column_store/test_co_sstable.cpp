@@ -11,24 +11,13 @@
  */
 
 #define USING_LOG_PREFIX STORAGE
-#include <gtest/gtest.h>
 #include <gmock/gmock.h>
 
 #define private public
 #define protected public
 
-#include "lib/allocator/page_arena.h"
-#include "storage/ob_i_table.h"
 #include "storage/schema_utils.h"
-#include "storage/blocksstable/ob_sstable.h"
-#include "storage/column_store/ob_column_oriented_sstable.h"
-#include "storage/tablet/ob_tablet_create_delete_helper.h"
-#include "storage/meta_mem/ob_tenant_meta_mem_mgr.h"
-#include "storage/ob_storage_struct.h"
-#include "storage/tablet/ob_table_store_util.h"
 #include "mtlenv/mock_tenant_module_env.h"
-#include "storage/ob_storage_schema.h"
-#include "share/schema/ob_table_schema.h"
 
 
 namespace oceanbase
@@ -38,6 +27,25 @@ using namespace storage;
 using namespace blocksstable;
 using namespace share;
 using namespace share::schema;
+
+
+namespace common
+{
+
+int ObIOTuner::init()
+{
+  int ret = OB_SUCCESS;
+  is_inited_ = true;
+  return ret;
+}
+
+void ObIOTuner::run1()
+{
+ // do nothing
+}
+
+}
+
 
 namespace unittest
 {
@@ -152,7 +160,7 @@ int TestCOSSTable::mock_major_sstable(
   ObStorageSchema storage_schema;
   if (OB_FAIL(storage_schema.init(allocator, table_schema, lib::Worker::CompatMode::MYSQL))) {
     LOG_WARN("failed to init storage schema", K(ret));
-  } else if (OB_FAIL(ObTabletCreateDeleteHelper::build_create_sstable_param(storage_schema, tablet_id, snapshot_version, param))) {
+  } else if (OB_FAIL(param.init_for_empty_major_sstable(tablet_id, storage_schema, snapshot_version, -1, false))) {
     LOG_WARN("failed to build create sstable param", K(ret), K(table_key));
   } else if (FALSE_IT(param.table_key_ = table_key)) {
   } else if (FALSE_IT(param.column_group_cnt_ = column_group_cnt)) {
@@ -334,19 +342,19 @@ TEST_F(TestCOSSTable, get_cg_table_test)
   EXPECT_EQ(true, co_sstable->valid_for_cs_reading_);
 
 
-  ObSSTable *get_cg_table1 = nullptr;
+  ObSSTableWrapper get_cg_table1;
   ret = co_sstable->get_cg_sstable(1, get_cg_table1);
-  EXPECT_EQ(co_sstable->key_.column_group_idx_, get_cg_table1->key_.column_group_idx_);
+  EXPECT_EQ(co_sstable->key_.column_group_idx_, get_cg_table1.sstable_->key_.column_group_idx_);
 
-  ObSSTable *get_cg_table2 = nullptr;
+  ObSSTableWrapper get_cg_table2;
   ret = co_sstable->get_cg_sstable(0, get_cg_table2);
-  EXPECT_EQ(cg_table1->key_.column_group_idx_, get_cg_table2->key_.column_group_idx_);
+  EXPECT_EQ(cg_table1->key_.column_group_idx_, get_cg_table2.sstable_->key_.column_group_idx_);
 
-  ObSSTable *get_cg_table3 = nullptr;
+  ObSSTableWrapper get_cg_table3;
   ret = co_sstable->get_cg_sstable(2, get_cg_table3);
-  EXPECT_EQ(cg_table2->key_.column_group_idx_, get_cg_table3->key_.column_group_idx_);
+  EXPECT_EQ(cg_table2->key_.column_group_idx_, get_cg_table3.sstable_->key_.column_group_idx_);
 
-  ObSSTable *get_cg_table4 = nullptr;
+  ObSSTableWrapper get_cg_table4;
   ret = co_sstable->get_cg_sstable(3, get_cg_table4);
   EXPECT_EQ(OB_INVALID_ARGUMENT, ret);
 }
@@ -405,11 +413,50 @@ TEST_F(TestCOSSTable, empty_co_table_test)
   EXPECT_EQ(OB_SUCCESS, ret);
 
   ObCOSSTableV2 *co_table = static_cast<ObCOSSTableV2 *>(co_table_handle.get_table());
-  EXPECT_EQ(0, co_table->cg_sstables_.count());
-  EXPECT_EQ(true, co_table->is_empty_co_table());
+  EXPECT_EQ(0, co_table->meta_->cg_sstables_.count());
+  EXPECT_EQ(true, co_table->is_empty());
   EXPECT_EQ(storage_schema.get_column_group_count(), co_table->get_cs_meta().column_group_cnt_);
 }
 
+TEST_F(TestCOSSTable, copy_from_old_sstable_test)
+{
+  int ret = OB_SUCCESS;
+
+  ObTenantMetaMemMgr *t3m = MTL(ObTenantMetaMemMgr *);
+  ASSERT_NE(nullptr, t3m);
+
+  // create co sstable
+  const int64_t base_version = 0;
+  const int64_t snapshot_version = 100;
+  ObTableHandleV2 co_handle;
+  ret = TestCOSSTable::mock_major_sstable(ObITable::COLUMN_ORIENTED_SSTABLE, allocator_, base_version, snapshot_version, 2, co_handle);
+  ASSERT_EQ(OB_SUCCESS, ret);
+  ObITable *co_table = co_handle.get_table();
+  ASSERT_EQ(true, co_table->is_co_sstable());
+
+  // create cg sstable
+  ObTableHandleV2 cg_handle;
+  ret = TestCOSSTable::mock_major_sstable(ObITable::NORMAL_COLUMN_GROUP_SSTABLE, allocator_, base_version, snapshot_version, 1, cg_handle);
+  ASSERT_EQ(OB_SUCCESS, ret);
+  ObITable *cg_table = cg_handle.get_table();
+  ASSERT_EQ(true, cg_table->is_cg_sstable());
+
+  // add cg table to co sstable
+  ObCOSSTableV2 *co_sstable = static_cast<ObCOSSTableV2 *>(co_table);
+  ObSEArray<ObITable *, 1> cg_sstables;
+  ret = cg_sstables.push_back(cg_table);
+  ASSERT_EQ(OB_SUCCESS, ret);
+  ret = co_sstable->fill_cg_sstables(cg_sstables);
+  ASSERT_EQ(OB_SUCCESS, ret);
+  EXPECT_EQ(true, co_sstable->valid_for_cs_reading_);
+
+  // copy old sstable and test
+  ObSSTable *copied_sstable = nullptr;
+  ObSSTable::copy_from_old_sstable(*co_sstable, allocator_, copied_sstable);
+  ASSERT_TRUE(copied_sstable->is_tmp_sstable_);
+  ASSERT_EQ(1, copied_sstable->meta_->cg_sstables_.count());
+  ASSERT_TRUE(static_cast<ObSSTable *>(copied_sstable->meta_->cg_sstables_.at(0))->is_tmp_sstable_);
+}
 
 } //namespace unittest
 } //namespace oceanbase
@@ -419,7 +466,7 @@ int main(int argc, char **argv)
 {
   system("rm -rf test_co_sstable.log");
   OB_LOGGER.set_file_name("test_co_sstable.log", true);
-  OB_LOGGER.set_log_level("DEBUG");
+  OB_LOGGER.set_log_level("INFO");
   CLOG_LOG(INFO, "begin unittest: test_co_sstable");
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();

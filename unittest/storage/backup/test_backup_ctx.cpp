@@ -119,10 +119,14 @@ void TestBackupCtx::SetUp()
   CHUNK_MGR.set_limit(8L * 1024L * 1024L * 1024L);
   ret = ObTmpFileManager::get_instance().init();
   EXPECT_EQ(OB_SUCCESS, ret);
-  static ObTenantBase tenant_ctx(1);
+  static ObTenantBase tenant_ctx(OB_SYS_TENANT_ID);
   ObTenantEnv::set_tenant(&tenant_ctx);
   ObTenantIOManager *io_service = nullptr;
+  EXPECT_EQ(OB_SUCCESS, ObTenantIOManager::mtl_new(io_service));
   EXPECT_EQ(OB_SUCCESS, ObTenantIOManager::mtl_init(io_service));
+  EXPECT_EQ(OB_SUCCESS, io_service->start());
+  tenant_ctx.set(io_service);
+  ObTenantEnv::set_tenant(&tenant_ctx);
   inner_init_();
 }
 
@@ -150,7 +154,7 @@ void TestBackupCtx::inner_init_()
   job_desc_.task_id_ = 1;
   backup_set_desc_.backup_set_id_ = 1;
   backup_set_desc_.backup_type_.type_ = ObBackupType::FULL_BACKUP;
-  backup_data_type_.set_major_data_backup();
+  backup_data_type_.set_user_data_backup();
   incarnation_ = 1;
   tenant_id_ = 1002;
   ls_id_ = ObLSID(1001);

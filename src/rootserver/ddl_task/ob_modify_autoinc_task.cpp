@@ -13,12 +13,8 @@
 #define USING_LOG_PREFIX RS
 #include "ob_modify_autoinc_task.h"
 #include "rootserver/ob_root_service.h"
-#include "share/ob_autoincrement_service.h"
-#include "share/ob_ddl_error_message_table_operator.h"
-#include "storage/tablelock/ob_table_lock_service.h"
-#include "storage/tablelock/ob_table_lock_rpc_client.h"
+#include "share/ob_ddl_sim_point.h"
 #include "storage/ddl/ob_ddl_lock.h"
-#include "share/ob_rpc_struct.h"
 
 using namespace oceanbase::common;
 using namespace oceanbase::share;
@@ -57,6 +53,8 @@ int ObUpdateAutoincSequenceTask::process()
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid argument", K(ret), K(tenant_id_), K(data_table_id_), K(column_id_),
                                  K(orig_column_type_), K(dest_table_id_));
+  } else if (OB_FAIL(DDL_SIM(tenant_id_, task_id_, UPDATE_AUTOINC_SEQUENCE_FAILED))) {
+    LOG_WARN("ddl sim failure", K(ret), K(tenant_id_), K(task_id_));
   } else {
     ObDDLService &ddl_service = root_service->get_ddl_service();
     ObMultiVersionSchemaService &schema_service = ddl_service.get_schema_service();
@@ -120,8 +118,19 @@ int ObUpdateAutoincSequenceTask::process()
     if (OB_SUCCESS != (tmp_ret = root_service->get_ddl_scheduler().notify_update_autoinc_end(task_key, max_value + 1, ret))) {
       LOG_WARN("fail to finish update autoinc task", K(ret), K(max_value));
     }
-    LOG_INFO("execute finish update autoinc task finish", K(ret), K(task_key), K(data_table_id_), K(column_id_), K(max_value));
+    LOG_INFO("execute finish update autoinc task finish", K(ret), "ddl_event_info", ObDDLEventInfo(), K(task_key), K(data_table_id_), K(column_id_), K(max_value));
   }
+  char table_id_buffer[256];
+  snprintf(table_id_buffer, sizeof(table_id_buffer), "data_table_id:%ld, dest_table_id:%ld",
+            data_table_id_, dest_table_id_);
+  ROOTSERVICE_EVENT_ADD("ddl scheduler", "update autoinc sequence task process",
+    "tenant_id", tenant_id_,
+    "ret", ret,
+    K_(trace_id),
+    K_(task_id),
+    "table_id", table_id_buffer,
+    K_(schema_version),
+    column_id_);
   return ret;
 }
 
@@ -147,7 +156,7 @@ ObAsyncTask *ObUpdateAutoincSequenceTask::deep_copy(char *buf, const int64_t buf
 }
 
 ObModifyAutoincTask::ObModifyAutoincTask()
-  : ObDDLTask(ObDDLType::DDL_INVALID), lock_(), wait_trans_ctx_(), alter_table_arg_(),
+  : ObDDLTask(ObDDLType::DDL_INVALID), lock_(), alter_table_arg_(),
     update_autoinc_job_ret_code_(INT64_MAX), update_autoinc_job_time_(0)
 {
 }
@@ -157,6 +166,7 @@ int ObModifyAutoincTask::init(const uint64_t tenant_id,
                               const int64_t table_id,
                               const int64_t schema_version,
                               const int64_t consumer_group_id,
+                              const int32_t sub_task_trace_id,
                               const obrpc::ObAlterTableArg &alter_table_arg,
                               const int64_t task_status,
                               const int64_t snapshot_version)
@@ -180,6 +190,7 @@ int ObModifyAutoincTask::init(const uint64_t tenant_id,
     target_object_id_ = table_id;
     schema_version_ = schema_version;
     consumer_group_id_ = consumer_group_id;
+    sub_task_trace_id_ = sub_task_trace_id;
     task_status_ = static_cast<ObDDLTaskStatus>(task_status);
     snapshot_version_ = snapshot_version;
     tenant_id_ = tenant_id;
@@ -207,7 +218,7 @@ int ObModifyAutoincTask::init(const ObDDLTaskRecord &task_record)
   } else if (OB_UNLIKELY(!task_record.is_valid())) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid arguments", K(ret), K(task_record));
-  } else if (OB_FAIL(deserlize_params_from_message(task_record.tenant_id_, task_record.message_.ptr(), task_record.message_.length(), pos))) {
+  } else if (OB_FAIL(deserialize_params_from_message(task_record.tenant_id_, task_record.message_.ptr(), task_record.message_.length(), pos))) {
     LOG_WARN("deserialize params from message failed", K(ret));
   } else if (OB_FAIL(set_ddl_stmt_str(task_record.ddl_stmt_str_))) {
     LOG_WARN("set ddl stmt str failed", K(ret));
@@ -272,6 +283,10 @@ int ObModifyAutoincTask::process()
       }
     }
     ddl_tracing_.release_span_hierarchy();
+    if (OB_FAIL(ret)) {
+      add_event_info("modify autoinc task process fail");
+      LOG_INFO("modify autoinc task process fail", "ddl_event_info", ObDDLEventInfo());
+    }
   }
   return ret;
 }
@@ -281,6 +296,7 @@ int ObModifyAutoincTask::unlock_table()
   int ret = OB_SUCCESS;
   ObRootService *root_service = GCTX.root_service_;
   ObMySQLTransaction trans;
+  ObTableLockOwnerID owner_id;
   if (OB_UNLIKELY(!is_inited_)) {
     ret = OB_NOT_INIT;
     LOG_WARN("ObModifyAutoincTask has not been inited", K(ret));
@@ -289,7 +305,10 @@ int ObModifyAutoincTask::unlock_table()
     LOG_WARN("error sys, root service must not be nullptr", K(ret));
   } else if (OB_FAIL(trans.start(&root_service->get_sql_proxy(), tenant_id_))) {
     LOG_WARN("start transaction failed", K(ret));
-  } else if (OB_FAIL(ObDDLLock::unlock_for_offline_ddl(tenant_id_, object_id_, ObTableLockOwnerID(task_id_), trans))) {
+  } else if (OB_FAIL(owner_id.convert_from_value(ObLockOwnerType::DEFAULT_OWNER_TYPE,
+                                                 task_id_))) {
+    LOG_WARN("convert owner id failed", K(ret), K(task_id_));
+  } else if (OB_FAIL(ObDDLLock::unlock_for_offline_ddl(tenant_id_, object_id_, nullptr/*hidden_tablet_ids_alone*/, owner_id, trans))) {
     LOG_WARN("failed to unlock table", K(ret));
   }
 
@@ -312,6 +331,8 @@ int ObModifyAutoincTask::modify_autoinc()
   } else if (OB_ISNULL(root_service)) {
     ret = OB_ERR_SYS;
     LOG_WARN("error sys, root service must not be nullptr", K(ret));
+  } else if (OB_FAIL(DDL_SIM(tenant_id_, task_id_, MODIFY_AUTOINC_FAILED))) {
+    LOG_WARN("ddl sim failure", K(ret), K(tenant_id_), K(task_id_));
   } else if (OB_FAIL(check_update_autoinc_end(is_update_autoinc_end))) {
     LOG_WARN("fail to check update autoinc end", K(ret));
   } else if (!is_update_autoinc_end && update_autoinc_job_time_ == 0) {
@@ -408,6 +429,7 @@ int ObModifyAutoincTask::wait_trans_end()
       ret = OB_TABLE_NOT_EXIST;
       LOG_WARN("cannot find orig table", K(ret), K(alter_table_arg_));
     } else if (OB_FAIL(wait_trans_ctx_.init(tenant_id_,
+                                            task_id_,
                                             object_id_,
                                             ObDDLWaitTransEndCtx::WAIT_SCHEMA_TRANS,
                                             updated_table_schema->get_schema_version()))) {
@@ -448,6 +470,8 @@ int ObModifyAutoincTask::set_schema_available()
   } else if (OB_ISNULL(root_service)) {
     ret = OB_ERR_SYS;
     LOG_WARN("error sys, root service must not be nullptr", K(ret));
+  } else if (OB_FAIL(DDL_SIM(tenant_id_, task_id_, DDL_TASK_TAKE_EFFECT_FAILED))) {
+    LOG_WARN("ddl sim failure", K(ret), K(tenant_id_), K(task_id_));
   } else {
     ObSArray<uint64_t> unused_ids;
     alter_table_arg_.ddl_task_type_ = share::UPDATE_AUTOINC_SCHEMA;
@@ -621,14 +645,14 @@ int ObModifyAutoincTask::serialize_params_to_message(char *buf, const int64_t bu
   return ret;
 }
 
-int ObModifyAutoincTask::deserlize_params_from_message(const uint64_t tenant_id, const char *buf, const int64_t data_len, int64_t &pos)
+int ObModifyAutoincTask::deserialize_params_from_message(const uint64_t tenant_id, const char *buf, const int64_t data_len, int64_t &pos)
 {
   int ret = OB_SUCCESS;
   obrpc::ObAlterTableArg tmp_arg;
   if (OB_UNLIKELY(!is_valid_tenant_id(tenant_id) || nullptr == buf || data_len <= 0)) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid arguments", K(ret), K(tenant_id), KP(buf), K(data_len));
-  } else if (OB_FAIL(ObDDLTask::deserlize_params_from_message(tenant_id, buf, data_len, pos))) {
+  } else if (OB_FAIL(ObDDLTask::deserialize_params_from_message(tenant_id, buf, data_len, pos))) {
     LOG_WARN("ObDDLTask deserlize failed", K(ret));
   } else if (OB_FAIL(tmp_arg.deserialize(buf, data_len, pos))) {
     LOG_WARN("serialize table failed", K(ret));
@@ -643,40 +667,4 @@ int ObModifyAutoincTask::deserlize_params_from_message(const uint64_t tenant_id,
 int64_t ObModifyAutoincTask::get_serialize_param_size() const
 {
   return alter_table_arg_.get_serialize_size() + ObDDLTask::get_serialize_param_size();
-}
-
-void ObModifyAutoincTask::flt_set_task_span_tag() const
-{
-  FLT_SET_TAG(ddl_task_id, task_id_, ddl_parent_task_id, parent_task_id_,
-              ddl_data_table_id, object_id_, ddl_schema_version, schema_version_,
-              ddl_snapshot_version, snapshot_version_, ddl_ret_code, ret_code_);
-}
-
-void ObModifyAutoincTask::flt_set_status_span_tag() const
-{
-  switch (task_status_) {
-  case ObDDLTaskStatus::WAIT_TRANS_END: {
-    FLT_SET_TAG(ddl_data_table_id, object_id_, ddl_ret_code, ret_code_);
-    break;
-  }
-  case ObDDLTaskStatus::OBTAIN_SNAPSHOT: {
-    FLT_SET_TAG(ddl_data_table_id, object_id_, ddl_ret_code, ret_code_);
-    break;
-  }
-  case ObDDLTaskStatus::MODIFY_AUTOINC: {
-    FLT_SET_TAG(ddl_ret_code, ret_code_);
-    break;
-  }
-  case ObDDLTaskStatus::FAIL: {
-    FLT_SET_TAG(ddl_ret_code, ret_code_);
-    break;
-  }
-  case ObDDLTaskStatus::SUCCESS: {
-    FLT_SET_TAG(ddl_ret_code, ret_code_);
-    break;
-  }
-  default: {
-    break;
-  }
-  }
 }

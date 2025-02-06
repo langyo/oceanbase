@@ -1,3 +1,6 @@
+// owner: yunlong.cb
+// owner group: log
+
 // Copyright (c) 2021 OceanBase
 // OceanBase is licensed under Mulan PubL v2.
 // You can use this software according to the terms and conditions of the Mulan PubL v2.
@@ -7,9 +10,6 @@
 // EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
 // MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 // See the Mulan PubL v2 for more details.
-#include <cstdio>
-#include <gtest/gtest.h>
-#include <signal.h>
 #define private public
 #include "env/ob_simple_log_cluster_env.h"
 #undef private
@@ -23,6 +23,11 @@ namespace oceanbase
 using namespace logservice;
 
 int64_t ARB_TIMEOUT_ARG = 2 * 1000 * 1000L;
+bool fisrt_f_connected_with_rs = true;
+bool second_f_connected_with_rs = true;
+common::ObAddr first_f_addr;
+common::ObAddr second_f_addr;
+ArbDegradationPolicy degradation_policy = LS_POLICY;
 
 namespace logservice
 {
@@ -34,6 +39,22 @@ void ObArbitrationService::update_arb_timeout_()
     CLOG_LOG_RET(WARN, OB_ERR_UNEXPECTED, "update_arb_timeout_", K_(self), K_(arb_timeout_us));
   }
 }
+
+bool ObArbitrationService::is_in_cluster_policy_() const
+{
+  return CLUSTER_POLICY == degradation_policy;
+}
+
+int ObArbitrationService::try_probe_rs_(bool &connected)
+{
+  if (self_ == first_f_addr) {
+    connected = fisrt_f_connected_with_rs;
+  } else if (self_ == second_f_addr) {
+    connected = second_f_connected_with_rs;
+  }
+  return OB_SUCCESS;
+}
+
 }
 
 namespace unittest
@@ -49,6 +70,7 @@ public:
 int64_t ObSimpleLogClusterTestBase::member_cnt_ = 3;
 int64_t ObSimpleLogClusterTestBase::node_cnt_ = 5;
 bool ObSimpleLogClusterTestBase::need_add_arb_server_ = true;
+bool ObSimpleLogClusterTestBase::need_shared_storage_ = false;
 std::string ObSimpleLogClusterTestBase::test_name_ = TEST_NAME;
 
 TEST_F(TestObSimpleLogClusterArbService, test_2f1a_degrade_upgrade)
@@ -550,7 +572,7 @@ TEST_F(TestObSimpleLogClusterArbService, test_multi_meta_block)
   sleep(2);
   ObSimpleArbServer *arb_server = dynamic_cast<ObSimpleArbServer*>(get_cluster()[arb_replica_idx]);
   IPalfHandleImplGuard arb_guard;
-  ASSERT_EQ(OB_SUCCESS, get_palf_handle_lite(OB_SERVER_TENANT_ID, id, arb_server, arb_guard));
+  ASSERT_EQ(OB_SUCCESS, get_palf_handle_lite(ObISimpleLogServer::DEFAULT_TENANT_ID, id, arb_server, arb_guard));
   PalfHandleLite *arb_palf = dynamic_cast<PalfHandleLite *>(arb_guard.palf_handle_impl_);
   LogEngine *log_engine = &arb_palf->log_engine_;
   LSN meta_tail = log_engine->log_meta_storage_.log_tail_;
@@ -576,7 +598,7 @@ TEST_F(TestObSimpleLogClusterArbService, test_multi_meta_block)
     EXPECT_EQ(OB_SUCCESS, get_leader(id, leader, leader_idx));
     EXPECT_EQ(OB_SUCCESS, submit_log(leader, 100, id));
     IPalfHandleImplGuard arb_guard;
-    ASSERT_EQ(OB_SUCCESS, get_palf_handle_lite(OB_SERVER_TENANT_ID, id, arb_server, arb_guard));
+    ASSERT_EQ(OB_SUCCESS, get_palf_handle_lite(ObISimpleLogServer::DEFAULT_TENANT_ID, id, arb_server, arb_guard));
     PalfHandleLite *arb_palf = dynamic_cast<PalfHandleLite *>(arb_guard.palf_handle_impl_);
     LogEngine *log_engine = &arb_palf->log_engine_;
     LogStorage *meta_storage = &log_engine->log_meta_storage_;
@@ -591,7 +613,7 @@ TEST_F(TestObSimpleLogClusterArbService, test_multi_meta_block)
     EXPECT_EQ(OB_SUCCESS, get_leader(id, leader, leader_idx));
     EXPECT_EQ(OB_SUCCESS, submit_log(leader, 100, id));
     IPalfHandleImplGuard arb_guard;
-    ASSERT_EQ(OB_SUCCESS, get_palf_handle_lite(OB_SERVER_TENANT_ID, id, arb_server, arb_guard));
+    ASSERT_EQ(OB_SUCCESS, get_palf_handle_lite(ObISimpleLogServer::DEFAULT_TENANT_ID, id, arb_server, arb_guard));
     PalfHandleLite *arb_palf = dynamic_cast<PalfHandleLite *>(arb_guard.palf_handle_impl_);
     LogEngine *log_engine = &arb_palf->log_engine_;
     LSN meta_tail = log_engine->log_meta_storage_.log_tail_;
@@ -611,7 +633,7 @@ TEST_F(TestObSimpleLogClusterArbService, test_multi_meta_block)
     EXPECT_EQ(OB_SUCCESS, get_leader(id, leader, leader_idx));
     EXPECT_EQ(OB_SUCCESS, submit_log(leader, 4000, id));
     IPalfHandleImplGuard arb_guard;
-    ASSERT_EQ(OB_SUCCESS, get_palf_handle_lite(OB_SERVER_TENANT_ID, id, arb_server, arb_guard));
+    ASSERT_EQ(OB_SUCCESS, get_palf_handle_lite(ObISimpleLogServer::DEFAULT_TENANT_ID, id, arb_server, arb_guard));
     PalfHandleLite *arb_palf = dynamic_cast<PalfHandleLite *>(arb_guard.palf_handle_impl_);
     LogEngine *log_engine = &arb_palf->log_engine_;
     LSN meta_tail = log_engine->log_meta_storage_.log_tail_;
@@ -761,10 +783,198 @@ TEST_F(TestObSimpleLogClusterArbService, test_2f1a_upgrade_when_no_leader)
   // waiting for upgrading
   is_upgraded(leader, id);
 
+  unblock_all_net(another_f_idx);
   revert_cluster_palf_handle_guard(palf_list);
   leader.reset();
   delete_paxos_group(id);
   PALF_LOG(INFO, "end test_2f1a_upgrade_when_no_leader", K(id));
+}
+
+TEST_F(TestObSimpleLogClusterArbService, test_1f1a_create_palf_group)
+{
+  oceanbase::common::ObClusterVersion::get_instance().cluster_version_ = CLUSTER_VERSION_4_1_0_0;
+  SET_CASE_LOG_FILE(TEST_NAME, "test_1f1a_create_palf_group");
+  PALF_LOG(INFO, "begin test_1f1a_create_palf_group");
+  OB_LOGGER.set_log_level("TRACE");
+  const int64_t CONFIG_CHANGE_TIMEOUT = 10 * 1000 * 1000L; // 10s
+  MockLocCB loc_cb;
+  int ret = OB_SUCCESS;
+  int64_t leader_idx = 0;
+  int64_t arb_replica_idx = -1;
+  PalfHandleImplGuard leader;
+  const int64_t id = ATOMIC_AAF(&palf_id_, 1);
+  common::ObMemberList member_list = get_member_list();
+  member_list.remove_server(get_cluster()[1]->get_addr());
+  const int64_t member_cnt = 2;
+  const common::ObMember &arb_member = get_arb_member();
+  EXPECT_EQ(OB_SUCCESS, create_paxos_group_with_arb(id, &loc_cb, member_list, member_cnt, arb_member, arb_replica_idx, leader_idx, false, leader));
+  EXPECT_EQ(OB_SUCCESS, submit_log(leader, 100, id));
+
+  LogConfigVersion config_version;
+  EXPECT_EQ(OB_SUCCESS, leader.palf_handle_impl_->get_config_version(config_version));
+  EXPECT_EQ(OB_SUCCESS, leader.palf_handle_impl_->add_member(ObMember(get_cluster()[1]->get_addr(), 1), 2, config_version, CONFIG_CHANGE_TIMEOUT));
+
+  EXPECT_EQ(2, leader.palf_handle_impl_->config_mgr_.log_ms_meta_.curr_.config_.log_sync_replica_num_);
+  EXPECT_EQ(2, leader.palf_handle_impl_->config_mgr_.log_ms_meta_.curr_.config_.log_sync_memberlist_.get_member_number());
+
+  leader.reset();
+  delete_paxos_group(id);
+  PALF_LOG(INFO, "end test_2f1a_degrade_upgrade", K(id));
+}
+
+// 1. 2F1A
+// 2. lock_memberlist(just renew barrier)
+// 3. submit and commit logs
+// 4. kill leader
+// 5. check committed_end_lsn
+TEST_F(TestObSimpleLogClusterArbService, test_lock_memberlist_opt)
+{
+  SET_CASE_LOG_FILE(TEST_NAME, "test_lock_memberlist_opt");
+  int ret = OB_SUCCESS;
+	const int64_t id = ATOMIC_AAF(&palf_id_, 1);
+  PALF_LOG(INFO, "begin test_repeat_lock_memberlist", K(id));
+	int64_t leader_idx = 0, arb_replica_idx = 0;
+  PalfHandleImplGuard leader;
+  oceanbase::common::ObClusterVersion::get_instance().cluster_version_ = CLUSTER_VERSION_4_2_0_0;
+	EXPECT_EQ(OB_SUCCESS, create_paxos_group_with_arb(id, arb_replica_idx, leader_idx, leader));
+  const int64_t CONFIG_CHANGE_TIMEOUT = 10 * 1000 * 1000L; // 10s
+  const int64_t another_f_idx = (leader_idx+1)%3;
+
+  EXPECT_EQ(OB_SUCCESS, submit_log(leader, 10, id));
+  EXPECT_UNTIL_EQ(leader.palf_handle_impl_->get_max_lsn(), leader.palf_handle_impl_->get_end_lsn());
+
+  // 2. renew_barrier
+  EXPECT_EQ(OB_SUCCESS, leader.palf_handle_impl_->config_mgr_.renew_config_change_barrier());
+
+  // 3. submit and commit logs
+  EXPECT_EQ(OB_SUCCESS, submit_log(leader, 10, id));
+  const LSN max_lsn = leader.palf_handle_impl_->get_max_lsn();
+  EXPECT_UNTIL_EQ(leader.palf_handle_impl_->get_max_lsn(), leader.palf_handle_impl_->get_end_lsn());
+
+  // 4. kill leader
+  block_all_net(leader_idx);
+
+  // 5. check committed_end_lsn
+  int64_t new_leader_idx = -1;
+  PalfHandleImplGuard new_leader;
+  EXPECT_EQ(OB_SUCCESS, get_leader(id, new_leader, new_leader_idx));
+  EXPECT_UNTIL_EQ(leader.palf_handle_impl_->get_max_lsn(), leader.palf_handle_impl_->get_end_lsn());
+  EXPECT_EQ(max_lsn, leader.palf_handle_impl_->get_end_lsn());
+  unblock_all_net(leader_idx);
+
+  leader.reset();
+  new_leader.reset();
+  delete_paxos_group(id);
+  PALF_LOG(INFO, "end test_lock_memberlist_opt", K(id));
+}
+
+TEST_F(TestObSimpleLogClusterArbService, test_degradation_policy)
+{
+  SET_CASE_LOG_FILE(TEST_NAME, "test_degradation_policy");
+  OB_LOGGER.set_log_level("INFO");
+  MockLocCB loc_cb;
+  int ret = OB_SUCCESS;
+  PALF_LOG(INFO, "begin test_degradation_policy");
+  oceanbase::common::ObClusterVersion::get_instance().cluster_version_ = CLUSTER_VERSION_4_3_4_0;
+  int64_t leader_idx = 0;
+  int64_t arb_replica_idx = -1;
+  int64_t another_f_idx = 1;
+  PalfHandleImplGuard leader;
+  const int64_t id = ATOMIC_AAF(&palf_id_, 1);
+  share::ObLSID ls_id(id);
+  std::vector<PalfHandleImplGuard*> palf_list;
+	EXPECT_EQ(OB_SUCCESS, create_paxos_group_with_arb(id, arb_replica_idx, leader_idx, leader));
+  EXPECT_EQ(OB_SUCCESS, get_cluster_palf_handle_guard(id, palf_list));
+  EXPECT_EQ(OB_SUCCESS, submit_log(leader, 10, id));
+  palf_list[leader_idx]->get_palf_handle_impl()->set_location_cache_cb(&loc_cb);
+  palf_list[another_f_idx]->get_palf_handle_impl()->set_location_cache_cb(&loc_cb);
+  first_f_addr = palf_list[leader_idx]->get_palf_handle_impl()->self_;
+  second_f_addr = palf_list[another_f_idx]->get_palf_handle_impl()->self_;
+  degradation_policy = CLUSTER_POLICY;
+  GCONF.arbitration_degradation_policy = "CLUSTER_POLICY";
+  {
+    // case 1: test election silent
+    int64_t first_leader_idx = leader_idx;
+    PALF_LOG(INFO, "case 1: make election in current leader replica silent, the leader should change to another replica", K(first_leader_idx));
+    // test election silent
+    fisrt_f_connected_with_rs = false;
+    EXPECT_EQ(OB_SUCCESS, palf_list[leader_idx]->palf_handle_impl_->set_election_silent_flag(true));
+    // wait for leader revoke
+    while (leader.palf_handle_impl_->state_mgr_.role_ == common::ObRole::LEADER) {
+      sleep(1);
+    }
+    // wait for new leader
+    leader_idx = -1;
+    while (-1 == leader_idx) {
+      leader.reset();
+      EXPECT_EQ(OB_SUCCESS, get_leader(id, leader, leader_idx));
+      sleep(1);
+    }
+    EXPECT_EQ(another_f_idx, leader_idx);
+    // disable another replica prepare/propose
+    second_f_connected_with_rs = false;
+    EXPECT_EQ(OB_SUCCESS, palf_list[another_f_idx]->palf_handle_impl_->set_election_silent_flag(true));
+    // wait for leader revoke
+    while (leader.palf_handle_impl_->state_mgr_.role_ == common::ObRole::LEADER) {
+      sleep(1);
+    }
+    // no leader for now
+    // enable prepare/propose
+    fisrt_f_connected_with_rs = true;
+    EXPECT_EQ(OB_SUCCESS, palf_list[first_leader_idx]->palf_handle_impl_->set_election_silent_flag(false));
+    // wait for new leader
+    EXPECT_EQ(OB_SUCCESS, get_leader(id, leader, leader_idx));
+    EXPECT_EQ(first_leader_idx, leader_idx);
+    second_f_connected_with_rs = true;
+    EXPECT_EQ(OB_SUCCESS, palf_list[another_f_idx]->palf_handle_impl_->set_election_silent_flag(false));
+  }
+
+  {
+    // case 2: test network broken
+    sleep(5);
+    int64_t first_leader_idx = leader_idx;
+    PALF_LOG(INFO, "case 2: test degrade for 2F1A");
+    block_net(first_leader_idx, another_f_idx);
+    fisrt_f_connected_with_rs = false;
+    // should not be degraded
+    sleep(5);
+    common::GlobalLearnerList degraded_learner_list;
+    EXPECT_EQ(OB_SUCCESS, leader.palf_handle_impl_->config_mgr_.get_degraded_learner_list(degraded_learner_list));
+    EXPECT_EQ(0, degraded_learner_list.get_member_number());
+    EXPECT_EQ(true, palf_list[first_leader_idx]->palf_handle_impl_->is_election_silent());
+
+    // wait for leader revoke
+    while (leader.palf_handle_impl_->state_mgr_.role_ == common::ObRole::LEADER) {
+      sleep(1);
+    }
+
+    // wait for new leader
+    leader_idx = -1;
+    while (-1 == leader_idx) {
+      leader.reset();
+      EXPECT_EQ(OB_SUCCESS, get_leader(id, leader, leader_idx));
+      sleep(1);
+    }
+    EXPECT_EQ(another_f_idx, leader_idx);
+    degraded_learner_list.reset();
+    // fisrt replica should be degraded
+    EXPECT_EQ(OB_SUCCESS, leader.palf_handle_impl_->config_mgr_.get_degraded_learner_list(degraded_learner_list));
+    EXPECT_EQ(1, degraded_learner_list.get_member_number());
+    common::ObAddr degraded_addr;
+    EXPECT_EQ(OB_SUCCESS, degraded_learner_list.get_server_by_index(0, degraded_addr));
+    EXPECT_EQ(first_f_addr, degraded_addr);
+    // network recover
+    unblock_net(first_leader_idx, another_f_idx);
+    fisrt_f_connected_with_rs = true;
+    // wait for upgrade
+    EXPECT_TRUE(is_upgraded(leader, id));
+    EXPECT_EQ(false, palf_list[first_leader_idx]->palf_handle_impl_->is_election_silent());
+  }
+
+  revert_cluster_palf_handle_guard(palf_list);
+  leader.reset();
+  delete_paxos_group(id);
+  PALF_LOG(INFO, "end test_degradation_policy", K(id));
 }
 
 } // end unittest

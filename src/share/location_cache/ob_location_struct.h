@@ -190,7 +190,7 @@ public:
   inline uint64_t get_tenant_id() const { return cache_key_.get_tenant_id(); }
   inline ObLSID get_ls_id() const { return cache_key_.get_ls_id(); }
   const ObLSLocationCacheKey &get_cache_key() const { return cache_key_; }
-  int get_replica_count(int64_t &full_replica_cnt, int64_t &readonly_replica_cnt);
+  int get_replica_count(int64_t &full_replica_cnt, int64_t &non_paxos_replica_cnt);
   inline const common::ObIArray<ObLSReplicaLocation> &get_replica_locations() const
   {
     return replica_locations_;
@@ -286,31 +286,26 @@ public:
   void reset();
   int assign(const ObTabletLSCache &other);
   bool is_valid() const;
-  // mapping is same with other, ignoring timestamp
-  bool mapping_is_same_with(const ObTabletLSCache &other) const;
   bool operator==(const ObTabletLSCache &other) const;
   bool operator!=(const ObTabletLSCache &other) const;
   inline uint64_t get_tenant_id() const { return cache_key_.get_tenant_id(); }
   inline ObTabletID get_tablet_id() const { return cache_key_.get_tablet_id(); }
   inline ObLSID get_ls_id() const { return ls_id_; }
   inline int64_t get_renew_time() const { return renew_time_; }
-  //inline int64_t get_row_scn() const { return row_scn_; }
-  //void set_last_access_ts(const int64_t ts) { last_access_ts_ = ts; }
-  //int64_t get_last_access_ts() const { return last_access_ts_; }
   const ObTabletLSKey &get_cache_key() const { return cache_key_; }
+  inline int64_t get_transfer_seq() const { return transfer_seq_; }
   int init(
       const uint64_t tenant_id,
       const ObTabletID &tablet_id,
       const ObLSID &ls_id,
       const int64_t renew_time,
-      const int64_t row_scn);
-  TO_STRING_KV(K_(cache_key), K_(ls_id), K_(renew_time));
+      const int64_t transfer_seq);
+  TO_STRING_KV(K_(cache_key), K_(ls_id), K_(renew_time), K_(transfer_seq));
 private:
    ObTabletLSKey cache_key_;
    ObLSID ls_id_;
    int64_t renew_time_;     // renew by sql
-   //int64_t row_scn_;        // used for auto refresh location
-   //int64_t last_access_ts_; // used for ObTabletLSMap
+   int64_t transfer_seq_;
 };
 
 //TODO: Reserved for tableapi. Need remove.
@@ -339,50 +334,6 @@ class ObLocationServiceUtility
 {
 public:
   static bool treat_sql_as_timeout(const int error_code);
-};
-
-class ObVTableLocationCacheKey : public common::ObIKVCacheKey
-{
-public:
-  ObVTableLocationCacheKey();
-  explicit ObVTableLocationCacheKey(
-      const uint64_t tenant_id,
-      const uint64_t table_id);
-  ~ObVTableLocationCacheKey();
-  virtual bool operator ==(const ObIKVCacheKey &other) const;
-  virtual bool operator !=(const ObIKVCacheKey &other) const;
-  virtual uint64_t get_tenant_id() const;
-  virtual uint64_t hash() const;
-  virtual int64_t size() const;
-  virtual int deep_copy(char *buf, const int64_t buf_len, ObIKVCacheKey *&key) const;
-  inline uint64_t get_table_id() const { return table_id_; }
-  TO_STRING_KV(K_(tenant_id), K_(table_id));
-private:
-  uint64_t tenant_id_;
-  uint64_t table_id_;
-};
-
-class ObLocationKVCacheValue : public common::ObIKVCacheValue
-{
-public:
-  ObLocationKVCacheValue() : size_(0), buffer_(NULL) {}
-  ObLocationKVCacheValue(const int64_t size, char *buffer)
-      : size_(size), buffer_(buffer) {}
-  virtual ~ObLocationKVCacheValue() {}
-  virtual int64_t size() const
-  {
-    return static_cast<int64_t>(sizeof(*this) + size_);
-  }
-  virtual int deep_copy(char *buf, const int64_t buf_len, ObIKVCacheValue *&value) const;
-  void reset();
-  inline int64_t get_size() const { return size_; }
-  inline char *get_buffer_ptr() const { return buffer_; }
-  void set_size(const int64_t size) { size_ = size; }
-  void set_buffer(char *buffer) { buffer_ = buffer; }
-  TO_STRING_KV(K_(size), "buffer", reinterpret_cast<int64_t>(buffer_));
-private:
-  int64_t size_;
-  char *buffer_;
 };
 
 class ObLocationSem

@@ -11,13 +11,9 @@
  */
 
 #define USING_LOG_PREFIX STORAGE_COMPACTION
-#include "storage/compaction/ob_tenant_medium_checker.h"
+#include "ob_tenant_medium_checker.h"
 #include "storage/compaction/ob_medium_compaction_func.h"
-#include "storage/compaction/ob_compaction_diagnose.h"
 #include "storage/compaction/ob_server_compaction_event_history.h"
-#include "storage/compaction/ob_tablet_merge_ctx.h"
-#include "storage/ls/ob_ls.h"
-#include "storage/tablet/ob_tablet.h"
 #include "storage/tx_storage/ob_ls_service.h"
 
 namespace oceanbase
@@ -68,8 +64,6 @@ int64_t ObBatchFinishCheckStat::to_string(char *buf, const int64_t buf_len) cons
 /*
  * ObTenantMediumChecker implement
  * */
-const int64_t ObTenantMediumChecker::MAX_BATCH_CHECK_NUM;
-
 int ObTenantMediumChecker::mtl_init(ObTenantMediumChecker *&tablet_medium_checker)
 {
   return tablet_medium_checker->init();
@@ -78,10 +72,11 @@ int ObTenantMediumChecker::mtl_init(ObTenantMediumChecker *&tablet_medium_checke
 ObTenantMediumChecker::ObTenantMediumChecker()
   : is_inited_(false),
     last_check_timestamp_(0),
-    ls_locality_cache_(),
+    error_tablet_cnt_(0),
     tablet_ls_set_(),
     ls_info_map_(),
-    lock_()
+    lock_(),
+    ls_locality_cache_empty_(true)
 {}
 
 ObTenantMediumChecker::~ObTenantMediumChecker()
@@ -92,8 +87,11 @@ ObTenantMediumChecker::~ObTenantMediumChecker()
 int ObTenantMediumChecker::init()
 {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(ls_locality_cache_.init(MTL_ID()))) {
-    LOG_WARN("failed to init ls locality cache", K(ret));
+  if (GCTX.is_shared_storage_mode()) {
+    FLOG_INFO("cluster is shared storage mode, not init ObTenantMediumChecker", KR(ret));
+  } else if (IS_INIT) {
+    ret = OB_INIT_TWICE;
+    LOG_WARN("ObTenantMediumChecker is inited before", KR(ret), KPC(this));
   } else if (OB_FAIL(tablet_ls_set_.create(DEFAULT_MAP_BUCKET, "MedCheckSet", "CheckSetNode", MTL_ID()))) {
     LOG_WARN("failed to create set", K(ret));
   } else if (OB_FAIL(ls_info_map_.create(OB_MAX_LS_NUM_PER_TENANT_PER_SERVER, "MedCheckMap", "CheckMapNode", MTL_ID()))) {
@@ -110,7 +108,7 @@ int ObTenantMediumChecker::init()
 void ObTenantMediumChecker::destroy()
 {
   is_inited_ = false;
-  ls_locality_cache_.destroy();
+  ls_locality_cache_empty_ = true;
   if (tablet_ls_set_.created()) {
     tablet_ls_set_.destroy();
   }
@@ -123,25 +121,32 @@ int ObTenantMediumChecker::refresh_ls_status()
 {
   int ret = OB_SUCCESS;
   int tmp_ret = OB_SUCCESS;
-  lib::ObMutexGuard guard(lock_);
-  if (OB_TMP_FAIL(ls_locality_cache_.refresh_ls_locality(true/*force_refresh*/))) {
-    LOG_WARN("failed to refresh ls locality", K(tmp_ret));
-  }
   common::ObSEArray<share::ObLSID, LS_ID_ARRAY_CNT> ls_ids;
-  if (OB_FAIL(MTL(ObLSService *)->get_ls_ids(ls_ids))) {
+  SMART_VAR(share::ObCompactionLocalityCache, ls_locality_cache) {
+  if (OB_FAIL(ls_locality_cache.init(MTL_ID()))) {
+    LOG_WARN("failed to init ls locality cache", K(ret));
+  } else if (OB_FAIL(ls_locality_cache.refresh_ls_locality(true/*force_refresh*/))) {
+    LOG_WARN("failed to refresh ls locality", K(ret));
+  } else if (OB_FAIL(MTL(ObLSService *)->get_ls_ids(ls_ids))) {
     LOG_WARN("failed to get all ls id", K(ret));
   } else {
+    lib::ObMutexGuard guard(lock_);
+    if (ls_locality_cache.empty()) {
+      ls_locality_cache_empty_ = true;
+    } else {
+      ls_locality_cache_empty_ = false;
+    }
     ls_info_map_.reuse();
     for (int64_t i = 0; i < ls_ids.count(); ++i) {
       const ObLSID &ls_id = ls_ids[i];
-      ObLSInfo ls_info;
+      ObLSInfo ls_info(MTL_ID(), ls_id);
       bool is_election_leader = false;
       if (OB_TMP_FAIL(ObMediumCompactionScheduleFunc::is_election_leader(ls_id, is_election_leader))) {
         if (OB_LS_NOT_EXIST != tmp_ret) {
           LOG_WARN("failed to get palf handle role", K(tmp_ret), K(ls_id));
         }
       } else if (is_election_leader) {
-        if (OB_TMP_FAIL(ls_locality_cache_.get_ls_info(ls_id, ls_info))) {
+        if (OB_TMP_FAIL(ls_locality_cache.get_ls_info(ls_id, ls_info))) {
           if (OB_HASH_NOT_EXIST != tmp_ret) {
             LOG_WARN("failed to get ls locality", K(tmp_ret), K(ls_id));
           }
@@ -150,26 +155,26 @@ int ObTenantMediumChecker::refresh_ls_status()
         }
       }
     }
-  }
+  } // end of lock
+  } // SMART_VAR
   return ret;
 }
 
 int ObTenantMediumChecker::check_ls_status(const share::ObLSID &ls_id, bool &is_leader, bool need_check)
 {
   int ret = OB_SUCCESS;
-  int tmp_ret = OB_SUCCESS;
   is_leader = false;
   if (need_check
       && CHECK_LS_LOCALITY_INTERVAL < ObTimeUtility::fast_current_time() - last_check_timestamp_) {
-    if (OB_TMP_FAIL(refresh_ls_status())) {
-      LOG_WARN("failed to refresh ls locality", K(tmp_ret));
+    if (OB_FAIL(refresh_ls_status())) {
+      LOG_WARN("failed to refresh ls locality", K(ret));
     } else {
       last_check_timestamp_ = ObTimeUtility::fast_current_time();
     }
   }
   lib::ObMutexGuard guard(lock_);
-  ObLSInfo ls_info;
-  if (OB_FAIL(ls_info_map_.get_refactored(ls_id, ls_info))) {
+  ObLSInfo ls_info(MTL_ID(), ls_id);
+  if (FAILEDx(ls_info_map_.get_refactored(ls_id, ls_info))) {
     if (OB_HASH_NOT_EXIST != ret) {
       LOG_WARN("fail to get map", K(ret), K(ls_id));
     } else {
@@ -196,12 +201,8 @@ int ObTenantMediumChecker::add_tablet_ls(const ObTabletID &tablet_id, const shar
     LOG_WARN("fail to check ls status", K(ret), K(ls_id));
   } else if (is_leader) {
     lib::ObMutexGuard guard(lock_);
-    if (OB_HASH_EXIST == (tmp_ret = tablet_ls_set_.exist_refactored(ObTabletCheckInfo(tablet_id, ls_id, medium_scn)))) {
-      ret = OB_SUCCESS; // tablet exist
-    } else if (OB_UNLIKELY(OB_HASH_NOT_EXIST != tmp_ret)) {
-      ret = OB_ERR_UNEXPECTED;
-      LOG_WARN("failed to check exist in tablet set", K(ret), K(tmp_ret), K(ls_id), K(tablet_id));
-    } else if (OB_FAIL(tablet_ls_set_.set_refactored(ObTabletCheckInfo(tablet_id, ls_id, medium_scn)))) {
+    // just cover the old info
+    if (OB_FAIL(tablet_ls_set_.set_refactored(ObTabletCheckInfo(tablet_id, ls_id, medium_scn)))) {
       LOG_WARN("failed to set tablet_ls_info", K(ret), K(ls_id), K(tablet_id));
     }
   }
@@ -210,12 +211,11 @@ int ObTenantMediumChecker::add_tablet_ls(const ObTabletID &tablet_id, const shar
 
 bool ObTenantMediumChecker::locality_cache_empty()
 {
-  bool ret = true;
+  bool bret = true;
   if (IS_INIT) {
-    lib::ObMutexGuard guard(lock_);
-    ret = ls_locality_cache_.empty();
+    bret = ls_locality_cache_empty_;
   }
-  return ret;
+  return bret;
 }
 
 int ObTenantMediumChecker::check_medium_finish_schedule()
@@ -226,15 +226,7 @@ int ObTenantMediumChecker::check_medium_finish_schedule()
     ret = OB_NOT_INIT;
     LOG_WARN("ObTenantMediumChecker is not inited", K(ret));
   } else {
-    // refresh ls locality cache
-    if (OB_TMP_FAIL(ls_locality_cache_.refresh_ls_locality())) {
-      LOG_WARN("failed to refresh ls locality", K(tmp_ret));
-      ADD_COMMON_SUSPECT_INFO(MEDIUM_MERGE, share::ObDiagnoseTabletType::TYPE_MEDIUM_MERGE,
-        SUSPECT_FAILED_TO_REFRESH_LS_LOCALITY, tmp_ret);
-    } else {
-      DEL_SUSPECT_INFO(MEDIUM_MERGE, UNKNOW_LS_ID, UNKNOW_TABLET_ID, ObDiagnoseTabletType::TYPE_MEDIUM_MERGE);
-    }
-
+    DEL_SUSPECT_INFO(MEDIUM_MERGE, UNKNOW_LS_ID, UNKNOW_TABLET_ID, ObDiagnoseTabletType::TYPE_MEDIUM_MERGE);
     TabletLSArray tablet_ls_infos;
     tablet_ls_infos.set_attr(ObMemAttr(MTL_ID(), "CheckInfos"));
     TabletLSArray batch_tablet_ls_infos;
@@ -258,32 +250,35 @@ int ObTenantMediumChecker::check_medium_finish_schedule()
         tablet_ls_set_.clear();
       }
     }
-    if (FAILEDx(batch_tablet_ls_infos.reserve(MAX_BATCH_CHECK_NUM))) {
-      LOG_WARN("fail to reserve array", K(ret), "size", MAX_BATCH_CHECK_NUM);
-    } else if (OB_FAIL(finish_tablet_ls_infos.reserve(MAX_BATCH_CHECK_NUM))) {
-      LOG_WARN("fail to reserve array", K(ret), "size", MAX_BATCH_CHECK_NUM);
+    const int64_t batch_size = MTL(ObTenantTabletScheduler *)->get_checker_batch_size();
+    if (OB_FAIL(ret) || tablet_ls_infos.empty()) {
+    } else if (OB_FAIL(batch_tablet_ls_infos.reserve(batch_size))) {
+      LOG_WARN("fail to reserve array", K(ret), "size", batch_size);
+    } else if (OB_FAIL(finish_tablet_ls_infos.reserve(batch_size))) {
+      LOG_WARN("fail to reserve array", K(ret), "size", batch_size);
     } else {
       // batch check
       int64_t info_count = tablet_ls_infos.count();
       int64_t start_idx = 0;
-      int64_t end_idx = min(MAX_BATCH_CHECK_NUM, info_count);
+      int64_t end_idx = min(batch_size, info_count);
       int64_t cost_ts = ObTimeUtility::fast_current_time();
       ObBatchFinishCheckStat stat;
       while (start_idx < end_idx) {
         if (OB_TMP_FAIL(check_medium_finish(tablet_ls_infos, start_idx, end_idx, batch_tablet_ls_infos, finish_tablet_ls_infos, stat))) {
           LOG_WARN("failed to check medium finish", K(tmp_ret));
-        } else {
-          LOG_INFO("success to batch check medium finish", K(start_idx), K(end_idx), K(info_count));
         }
         start_idx = end_idx;
-        end_idx = min(start_idx + MAX_BATCH_CHECK_NUM, info_count);
+        end_idx = min(start_idx + batch_size, info_count);
       }
       cost_ts = ObTimeUtility::fast_current_time() - cost_ts;
       ADD_COMPACTION_EVENT(
-        MTL(ObTenantTabletScheduler*)->get_frozen_version(),
+        MERGE_SCHEDULER_PTR->get_frozen_version(),
         ObServerCompactionEvent::COMPACTION_FINISH_CHECK,
         ObTimeUtility::fast_current_time(),
         K(cost_ts), "batch_check_stat", stat);
+    }
+    if (REACH_THREAD_TIME_INTERVAL(CLEAR_CKM_ERROR_INTERVAL)) {
+      clear_error_tablet_cnt();
     }
   }
   return ret;
@@ -293,8 +288,8 @@ int ObTenantMediumChecker::check_medium_finish(
     const ObIArray<ObTabletCheckInfo> &tablet_ls_infos,
     int64_t start_idx,
     int64_t end_idx,
-    ObIArray<ObTabletCheckInfo> &check_tablet_ls_infos,
-    ObIArray<ObTabletCheckInfo> &finish_tablet_ls_infos,
+    ObArray<ObTabletCheckInfo> &check_tablet_ls_infos,
+    ObArray<ObTabletCheckInfo> &finish_tablet_ls_infos,
     ObBatchFinishCheckStat &stat)
 {
   int ret = OB_SUCCESS;
@@ -322,7 +317,7 @@ int ObTenantMediumChecker::check_medium_finish(
         }
       }
     }
-    ObStorageCompactionTimeGuard time_guard;
+    ObCompactionScheduleTimeGuard time_guard;
     stat.filter_cnt_ += (end_idx - start_idx - check_tablet_ls_infos.count());
     if (FAILEDx(ObMediumCompactionScheduleFunc::batch_check_medium_finish(
         ls_info_map_, finish_tablet_ls_infos, check_tablet_ls_infos, time_guard))) {
@@ -340,14 +335,15 @@ int ObTenantMediumChecker::check_medium_finish(
         K(finish_tablet_ls_infos.count()), K(tablet_ls_infos), K(check_tablet_ls_infos), K(finish_tablet_ls_infos));
       stat.succ_cnt_ += check_tablet_ls_infos.count();
       stat.finish_cnt_ += finish_tablet_ls_infos.count();
-      if (OB_FAIL(MTL(ObTenantTabletScheduler*)->schedule_next_round_for_leader(check_tablet_ls_infos, finish_tablet_ls_infos))) {
+      ObScheduleNewMediumLoop medium_loop(finish_tablet_ls_infos);
+      if (OB_FAIL(medium_loop.loop())) {
         LOG_WARN("failed to leader schedule", K(ret));
       } else {
-        time_guard.click(ObStorageCompactionTimeGuard::SCHEDULER_NEXT_ROUND);
-        LOG_INFO("success to leader schedule", K(ret),
-          K(check_tablet_ls_infos.count()), K(finish_tablet_ls_infos.count()), K(time_guard));
+        time_guard.click(ObCompactionScheduleTimeGuard::SCHEDULER_NEXT_ROUND);
       }
     }
+    LOG_INFO("finish medium check", K(ret), K(start_idx), K(end_idx),
+          K(check_tablet_ls_infos.count()), K(finish_tablet_ls_infos.count()), K(time_guard));
   }
   return ret;
 }

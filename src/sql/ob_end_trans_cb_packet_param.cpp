@@ -10,10 +10,8 @@
  * See the Mulan PubL v2 for more details.
  */
 
-#include "sql/ob_end_trans_cb_packet_param.h"
-#include "lib/alloc/alloc_assist.h"
+#include "ob_end_trans_cb_packet_param.h"
 #include "sql/ob_result_set.h"
-#include "sql/session/ob_sql_session_info.h"
 
 using namespace oceanbase::common;
 namespace oceanbase
@@ -39,6 +37,12 @@ const ObEndTransCbPacketParam &ObEndTransCbPacketParam::fill(ObResultSet &rs,
   // oracle ANONYMOUS_BLOCK affect rows always return 1
   affected_rows_ = stmt::T_ANONYMOUS_BLOCK == rs.get_stmt_type() 
                     ? 1 : rs.get_affected_rows();
+  // The commit asynchronous callback logic needs
+  // to trigger the update logic of affected row first.
+  if (session.is_session_sync_support()) {
+    session.set_affected_rows_is_changed(affected_rows_);
+  }
+  session.set_affected_rows(affected_rows_);
   last_insert_id_to_client_ = rs.get_last_insert_id_to_client();
   is_partition_hit_ = session.partition_hit().get_bool();
   trace_id_.set(trace_id);

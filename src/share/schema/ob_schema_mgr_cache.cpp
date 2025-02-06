@@ -15,9 +15,6 @@
 #include "ob_schema_mgr_cache.h"
 #include "share/schema/ob_schema_service.h"
 #include "share/schema/ob_schema_mgr.h"
-#include "share/config/ob_server_config.h"
-#include "common/ob_clock_generator.h"
-#include "lib/oblog/ob_log.h"
 #include "observer/omt/ob_tenant_config_mgr.h"
 
 namespace oceanbase
@@ -516,9 +513,11 @@ int ObSchemaMgrCache::put(ObSchemaMgr *schema_mgr,
     bool is_stop = false;
     const uint64_t tenant_id = schema_mgr->get_tenant_id();
     int64_t max_schema_slot_num = max_cached_num_;
-    omt::ObTenantConfigGuard tenant_config(OTC_MGR.get_tenant_config_with_lock(tenant_id));
-    if (tenant_config.is_valid()) {
-      max_schema_slot_num = tenant_config->_max_schema_slot_num;
+    if (!ObSchemaService::g_liboblog_mode_) {
+      omt::ObTenantConfigGuard tenant_config(OTC_MGR.get_tenant_config_with_lock(tenant_id));
+      if (tenant_config.is_valid()) {
+        max_schema_slot_num = tenant_config->_max_schema_slot_num;
+      }
     }
     TCWLockGuard guard(lock_);
     // 1. In order to avoid the repeated adjustment of the configuration item _max_schema_slot_num that may cause problems

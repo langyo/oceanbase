@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
+from __future__ import print_function
 import sys
 import os
 import time
@@ -8,9 +9,15 @@ import mysql.connector
 from mysql.connector import errorcode
 import logging
 import getopt
+import re
 
 class UpgradeParams:
   log_filename = 'upgrade_cluster_health_checker.log'
+
+class PasswordMaskingFormatter(logging.Formatter):
+  def format(self, record):
+    s = super(PasswordMaskingFormatter, self).format(record)
+    return re.sub(r'password="(?:[^"\\]|\\.)*"', 'password="******"', s)
 
 #### --------------start : my_error.py --------------
 class MyError(Exception):
@@ -31,12 +38,12 @@ class QueryCursor:
       if True == print_when_succ:
         logging.info('succeed to execute sql: %s, rowcount = %d', sql, rowcount)
       return rowcount
-    except mysql.connector.Error, e:
+    except mysql.connector.Error as e:
       logging.exception('mysql connector error, fail to execute sql: %s', sql)
-      raise e
-    except Exception, e:
+      raise
+    except Exception as e:
       logging.exception('normal error, fail to execute sql: %s', sql)
-      raise e
+      raise
   def exec_query(self, sql, print_when_succ = True):
     try:
       self.__cursor.execute(sql)
@@ -45,12 +52,12 @@ class QueryCursor:
       if True == print_when_succ:
         logging.info('succeed to execute query: %s, rowcount = %d', sql, rowcount)
       return (self.__cursor.description, results)
-    except mysql.connector.Error, e:
+    except mysql.connector.Error as e:
       logging.exception('mysql connector error, fail to execute sql: %s', sql)
-      raise e
-    except Exception, e:
+      raise
+    except Exception as e:
       logging.exception('normal error, fail to execute sql: %s', sql)
-      raise e
+      raise
 #### ---------------end----------------------
 
 #### --------------start :  opt.py --------------
@@ -73,7 +80,7 @@ sys.argv[0] + """ [OPTIONS]""" +\
 '                    that all modules should be run. They are splitted by ",".\n' +\
 '                    For example: -m all, or --module=ddl,normal_dml,special_action\n' +\
 '-l, --log-file=name Log file path. If log file path is not given it\'s ' + os.path.splitext(sys.argv[0])[0] + '.log\n' +\
-'-t, --timeout=name  check timeout, default: 600(s).\n' + \
+'-t, --timeout=name  check timeout.\n' + \
 '-z, --zone=name     If zone is not specified, check all servers status in cluster. \n' +\
 '                    Otherwise, only check servers status in specified zone. \n' + \
 '\n\n' +\
@@ -135,8 +142,7 @@ Option('p', 'password', True, False, ''),\
 Option('m', 'module', True, False, 'all'),\
 # 日志文件路径，不同脚本的main函数中中会改成不同的默认值
 Option('l', 'log-file', True, False),\
-# 一些检查的超时时间，默认是600s
-Option('t', 'timeout', True, False, '600'),\
+Option('t', 'timeout', True, False, 0),\
 Option('z', 'zone', True, False, ''),\
 ]\
 
@@ -191,10 +197,10 @@ def parse_options(argv):
 def deal_with_local_opt(opt):
   if 'help' == opt.get_long_name():
     global help_str
-    print help_str
+    print(help_str)
   elif 'version' == opt.get_long_name():
     global version_str
-    print version_str
+    print(version_str)
 
 def deal_with_local_opts():
   global g_opts
@@ -258,21 +264,21 @@ def get_opt_zone():
 
 #### --------------start :  do_upgrade_pre.py--------------
 def config_logging_module(log_filenamme):
-  logging.basicConfig(level=logging.INFO,\
-      format='[%(asctime)s] %(levelname)s %(filename)s:%(lineno)d %(message)s',\
-      datefmt='%Y-%m-%d %H:%M:%S',\
-      filename=log_filenamme,\
-      filemode='w')
+  logger = logging.getLogger('')
+  logger.setLevel(logging.INFO)
   # 定义日志打印格式
-  formatter = logging.Formatter('[%(asctime)s] %(levelname)s %(filename)s:%(lineno)d %(message)s', '%Y-%m-%d %H:%M:%S')
+  formatter = PasswordMaskingFormatter('[%(asctime)s] %(levelname)s %(filename)s:%(lineno)d %(message)s', '%Y-%m-%d %H:%M:%S')
   #######################################
   # 定义一个Handler打印INFO及以上级别的日志到sys.stdout
   stdout_handler = logging.StreamHandler(sys.stdout)
   stdout_handler.setLevel(logging.INFO)
-  # 设置日志打印格式
   stdout_handler.setFormatter(formatter)
-  # 将定义好的stdout_handler日志handler添加到root logger
+  # 定义一个Handler处理文件输出
+  file_handler = logging.FileHandler(log_filenamme, mode='w')
+  file_handler.setLevel(logging.INFO)
+  file_handler.setFormatter(formatter)
   logging.getLogger('').addHandler(stdout_handler)
+  logging.getLogger('').addHandler(file_handler)
 #### ---------------end----------------------
 
 def check_zone_valid(query_cur, zone):
@@ -288,13 +294,38 @@ def check_zone_valid(query_cur, zone):
   else:
     logging.info("zone is empty, check all servers in cluster")
 
+def fetch_tenant_ids(query_cur):
+  try:
+    tenant_id_list = []
+    (desc, results) = query_cur.exec_query("""select distinct tenant_id from oceanbase.__all_tenant order by tenant_id desc""")
+    for r in results:
+      tenant_id_list.append(r[0])
+    return tenant_id_list
+  except Exception as e:
+    logging.exception('fail to fetch distinct tenant ids')
+    raise
+
+def set_default_timeout_by_tenant(query_cur, timeout, timeout_per_tenant, min_timeout):
+  if timeout > 0:
+    logging.info("use timeout from opt, timeout(s):{0}".format(timeout))
+  else:
+    tenant_id_list = fetch_tenant_ids(query_cur)
+    cal_timeout = len(tenant_id_list) * timeout_per_tenant
+    timeout = (cal_timeout if cal_timeout > min_timeout else min_timeout)
+    logging.info("use default timeout caculated by tenants, "
+                 "timeout(s):{0}, tenant_count:{1}, "
+                 "timeout_per_tenant(s):{2}, min_timeout(s):{3}"
+                 .format(timeout, len(tenant_id_list), timeout_per_tenant, min_timeout))
+
+  return timeout
+
 #### START ####
 # 0. 检查server版本是否严格一致
 def check_server_version_by_zone(query_cur, zone):
   if zone == '':
     logging.info("skip check server version by cluster")
   else:
-    sql = """select distinct(substring_index(build_version, '_', 1)) from __all_server where zone = '{0}'""".format(zone);
+    sql = """select distinct(substring_index(build_version, '_', 1)) from oceanbase.__all_server where zone = '{0}'""".format(zone);
     (desc, results) = query_cur.exec_query(sql);
     if len(results) != 1:
       raise MyError("servers build_version not match")
@@ -304,8 +335,9 @@ def check_server_version_by_zone(query_cur, zone):
 # 1. 检查paxos副本是否同步, paxos副本是否缺失
 def check_paxos_replica(query_cur, timeout):
   # 1.1 检查paxos副本是否同步
-  sql = """select count(*) from GV$OB_LOG_STAT where in_sync = 'NO'"""
-  check_until_timeout(query_cur, sql, 0, timeout)
+  sql = """select count(*) from oceanbase.GV$OB_LOG_STAT where in_sync = 'NO'"""
+  wait_timeout = set_default_timeout_by_tenant(query_cur, timeout, 10, 600)
+  check_until_timeout(query_cur, sql, 0, wait_timeout)
 
   # 1.2 检查paxos副本是否有缺失 TODO
   logging.info('check paxos replica success')
@@ -315,26 +347,29 @@ def check_observer_status(query_cur, zone, timeout):
   sql = """select count(*) from oceanbase.__all_server where (start_service_time <= 0 or status='inactive')"""
   if zone != '':
     sql += """ and zone = '{0}'""".format(zone)
-  check_until_timeout(query_cur, sql, 0, timeout)
+  wait_timeout = set_default_timeout_by_tenant(query_cur, timeout, 10, 600)
+  check_until_timeout(query_cur, sql, 0, wait_timeout)
 
 # 3. 检查schema是否刷新成功
 def check_schema_status(query_cur, timeout):
   sql = """select if (a.cnt = b.cnt, 1, 0) as passed from (select count(*) as cnt from oceanbase.__all_virtual_server_schema_info where refreshed_schema_version > 1 and refreshed_schema_version % 8 = 0) as a join (select count(*) as cnt from oceanbase.__all_server join oceanbase.__all_tenant) as b"""
-  check_until_timeout(query_cur, sql, 1, timeout)
+  wait_timeout = set_default_timeout_by_tenant(query_cur, timeout, 30, 600)
+  check_until_timeout(query_cur, sql, 1, wait_timeout)
 
 # 4. check major finish
 def check_major_merge(query_cur, timeout):
   need_check = 0
-  (desc, results) = query_cur.exec_query("""select distinct value from  GV$OB_PARAMETERs where name = 'enable_major_freeze';""")
+  (desc, results) = query_cur.exec_query("""select distinct value from oceanbase.GV$OB_PARAMETERS where name = 'enable_major_freeze';""")
   if len(results) != 1:
     need_check = 1
   elif results[0][0] != 'True':
     need_check = 1
   if need_check == 1:
-    sql = """select count(1) from CDB_OB_MAJOR_COMPACTION where (GLOBAL_BROADCAST_SCN > LAST_SCN or STATUS != 'IDLE')"""
-    check_until_timeout(query_cur, sql, 0, timeout)
-    sql2 = """select /*+ query_timeout(1000000000) */ count(1) from __all_virtual_tablet_compaction_info where max_received_scn > finished_scn and max_received_scn > 0"""
-    check_until_timeout(query_cur, sql2, 0, timeout)
+    wait_timeout = set_default_timeout_by_tenant(query_cur, timeout, 30, 600)
+    sql = """select count(1) from oceanbase.CDB_OB_MAJOR_COMPACTION where (GLOBAL_BROADCAST_SCN > LAST_SCN or STATUS != 'IDLE')"""
+    check_until_timeout(query_cur, sql, 0, wait_timeout)
+    sql2 = """select /*+ query_timeout(1000000000) */ count(1) from oceanbase.__all_virtual_tablet_compaction_info where max_received_scn > finished_scn and max_received_scn > 0"""
+    check_until_timeout(query_cur, sql2, 0, wait_timeout)
 
 def check_until_timeout(query_cur, sql, value, timeout):
   times = timeout / 10
@@ -351,8 +386,8 @@ def check_until_timeout(query_cur, sql, value, timeout):
 
     times -= 1
     if times == -1:
-      logging.warn("""check {0} job timeout""".format(job_name))
-      raise e
+      logging.warn("""result not expected, sql: '{0}', expected: '{1}', current: '{2}'""".format(sql, value, results[0][0]))
+      raise MyError("""result not expected, sql: '{0}', expected: '{1}', current: '{2}'""".format(sql, value, results[0][0]))
     time.sleep(10)
 
 # 开始健康检查
@@ -366,7 +401,6 @@ def do_check(my_host, my_port, my_user, my_passwd, upgrade_params, timeout, need
                                    raise_on_warnings = True)
     conn.autocommit = True
     cur = conn.cursor(buffered=True)
-    timeout = timeout if timeout > 0 else 600
     try:
       query_cur = QueryCursor(cur)
       check_zone_valid(query_cur, zone)
@@ -376,18 +410,18 @@ def do_check(my_host, my_port, my_user, my_passwd, upgrade_params, timeout, need
       check_server_version_by_zone(query_cur, zone)
       if True == need_check_major_status:
         check_major_merge(query_cur, timeout)
-    except Exception, e:
+    except Exception as e:
       logging.exception('run error')
-      raise e
+      raise
     finally:
       cur.close()
       conn.close()
-  except mysql.connector.Error, e:
+  except mysql.connector.Error as e:
     logging.exception('connection error')
-    raise e
-  except Exception, e:
+    raise
+  except Exception as e:
     logging.exception('normal error')
-    raise e
+    raise
 
 if __name__ == '__main__':
   upgrade_params = UpgradeParams()
@@ -409,12 +443,12 @@ if __name__ == '__main__':
       timeout = int(get_opt_timeout())
       zone = get_opt_zone()
       logging.info('parameters from cmd: host=\"%s\", port=%s, user=\"%s\", password=\"%s\", log-file=\"%s\", timeout=%s, zone=\"%s\"', \
-          host, port, user, password, log_filename, timeout, zone)
+          host, port, user, password.replace('"', '\\"'), log_filename, timeout, zone)
       do_check(host, port, user, password, upgrade_params, timeout, False, zone) # need_check_major_status = False
-    except mysql.connector.Error, e:
+    except mysql.connector.Error as e:
       logging.exception('mysql connctor error')
-      raise e
-    except Exception, e:
+      raise
+    except Exception as e:
       logging.exception('normal error')
-      raise e
+      raise
 

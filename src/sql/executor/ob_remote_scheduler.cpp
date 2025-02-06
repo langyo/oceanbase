@@ -14,20 +14,11 @@
 
 #include "sql/executor/ob_remote_scheduler.h"
 #include "sql/executor/ob_remote_job_control.h"
-#include "sql/executor/ob_task_spliter_factory.h"
 #include "sql/executor/ob_remote_job_executor.h"
 #include "sql/executor/ob_remote_task_executor.h"
 #include "sql/executor/ob_local_job_executor.h"
 #include "sql/executor/ob_local_task_executor.h"
-#include "sql/executor/ob_job.h"
-#include "share/partition_table/ob_partition_location.h"
 #include "sql/executor/ob_job_parser.h"
-#include "sql/executor/ob_task_executor_ctx.h"
-#include "sql/engine/ob_physical_plan_ctx.h"
-#include "share/ob_define.h"
-#include "lib/utility/utility.h"
-#include "sql/engine/ob_exec_context.h"
-#include "rpc/obrpc/ob_rpc_net_handler.h"
 
 namespace oceanbase
 {
@@ -164,7 +155,8 @@ int ObRemoteScheduler::build_remote_task(ObExecContext &ctx,
       K(task_exec_ctx.get_query_sys_begin_schema_version()));
   remote_task.set_remote_sql_info(&plan_ctx->get_remote_sql_info());
   ObDASTabletLoc *first_tablet_loc = DAS_CTX(ctx).get_table_loc_list().get_first()->get_first_tablet_loc();
-  if (OB_ISNULL(session = ctx.get_my_session())) {
+  if (OB_FAIL(ret)){
+  } else if (OB_ISNULL(session = ctx.get_my_session())) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("session is null", K(ret));
   } else {
@@ -174,7 +166,9 @@ int ObRemoteScheduler::build_remote_task(ObExecContext &ctx,
     task_id.set_server(ctx.get_addr());
     task_id.set_task_id(0);
     remote_task.set_task_id(task_id);
-    remote_task.set_snapshot(ctx.get_das_ctx().get_snapshot());
+    if (OB_FAIL(remote_task.set_snapshot(ctx.get_das_ctx().get_snapshot()))) {
+      LOG_WARN("fail to set snapshot", K(ret));
+    }
   }
   return ret;
 }

@@ -1,3 +1,6 @@
+// owner: zjf225077
+// owner group: log
+
 /**
  * Copyright (c) 2021 OceanBase
  * OceanBase CE is licensed under Mulan PubL v2.
@@ -10,22 +13,11 @@
  * See the Mulan PubL v2 for more details.
  */
 
-#include "lib/ob_define.h"
-#include "lib/ob_errno.h"
-#include <cstdio>
-#include <gtest/gtest.h>
-#include <signal.h>
-#include <stdexcept>
 #define private public
 #define protected public
 #include "env/ob_simple_log_cluster_env.h"
 #undef private
 #undef protected
-#include "logservice/palf/log_reader_utils.h"
-#include "logservice/palf/log_define.h"
-#include "logservice/palf/log_group_entry_header.h"
-#include "logservice/palf/log_io_worker.h"
-#include "logservice/palf/lsn.h"
 
 const std::string TEST_NAME = "log_restart";
 using namespace oceanbase::common;
@@ -63,8 +55,9 @@ int64_t ObSimpleLogClusterTestBase::member_cnt_ = 1;
 int64_t ObSimpleLogClusterTestBase::node_cnt_ = 1;
 std::string ObSimpleLogClusterTestBase::test_name_ = TEST_NAME;
 bool ObSimpleLogClusterTestBase::need_add_arb_server_  = false;
+bool ObSimpleLogClusterTestBase::need_shared_storage_ = false;
 constexpr int64_t timeout_ts_us = 3 * 1000 * 1000;
-
+int64_t log_entry_size = 2 * 1024 * 1024 + 16 * 1024;
 
 TEST_F(TestObSimpleLogClusterRestart, read_block_in_flashback)
 {
@@ -77,7 +70,7 @@ TEST_F(TestObSimpleLogClusterRestart, read_block_in_flashback)
   PalfEnv *palf_env = NULL;
   EXPECT_EQ(OB_SUCCESS, create_paxos_group(id, leader_idx, leader));
 
-  EXPECT_EQ(OB_SUCCESS, submit_log(leader, 2 * 32 + 2, id, MAX_LOG_BODY_SIZE));
+  EXPECT_EQ(OB_SUCCESS, submit_log(leader, 2 * 32 + 2, id, log_entry_size));
   EXPECT_EQ(OB_SUCCESS, wait_until_has_committed(leader, leader.get_palf_handle_impl()->get_max_lsn()));
 
   block_id_t min_block_id, max_block_id;
@@ -133,7 +126,7 @@ TEST_F(TestObSimpleLogClusterRestart, restart_when_first_log_block_is_empty)
     PalfHandleImplGuard leader;
     EXPECT_EQ(OB_SUCCESS, get_leader(id, leader, leader_idx));
     EXPECT_EQ(LSN(PALF_INITIAL_LSN_VAL), leader.palf_handle_impl_->get_max_lsn());
-    EXPECT_EQ(OB_SUCCESS, submit_log(leader, 1, id, MAX_LOG_BODY_SIZE));
+    EXPECT_EQ(OB_SUCCESS, submit_log(leader, 1, id, log_entry_size));
     EXPECT_EQ(OB_SUCCESS, wait_lsn_until_flushed(leader.palf_handle_impl_->get_max_lsn(), leader));
     EXPECT_EQ(OB_SUCCESS, leader.palf_handle_impl_->log_engine_.truncate(LSN(0)));
   }
@@ -144,7 +137,7 @@ TEST_F(TestObSimpleLogClusterRestart, restart_when_first_log_block_is_empty)
     PalfHandleImplGuard leader;
     EXPECT_EQ(OB_SUCCESS, get_leader(id, leader, leader_idx));
     EXPECT_EQ(LSN(PALF_INITIAL_LSN_VAL), leader.palf_handle_impl_->get_max_lsn());
-    EXPECT_EQ(OB_SUCCESS, submit_log(leader, 40, id, MAX_LOG_BODY_SIZE));
+    EXPECT_EQ(OB_SUCCESS, submit_log(leader, 40, id, log_entry_size));
     EXPECT_EQ(OB_SUCCESS, wait_until_has_committed(leader, leader.palf_handle_impl_->get_max_lsn()));
     PalfBaseInfo base_info;
     base_info.generate_by_default();
@@ -169,7 +162,7 @@ TEST_F(TestObSimpleLogClusterRestart, restart_when_first_log_block_is_empty)
     PalfHandleImplGuard leader;
     EXPECT_EQ(OB_SUCCESS, get_leader(id, leader, leader_idx));
     EXPECT_EQ(rebuild_lsn, leader.palf_handle_impl_->get_max_lsn());
-    EXPECT_EQ(OB_SUCCESS, submit_log(leader, 1, id, MAX_LOG_BODY_SIZE));
+    EXPECT_EQ(OB_SUCCESS, submit_log(leader, 1, id, log_entry_size));
     EXPECT_EQ(OB_SUCCESS, wait_until_has_committed(leader, leader.palf_handle_impl_->get_max_lsn()));
     int64_t mode_version;
     switch_append_to_flashback(leader, mode_version);
@@ -182,7 +175,7 @@ TEST_F(TestObSimpleLogClusterRestart, restart_when_first_log_block_is_empty)
     EXPECT_EQ(rebuild_lsn, leader.palf_handle_impl_->get_max_lsn());
     int64_t mode_version;
     switch_flashback_to_append(leader, mode_version);
-    EXPECT_EQ(OB_SUCCESS, submit_log(leader, 1, id, MAX_LOG_BODY_SIZE));
+    EXPECT_EQ(OB_SUCCESS, submit_log(leader, 1, id, log_entry_size));
     EXPECT_EQ(OB_SUCCESS, wait_until_has_committed(leader, leader.palf_handle_impl_->get_max_lsn()));
   }
 }
@@ -198,7 +191,7 @@ TEST_F(TestObSimpleLogClusterRestart, test_restart)
   {
     PalfHandleImplGuard leader;
     EXPECT_EQ(OB_SUCCESS, create_paxos_group(id, leader_idx, leader));
-    EXPECT_EQ(OB_SUCCESS, submit_log(leader, 1, id, MAX_LOG_BODY_SIZE));
+    EXPECT_EQ(OB_SUCCESS, submit_log(leader, 1, id, log_entry_size));
     wait_lsn_until_flushed(leader.palf_handle_impl_->get_max_lsn(), leader);
     LogEngine *log_engine = &leader.palf_handle_impl_->log_engine_;
     char *meta_log_dir = log_engine->log_meta_storage_.block_mgr_.log_dir_;
@@ -221,7 +214,7 @@ TEST_F(TestObSimpleLogClusterRestart, test_restart)
     PalfHandleImplGuard leader;
     EXPECT_EQ(OB_SUCCESS, create_paxos_group(id, leader_idx, leader));
     EXPECT_EQ(OB_SUCCESS, get_leader(id, leader, leader_idx));
-    EXPECT_EQ(OB_SUCCESS, submit_log(leader, 33, id, MAX_LOG_BODY_SIZE));
+    EXPECT_EQ(OB_SUCCESS, submit_log(leader, 33, id, log_entry_size));
     wait_lsn_until_flushed(leader.palf_handle_impl_->get_max_lsn(), leader);
     block_id_t min_block_id, max_block_id;
     LogStorage *log_storage = &leader.palf_handle_impl_->log_engine_.log_storage_;
@@ -240,7 +233,7 @@ TEST_F(TestObSimpleLogClusterRestart, test_restart)
     PalfHandleImplGuard leader;
     EXPECT_EQ(OB_SUCCESS, get_leader(id, leader, leader_idx));
     //检查manifest是否为3
-    EXPECT_EQ(OB_SUCCESS, submit_log(leader, 1, id, MAX_LOG_BODY_SIZE));
+    EXPECT_EQ(OB_SUCCESS, submit_log(leader, 1, id, log_entry_size));
     LogStorage *meta_storage = &leader.get_palf_handle_impl()->log_engine_.log_meta_storage_;
     EXPECT_EQ(2, lsn_2_block(meta_storage->log_block_header_.min_lsn_, PALF_BLOCK_SIZE));
   }
@@ -251,7 +244,7 @@ TEST_F(TestObSimpleLogClusterRestart, test_restart)
     PalfHandleImplGuard leader;
     id = ATOMIC_AAF(&palf_id_, 1);
     EXPECT_EQ(OB_SUCCESS, create_paxos_group(id, leader_idx, leader));
-    EXPECT_EQ(OB_SUCCESS, submit_log(leader, 66, id, MAX_LOG_BODY_SIZE));
+    EXPECT_EQ(OB_SUCCESS, submit_log(leader, 66, id, log_entry_size));
     wait_lsn_until_flushed(leader.palf_handle_impl_->get_max_lsn(), leader);
     EXPECT_EQ(OB_ITER_END, read_log(leader));
   }
@@ -299,7 +292,7 @@ TEST_F(TestObSimpleLogClusterRestart, test_restart)
     EXPECT_EQ(OB_SUCCESS, log_storage->get_block_id_range(min_block_id, max_block_id));
     EXPECT_EQ(2, max_block_id);
     EXPECT_EQ(3, lsn_2_block(meta_storage->log_block_header_.min_lsn_, PALF_BLOCK_SIZE));
-    EXPECT_EQ(OB_SUCCESS, submit_log(leader, 1, id, MAX_LOG_BODY_SIZE));
+    EXPECT_EQ(OB_SUCCESS, submit_log(leader, 1, id, log_entry_size));
     wait_lsn_until_flushed(leader.palf_handle_impl_->get_max_lsn(), leader);
     EXPECT_EQ(3, lsn_2_block(meta_storage->log_block_header_.min_lsn_, PALF_BLOCK_SIZE));
   }
@@ -312,7 +305,7 @@ TEST_F(TestObSimpleLogClusterRestart, test_restart)
     LogIOWorker *iow = leader.palf_handle_impl_->log_engine_.log_io_worker_;
     int64_t epoch = leader.palf_handle_impl_->log_engine_.palf_epoch_;
     int64_t palf_id = leader.palf_handle_impl_->palf_id_;
-    EXPECT_EQ(OB_SUCCESS, submit_log(leader, 29, id, MAX_LOG_BODY_SIZE));
+    EXPECT_EQ(OB_SUCCESS, submit_log(leader, 29, id, log_entry_size));
     EXPECT_EQ(OB_SUCCESS, wait_lsn_until_flushed(leader.palf_handle_impl_->get_max_lsn(), leader));
     // 预期log_tail接近文件2的尾部
     EXPECT_LE(LSN(3*PALF_BLOCK_SIZE) - log_storage->log_tail_, 5*1024*1024);
@@ -323,7 +316,7 @@ TEST_F(TestObSimpleLogClusterRestart, test_restart)
     EXPECT_EQ(OB_SUCCESS, wait_lsn_until_flushed(leader.palf_handle_impl_->get_max_lsn(), leader));
     IOTaskConsumeCond cond(palf_id, epoch);
     EXPECT_EQ(OB_SUCCESS, iow->submit_io_task(&cond));
-    EXPECT_EQ(OB_SUCCESS, submit_log(leader, 10, id, MAX_LOG_BODY_SIZE));
+    EXPECT_EQ(OB_SUCCESS, submit_log(leader, 10, id, log_entry_size));
     while (1) {
       if (leader.palf_handle_impl_->sw_.last_submit_end_lsn_ < leader.palf_handle_impl_->get_max_lsn()) {
         usleep(5000);
@@ -353,7 +346,7 @@ TEST_F(TestObSimpleLogClusterRestart, test_restart)
     LogIOWorker *iow = leader.palf_handle_impl_->log_engine_.log_io_worker_;
     int64_t epoch = leader.palf_handle_impl_->log_engine_.palf_epoch_;
     int64_t palf_id = leader.palf_handle_impl_->palf_id_;
-    EXPECT_EQ(OB_SUCCESS, submit_log(leader, 10, id, MAX_LOG_BODY_SIZE));
+    EXPECT_EQ(OB_SUCCESS, submit_log(leader, 10, id, log_entry_size));
     EXPECT_EQ(OB_SUCCESS, wait_until_has_committed(leader, leader.palf_handle_impl_->get_end_lsn()));
     sleep(1);
     EXPECT_EQ(OB_SUCCESS, submit_log(leader, 1, id, 1000));
@@ -361,7 +354,7 @@ TEST_F(TestObSimpleLogClusterRestart, test_restart)
     EXPECT_EQ(OB_SUCCESS, wait_lsn_until_flushed(leader.palf_handle_impl_->get_max_lsn(), leader));
     IOTaskConsumeCond cond(palf_id, epoch);
     EXPECT_EQ(OB_SUCCESS, iow->submit_io_task(&cond));
-    EXPECT_EQ(OB_SUCCESS, submit_log(leader, 10, id, MAX_LOG_BODY_SIZE));
+    EXPECT_EQ(OB_SUCCESS, submit_log(leader, 10, id, log_entry_size));
     while (1) {
       if (leader.palf_handle_impl_->sw_.last_submit_end_lsn_ < leader.palf_handle_impl_->get_max_lsn()) {
         usleep(5000);
@@ -382,9 +375,10 @@ TEST_F(TestObSimpleLogClusterRestart, test_restart)
     PalfBaseInfo base_info;
     EXPECT_EQ(OB_SUCCESS, leader.palf_handle_impl_->get_base_info(
       leader.palf_handle_impl_->get_max_lsn(), base_info));
+    base_info.curr_lsn_ = LSN(10*PALF_BLOCK_SIZE);
     LogSnapshotMeta snapshot;
-    base_info.prev_log_info_.lsn_ = LSN(10*PALF_BLOCK_SIZE - 10*1024);
-    EXPECT_EQ(OB_SUCCESS, snapshot.generate(LSN(10*PALF_BLOCK_SIZE), base_info.prev_log_info_));
+    base_info.prev_log_info_.lsn_ = base_info.curr_lsn_ - 10*1024;
+    EXPECT_EQ(OB_SUCCESS, snapshot.generate(base_info.curr_lsn_, base_info.prev_log_info_, base_info.curr_lsn_));
     FlushMetaCbCtx meta_ctx;
     meta_ctx.type_ = SNAPSHOT_META;
     meta_ctx.base_lsn_ = snapshot.base_lsn_;
@@ -418,20 +412,27 @@ TEST_F(TestObSimpleLogClusterRestart, advance_base_lsn_with_restart)
     sleep(2);
     LSN log_tail =
         leader.palf_handle_impl_->log_engine_.log_meta_storage_.log_tail_;
-    for (int64_t i = 0; i < 4096; i++) {
+    int count = (LSN(PALF_META_BLOCK_SIZE) - log_tail)/4096;
+    for (int64_t i = 0; i < count; i++) {
       EXPECT_EQ(OB_SUCCESS, leader.palf_handle_impl_->enable_vote());
     }
-    while (LSN(4096 * 4096 + log_tail.val_) !=
+    while (LSN(PALF_META_BLOCK_SIZE) !=
         leader.palf_handle_impl_->log_engine_.log_meta_storage_.log_tail_)
     {
       sleep(1);
     }
+    sleep(1);
+    EXPECT_EQ(LSN(PALF_META_BLOCK_SIZE), leader.palf_handle_impl_->log_engine_.log_meta_storage_.log_tail_);
+    EXPECT_EQ(OB_SUCCESS, leader.palf_handle_impl_->log_engine_.log_meta_storage_.block_mgr_.switch_next_block(1));
   }
   EXPECT_EQ(OB_SUCCESS, restart_paxos_groups());
   {
     PalfHandleImplGuard leader;
     EXPECT_EQ(OB_SUCCESS, get_leader(id, leader, leader_idx));
+    EXPECT_LT(LSN(PALF_META_BLOCK_SIZE), leader.palf_handle_impl_->log_engine_.log_meta_storage_.log_tail_);
     EXPECT_EQ(OB_SUCCESS, leader.palf_handle_impl_->set_base_lsn(LSN(0)));
+    sleep(1);
+    EXPECT_LT(LSN(PALF_META_BLOCK_SIZE) + 4096, leader.palf_handle_impl_->log_engine_.log_meta_storage_.log_tail_);
   }
 }
 
@@ -532,6 +533,63 @@ TEST_F(TestObSimpleLogClusterRestart, restart_and_clear_tmp_files)
   }
   EXPECT_EQ(OB_SUCCESS, ret);
   PALF_LOG(INFO, "end test restart", K(id), K(guard));
+}
+
+TEST_F(TestObSimpleLogClusterRestart, test_with_tmp_dir)
+{
+  SET_CASE_LOG_FILE(TEST_NAME, "test_with_tmp_dir");
+  OB_LOGGER.set_log_level("INFO");
+  const int64_t id = ATOMIC_AAF(&palf_id_, 1);
+  PALF_LOG(INFO, "start advance_base_lsn", K(id));
+  int64_t leader_idx = 0;
+  int64_t log_ts = 1;
+  ObServerLogBlockMgr *log_pool = nullptr;
+  std::string logserver_dir;
+  {
+    PalfHandleImplGuard leader;
+    EXPECT_EQ(OB_SUCCESS, create_paxos_group(id, leader_idx, leader));
+    EXPECT_EQ(OB_SUCCESS, submit_log(leader, 100, id));
+    logserver_dir = leader.palf_env_impl_->log_dir_;
+    sleep(2);
+    LSN log_tail =
+        leader.palf_handle_impl_->log_engine_.log_meta_storage_.log_tail_;
+    int count = (LSN(PALF_META_BLOCK_SIZE) - log_tail)/4096;
+    for (int64_t i = 0; i < count; i++) {
+      EXPECT_EQ(OB_SUCCESS, leader.palf_handle_impl_->enable_vote());
+    }
+    while (LSN(PALF_META_BLOCK_SIZE) !=
+        leader.palf_handle_impl_->log_engine_.log_meta_storage_.log_tail_)
+    {
+      sleep(1);
+    }
+    sleep(1);
+    EXPECT_EQ(LSN(PALF_META_BLOCK_SIZE), leader.palf_handle_impl_->log_engine_.log_meta_storage_.log_tail_);
+    EXPECT_EQ(OB_SUCCESS, leader.palf_handle_impl_->log_engine_.log_meta_storage_.block_mgr_.switch_next_block(1));
+    ObISimpleLogServer *i_server = get_cluster()[leader_idx];
+    ObSimpleLogServer *server = dynamic_cast<ObSimpleLogServer*>(i_server);
+    log_pool = &server->log_block_pool_;
+  }
+  const std::string log_pool_dir = log_pool->log_pool_path_;
+  std::size_t pos = log_pool_dir.find_last_of('/');
+  const std::string log_base_dir = log_pool_dir.substr(0, pos);
+  const std::string mkdir_unexpected_dir = "mkdir -p " + log_base_dir + "/unexpected_dir";
+  CLOG_LOG(INFO, "runlin trace print mkdir", K(mkdir_unexpected_dir.c_str()));
+  system(mkdir_unexpected_dir.c_str());
+  EXPECT_EQ(OB_ERR_UNEXPECTED, restart_paxos_groups());
+  const std::string rm_unexpected_dir = "rm -rf " + log_base_dir + "/unexpected_dir";
+  system(rm_unexpected_dir.c_str());
+  const std::string tmp_log_dir = logserver_dir + "/tmp_dir";
+  const std::string mkdir_tmp_log_dir = "mkdir -p " + tmp_log_dir;
+  system(mkdir_tmp_log_dir.c_str());
+  EXPECT_EQ(OB_SUCCESS, restart_paxos_groups());
+  {
+    PalfHandleImplGuard leader;
+    EXPECT_EQ(OB_SUCCESS, get_leader(id, leader, leader_idx));
+    EXPECT_LT(LSN(PALF_META_BLOCK_SIZE), leader.palf_handle_impl_->log_engine_.log_meta_storage_.log_tail_);
+    EXPECT_EQ(OB_SUCCESS, leader.palf_handle_impl_->set_base_lsn(LSN(0)));
+    sleep(1);
+    EXPECT_LT(LSN(PALF_META_BLOCK_SIZE) + 4096, leader.palf_handle_impl_->log_engine_.log_meta_storage_.log_tail_);
+  }
 }
 
 } // namespace unittest

@@ -59,10 +59,12 @@ public:
   ObMicroBlockReader()
     : ObIMicroBlockFlatReader(),
       ObIMicroBlockReader()
-  {}
+  {
+    reader_type_ = Reader;
+  }
   virtual ~ObMicroBlockReader()
   { reset(); }
-  virtual ObReaderType get_type() override { return Reader; }
+  // virtual ObReaderType get_type() override { return Reader; }
   virtual void reset();
   virtual int init(
       const ObMicroBlockData &block_data,
@@ -76,6 +78,10 @@ public:
   virtual int get_row_header(
       const int64_t row_idx,
       const ObRowHeader *&row_header) override;
+  int get_logical_row_cnt(
+      const int64_t last,
+      int64_t &row_idx,
+      int64_t &row_cnt) const;
   virtual int get_row_count(int64_t &row_count) override;
   int get_multi_version_info(
       const int64_t row_idx,
@@ -93,7 +99,7 @@ public:
       const common::ObIArray<int32_t> &cols_projector,
       const common::ObIArray<const share::schema::ObColumnParam *> &col_params,
       const blocksstable::ObDatumRow *default_row,
-      const int64_t *row_ids,
+      const int32_t *row_ids,
       const int64_t row_cap,
       ObDatumRow &row_buf,
       common::ObIArray<ObSqlDatumInfo> &datum_infos,
@@ -102,9 +108,10 @@ public:
       sql::ObEvalCtx &eval_ctx);
   virtual int get_row_count(
       int32_t col,
-      const int64_t *row_ids,
+      const int32_t *row_ids,
       const int64_t row_cap,
       const bool contains_null,
+      const share::schema::ObColumnParam *col_param,
       int64_t &count) override final;
   virtual int64_t get_column_count() const override
   {
@@ -112,18 +119,25 @@ public:
     return header_->column_count_;
   }
   virtual int get_aggregate_result(
+      const ObTableIterParam &iter_param,
+      const ObTableAccessContext &context,
       const int32_t col_offset,
-      const share::schema::ObColumnParam *col_param,
-      const int64_t *row_ids,
+      const share::schema::ObColumnParam &col_param,
+      const int32_t *row_ids,
       const int64_t row_cap,
       storage::ObAggDatumBuf &agg_datum_buf,
       storage::ObAggCell &agg_cell) override;
   int get_aggregate_result(
-      const int64_t *row_ids,
+      const ObTableIterParam &iter_param,
+      const ObTableAccessContext &context,
+      const int32_t *row_ids,
       const int64_t row_cap,
       ObDatumRow &row_buf,
       common::ObIArray<storage::ObAggCell*> &agg_cells);
   virtual int get_column_datum(
+      const ObTableIterParam &iter_param,
+      const ObTableAccessContext &context,
+      const share::schema::ObColumnParam &col_param,
       const int32_t col_offset,
       const int64_t row_index,
       ObStorageDatum &datum) override;
@@ -142,6 +156,7 @@ public:
       const int64_t begin_idx,
       int64_t &row_idx) override;
   OB_INLINE bool single_version_rows() { return nullptr != header_ && header_->single_version_rows_; }
+  OB_INLINE bool committed_single_version_rows() { return single_version_rows() && !header_->contain_uncommitted_rows(); }
 
   // For column store
   virtual int find_bound(
@@ -153,6 +168,19 @@ public:
       bool &equal) override;
   virtual void reserve_reader_memory(bool reserve) override
   { allocator_.set_reserve_memory(reserve); }
+  int get_rows(
+      const common::ObIArray<int32_t> &cols_projector,
+      const common::ObIArray<const share::schema::ObColumnParam *> &col_params,
+      const blocksstable::ObDatumRow *default_row,
+      const int32_t *row_ids,
+      const int64_t vector_offset,
+      const int64_t row_cap,
+      ObDatumRow &row_buf,
+      sql::ObExprPtrIArray &exprs,
+      sql::ObEvalCtx &eval_ctx,
+      const bool need_init_vector);
+  virtual bool has_lob_out_row() const override final
+  { return nullptr != header_ && header_->has_lob_out_row(); }
 
 protected:
   virtual int find_bound(

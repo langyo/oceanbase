@@ -13,25 +13,11 @@
 #define USING_LOG_PREFIX PL
 
 #include "core/jit_context.h"
-#include "llvm/IR/LLVMContext.h"
-#include "llvm/IR/Module.h"
-#include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Verifier.h"
-#include "llvm/IR/GlobalVariable.h"
-#include "llvm/ExecutionEngine/ExecutionEngine.h"
 #include "llvm/Support/TargetSelect.h"
-#include "llvm/Support/DynamicLibrary.h"
-
-#include "share/ob_define.h"
 #include "objit/ob_llvm_helper.h"
-#include "objit/ob_llvm_di_helper.h"
-#include "lib/oblog/ob_log_module.h"
-#include "lib/ob_errno.h"
-#include "lib/utility/ob_macro_utils.h"
-#include "lib/allocator/ob_malloc.h"
-#include "lib/container/ob_se_array.h"
-#include "share/rc/ob_tenant_base.h"
-#include "lib/alloc/malloc_hook.h"
+
+#include "src/pl/ob_pl.h"
 
 using namespace llvm;
 
@@ -123,7 +109,11 @@ static ObGetIRType OB_IR_TYPE[common::ObMaxType + 1] =
   NULL,                                                    //48.ObGeometryType
   NULL,                                                    //49.ObUserDefinedSQLType
   NULL,                                                    //50. ObDecimalIntType
-  NULL,                                                    //51.ObMaxType
+  NULL,                                                    //51.ObCollectionSQLType
+  reinterpret_cast<ObGetIRType>(ObIRType::getInt32Ty),     //52.ObMySQLDateType
+  reinterpret_cast<ObGetIRType>(ObIRType::getInt64Ty),     //53.ObMySQLDateTimeType
+  NULL,                                                    //54.ObRoaringBitmapType
+  NULL,                                                    //55.ObMaxType
 };
 
 template<typename T, int64_t N>
@@ -145,6 +135,20 @@ int ObLLVMType::get_pointer_to(ObLLVMType &result)
     ret = common::OB_NOT_INIT;
   } else {
     result.set_v(get_v()->getPointerTo());
+  }
+  return ret;
+}
+
+int ObLLVMType::get_pointee_type(ObLLVMType &result)
+{
+  int ret = common::OB_SUCCESS;
+  if (OB_ISNULL(get_v())) {
+    ret = common::OB_NOT_INIT;
+  } else if (OB_UNLIKELY(llvm::Type::PointerTyID != get_id())) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("not a pointer", K(ret), K(get_id()), K(lbt()));
+  } else {
+    result.set_v(get_v()->getPointerElementType());
   }
   return ret;
 }
@@ -490,7 +494,7 @@ int ObLLVMSwitch::add_case(const ObLLVMValue &value, ObLLVMBasicBlock &block)
 
 ObLLVMHelper::~ObLLVMHelper()
 {
-  OB_LLVM_MALLOC_GUARD("PlJit");
+  OB_LLVM_MALLOC_GUARD(GET_PL_MOD_STRING(pl::OB_PL_JIT));
   final();
   if (nullptr != jit_) {
     jit_->~ObOrcJit();
@@ -501,20 +505,43 @@ ObLLVMHelper::~ObLLVMHelper()
 int ObLLVMHelper::init()
 {
   int ret = OB_SUCCESS;
-  OB_LLVM_MALLOC_GUARD("PlJit");
+  OB_LLVM_MALLOC_GUARD(GET_PL_MOD_STRING(pl::OB_PL_JIT));
 
-  if (nullptr == (jc_ = OB_NEWx(core::JitContext, (&allocator_)))) {
+  if (is_inited_) {
+    ret = OB_INIT_TWICE;
+    LOG_WARN("ObLLVMHelper has been inited", K(ret), K(lbt()));
+  } else if (nullptr == (jc_ = OB_NEWx(core::JitContext, (&allocator_)))) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
     LOG_WARN("failed to alloc memory for jit context", K(ret));
-#ifndef ORC2
   } else if (nullptr == (jit_ = OB_NEWx(core::ObOrcJit, (&allocator_), allocator_))) {
-#else
-  } else if (nullptr == (jit_ = core::ObOrcJit::create(allocator_))) {
-#endif
+    jc_->~JitContext();
+    allocator_.free(jc_);
+    jc_ = nullptr;
+
     ret = OB_ALLOCATE_MEMORY_FAILED;
     LOG_WARN("failed to alloc memory for jit", K(ret));
+  } else if (OB_FAIL(jit_->init())) {
+    jit_->~ObOrcJit();
+    allocator_.free(jit_);
+    jit_ = nullptr;
+
+    jc_->~JitContext();
+    allocator_.free(jc_);
+    jc_ = nullptr;
+
+    LOG_WARN("failed to init jit engine", K(ret));
+  } else if (OB_FAIL(jc_->InitializeModule(jit_->get_DL()))) {
+    jit_->~ObOrcJit();
+    allocator_.free(jit_);
+    jit_ = nullptr;
+
+    jc_->~JitContext();
+    allocator_.free(jc_);
+    jc_ = nullptr;
+
+    LOG_WARN("failed to initialize module", K(ret));
   } else {
-    jc_->InitializeModule(*jit_);
+    is_inited_ = true;
   }
 
   return ret;
@@ -522,7 +549,7 @@ int ObLLVMHelper::init()
 
 void ObLLVMHelper::final()
 {
-  OB_LLVM_MALLOC_GUARD("PlJit");
+  OB_LLVM_MALLOC_GUARD(GET_PL_MOD_STRING(pl::OB_PL_JIT));
   if (nullptr != jc_) {
     jc_->~JitContext();
     allocator_.free(jc_);
@@ -538,7 +565,9 @@ int ObLLVMHelper::initialize()
   llvm::InitializeNativeTargetAsmPrinter();
   llvm::InitializeNativeTargetAsmParser();
 
-#if !defined(__aarch64__)
+/*Do not juse use !defined(__aarch64__) here*/
+//#if !defined(__aarch64__)
+#if defined(__x86_64__)
   // initialize LLVM X86 unfold table
   llvm::lookupUnfoldTable(0);
 #endif
@@ -551,11 +580,13 @@ int ObLLVMHelper::initialize()
 int ObLLVMHelper::init_llvm() {
   int ret = OB_SUCCESS;
 
-  OB_LLVM_MALLOC_GUARD("PlJit");
-  ObArenaAllocator alloc("PlJit", OB_MALLOC_NORMAL_BLOCK_SIZE, OB_SYS_TENANT_ID);
+  OB_LLVM_MALLOC_GUARD(GET_PL_MOD_STRING(pl::OB_PL_JIT));
+  ObArenaAllocator alloc(GET_PL_MOD_STRING(pl::OB_PL_JIT), OB_MALLOC_NORMAL_BLOCK_SIZE, OB_SYS_TENANT_ID);
   ObLLVMHelper helper(alloc);
   ObLLVMDIHelper di_helper(alloc);
   static char init_func_name[] = "pl_init_func";
+
+  OZ (core::ObNotifyLoaded::initGdbHelper());
 
   OZ (helper.init());
   OZ (di_helper.init(helper.get_jc()));
@@ -566,6 +597,7 @@ int ObLLVMHelper::init_llvm() {
   ObLLVMFunctionType ft;
   ObLLVMBasicBlock block;
   ObLLVMValue magic;
+  uint64_t addr;
 
   OZ (helper.get_llvm_type(ObIntType, int64_type));
   OZ (arg_types.push_back(int64_type));
@@ -576,27 +608,69 @@ int ObLLVMHelper::init_llvm() {
   OZ (helper.get_int64(OB_SUCCESS, magic));
   OZ (helper.create_ret(magic));
 
-  OX (helper.compile_module());
-  OX (helper.get_function_address(init_func_name));
+  OZ (helper.compile_module(jit::ObPLOptLevel::O2));
+  OZ (helper.get_function_address(init_func_name, addr));
 
   return ret;
 }
 
-void ObLLVMHelper::compile_module(bool optimization)
+int ObLLVMHelper::compile_module(jit::ObPLOptLevel optimization)
 {
-  if (optimization) {
-    OB_LLVM_MALLOC_GUARD("PlCodeGen");
-    jc_->optimize();
-    LOG_INFO("================Optimized LLVM Module================");
-    dump_module();
+  int ret = OB_SUCCESS;
+
+  CK (OB_NOT_NULL(jc_));
+  CK (OB_NOT_NULL(jc_->TheModule));
+
+  if (OB_FAIL(ret)) {
+    // do nothing
+  } else if (OB_FAIL(jit_->set_optimize_level(optimization))) {
+    LOG_WARN("failed to set backend optimize level", K(ret), K(optimization));
+  } else {
+    if (optimization >= jit::ObPLOptLevel::O2) {
+      OB_LLVM_MALLOC_GUARD(GET_PL_MOD_STRING(pl::OB_PL_CODE_GEN));
+      jc_->optimize();
+      LOG_INFO("================Optimized LLVM Module================");
+      dump_module();
+    }
+
+    if (OB_SUCC(ret)) {
+      OB_LLVM_MALLOC_GUARD(GET_PL_MOD_STRING(pl::OB_PL_CODE_GEN));
+
+      for (auto func_iter = jc_->TheModule->functions().begin();
+           OB_SUCC(ret) && func_iter != jc_->TheModule->functions().end();
+           func_iter++) {
+        for (auto block_iter = func_iter->begin();
+             OB_SUCC(ret) && block_iter != func_iter->end();
+             block_iter++) {
+          for (auto inst_iter = block_iter->begin();
+               OB_SUCC(ret) && inst_iter != block_iter->end();
+               inst_iter++) {
+            const auto &alloca = llvm::dyn_cast_or_null<llvm::AllocaInst>(&*inst_iter);
+            if (alloca && !alloca->isStaticAlloca()) {
+              ret = OB_ERR_UNEXPECTED;
+              LOG_WARN("[to hyy] dynamic alloca found, which is not allowed",
+                       K(ret),
+                       "alloca_name", alloca->getName().str().c_str(),
+                       "block_name", alloca->getParent()->getName().str().c_str(),
+                       "function_name", alloca->getParent()->getParent()->getName().str().c_str());
+            }
+          }
+        }
+      }
+    }
+
+    if (OB_SUCC(ret)) {
+      OB_LLVM_MALLOC_GUARD(GET_PL_MOD_STRING(pl::OB_PL_JIT));
+      OZ (jc_->compile(*jit_));
+    }
   }
-  OB_LLVM_MALLOC_GUARD("PlJit");
-  jc_->compile();
+
+  return ret;
 }
 
 void ObLLVMHelper::dump_module()
 {
-  OB_LLVM_MALLOC_GUARD("PlCodeGen");
+  OB_LLVM_MALLOC_GUARD(GET_PL_MOD_STRING(pl::OB_PL_CODE_GEN));
   if (OB_ISNULL(jc_)) {
     //do nothing
   } else {
@@ -609,7 +683,7 @@ void ObLLVMHelper::dump_module()
 
 void ObLLVMHelper::dump_debuginfo()
 {
-  OB_LLVM_MALLOC_GUARD("PlCodeGen");
+  OB_LLVM_MALLOC_GUARD(GET_PL_MOD_STRING(pl::OB_PL_CODE_GEN));
   if (OB_ISNULL(jit_) || jit_->get_debug_info_size() <= 0) {
     // do nothing ...
   } else {
@@ -617,26 +691,9 @@ void ObLLVMHelper::dump_debuginfo()
   }
 }
 
-int ObLLVMHelper::verify_function(ObLLVMFunction &function)
-{
-  OB_LLVM_MALLOC_GUARD("PlCodeGen");
-  int ret = OB_SUCCESS;
-  if (OB_ISNULL(jc_)) {
-    ret = OB_NOT_INIT;
-    LOG_WARN("jc is NULL", K(ret));
-  } else if (OB_ISNULL(function.get_v())) {
-    ret = OB_INVALID_ARGUMENT;
-    LOG_WARN("value is NULL", K(ret));
-  } else if (verifyFunction(*function.get_v())) {
-    ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("failed to verify function", K(ret));
-  } else { /*do nothing*/ }
-  return ret;
-}
-
 int ObLLVMHelper::verify_module()
 {
-  OB_LLVM_MALLOC_GUARD("PlCodeGen");
+  OB_LLVM_MALLOC_GUARD(GET_PL_MOD_STRING(pl::OB_PL_CODE_GEN));
   int ret = OB_SUCCESS;
   std::string verify_error;
   llvm::raw_string_ostream verify_raw_os(verify_error);
@@ -647,18 +704,31 @@ int ObLLVMHelper::verify_module()
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("failed to verify function", K(ret), K(verify_error.c_str()));
   } else { /*do nothing*/ }
+
+  // always reset Builder
+  if (OB_NOT_NULL(jc_)) {
+    jc_->Builder.reset();
+  }
   return ret;
 }
 
-uint64_t ObLLVMHelper::get_function_address(const ObString &name)
+int ObLLVMHelper::get_function_address(const ObString &name, uint64_t &addr)
 {
-  OB_LLVM_MALLOC_GUARD("PlJit");
-  return jc_->TheJIT->get_function_address(std::string(name.ptr(), name.length()));
+  int ret = OB_SUCCESS;
+
+  CK (OB_NOT_NULL(jit_));
+
+  if (OB_SUCC(ret)) {
+    OB_LLVM_MALLOC_GUARD(GET_PL_MOD_STRING(pl::OB_PL_JIT));
+    OZ (jit_->get_function_address(std::string(name.ptr(), name.length()), addr));
+  }
+
+  return ret;
 }
 
 void ObLLVMHelper::add_symbol(const ObString &name, void *value)
 {
-  llvm::sys::DynamicLibrary::AddSymbol(make_string_ref(name), value);
+  core::ObJitGlobalSymbolGenerator::add_symbol(make_string_ref(name), value);
 }
 
 ObDIRawData ObLLVMHelper::get_debug_info() const
@@ -984,7 +1054,11 @@ int ObLLVMHelper::create_load(const ObString &name, ObLLVMValue &ptr, ObLLVMValu
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("value is NULL", K(name), K(ptr), K(ret));
   } else {
+#ifdef CPP_STANDARD_20
+    llvm::Value *value = jc_->get_builder().CreateLoad(ObIRType::getInt64Ty(jc_->get_context()), ptr.get_v(), make_string_ref(name));
+#else
     llvm::Value *value = jc_->get_builder().CreateLoad(ptr.get_v(), make_string_ref(name));
+#endif
     if (OB_ISNULL(value)) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("failed to create load", K(ret));
@@ -1021,6 +1095,18 @@ int ObLLVMHelper::create_istore(int64_t i, ObLLVMValue &dest)
   } else if (OB_ISNULL(dest.get_v())) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("value is NULL", K(i), K(dest), K(ret));
+#ifdef CPP_STANDARD_20
+  } else if (llvm::Type::PointerTyID != dest.get_type_id()
+      || 0 == dest.get_type().get_num_child()
+      || 1 != dest.get_type().get_num_child()
+      || llvm::Type::IntegerTyID != dest.get_type().get_child(0).get_id()) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("dest type is not integer pointer ",
+             K(i),
+             K(dest.get_type_id()),
+             K(dest.get_type().get_num_child()),
+             K(ret));
+#else
   } else if (llvm::Type::PointerTyID != dest.get_type_id()
       || 1 != dest.get_type().get_num_child()
       || llvm::Type::IntegerTyID != dest.get_type().get_child(0).get_id()) {
@@ -1031,6 +1117,7 @@ int ObLLVMHelper::create_istore(int64_t i, ObLLVMValue &dest)
              K(dest.get_type().get_num_child()),
              K(dest.get_type().get_child(0).get_id()),
              K(ret));
+#endif
   } else {
     ObLLVMValue value;
     if (OB_FAIL(get_int_value(dest.get_type().get_child(0), i, value))) {
@@ -1046,7 +1133,7 @@ int ObLLVMHelper::create_icmp_eq(ObLLVMValue &value, int64_t i, ObLLVMValue &res
 {
   int ret = OB_SUCCESS;
   if (OB_FAIL(create_icmp(value, i, ICMP_EQ, result))) {
-    LOG_WARN("failed to get int64", K(i), K(ret));
+    LOG_WARN("failed to create_icmp", K(value), K(i), K(ret));
   }
   return ret;
 }
@@ -1055,7 +1142,7 @@ int ObLLVMHelper::create_icmp_slt(ObLLVMValue &value, int64_t i, ObLLVMValue &re
 {
   int ret = OB_SUCCESS;
   if (OB_FAIL(create_icmp(value, i, ICMP_SLT, result))) {
-    LOG_WARN("failed to get int64", K(i), K(ret));
+    LOG_WARN("failed to create_icmp", K(value), K(i), K(ret));
   }
   return ret;
 }
@@ -1368,7 +1455,11 @@ int ObLLVMHelper::create_gep(const ObString &name, ObLLVMValue &value, ObIArray<
       } else { /*do nothing*/ }
     }
     if (OB_SUCC(ret)) {
+#ifdef CPP_STANDARD_20
+      llvm::Value *elem = jc_->get_builder().CreateGEP(ObIRType::getInt64Ty(jc_->get_context()), value.get_v(), make_array_ref(array), make_string_ref(name));
+#else
       llvm::Value *elem = jc_->get_builder().CreateGEP(value.get_v(), make_array_ref(array), make_string_ref(name));
+#endif
       if (OB_ISNULL(elem)) {
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("failed to create gep", K(ret));
@@ -1411,7 +1502,11 @@ int ObLLVMHelper::create_gep(const ObString &name, ObLLVMValue &value, ObLLVMVal
     } else if (OB_FAIL(array.push_back(idx.get_v()))) {
       LOG_WARN("push_back error", K(ret));
     } else {
+#ifdef CPP_STANDARD_20
+      llvm::Value *elem = jc_->get_builder().CreateGEP(ObIRType::getInt64Ty(jc_->get_context()), value.get_v(), make_array_ref(array), make_string_ref(name));
+#else
       llvm::Value *elem = jc_->get_builder().CreateGEP(value.get_v(), make_array_ref(array), make_string_ref(name));
+#endif
       if (OB_ISNULL(elem)) {
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("failed to create gep", K(ret));
@@ -1433,7 +1528,11 @@ int ObLLVMHelper::create_const_gep1_64(const ObString &name, ObLLVMValue &value,
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("value is NULL", K(name), K(value), K(idx), K(ret));
   } else {
+#ifdef CPP_STANDARD_20
+    llvm::Value *elem = jc_->get_builder().CreateConstGEP1_64(ObIRType::getInt64Ty(jc_->get_context()), value.get_v(), idx, make_string_ref(name));
+#else
     llvm::Value *elem = jc_->get_builder().CreateConstGEP1_64(value.get_v(), idx, make_string_ref(name));
+#endif
     if (OB_ISNULL(elem)) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("failed to create const gep164", K(ret));
@@ -1592,7 +1691,7 @@ int ObLLVMHelper::create_global_string(const ObString &str, ObLLVMValue &result)
     llvm::Value *value = jc_->get_builder().CreateGlobalStringPtr(make_string_ref(str));
     if (OB_ISNULL(value)) {
       ret = OB_ERR_UNEXPECTED;
-      LOG_WARN("failed to create switch", K(ret));
+      LOG_WARN("unexpected NULL global string", K(ret), K(str));
     } else {
       result.set_v(value);
     }
@@ -1636,6 +1735,30 @@ int ObLLVMHelper::set_insert_point(const ObLLVMBasicBlock &block)
   return ret;
 }
 
+int ObLLVMHelper::set_insert_point(ObLLVMValue &value)
+{
+  int ret = OB_SUCCESS;
+
+  if (OB_ISNULL(jc_)) {
+    ret = OB_NOT_INIT;
+    LOG_WARN("jc is NULL", K(ret));
+  } else if (OB_ISNULL(value.get_v())) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("value is NULL", K(value), K(ret));
+  } else {
+    llvm::Instruction *inst = llvm::dyn_cast<llvm::Instruction>(value.get_v());
+
+    if (OB_ISNULL(inst)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("value is not an instruction", K(ret), K(value), K(lbt()));
+    } else {
+      jc_->get_builder().SetInsertPoint(inst);
+    }
+  }
+
+  return ret;
+}
+
 int ObLLVMHelper::set_debug_location(uint32_t line, uint32_t col, ObLLVMDIScope *scope)
 {
   int ret = OB_SUCCESS;
@@ -1646,8 +1769,36 @@ int ObLLVMHelper::set_debug_location(uint32_t line, uint32_t col, ObLLVMDIScope 
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("scope is NULL", K(ret));
   } else {
+#ifdef CPP_STANDARD_20
+    jc_->get_builder().SetCurrentDebugLocation(ObDILocation::get(scope->get_v()->getContext(), line, col, scope->get_v()));
+#else
     jc_->get_builder().SetCurrentDebugLocation(ObDebugLoc::get(line, col, scope->get_v()));
+#endif
   }
+  return ret;
+}
+
+int ObLLVMHelper::get_debug_location(uint32_t &line, uint32_t &col)
+{
+  int ret = OB_SUCCESS;
+
+  if (OB_ISNULL(jc_)) {
+    ret = OB_NOT_INIT;
+    LOG_WARN("jc is NULL", K(ret));
+  } else {
+    line = 0;
+    col = 0;
+    DebugLoc curr_loc = jc_->get_builder().getCurrentDebugLocation();
+
+    if (OB_NOT_NULL(curr_loc.get())) {
+      line = curr_loc.getLine();
+      col = curr_loc.getCol();
+    } else {
+      LOG_INFO("[to hyy] some statement may forget to set debug_location, please check",
+               K(lbt()));
+    }
+  }
+
   return ret;
 }
 
@@ -1722,14 +1873,20 @@ int ObLLVMHelper::get_array_type(const ObLLVMType &elem_type, uint64_t size, ObL
   return ret;
 }
 
-int ObLLVMHelper::get_uint64_array(const ObIArray<uint64_t> &elem_values, ObLLVMValue &result)
+template <typename T>
+static int get_llvm_array_ptr(ObIAllocator &allocator,
+                              ObLLVMContext &context,
+                              llvm::Module &module,
+                              const ObIArray<T> &elem_values,
+                              ObLLVMValue &result)
 {
   int ret = OB_SUCCESS;
+
   if (elem_values.empty()) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("element types is empty", K(ret));
   } else {
-    ObFastArray<uint64_t, 64> array(allocator_);
+    ObFastArray<T, 64> array(allocator);
     for (int64_t i = 0; OB_SUCC(ret) && i < elem_values.count(); ++i) {
       if (OB_FAIL(array.push_back(elem_values.at(i)))) {
         LOG_WARN("push_back error", K(i), K(elem_values), K(ret));
@@ -1737,52 +1894,62 @@ int ObLLVMHelper::get_uint64_array(const ObIArray<uint64_t> &elem_values, ObLLVM
     }
     // TODO:
     if (OB_SUCC(ret)) {
-      llvm::Constant *value = llvm::ConstantDataArray::get(jc_->get_context(), make_array_ref(array));
+      llvm::Constant *value = llvm::ConstantDataArray::get(context, make_array_ref(array));
       if (OB_ISNULL(value)) {
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("failed to create struct type", K(ret));
       } else {
-        result.set_v(value);
+        GlobalVariable *gv = new GlobalVariable(
+          module, value->getType(), true, GlobalValue::PrivateLinkage, value);
+
+        if (OB_ISNULL(gv)) {
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("unexpected NULL global variable", K(ret));
+        } else {
+          gv->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
+          gv->setAlignment(Align(alignof(T)));
+        }
+
+        if (OB_SUCC(ret)) {
+          llvm::Constant *zero = ConstantInt::get(Type::getInt32Ty(context), 0);
+          llvm::Constant *indices[] = {zero, zero};
+
+          llvm::Value *ptr = ConstantExpr::getInBoundsGetElementPtr(gv->getValueType(), gv, indices);
+
+          result.set_v(ptr);
+        }
       }
     }
   }
+
   return ret;
 }
 
-int ObLLVMHelper::get_string(const ObString &str, ObLLVMValue &result)
+int ObLLVMHelper::get_uint64_array(const ObIArray<uint64_t> &elem_values, ObLLVMValue &result)
 {
   int ret = OB_SUCCESS;
-  if (str.empty()) {
-    ret = OB_INVALID_ARGUMENT;
-    LOG_WARN("element types is empty", K(str), K(ret));
-  } else {
-    llvm::Constant *value = llvm::ConstantDataArray::getString(jc_->get_context(), make_string_ref(str));
-    if (OB_ISNULL(value)) {
-      ret = OB_ERR_UNEXPECTED;
-      LOG_WARN("failed to create struct type", K(str), K(ret));
-    } else {
-      result.set_v(value);
-    }
+
+  if (OB_ISNULL(jc_)) {
+    ret = OB_NOT_INIT;
+    LOG_WARN("jc is NULL", K(jc_), K(ret));
+  } else if (OB_FAIL(get_llvm_array_ptr(allocator_, jc_->get_context(), jc_->get_module(), elem_values, result))) {
+    LOG_WARN("failed to get_llvm_array_ptr", K(ret), K(elem_values), K(result));
   }
+
   return ret;
 }
 
-int ObLLVMHelper::get_global_string(ObLLVMValue &const_string, ObLLVMValue &result)
+int ObLLVMHelper::get_int8_array(const ObIArray<int8_t> &elem_values, ObLLVMValue &result)
 {
   int ret = OB_SUCCESS;
-  llvm::Value *string_var = nullptr;
-  if (nullptr == (string_var = new llvm::GlobalVariable(
-    (jc_->get_module()),
-    const_string.get_v()->getType(),
-    true,
-    llvm::GlobalVariable::PrivateLinkage,
-    static_cast<llvm::Constant *>(const_string.get_v()),
-    ""))) {
-    ret = OB_ALLOCATE_MEMORY_FAILED;
-    LOG_WARN("failed allocate memory for GlobalVariable", K(ret), K(sizeof(llvm::GlobalVariable)));
-  } else {
-    result.set_v(string_var);
+
+  if (OB_ISNULL(jc_)) {
+    ret = OB_NOT_INIT;
+    LOG_WARN("jc is NULL", K(jc_), K(ret));
+  } else if (OB_FAIL(get_llvm_array_ptr(allocator_, jc_->get_context(), jc_->get_module(), elem_values, result))) {
+    LOG_WARN("failed to get_llvm_array_ptr", K(ret), K(elem_values), K(result));
   }
+
   return ret;
 }
 
@@ -1992,9 +2159,50 @@ int ObLLVMHelper::check_insert_point(bool &is_valid)
   return ret;
 }
 
+int ObLLVMHelper::create_phi(const ObString &name,
+                             ObLLVMType &type,
+                             ObIArray<std::pair<ObLLVMValue, ObLLVMBasicBlock>> &incoming,
+                             ObLLVMValue &result)
+{
+  int ret = OB_SUCCESS;
+
+  if (OB_ISNULL(jc_)) {
+    ret = OB_NOT_INIT;
+    LOG_WARN("jc is NULL", K(jc_), K(ret));
+  } else if (OB_ISNULL(type.get_v())) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("value is NULL", K(name), K(type), K(ret));
+  } else {
+    llvm::PHINode *phi = jc_->get_builder().CreatePHI(type.get_v(), incoming.count(), make_string_ref(name));
+
+    if (OB_ISNULL(phi)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("failed to create LLVM PHI node", K(ret));
+    } else {
+      for (int64_t i = 0; OB_SUCC(ret) && i < incoming.count(); ++i) {
+        std::pair<ObLLVMValue, ObLLVMBasicBlock> &curr = incoming.at(i);
+
+        CK (OB_NOT_NULL(curr.first.get_v()));
+        CK (OB_NOT_NULL(curr.second.get_v()))
+
+        if (OB_SUCC(ret)) {
+          phi->addIncoming(curr.first.get_v(), curr.second.get_v());
+        }
+      }
+
+      if (OB_SUCC(ret)) {
+        result.set_v(phi);
+      }
+    }
+  }
+
+  return ret;
+}
+
 int ObDWARFHelper::init()
 {
   int ret = OB_SUCCESS;
+  OB_LLVM_MALLOC_GUARD(GET_PL_MOD_STRING(pl::OB_PL_DEBUG_MOD));
   std::string s;
   llvm::raw_string_ostream Out(s);
   if (nullptr == (Context = OB_NEWx(core::ObDWARFContext, (&Allocator), DebugBuf, DebugLen))) {
@@ -2016,7 +2224,12 @@ int ObDWARFHelper::init()
     DumpOpts.ShowForm = true;
     DumpOpts.SummarizeTypes = true;
     DumpOpts.Verbose = true; 
-    Context->Context->dump(Out, DumpOpts);
+    {
+      // dump uses static memory, record as SYS tenant
+      lib::ObMallocHookAttrGuard malloc_guard(
+          ObMemAttr(OB_SYS_TENANT_ID, GET_PL_MOD_STRING(pl::OB_PL_DEBUG_MOD)));
+      Context->Context->dump(Out, DumpOpts);
+    }
     Out.flush();
     LOG_INFO("success to init ObDWARFHelper!", K(ret), K(Out.str().c_str()));
   }
@@ -2028,8 +2241,7 @@ int ObDWARFHelper::dump(char* DebugBuf, int64_t DebugLen)
   int ret = OB_SUCCESS;
   std::string s;
   llvm::raw_string_ostream Out(s);
-  core::StringMemoryBuffer MemoryBuf(DebugBuf, DebugLen);
-  MemoryBufferRef MemoryRef(MemoryBuf);
+  MemoryBufferRef MemoryRef(ObStringRef(DebugBuf, DebugLen), "");
   auto BinOrErr = llvm::object::createBinary(MemoryRef);
   if (!BinOrErr) {
     ret = OB_ERR_UNEXPECTED;
@@ -2047,7 +2259,12 @@ int ObDWARFHelper::dump(char* DebugBuf, int64_t DebugLen)
       DumpOpts.SummarizeTypes = true;
       DumpOpts.Verbose = true;
       Context->verify(Out);
-      Context->dump(Out, DumpOpts);
+      {
+        // dump uses static memory, record as SYS tenant
+        lib::ObMallocHookAttrGuard malloc_guard(
+            ObMemAttr(OB_SYS_TENANT_ID, GET_PL_MOD_STRING(pl::OB_PL_DEBUG_MOD)));
+        Context->dump(Out, DumpOpts);
+      }
       Out.flush();
     }
   }
@@ -2204,5 +2421,64 @@ int ObDWARFHelper::find_function_from_pc(uint64_t pc, ObDIEAddress &func)
   return ret;
 }
 
+ObDWARFHelper::~ObDWARFHelper() {
+  if (nullptr != Context) {
+    Context->~ObDWARFContext();
+    Allocator.free(Context);
+    Context = nullptr;
+  }
 }
+
+int ObLLVMHelper::add_compiled_object(size_t length, const char *ptr)
+{
+  int ret = OB_SUCCESS;
+
+  CK (OB_NOT_NULL(jit_));
+  CK (OB_NOT_NULL(ptr));
+  CK (OB_LIKELY(length > 0));
+
+  if (OB_SUCC(ret)) {
+    OB_LLVM_MALLOC_GUARD(GET_PL_MOD_STRING(pl::OB_PL_JIT));
+    OZ (jit_->add_compiled_object(length, ptr));
+  }
+
+  return ret;
 }
+
+const ObString& ObLLVMHelper::get_compiled_object()
+{
+  return jit_->get_compiled_object();
+}
+
+int ObLLVMHelper::get_compiled_stack_size(uint64_t &stack_size) {
+  int ret = OB_SUCCESS;
+
+  if (OB_ISNULL(jit_)) {
+    ret = OB_NOT_INIT;
+    LOG_WARN("jit is NULL", K(ret), K(jc_), K(jit_), K(lbt()));
+  } else {
+    stack_size = jit_->get_stack_size();
+  }
+
+  return ret;
+}
+
+#ifdef CPP_STANDARD_20
+int64 ObLLVMHelper::get_integer_type_id()
+{
+  return ::llvm::Type::IntegerTyID;
+}
+
+int64 ObLLVMHelper::get_pointer_type_id()
+{
+  return ::llvm::Type::PointerTyID;
+}
+
+int64 ObLLVMHelper::get_struct_type_id()
+{
+  return ::llvm::Type::StructTyID;
+}
+#endif
+
+} // namespace jit
+} // namespace oceanbase

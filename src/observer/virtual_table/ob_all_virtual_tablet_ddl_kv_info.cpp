@@ -13,7 +13,6 @@
 #include "observer/virtual_table/ob_all_virtual_tablet_ddl_kv_info.h"
 #include "storage/tx_storage/ob_ls_service.h"
 #include "storage/ddl/ob_tablet_ddl_kv.h"
-#include "storage/ddl/ob_tablet_ddl_kv_mgr.h"
 
 using namespace oceanbase::common;
 using namespace oceanbase::storage;
@@ -27,7 +26,7 @@ ObAllVirtualTabletDDLKVInfo::ObAllVirtualTabletDDLKVInfo()
       addr_(),
       ls_id_(share::ObLSID::INVALID_LS_ID),
       ls_iter_guard_(),
-      ls_tablet_iter_(ObMDSGetTabletMode::READ_READABLE_COMMITED),
+      ls_tablet_iter_(ObMDSGetTabletMode::READ_ALL_COMMITED),
       ddl_kvs_handle_(),
       curr_tablet_id_(),
       ddl_kv_idx_(-1)
@@ -95,19 +94,24 @@ int ObAllVirtualTabletDDLKVInfo::get_next_ddl_kv_mgr(ObDDLKvMgrHandle &ddl_kv_mg
 {
   int ret = OB_SUCCESS;
   while (OB_SUCC(ret)) {
-    if (OB_FAIL(ls_tablet_iter_.get_next_ddl_kv_mgr(ddl_kv_mgr_handle))) {
-      if (!ls_tablet_iter_.is_valid() || OB_ITER_END == ret) {
-        ret = OB_SUCCESS; // continue to next ls
-        ObLS *ls = nullptr;
-        if (OB_FAIL(get_next_ls(ls))) {
-          if (OB_ITER_END != ret) {
-            SERVER_LOG(WARN, "fail to get next ls", K(ret));
-          }
-        } else if (OB_FAIL(ls->get_tablet_svr()->build_tablet_iter(ls_tablet_iter_))) {
-          SERVER_LOG(WARN, "fail to get tablet iter", K(ret));
+    if (!ls_tablet_iter_.is_valid()) {
+      ObLS *ls = nullptr;
+      if (OB_FAIL(get_next_ls(ls))) {
+        if (OB_ITER_END != ret) {
+          SERVER_LOG(WARN, "fail to get next ls", K(ret));
         }
+      } else if (OB_FAIL(ls->build_tablet_iter(ls_tablet_iter_))) {
+        SERVER_LOG(WARN, "fail to build tablet iter", K(ret));
+      }
+    }
+
+    if (OB_FAIL(ret)) {
+    } else if (OB_FAIL(ls_tablet_iter_.get_next_ddl_kv_mgr(ddl_kv_mgr_handle))) {
+      if (OB_ITER_END == ret) {
+        ls_tablet_iter_.reset();
+        ret = OB_SUCCESS;
       } else {
-        SERVER_LOG(WARN, "fail to get next ddl kv mgr", K(ret));
+        SERVER_LOG(WARN, "fail to get next tablet", K(ret));
       }
     } else {
       curr_tablet_id_ = ddl_kv_mgr_handle.get_obj()->get_tablet_id();
@@ -122,7 +126,7 @@ int ObAllVirtualTabletDDLKVInfo::get_next_ddl_kv(ObDDLKV *&ddl_kv)
   int ret = OB_SUCCESS;
   ObTabletHandle tablet_handle;
   while (OB_SUCC(ret)) {
-    if (ddl_kv_idx_ < 0 || ddl_kv_idx_ >= ddl_kvs_handle_.get_count()) {
+    if (ddl_kv_idx_ < 0 || ddl_kv_idx_ >= ddl_kvs_handle_.count()) {
       ObDDLKvMgrHandle ddl_kv_mgr_handle;
       if (OB_FAIL(get_next_ddl_kv_mgr(ddl_kv_mgr_handle))) {
         if (OB_ITER_END != ret) {
@@ -130,13 +134,13 @@ int ObAllVirtualTabletDDLKVInfo::get_next_ddl_kv(ObDDLKV *&ddl_kv)
         }
       } else if (OB_FAIL(ddl_kv_mgr_handle.get_obj()->get_ddl_kvs(false/*frozen_only*/, ddl_kvs_handle_))) {
         SERVER_LOG(WARN, "fail to get ddl kvs", K(ret));
-      } else if (ddl_kvs_handle_.get_count() > 0) {
+      } else if (ddl_kvs_handle_.count() > 0) {
         ddl_kv_idx_ = 0;
       }
     }
 
-    if (OB_SUCC(ret) && ddl_kv_idx_ >= 0 && ddl_kv_idx_ < ddl_kvs_handle_.get_count()) {
-      ddl_kv = static_cast<ObDDLKV *>(ddl_kvs_handle_.get_table(ddl_kv_idx_));
+    if (OB_SUCC(ret) && ddl_kv_idx_ >= 0 && ddl_kv_idx_ < ddl_kvs_handle_.count()) {
+      ddl_kv = ddl_kvs_handle_.at(ddl_kv_idx_).get_obj();
       if (OB_ISNULL(ddl_kv)) {
         ret = OB_ERR_UNEXPECTED;
         SERVER_LOG(WARN, "fail to get ddl kv", K(ret), K(ddl_kv_idx_));

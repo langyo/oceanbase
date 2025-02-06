@@ -20,7 +20,6 @@
 #include "ob_log_part_trans_task.h"     // PartTransTask
 #include "ob_log_schema_getter.h"       // IObLogSchemaGetter
 #include "ob_log_tenant_mgr.h"          // IObLogTenantMgr
-#include "ob_log_table_matcher.h"       // IObLogTableMatcher
 #include "ob_log_config.h"              // TCONF
 
 #define _STAT(level, fmt, args...) _OBLOG_LOG(level, "[STAT] [DDL_PROCESSOR] " fmt, ##args)
@@ -50,7 +49,8 @@ namespace libobcdc
 ObLogDDLProcessor::ObLogDDLProcessor() :
     is_inited_(false),
     schema_getter_(NULL),
-    skip_reversed_schema_version_(false)
+    skip_reversed_schema_version_(false),
+    enable_white_black_list_(false)
 {}
 
 ObLogDDLProcessor::~ObLogDDLProcessor()
@@ -60,7 +60,8 @@ ObLogDDLProcessor::~ObLogDDLProcessor()
 
 int ObLogDDLProcessor::init(
     IObLogSchemaGetter *schema_getter,
-    const bool skip_reversed_schema_version)
+    const bool skip_reversed_schema_version,
+    const bool enable_white_black_list)
 {
   int ret = OB_SUCCESS;
 
@@ -72,6 +73,7 @@ int ObLogDDLProcessor::init(
     LOG_ERROR("invalid argument", KR(ret), K(schema_getter));
   } else {
     skip_reversed_schema_version_ = skip_reversed_schema_version;
+    enable_white_black_list_ = enable_white_black_list;
     is_inited_ = true;
   }
 
@@ -83,11 +85,13 @@ void ObLogDDLProcessor::destroy()
   is_inited_ = false;
   schema_getter_ = NULL;
   skip_reversed_schema_version_ = false;
+  enable_white_black_list_ = false;
 }
 
 int ObLogDDLProcessor::handle_ddl_trans(
     PartTransTask &task,
     ObLogTenant &tenant,
+    const bool need_update_tic,
     volatile bool &stop_flag)
 {
   int ret = OB_SUCCESS;
@@ -97,7 +101,7 @@ int ObLogDDLProcessor::handle_ddl_trans(
     LOG_ERROR("invalid ddl task which is not DDL trans", KR(ret), K(task));
   }
   // Iterate through all DDL statements
-  else if (OB_FAIL(handle_tenant_ddl_task_(task, tenant, stop_flag))) {
+  else if (OB_FAIL(handle_tenant_ddl_task_(task, tenant, need_update_tic, stop_flag))) {
     if (OB_IN_STOP_STATE != ret) {
       LOG_ERROR("handle_tenant_ddl_task_ fail", KR(ret), K(task), K(tenant));
     }
@@ -267,6 +271,7 @@ int ObLogDDLProcessor::filter_ddl_stmt_(ObLogTenant &tenant,
   }
 
   if (OB_SUCCESS == ret && ! chosen) {
+    ObCStringHelper helper;
     _ISTAT("[DDL] [FILTER_DDL_STMT] TENANT_ID=%lu OP_TYPE=%s(%d) SCHEMA_VERSION=%ld "
         "SCHEMA_DELAY=%.3lf(sec) CUR_SCHEMA_VERSION=%ld OP_TABLE_ID=%ld OP_TENANT_ID=%ld "
         "EXEC_TENANT_ID=%lu OP_DB_ID=%ld OP_TG_ID=%ld DDL_STMT=[%s] ONLY_FILTER_BY_TENANT=%d",
@@ -280,17 +285,17 @@ int ObLogDDLProcessor::filter_ddl_stmt_(ObLogTenant &tenant,
         ddl_stmt.get_exec_tenant_id(),
         ddl_stmt.get_op_database_id(),
         ddl_stmt.get_op_tablegroup_id(),
-        to_cstring(ddl_stmt.get_ddl_stmt_str()),
+        helper.convert(ddl_stmt.get_ddl_stmt_str()),
         only_filter_by_tenant);
   }
 
   return ret;
 }
 
-
 int ObLogDDLProcessor::handle_tenant_ddl_task_(
     PartTransTask &task,
     ObLogTenant &tenant,
+    const bool need_update_tic,
     volatile bool &stop_flag)
 {
   int ret = OB_SUCCESS;
@@ -354,7 +359,14 @@ int ObLogDDLProcessor::handle_tenant_ddl_task_(
         mark_stmt_binlog_record_invalid_(*ddl_stmt);
       } else {
         // statements are not filtered, processing DDL statements
-        if (OB_FAIL(handle_ddl_stmt_(tenant, task, *ddl_stmt, old_schema_version, new_schema_version, stop_flag))) {
+        if ((enable_white_black_list_ || TCONF.enable_hbase_mode) && need_update_tic && OB_FAIL(handle_ddl_stmt_update_tic_(tenant, task,
+            *ddl_stmt, old_schema_version, new_schema_version, stop_flag))) {
+          if (OB_IN_STOP_STATE != ret) {
+            LOG_ERROR("handle_ddl_stmt_update_tic_ fail", KR(ret), K(tenant), K(task), K(ddl_stmt),
+                K(old_schema_version), K(new_schema_version));
+          }
+        } else if (!need_update_tic && OB_FAIL(handle_ddl_stmt_(tenant, task, *ddl_stmt, old_schema_version,
+            new_schema_version, stop_flag))) {
           if (OB_IN_STOP_STATE != ret) {
             LOG_ERROR("handle_ddl_stmt_ fail", KR(ret), K(tenant), K(task), K(ddl_stmt),
                 K(old_schema_version), K(new_schema_version));
@@ -391,6 +403,7 @@ int ObLogDDLProcessor::handle_ddl_stmt_(
   ObSchemaOperationType op_type = (ObSchemaOperationType)ddl_stmt.get_operation_type();
   const int64_t checkpoint_seq = ddl_stmt.get_host().get_checkpoint_seq();
 
+  ObCStringHelper helper;
   _ISTAT("[DDL] [HANDLE_STMT] TENANT_ID=%lu OP_TYPE=%s(%d) OP_TABLE_ID=%ld SCHEMA_VERSION=%ld "
       "SCHEMA_DELAY=%.3lf(sec) CUR_SCHEMA_VERSION=%ld EXEC_TENANT_ID=%ld OP_TENANT_ID=%ld "
       "OP_TABLE_ID=%ld OP_DB_ID=%ld OP_TG_ID=%ld DDL_STMT=[%s] CHECKPOINT_SEQ=%ld TRANS_ID=%ld",
@@ -404,25 +417,31 @@ int ObLogDDLProcessor::handle_ddl_stmt_(
       ddl_stmt.get_op_table_id(),
       ddl_stmt.get_op_database_id(),
       ddl_stmt.get_op_tablegroup_id(),
-      to_cstring(ddl_stmt.get_ddl_stmt_str()),
+      helper.convert(ddl_stmt.get_ddl_stmt_str()),
       checkpoint_seq,
       task.get_trans_id().get_id());
 
+  const bool need_update_tic = false;
+
   switch (op_type) {
     case OB_DDL_DROP_TABLE : {
-      ret = handle_ddl_stmt_drop_table_(tenant, ddl_stmt, old_schema_version, new_schema_version, stop_flag);
+      ret = handle_ddl_stmt_drop_table_(tenant, ddl_stmt, old_schema_version, new_schema_version,
+          need_update_tic, stop_flag);
       break;
     }
     case OB_DDL_ALTER_TABLE : {
-      ret = handle_ddl_stmt_alter_table_(tenant, ddl_stmt, old_schema_version, new_schema_version, "alter_table", stop_flag);
+      ret = handle_ddl_stmt_alter_table_(tenant, ddl_stmt, old_schema_version, new_schema_version,
+          need_update_tic, stop_flag);
       break;
     }
     case OB_DDL_CREATE_TABLE : {
-      ret = handle_ddl_stmt_create_table_(tenant, ddl_stmt, new_schema_version, stop_flag);
+      ret = handle_ddl_stmt_create_table_(tenant, ddl_stmt, new_schema_version, need_update_tic,
+          stop_flag);
       break;
     }
     case OB_DDL_TABLE_RENAME : {
-      ret = handle_ddl_stmt_rename_table_(tenant, ddl_stmt, old_schema_version, new_schema_version, stop_flag);
+      ret = handle_ddl_stmt_rename_table_(tenant, ddl_stmt, old_schema_version, new_schema_version,
+          need_update_tic, stop_flag);
       break;
     }
     case OB_DDL_TRUNCATE_TABLE_DROP : {
@@ -488,7 +507,8 @@ int ObLogDDLProcessor::handle_ddl_stmt_(
       break;
     }
     case OB_DDL_DEL_DATABASE : {
-      ret = handle_ddl_stmt_drop_database_(tenant, ddl_stmt, old_schema_version, new_schema_version, stop_flag);
+      ret = handle_ddl_stmt_drop_database_(tenant, ddl_stmt, old_schema_version, new_schema_version,
+          need_update_tic, stop_flag);
       break;
     }
     case OB_DDL_RENAME_DATABASE : {
@@ -544,6 +564,78 @@ int ObLogDDLProcessor::handle_ddl_stmt_(
   return ret;
 }
 
+int ObLogDDLProcessor::handle_ddl_stmt_update_tic_(
+    ObLogTenant &tenant,
+    PartTransTask &task,
+    DdlStmtTask &ddl_stmt,
+    const int64_t old_schema_version,
+    const int64_t new_schema_version,
+    volatile bool &stop_flag)
+{
+  int ret = OB_SUCCESS;
+  ObSchemaOperationType op_type = (ObSchemaOperationType)ddl_stmt.get_operation_type();
+  const int64_t checkpoint_seq = ddl_stmt.get_host().get_checkpoint_seq();
+
+  ObCStringHelper helper;
+  _ISTAT("[DDL] [HANDLE_STMT_UPDATE_TIC] TENANT_ID=%lu OP_TYPE=%s(%d) OP_TABLE_ID=%ld SCHEMA_VERSION=%ld "
+      "SCHEMA_DELAY=%.3lf(sec) CUR_SCHEMA_VERSION=%ld EXEC_TENANT_ID=%ld OP_TENANT_ID=%ld "
+      "OP_TABLE_ID=%ld OP_DB_ID=%ld OP_TG_ID=%ld DDL_STMT=[%s] CHECKPOINT_SEQ=%ld TRANS_ID=%ld",
+      tenant.get_tenant_id(), ObSchemaOperation::type_str(op_type), op_type,
+      ddl_stmt.get_op_table_id(),
+      ddl_stmt.get_op_schema_version(),
+      get_delay_sec(ddl_stmt.get_op_schema_version()),
+      tenant.get_schema_version(),
+      ddl_stmt.get_exec_tenant_id(),
+      ddl_stmt.get_op_tenant_id(),
+      ddl_stmt.get_op_table_id(),
+      ddl_stmt.get_op_database_id(),
+      ddl_stmt.get_op_tablegroup_id(),
+      helper.convert(ddl_stmt.get_ddl_stmt_str()),
+      checkpoint_seq,
+      task.get_trans_id().get_id());
+
+  const bool need_update_tic = true;
+
+  switch (op_type) {
+    case OB_DDL_DROP_TABLE : {
+      ret = handle_ddl_stmt_drop_table_(tenant, ddl_stmt, old_schema_version, new_schema_version,
+          need_update_tic, stop_flag);
+      break;
+    }
+    case OB_DDL_ALTER_TABLE : {
+      ret = handle_ddl_stmt_alter_table_(tenant, ddl_stmt, old_schema_version, new_schema_version,
+          need_update_tic, stop_flag);
+      break;
+    }
+    case OB_DDL_CREATE_TABLE : {
+      ret = handle_ddl_stmt_create_table_(tenant, ddl_stmt, new_schema_version,
+          need_update_tic, stop_flag);
+      break;
+    }
+    case OB_DDL_TABLE_RENAME : {
+      ret = handle_ddl_stmt_rename_table_(tenant, ddl_stmt, old_schema_version, new_schema_version,
+          need_update_tic, stop_flag);
+      break;
+    }
+    case OB_DDL_DEL_DATABASE : {
+      ret = handle_ddl_stmt_drop_database_(tenant, ddl_stmt, old_schema_version, new_schema_version,
+          need_update_tic, stop_flag);
+      break;
+    }
+    default: {
+      break;
+    }
+  }
+
+  if (OB_FAIL(ret)) {
+    if (OB_IN_STOP_STATE != ret) {
+      LOG_ERROR("handle ddl statement for tic update fail", KR(ret), K(op_type), K(ddl_stmt));
+    }
+  }
+
+  return ret;
+}
+
 int ObLogDDLProcessor::handle_ddl_stmt_direct_output_(
     ObLogTenant &tenant,
     DdlStmtTask &ddl_stmt,
@@ -554,9 +646,10 @@ int ObLogDDLProcessor::handle_ddl_stmt_direct_output_(
   int ret = OB_SUCCESS;
   ObSchemaOperationType op_type =
       static_cast<ObSchemaOperationType>(ddl_stmt.get_operation_type());
+  ObCStringHelper helper;
   _ISTAT("[DDL] [HANDLE_STMT] [DIRECT_OUTPUT] TENANT_ID=%ld OP_TYPE=%s(%d) DDL_STMT=[%s]",
       tenant.get_tenant_id(), ObSchemaOperation::type_str(op_type), op_type,
-      to_cstring(ddl_stmt.get_ddl_stmt_str()));
+      helper.convert(ddl_stmt.get_ddl_stmt_str()));
 
   if (OB_FAIL(commit_ddl_stmt_(tenant, ddl_stmt, schema_version, stop_flag, NULL, NULL, format_with_new_schema))) {
     if (OB_IN_STOP_STATE != ret) {
@@ -653,12 +746,13 @@ int ObLogDDLProcessor::commit_ddl_stmt_(ObLogTenant &tenant,
     LOG_ERROR("set_binlog_record_db_name_ fail", KR(ret), K(op_type), K(tenant_name), K(db_name));
   } else {
     // handle done
+    ObCStringHelper helper;
     _ISTAT("[DDL] [HANDLE_DONE] TENANT_ID=%lu DB_NAME=%s OP_TYPE=%s(%d) SCHEMA_VERSION=%ld "
         "OP_TENANT_ID=%lu EXEC_TENANT_ID=%lu OP_DB_ID=%lu OP_TABLE_ID=%lu DDL_STMT=[%s] CHECKPOINT_SEQ=%ld",
         ddl_tenant_id, br_data->dbname(), op_type_str, op_type, ddl_stmt.get_op_schema_version(),
         ddl_stmt.get_op_tenant_id(), ddl_stmt.get_exec_tenant_id(), ddl_stmt.get_op_database_id(),
         ddl_stmt.get_op_table_id(),
-        to_cstring(ddl_stmt.get_ddl_stmt_str()),
+        helper.convert(ddl_stmt.get_ddl_stmt_str()),
         checkpoint_seq);
   }
 
@@ -1010,44 +1104,29 @@ int ObLogDDLProcessor::handle_ddl_stmt_drop_table_(ObLogTenant &tenant,
     DdlStmtTask &ddl_stmt,
     const int64_t old_schema_version,
     const int64_t new_schema_version,
+    const bool need_update_tic,
     volatile bool &stop_flag)
 {
   int ret = OB_SUCCESS;
-  ObLogSchemaGuard old_schema_guard;
   const char *tenant_name = NULL;
   const char *db_name = NULL;
   bool is_table_should_ignore_in_committer = false;
 
-  /*
-   * TODO Support
-  RETRY_FUNC(stop_flag, tenant.get_part_mgr(), drop_table,
-      ddl_stmt.get_op_table_id(),
-      old_schema_version,
-      new_schema_version,
-      is_table_should_ignore_in_committer,
-      old_schema_guard,
-      tenant_name,
-      db_name,
-      DATA_OP_TIMEOUT);
-   */
-
-  // If the schema error is encountered, it means that the tenant may be deleted in the future, so the schema of table,
-  // database, tenant or table group cannot be obtained, in this case, the DDL will be ignored.
-  IGNORE_SCHEMA_ERROR(ret, "schema_version", old_schema_version, K(ddl_stmt), K(is_table_should_ignore_in_committer));
-
-  if (OB_SUCC(ret)) {
-    // Delete table using old_schema_version parsing
-    if (OB_FAIL(commit_ddl_stmt_(tenant, ddl_stmt, old_schema_version, stop_flag, tenant_name, db_name, false,
-        is_table_should_ignore_in_committer))) {
-      if (OB_IN_STOP_STATE != ret) {
-        LOG_ERROR("commit_ddl_stmt_ fail", KR(ret), K(ddl_stmt), K(tenant), K(old_schema_version),
-            K(tenant_name), K(db_name), K(is_table_should_ignore_in_committer));
-      }
-    } else {
-      // succ
+  if (need_update_tic) {
+    RETRY_FUNC(stop_flag, tenant.get_part_mgr(), drop_table,
+        ddl_stmt.get_op_table_id(),
+        ddl_stmt,
+        old_schema_version,
+        DATA_OP_TIMEOUT);
+  } else if (OB_FAIL(commit_ddl_stmt_(tenant, ddl_stmt, old_schema_version, stop_flag, tenant_name,
+      db_name, false, is_table_should_ignore_in_committer))) {
+    if (OB_IN_STOP_STATE != ret) {
+      LOG_ERROR("commit_ddl_stmt_ fail", KR(ret), K(ddl_stmt), K(tenant), K(old_schema_version),
+          K(tenant_name), K(db_name), K(is_table_should_ignore_in_committer));
     }
+  } else {
+    // succ
   }
-
   return ret;
 }
 
@@ -1073,47 +1152,26 @@ int ObLogDDLProcessor::handle_ddl_stmt_alter_table_(
     DdlStmtTask &ddl_stmt,
     const int64_t old_schema_version,
     const int64_t new_schema_version,
-    const char *event,
+    const bool need_update_tic,
     volatile bool &stop_flag)
 {
   int ret = OB_SUCCESS;
-  ObLogSchemaGuard old_schema_guard;
-  ObLogSchemaGuard new_schema_guard;
   const char *old_tenant_name = NULL;
   const char *old_db_name = NULL;
-
-  // TODO：Support table renaming, refiltering  based on filtering rules
-  int64_t trans_commit_version = ddl_stmt.get_host().get_trans_commit_version();
-  int64_t start_serve_timestamp = get_start_serve_timestamp_(new_schema_version,
-      trans_commit_version);
-
-  // Atopt new_schema_version
-  // RETRY_FUNC(stop_flag, tenant.get_part_mgr(), alter_table,
-  //     ddl_stmt.get_op_table_id(),
-  //     old_schema_version,
-  //     new_schema_version,
-  //     start_serve_timestamp,
-  //     old_schema_guard,
-  //     new_schema_guard,
-  //     old_tenant_name,
-  //     old_db_name,
-  //     event,
-  //     DATA_OP_TIMEOUT);
-
-  // If the schema error is encountered, it means that the tenant may be deleted in the future, so the schema of table,
-  // database, tenant or table group cannot be obtained, in this case, the DDL will be ignored.
-  IGNORE_SCHEMA_ERROR(ret, "schema_version", new_schema_version, K(ddl_stmt));
-
-  if (OB_SUCC(ret)) {
-    // Set tenant, database and table name with old schema
-    if (OB_FAIL(commit_ddl_stmt_(tenant, ddl_stmt, old_schema_version, stop_flag, old_tenant_name, old_db_name))) {
-      if (OB_IN_STOP_STATE != ret) {
-        LOG_ERROR("commit_ddl_stmt_ fail", KR(ret), K(tenant), K(ddl_stmt), K(old_schema_version),
-            K(old_tenant_name), K(old_db_name));
-      }
+  if (need_update_tic) {
+    RETRY_FUNC(stop_flag, tenant.get_part_mgr(), alter_table,
+      ddl_stmt.get_op_table_id(),
+      ddl_stmt,
+      new_schema_version,
+      DATA_OP_TIMEOUT);
+  } else if (OB_FAIL(commit_ddl_stmt_(tenant, ddl_stmt, old_schema_version, stop_flag, old_tenant_name, old_db_name))) {
+    if (OB_IN_STOP_STATE != ret) {
+      LOG_ERROR("commit_ddl_stmt_ fail", KR(ret), K(tenant), K(ddl_stmt), K(old_schema_version),
+          K(old_tenant_name), K(old_db_name));
     }
+  } else {
+    // succ
   }
-
   return ret;
 }
 
@@ -1121,44 +1179,28 @@ int ObLogDDLProcessor::handle_ddl_stmt_create_table_(
     ObLogTenant &tenant,
     DdlStmtTask &ddl_stmt,
     const int64_t new_schema_version,
+    const bool need_update_tic,
     volatile bool &stop_flag)
 {
   int ret = OB_SUCCESS;
-  bool is_create_table = true;
   bool is_table_should_ignore_in_committer = false;
-  int64_t trans_commit_version = ddl_stmt.get_host().get_trans_commit_version();
-  int64_t start_serve_tstamp = get_start_serve_timestamp_(new_schema_version,
-      trans_commit_version);
-  ObLogSchemaGuard schema_guard;
   const char *tenant_name = NULL;
   const char *db_name = NULL;
 
-  // TODO support
-  /*
-  RETRY_FUNC(stop_flag, tenant.get_part_mgr(), add_table,
-      ddl_stmt.get_op_table_id(),
-      new_schema_version,
-      start_serve_tstamp,
-      is_create_table,
-      is_table_should_ignore_in_committer,
-      schema_guard,
-      tenant_name,
-      db_name,
-      DATA_OP_TIMEOUT);
-      */
-
-  // If the schema error is encountered, it means that the tenant may be deleted in the future, so the schema of table,
-  // database, tenant or table group cannot be obtained, in this case, the DDL will be ignored.
-  IGNORE_SCHEMA_ERROR(ret, "schema_version", new_schema_version, K(ddl_stmt), K(is_table_should_ignore_in_committer));
-
-  if (OB_SUCC(ret)) {
-    if (OB_FAIL(commit_ddl_stmt_(tenant, ddl_stmt, new_schema_version, stop_flag, tenant_name, db_name, true,
-        is_table_should_ignore_in_committer))) {
-      if (OB_IN_STOP_STATE != ret) {
-        LOG_ERROR("commit_ddl_stmt_ fail", KR(ret), K(tenant), K(ddl_stmt), K(tenant_name),
-            K(db_name), K(is_table_should_ignore_in_committer));
-      }
-    } else {}
+  if (need_update_tic) {
+    RETRY_FUNC(stop_flag, tenant.get_part_mgr(), add_table,
+        ddl_stmt.get_op_table_id(),
+        ddl_stmt,
+        new_schema_version,
+        DATA_OP_TIMEOUT);
+  } else if (OB_FAIL(commit_ddl_stmt_(tenant, ddl_stmt, new_schema_version, stop_flag, tenant_name,
+      db_name, true, is_table_should_ignore_in_committer))) {
+    if (OB_IN_STOP_STATE != ret) {
+      LOG_ERROR("commit_ddl_stmt_ fail", KR(ret), K(tenant), K(ddl_stmt), K(tenant_name),
+          K(db_name), K(is_table_should_ignore_in_committer));
+    }
+  } else {
+    // succ
   }
 
   return ret;
@@ -1169,15 +1211,19 @@ int ObLogDDLProcessor::handle_ddl_stmt_rename_table_(
     DdlStmtTask &ddl_stmt,
     const int64_t old_schema_version,
     const int64_t new_schema_version,
+    const bool need_update_tic,
     volatile bool &stop_flag)
 {
   int ret = OB_SUCCESS;
-  // TODO：support table rename
-  UNUSED(new_schema_version);
-
-  // Parsing with older schema versions
-  ret = handle_ddl_stmt_direct_output_(tenant, ddl_stmt, old_schema_version, stop_flag);
-
+  if (need_update_tic) {
+    RETRY_FUNC(stop_flag, tenant.get_part_mgr(), rename_table,
+        ddl_stmt.get_op_table_id(),
+        ddl_stmt,
+        new_schema_version,
+        DATA_OP_TIMEOUT);
+  } else {
+    ret = handle_ddl_stmt_direct_output_(tenant, ddl_stmt, old_schema_version, stop_flag);
+  }
   return ret;
 }
 
@@ -1275,12 +1321,13 @@ int ObLogDDLProcessor::handle_ddl_stmt_truncate_table_drop_(
   const char *db_name = NULL;
   bool is_table_should_ignore_in_committer = false;
 
+  ObCStringHelper helper;
   _ISTAT("[DDL] [TRUNCATE_DROP] TENANT_ID=%lu TABLE_ID=%ld SCHEMA_VERSION=(OLD=%ld,NEW=%ld) DDL_STMT=[%s]",
       tenant.get_tenant_id(),
       ddl_stmt.get_op_table_id(),
       old_schema_version,
       new_schema_version,
-      to_cstring(ddl_stmt.get_ddl_stmt_str()));
+      helper.convert(ddl_stmt.get_ddl_stmt_str()));
 
   // TODO Support
   /*
@@ -1315,13 +1362,14 @@ int ObLogDDLProcessor::handle_ddl_stmt_truncate_drop_table_to_recyclebin_(
 {
   int ret = OB_SUCCESS;
 
+  ObCStringHelper helper;
   _ISTAT("[DDL] [TRUNCATE_DROP_TABLE_TO_RECYCLEBIN] TENANT_ID=%lu TABLE_ID=%ld "
       "SCHEMA_VERSION=(OLD=%ld,NEW=%ld) DDL_STMT=[%s]",
       tenant.get_tenant_id(),
       ddl_stmt.get_op_table_id(),
       old_schema_version,
       new_schema_version,
-      to_cstring(ddl_stmt.get_ddl_stmt_str()));
+      helper.convert(ddl_stmt.get_ddl_stmt_str()));
 
   if (OB_SUCC(ret)) {
     // OB_DDL_TRUNCATE_DROP_TABLE_TO_RECYCLEBIN operation does not need to output DDL
@@ -1349,12 +1397,13 @@ int ObLogDDLProcessor::handle_ddl_stmt_truncate_table_create_(
   const char *tenant_name = NULL;
   const char *db_name = NULL;
 
+  ObCStringHelper helper;
   _ISTAT("[DDL] [TRUNCATE_CREATE] TENANT_ID=%lu TABLE_ID=%ld SCHEMA_VERSION=%ld START_TSTAMP=%ld DDL_STMT=[%s]",
       tenant.get_tenant_id(),
       ddl_stmt.get_op_table_id(),
       new_schema_version,
       start_serve_tstamp,
-      to_cstring(ddl_stmt.get_ddl_stmt_str()));
+      helper.convert(ddl_stmt.get_ddl_stmt_str()));
 
   // TODO Support
   /*
@@ -1647,14 +1696,19 @@ int ObLogDDLProcessor::handle_ddl_stmt_drop_database_(
     DdlStmtTask &ddl_stmt,
     const int64_t old_schema_version,
     const int64_t new_schema_version,
+    const bool need_update_tic,
     volatile bool &stop_flag)
 {
   int ret = OB_SUCCESS;
-  // don't need to handle drop database
-  UNUSED(new_schema_version);
-
-  ret = handle_ddl_stmt_direct_output_(tenant, ddl_stmt, old_schema_version, stop_flag);
-
+  if (need_update_tic) {
+    RETRY_FUNC(stop_flag, tenant.get_part_mgr(), drop_database,
+        ddl_stmt.get_op_database_id(),
+        old_schema_version,
+        ddl_stmt,
+        DATA_OP_TIMEOUT);
+  } else {
+    ret = handle_ddl_stmt_direct_output_(tenant, ddl_stmt, old_schema_version, stop_flag);
+  }
   return ret;
 }
 

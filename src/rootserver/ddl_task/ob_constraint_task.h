@@ -98,6 +98,7 @@ public:
       const int64_t schema_version,
       const obrpc::ObAlterTableArg &alter_table_arg,
       const int64_t consumer_group_id,
+      const int32_t sub_task_trace_id,
       const int64_t parent_task_id = 0,
       const int64_t status = share::ObDDLTaskStatus::WAIT_TRANS_END,
       const int64_t snapshot_version = 0);
@@ -105,18 +106,16 @@ public:
   virtual int process() override;
   int update_check_constraint_finish(const int ret_code);
   virtual int serialize_params_to_message(char *buf, const int64_t buf_size, int64_t &pos) const override;
-  virtual int deserlize_params_from_message(const uint64_t tenant_id, const char *buf, const int64_t buf_size, int64_t &pos) override;
+  virtual int deserialize_params_from_message(const uint64_t tenant_id, const char *buf, const int64_t buf_size, int64_t &pos) override;
   virtual int64_t get_serialize_param_size() const override;
-  virtual void flt_set_task_span_tag() const override;
-  virtual void flt_set_status_span_tag() const override;
-  virtual int cleanup_impl() override;
 private:
-  int hold_snapshot(const int64_t snapshot_version);
+  int hold_snapshot(common::ObMySQLTransaction &trans, const int64_t snapshot_version);
   int release_snapshot(const int64_t snapshot_version);
   int wait_trans_end();
   int validate_constraint_valid();
   int fail();
   int succ();
+  virtual int cleanup_impl() override;
   int send_check_constraint_request();
   int send_fk_constraint_request();
   int set_foreign_key_constraint_validated();
@@ -147,14 +146,12 @@ private:
 private:
   static const int64_t OB_CONSTRAINT_TASK_VERSION = 1;
   common::TCRWLock lock_;
-  ObDDLWaitTransEndCtx wait_trans_ctx_;
   obrpc::ObAlterTableArg alter_table_arg_;
   common::ObArenaAllocator allocator_;
   ObRootService *root_service_;
   int64_t check_job_ret_code_;
   int64_t check_replica_request_time_;
   bool is_table_hidden_;
-  bool snapshot_held_;
 };
 
 }  // end namespace rootserver

@@ -18,6 +18,7 @@
 #include "lib/container/ob_fast_array.h"
 #include "lib/string/ob_string.h"
 #include "common/object/ob_object.h"
+#include "share/rc/ob_tenant_base.h"
 
 namespace llvm
 {
@@ -42,6 +43,7 @@ namespace oceanbase
 {
 namespace jit
 {
+enum class ObPLOptLevel : int;
 
 namespace core {
 class JitContext;
@@ -86,6 +88,7 @@ public:
 
 public:
   int get_pointer_to(ObLLVMType &result);
+  int get_pointee_type(ObLLVMType &result);
   int same_as(ObLLVMType &other, bool &same);
 
 //For Debug
@@ -351,22 +354,26 @@ public:
 
 public:
   ObLLVMHelper(common::ObIAllocator &allocator)
-    : allocator_(allocator),
+    : is_inited_(false),
+      allocator_(allocator),
       jc_(NULL),
-      jit_(NULL){}
+      jit_(NULL) {}
   virtual ~ObLLVMHelper();
   int init();
   void final();
   static int initialize();
-  void compile_module(bool optimization = true);
+  int compile_module(jit::ObPLOptLevel optimization);
   void dump_module();
   void dump_debuginfo();
-  int verify_function(ObLLVMFunction &function);
   int verify_module();
-  uint64_t get_function_address(const common::ObString &name);
+  int get_function_address(const common::ObString &name, uint64_t &addr);
   static void add_symbol(const common::ObString &name, void *value);
 
   ObDIRawData get_debug_info() const;
+
+  const ObString &get_compiled_object();
+
+  int add_compiled_object(size_t length, const char *ptr);
 
 public:
   //指令
@@ -413,10 +420,16 @@ public:
   int create_switch(ObLLVMValue &value, ObLLVMBasicBlock &default_block, ObLLVMSwitch &result);
   int create_resume(ObLLVMValue &value);
   int create_unreachable();
+  int create_phi(const common::ObString &name,
+                 ObLLVMType &type,
+                 ObIArray<std::pair<ObLLVMValue, ObLLVMBasicBlock>> &incoming,
+                 ObLLVMValue &result);
 
   int create_global_string(const common::ObString &str, ObLLVMValue &result);
   int set_insert_point(const ObLLVMBasicBlock &block);
+  int set_insert_point(ObLLVMValue &value);
   int set_debug_location(uint32_t line, uint32_t col, ObLLVMDIScope *scope);
+  int get_debug_location(uint32_t &line, uint32_t &col);
   int unset_debug_location(ObLLVMDIScope *scope);
   int get_or_insert_global(const common::ObString &name, ObLLVMType &type, ObLLVMValue &result);
   int stack_save(ObLLVMValue &stack);
@@ -425,8 +438,7 @@ public:
   static int get_null_const(const ObLLVMType &type, ObLLVMValue &result);
   static int get_array_type(const ObLLVMType &elem_type, uint64_t size, ObLLVMType &type);
   int get_uint64_array(const common::ObIArray<uint64_t> &elem_values, ObLLVMValue &result);
-  int get_string(const common::ObString &str, ObLLVMValue &result);
-  int get_global_string(ObLLVMValue &const_string, ObLLVMValue &result);
+  int get_int8_array(const common::ObIArray<int8_t> &elem_values, ObLLVMValue &result);
   static int get_const_struct(ObLLVMType &type, common::ObIArray<ObLLVMValue> &elem_values, ObLLVMValue &result);
 
   int get_function_type(ObLLVMType &ret_type, common::ObIArray<ObLLVMType> &arg_types, ObLLVMType &result);
@@ -444,14 +456,22 @@ public:
   int get_int_value(const ObLLVMType &value, int64_t i, ObLLVMValue &i_value);
   int get_insert_block(ObLLVMBasicBlock &block);
 
+#ifdef CPP_STANDARD_20
+  static int64 get_integer_type_id();
+  static int64 get_pointer_type_id();
+  static int64 get_struct_type_id();
+#endif
+
 public:
   core::JitContext *get_jc() { return jc_; }
+  int get_compiled_stack_size(uint64_t &stack_size);
 
 private:
   int check_insert_point(bool &is_valid);
   static int init_llvm();
 
 private:
+  bool is_inited_;
   common::ObIAllocator &allocator_;
   core::JitContext *jc_;
   core::ObOrcJit *jit_;
@@ -544,7 +564,7 @@ class ObDWARFHelper
 public:
   ObDWARFHelper(ObIAllocator &allocator, char* debug_buf, int64_t debug_len)
     : Allocator(allocator), DebugBuf(debug_buf), DebugLen(debug_len), Context(nullptr) {}
-  ~ObDWARFHelper() {}
+  ~ObDWARFHelper();
 
   int init();
 

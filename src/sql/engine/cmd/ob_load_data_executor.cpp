@@ -14,45 +14,32 @@
 
 #include "sql/engine/cmd/ob_load_data_executor.h"
 
-#include "lib/oblog/ob_log_module.h"
-#include "sql/engine/cmd/ob_load_data_impl.h"
 #include "sql/engine/cmd/ob_load_data_direct_impl.h"
-#include "sql/engine/ob_exec_context.h"
+#include "sql/optimizer/ob_direct_load_optimizer_ctx.h"
 
 namespace oceanbase
 {
 namespace sql
 {
 
-int ObLoadDataExecutor::check_is_direct_load(const ObLoadDataHint &load_hint, bool &check_ret)
-{
-  int ret = OB_SUCCESS;
-  int64_t enable_direct = 0;
-  int64_t append = 0;
-  if (OB_FAIL(load_hint.get_value(ObLoadDataHint::ENABLE_DIRECT, enable_direct))) {
-    LOG_WARN("fail to get value of ENABLE_DIRECT", K(ret));
-  } else if (OB_FAIL(load_hint.get_value(ObLoadDataHint::APPEND, append))) {
-    LOG_WARN("fail to get value of APPEND", K(ret));
-  } else if ((enable_direct != 0 || append != 0) && GCONF._ob_enable_direct_load) {
-    check_ret = true;
-  } else {
-    check_ret = false;
-  }
-  return ret;
-}
-
 int ObLoadDataExecutor::execute(ObExecContext &ctx, ObLoadDataStmt &stmt)
 {
   int ret = OB_SUCCESS;
+  ObTableDirectInsertCtx &table_direct_insert_ctx = ctx.get_table_direct_insert_ctx();
   ObLoadDataBase *load_impl = NULL;
-  bool is_direct_load = false;
+  ObDirectLoadOptimizerCtx optimizer_ctx;
+  stmt.set_optimizer_ctx(&optimizer_ctx);
   if (!stmt.get_load_arguments().is_csv_format_) {
     ret = OB_NOT_SUPPORTED;
     LOG_WARN("invalid resolver results", K(ret));
-  } else if (OB_FAIL(check_is_direct_load(stmt.get_hints(), is_direct_load))) {
-    LOG_WARN("fail to check is load mode", KR(ret));
+  } else if (OB_FAIL(optimizer_ctx.init_direct_load_ctx(&ctx, stmt))) {
+    LOG_WARN("fail to init direct load ctx", K(ret), K(stmt));
   } else {
-    if (!is_direct_load) {
+    if (optimizer_ctx.can_use_direct_load()) {
+      optimizer_ctx.set_use_direct_load();
+    }
+    table_direct_insert_ctx.set_is_direct(optimizer_ctx.use_direct_load());
+    if (!table_direct_insert_ctx.get_is_direct()) {
       if (OB_ISNULL(load_impl = OB_NEWx(ObLoadDataSPImpl, (&ctx.get_allocator())))) {
         ret = OB_ALLOCATE_MEMORY_FAILED;
         LOG_WARN("allocate memory failed", K(ret));
@@ -70,6 +57,8 @@ int ObLoadDataExecutor::execute(ObExecContext &ctx, ObLoadDataStmt &stmt)
   if (OB_SUCC(ret)) {
     if (OB_FAIL(load_impl->execute(ctx, stmt))) {
       LOG_WARN("failed to execute load data stmt", K(ret));
+    } else {
+      LOG_TRACE("load data success");
     }
     load_impl->~ObLoadDataBase();
   }

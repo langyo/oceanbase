@@ -10,14 +10,9 @@
  * See the Mulan PubL v2 for more details.
  */
 
-#include <float.h>
 #define USING_LOG_PREFIX COMMON
-#include "lib/ob_define.h"
-#include "common/object/ob_obj_type.h"
+#include "ob_obj_type.h"
 #include "common/object/ob_object.h"
-#include "common/ob_accuracy.h"
-#include "lib/charset/ob_charset.h"
-#include "lib/string/ob_string.h"
 namespace oceanbase
 {
 namespace common
@@ -105,6 +100,10 @@ const char *ob_sql_type_str(ObObjType type)
       "GEOMETRY",
       "UDT",
       "DECIMAL_INT",
+      "ARRAY",
+      "MYSQL_DATE",
+      "MYSQL_DATETIME",
+      "ROARINGBITMAP",
       ""
     },
     {
@@ -158,9 +157,13 @@ const char *ob_sql_type_str(ObObjType type)
       "ROWID",
       "LOB",
       "JSON",
-      "GEOMETRY",
+      "SDO_GEOMETRY",
       "UDT",
       "DECIMAL_INT",
+      "ARRAY",
+      "MYSQL_DATE",
+      "MYSQL_DATETIME",
+      "ROARINGBITMAP",
       ""
     }
   };
@@ -394,8 +397,11 @@ DEF_TYPE_STR_FUNCS(set, "set", "");
 DEF_TYPE_STR_FUNCS_PRECISION(number_float, "float", "");
 DEF_TYPE_TEXT_FUNCS_LENGTH(lob, (lib::is_oracle_mode() ? "clob" : "longtext"), (lib::is_oracle_mode() ? "blob" : "longblob"));
 DEF_TYPE_TEXT_FUNCS_LENGTH(json, "json", "json");
-DEF_TYPE_TEXT_FUNCS_LENGTH(geometry, "geometry", "geometry");
 DEF_TYPE_STR_FUNCS_PRECISION_SCALE(decimal_int, "decimal", "", "number");
+DEF_TYPE_TEXT_FUNCS_LENGTH(geometry, (lib::is_oracle_mode() ? "sdo_geometry" : "geometry"), (lib::is_oracle_mode() ? "sdo_geometry" : "geometry"));
+DEF_TYPE_STR_FUNCS(mysql_date, "mysql_date", "");
+DEF_TYPE_STR_FUNCS_SCALE_DEFAULT_ZERO(mysql_datetime, "mysql_datetime", "", "")
+DEF_TYPE_TEXT_FUNCS_LENGTH(roaringbitmap, "roaringbitmap", "roaringbitmap");
 
 ///////////////////////////////////////////////////////////
 DEF_TYPE_STR_FUNCS_WITHOUT_ACCURACY_FOR_NON_STRING(null, "null", "");
@@ -444,8 +450,11 @@ DEF_TYPE_STR_FUNCS_WITHOUT_ACCURACY_FOR_STRING(nchar, "nchar", "nchar");
 DEF_TYPE_STR_FUNCS_WITHOUT_ACCURACY_FOR_NON_STRING(urowid, "urowid", "");
 DEF_TYPE_STR_FUNCS_WITHOUT_ACCURACY_FOR_STRING(lob, (lib::is_oracle_mode() ? "clob" : "longtext"), (lib::is_oracle_mode() ? "blob" : "longblob"));
 DEF_TYPE_STR_FUNCS_WITHOUT_ACCURACY_FOR_STRING(json, "json", "json");
-DEF_TYPE_STR_FUNCS_WITHOUT_ACCURACY_FOR_STRING(geometry, "geometry", "geometry");
 DEF_TYPE_STR_FUNCS_WITHOUT_ACCURACY_FOR_NON_STRING(decimal_int, "decimal", "");
+DEF_TYPE_STR_FUNCS_WITHOUT_ACCURACY_FOR_STRING(geometry, (lib::is_oracle_mode() ? "sdo_geometry" : "geometry"), (lib::is_oracle_mode() ? "sdo_geometry" : "geometry"));
+DEF_TYPE_STR_FUNCS_WITHOUT_ACCURACY_FOR_NON_STRING(mysql_date, "mysql_date", "");
+DEF_TYPE_STR_FUNCS_WITHOUT_ACCURACY_FOR_ODATE(mysql_datetime, "mysql_datetime", "");
+DEF_TYPE_STR_FUNCS_WITHOUT_ACCURACY_FOR_STRING(roaringbitmap, "roaringbitmap", "roaringbitmap");
 
 
 int ob_empty_str(char *buff, int64_t buff_length, ObCollationType coll_type)
@@ -517,16 +526,39 @@ int ob_geometry_sub_type_str(char *buff, int64_t buff_length, int64_t &pos, cons
   return ret;
 }
 
-int ob_udt_sub_type_str(char *buff, int64_t buff_length, int64_t &pos, const uint64_t sub_type, bool is_sql_type = false)
+int ob_udt_sub_type_str(char *buff,
+                        int64_t buff_length,
+                        int64_t &pos, const common::ObIArray<ObString> &type_info,
+                        const uint64_t sub_type,
+                        bool is_sql_type = false)
 {
   int ret = OB_SUCCESS;
   if (is_sql_type && sub_type == ObXMLSqlType) {
     ret = databuff_printf(buff, buff_length, pos, "XMLTYPE");
   } else if (sub_type == T_OBJ_XML) {
     ret = databuff_printf(buff, buff_length, pos, "XMLTYPE");
-  } else {
+  } else if (sub_type == T_OBJ_SDO_GEOMETRY) {
+    ret = databuff_printf(buff, buff_length, pos, "SDO_GEOMETRY");
+  } else if (type_info.empty()) {
     ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("undefined geometry type", K(ret), K(sub_type), K(is_sql_type));
+    LOG_WARN("unexpected column sub type", K(ret), K(sub_type), K(is_sql_type));
+  } else {
+    ret = databuff_printf(buff, buff_length, pos, "%.*s", type_info.at(0).length(), type_info.at(0).ptr());
+  }
+  return ret;
+}
+
+int ob_collection_str(const ObObjType &type, const common::ObIArray<ObString> &type_info, char *buff, int64_t buff_length, int64_t &pos)
+{
+  int ret = OB_SUCCESS;
+  if (OB_UNLIKELY(!ob_is_collection_sql_type(type)) || type_info.count() < 1) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected column type", K(ret), K(type), K(type_info.count()));
+  } else {
+    ObString cur_str = type_info.at(0);
+    if (OB_FAIL(databuff_printf(buff, buff_length, pos, "%.*s", cur_str.length(), cur_str.ptr()))) {
+      LOG_WARN("fail to print array type info", K(ret), K(buff_length), K(pos));
+    }
   }
   return ret;
 }
@@ -642,6 +674,72 @@ int ob_urowid_str(char *buff, int64_t buff_length, int64_t &pos, int64_t length,
   return databuff_printf(buff, buff_length, pos, "urowid(%ld)", length);
 }
 
+bool is_match_alter_integer_column_online_ddl_rules(const common::ObObjMeta& src_meta,
+                                                    const common::ObObjMeta& dst_meta)
+{
+  bool is_online_ddl  = false;
+  if ((((src_meta.is_signed_integer() && dst_meta.is_signed_integer())
+        || (src_meta.is_unsigned_integer() && dst_meta.is_unsigned_integer())) // both are singed or unsigned integer
+        && src_meta.get_type() <= dst_meta.get_type())) { // (unsigned) integer can be changed into larger by online ddl
+    is_online_ddl = true;
+  }
+  return is_online_ddl;
+}
+
+bool is_match_alter_string_column_online_ddl_rules(const common::ObObjMeta& src_meta,
+                                                   const common::ObObjMeta& dst_meta,
+                                                   const int32_t src_len,
+                                                   const int32_t dst_len)
+{
+  bool is_online_ddl = false;
+  if (src_len > dst_len
+    || src_meta.get_charset_type() != dst_meta.get_charset_type()
+    || src_meta.get_collation_type() != dst_meta.get_collation_type()) {
+    // is_online_ddl = false;
+  } else if ((src_meta.is_varbinary() && dst_meta.is_blob() && ObTinyTextType == dst_meta.get_type())     // varbinary -> tinyblob;   depended by generated column
+          || (src_meta.is_varchar()   && dst_meta.is_text() && ObTinyTextType == dst_meta.get_type())     // varchar   -> tinytext;   depended by generated column
+          || (dst_meta.is_varbinary() && src_meta.is_blob() && ObTinyTextType == src_meta.get_type())     // tinyblob  -> varbinary;  depended by generated column
+          || (dst_meta.is_varchar()   && src_meta.is_text() && ObTinyTextType == src_meta.get_type())) {  // tinytext  -> varchar;    depended by generated column
+    // support online ddl with generated column depended:
+    // varbinary -> tinyblob, varchar -> tinytext, tinyblob -> varbinary and tinytext -> varchar in version 4.3
+    is_online_ddl = true;
+  } else if (((src_meta.is_blob() && ObTinyTextType != src_meta.get_type() && dst_meta.is_blob() && ObTinyTextType != dst_meta.get_type())      // tinyblob -x-> blob ---> mediumblob ---> logblob
+           || (src_meta.is_text() && ObTinyTextType != src_meta.get_type() && dst_meta.is_text() && ObTinyTextType != dst_meta.get_type()))) {  // tinytext -x-> text ---> mediumtext ---> longtext
+    // support online ddl with generated column depended:
+    // smaller lob -> larger lob;
+    is_online_ddl = true;
+  }
+  return is_online_ddl;
+}
+
+int ob_sql_type_str_with_coll(char *buff,
+    int64_t buff_length,
+    int64_t &pos,
+    ObObjType type,
+    int64_t length,
+    int64_t precision,
+    int64_t scale,
+    ObCollationType coll_type,
+    const common::ObIArray<ObString> &type_info,
+    const uint64_t sub_type/* common::ObGeoType::GEOTYPEMAX */)
+{
+  int ret = OB_SUCCESS;
+  if (OB_FAIL(ob_sql_type_str(buff, buff_length, pos, type, length, precision, scale, coll_type, type_info, sub_type))) {
+    LOG_WARN("fail to get data type str", K(ret), K(sub_type), K(buff), K(buff_length), K(pos));
+  } else if (lib::is_mysql_mode() && ob_is_string_type(type) && CS_TYPE_BINARY != coll_type) {
+      if (ObCharset::is_default_collation(coll_type)) {
+        if (OB_FAIL(databuff_printf(buff, buff_length, pos, " CHARSET %s", ObCharset::charset_name(coll_type)))) {
+          LOG_WARN("fail to concat charset str", K(ret), K(sub_type), K(buff), K(buff_length), K(pos));
+        }
+      } else {
+        if (OB_FAIL(databuff_printf(buff, buff_length, pos, " CHARSET %s COLLATE %s", ObCharset::charset_name(coll_type), ObCharset::collation_name(coll_type)))) {
+          LOG_WARN("fail to concat charset and coll_type str", K(ret), K(sub_type), K(buff), K(buff_length), K(pos));
+        }
+      }
+  }
+  return ret;
+}
+
 int ob_sql_type_str(char *buff,
     int64_t buff_length,
     int64_t &pos,
@@ -650,6 +748,7 @@ int ob_sql_type_str(char *buff,
     int64_t precision,
     int64_t scale,
     ObCollationType coll_type,
+    const common::ObIArray<ObString> &type_info,
     const uint64_t sub_type/* common::ObGeoType::GEOTYPEMAX */)
 {
   int ret = OB_SUCCESS;
@@ -712,8 +811,12 @@ int ob_sql_type_str(char *buff,
     ob_lob_str,//lob
     ob_json_str,//json
     ob_geometry_str,//geometry
-    nullptr,
+    nullptr, // udt
     ob_decimal_int_str, //decimal int
+    nullptr, // collection
+    ob_date_str, // mysql date
+    ob_datetime_str, // mysql datetime
+    ob_roaringbitmap_str,//roaringbitmap
     ob_empty_str             // MAX
   };
   static_assert(sizeof(sql_type_name) / sizeof(ObSqlTypeStrFunc) == ObMaxType + 1, "Not enough initializer");
@@ -721,10 +824,16 @@ int ob_sql_type_str(char *buff,
     if (OB_FAIL(ob_geometry_sub_type_str(buff, buff_length, pos, static_cast<common::ObGeoType>(sub_type)))) {
       LOG_WARN("fail to get geometry sub type str", K(ret), K(sub_type), K(buff), K(buff_length), K(pos));
     }
-  } else if (lib::is_oracle_mode() && (ob_is_user_defined_sql_type(type) || sub_type == T_OBJ_XML)) {
-     if (OB_FAIL(ob_udt_sub_type_str(buff, buff_length, pos, sub_type, true))) {
-       LOG_WARN("fail to get udt sub type str", K(ret), K(sub_type), K(buff), K(buff_length), K(pos));
-     }
+  } else if (lib::is_oracle_mode() && (ob_is_user_defined_sql_type(type) || sub_type == T_OBJ_XML || sub_type == T_OBJ_SDO_GEOMETRY)) {
+    ObSEArray<ObString, 1> dummy_arr;
+    if (OB_FAIL(ob_udt_sub_type_str(buff, buff_length, pos, dummy_arr, sub_type, true))) {
+      LOG_WARN("fail to get udt sub type str", K(ret), K(sub_type), K(buff), K(buff_length), K(pos));
+    }
+  } else if (ob_is_collection_sql_type(type)) {
+    int64_t pos = 0;
+    if (OB_FAIL(ob_collection_str(type, type_info, buff, buff_length, pos))) {
+      LOG_WARN("fail to get enum_or_set str", K(ret), K(type), K(type_info), K(buff_length), K(pos));
+    }
   } else {
     ret = sql_type_name[OB_LIKELY(type < ObMaxType) ? type : ObMaxType](buff, buff_length, pos, length, precision, scale, coll_type);
   }
@@ -735,6 +844,7 @@ int ob_sql_type_str(char *buff,
     int64_t buff_length,
     ObObjType type,
     ObCollationType coll_type,
+    const common::ObIArray<ObString> &type_info,
     const common::ObGeoType geo_type/* common::ObGeoType::GEOTYPEMAX */)
 {
   int ret = OB_SUCCESS;
@@ -797,8 +907,12 @@ int ob_sql_type_str(char *buff,
     ob_lob_str_without_accuracy,//lob
     ob_json_str_without_accuracy,//json
     ob_geometry_str_without_accuracy,//geometry
-    nullptr,
+    nullptr,//udt
     ob_decimal_int_str_without_accuracy,//decimal int
+    nullptr,//collection
+    ob_date_str_without_accuracy,//mysql date
+    ob_datetime_str_without_accuracy,//mysql datetime
+    ob_roaringbitmap_str_without_accuracy,//roaringbitmap
     ob_empty_str   // MAX
   };
   static_assert(sizeof(sql_type_name) / sizeof(obSqlTypeStrWithoutAccuracyFunc) == ObMaxType + 1, "Not enough initializer");
@@ -809,6 +923,11 @@ int ob_sql_type_str(char *buff,
     int64_t pos = 0;
     if (OB_FAIL(ob_geometry_sub_type_str(buff, buff_length, pos, geo_type))) {
       LOG_WARN("fail to get geometry sub type str", K(ret), K(geo_type), K(buff), K(buff_length), K(pos));
+    }
+  } else if (ob_is_collection_sql_type(type)) {
+    int64_t pos = 0;
+    if (OB_FAIL(ob_collection_str(type, type_info, buff, buff_length, pos))) {
+      LOG_WARN("fail to get enum_or_set str", K(ret), K(type), K(type_info), K(buff_length), K(pos));
     }
   } else if (OB_ISNULL(sql_type_name[type])) {
     ret = OB_ERR_UNEXPECTED;
@@ -844,9 +963,13 @@ int ob_sql_type_str(const ObObjMeta &obj_meta,
       LOG_WARN("fail to get geometry sub type str", K(ret), K(sub_type), K(buff), K(buff_length), K(pos));
     }
   } else if (lib::is_oracle_mode() && obj_meta.is_ext()) {
-     if (OB_FAIL(ob_udt_sub_type_str(buff, buff_length, pos, sub_type))) {
-       LOG_WARN("fail to get udt sub type str", K(ret), K(accuracy.get_accuracy()), K(buff), K(buff_length), K(pos));
+     if (OB_FAIL(ob_udt_sub_type_str(buff, buff_length, pos, type_info, sub_type))) {
+       LOG_WARN("fail to get udt sub type str", K(ret), K(sub_type), K(buff), K(buff_length), K(pos));
      }
+  } else if (obj_meta.is_collection_sql_type()) {
+    if (OB_FAIL(ob_collection_str(obj_meta.get_type(), type_info, buff, buff_length, pos))) {
+      LOG_WARN("fail to get enum_or_set str", K(ret), K(obj_meta), K(accuracy), K(buff_length), K(pos));
+    }
   } else {
     ObObjType datatype = obj_meta.get_type();
     ObCollationType coll_type = obj_meta.get_collation_type();
@@ -860,7 +983,7 @@ int ob_sql_type_str(const ObObjMeta &obj_meta,
     if (OB_FAIL(ob_sql_type_str(buff, buff_length, pos,
                                 datatype, length,
                                 precision_or_length_semantics,
-                                accuracy.get_scale(), coll_type, sub_type))) {
+                                accuracy.get_scale(), coll_type, type_info, sub_type))) {
       LOG_WARN("fail to print sql type", K(ret), K(obj_meta), K(accuracy));
     }
   }
@@ -898,6 +1021,10 @@ const char *ob_sql_tc_str(ObObjTypeClass tc)
     "GEOMETRY",
     "UDT",
     "DECIMAL_INT",
+    "COLLECTION",
+    "MYSQL_DATE",
+    "MYSQL_DATETIME",
+    "ROARINGBITMAP",
     ""
   };
   static_assert(sizeof(sql_tc_name) / sizeof(const char *) == ObMaxTC + 1, "Not enough initializer");

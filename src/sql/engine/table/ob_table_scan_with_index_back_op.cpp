@@ -12,7 +12,6 @@
 
 #define USING_LOG_PREFIX SQL_ENG
 #include "sql/engine/table/ob_table_scan_with_index_back_op.h"
-#include "storage/blocksstable/ob_block_sstable_struct.h"
 #include "storage/access/ob_table_scan_iterator.h"
 namespace oceanbase
 {
@@ -280,6 +279,7 @@ int ObTableScanWithIndexBackOp::inner_close()
   }
   tmp_ret = ret;
   if (OB_FAIL(ObTableScanOp::inner_close())) {
+    // overwrite ret
     LOG_WARN("inner close ooerator failed", K(ret));
   }
   ret = (OB_SUCCESS == ret) ? tmp_ret : ret;

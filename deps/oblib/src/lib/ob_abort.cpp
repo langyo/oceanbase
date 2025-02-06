@@ -10,9 +10,11 @@
  * See the Mulan PubL v2 for more details.
  */
 
-#include <lib/ob_abort.h>
+#include "ob_abort.h"
+#include "lib/ob_define.h"
 
 void ob_abort (void) __THROW
 {
+  fprintf(stderr, "OB_ABORT, tid: %ld, lbt: %s\n", GETTID(), oceanbase::common::lbt());
   abort();
 }

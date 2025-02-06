@@ -1,9 +1,54 @@
 ob_set_subtarget(ob_share ALONE
+  aggregate/approx_count_distinct.cpp
+  aggregate/count.cpp
+  aggregate/iaggregate.cpp
+  aggregate/min_max.cpp
+  aggregate/processor.cpp
+  aggregate/single_row.cpp
+  aggregate/single_row_sum.cpp
+  aggregate/single_row_min_max.cpp
+  aggregate/single_row_count.cpp
+  aggregate/sum.cpp
+  aggregate/sys_bit.cpp
+  aggregate/aggr_extra.cpp
+  aggregate/rb_build_agg.cpp
+  datum/ob_datum_funcs.cpp
   ob_rpc_struct.cpp
   ob_tenant_mgr.cpp
-  datum/ob_datum_funcs.cpp
-  schema/ob_schema_service_sql_impl.cpp
   parameter/ob_parameter_attr.cpp
+  schema/ob_schema_service_sql_impl.cpp
+  vector/expr_cmp_func.cpp
+  vector/expr_cmp_func_parts/expr_cmp_func_part_0.cpp
+  vector/expr_cmp_func_parts/expr_cmp_func_part_1.cpp
+  vector/expr_cmp_func_parts/expr_cmp_func_part_2.cpp
+  vector/expr_cmp_func_parts/expr_cmp_func_part_3.cpp
+  vector/expr_cmp_func_parts/expr_cmp_func_part_4.cpp
+  vector/expr_cmp_func_parts/expr_cmp_func_part_5.cpp
+  vector/expr_cmp_func_parts/expr_cmp_func_part_6.cpp
+  vector/expr_cmp_func_parts/expr_cmp_func_part_7.cpp
+  aggregate/approx_count_distinct_synopsis.cpp
+
+  datum/ob_datum_funcs_compilation/ob_datum_funcs_compilation_0.cpp
+  datum/ob_datum_funcs_compilation/ob_datum_funcs_compilation_1.cpp
+  datum/ob_datum_funcs_compilation/ob_datum_funcs_compilation_2.cpp
+  datum/ob_datum_funcs_compilation/ob_datum_funcs_compilation_3.cpp
+  datum/ob_datum_funcs_compilation/ob_datum_funcs_compilation_4.cpp
+  datum/ob_datum_funcs_compilation/ob_datum_funcs_compilation_5.cpp
+  datum/ob_datum_funcs_compilation/ob_datum_funcs_compilation_6.cpp
+  datum/ob_datum_funcs_compilation/ob_datum_funcs_compilation_7.cpp
+  datum/ob_datum_funcs_compilation/ob_datum_funcs_all.cpp
+
+  datum/ob_str_datum_funcs_compilation/ob_str_datum_funcs_compilation_0.cpp
+  datum/ob_str_datum_funcs_compilation/ob_str_datum_funcs_compilation_1.cpp
+  datum/ob_str_datum_funcs_compilation/ob_str_datum_funcs_compilation_2.cpp
+  datum/ob_str_datum_funcs_compilation/ob_str_datum_funcs_compilation_3.cpp
+  datum/ob_str_datum_funcs_compilation/ob_str_datum_funcs_compilation_4.cpp
+  datum/ob_str_datum_funcs_compilation/ob_str_datum_funcs_compilation_5.cpp
+  datum/ob_str_datum_funcs_compilation/ob_str_datum_funcs_compilation_6.cpp
+  datum/ob_str_datum_funcs_compilation/ob_str_datum_funcs_compilation_7.cpp
+  datum/ob_str_datum_funcs_compilation/ob_str_datum_funcs_all.cpp
+  ob_srv_rpc_proxy.cpp
+  ob_common_rpc_proxy.cpp
 )
 
 file(GLOB SCHEMA_CPPS "inner_table/ob_inner_table_schema.*.cpp")
@@ -11,13 +56,19 @@ ob_set_subtarget(ob_share SCHEMA_CPPS
   ${SCHEMA_CPPS}
 )
 
+ob_set_subtarget(ob_share aggregates
+  aggregate/grouping.cpp
+)
+
 ob_set_subtarget(ob_share allocator
   allocator/ob_fifo_arena.cpp
-  allocator/ob_gmemstore_allocator.cpp
+  allocator/ob_memstore_allocator.cpp
   allocator/ob_handle_list.cpp
-  allocator/ob_memstore_allocator_mgr.cpp
+  allocator/ob_mds_allocator.cpp
+  allocator/ob_shared_memory_allocator_mgr.cpp
   allocator/ob_tenant_mutil_allocator.cpp
   allocator/ob_tenant_mutil_allocator_mgr.cpp
+  allocator/ob_tx_data_allocator.cpp
 )
 
 ob_set_subtarget(ob_share backup
@@ -37,6 +88,7 @@ ob_set_subtarget(ob_share backup
   backup/ob_tenant_archive_mgr.cpp
   backup/ob_tenant_archive_round.cpp
   backup/ob_backup_data_table_operator.cpp
+  backup/ob_backup_tablet_reorganize_helper.cpp
   backup/ob_backup_helper.cpp
   backup/ob_archive_persist_helper.cpp
   backup/ob_backup_serialize_provider.cpp
@@ -59,18 +111,7 @@ ob_set_subtarget(ob_share cache
   cache/ob_working_set_mgr.cpp
   cache/ob_kvcache_hazard_version.cpp
   cache/ob_kvcache_pre_warmer.cpp
-)
-
-ob_set_subtarget(ob_share scheduler
-  scheduler/ob_tenant_dag_scheduler.cpp
-  scheduler/ob_sys_task_stat.cpp
-  scheduler/ob_dag_warning_history_mgr.cpp
-)
-
-ob_set_subtarget(ob_share compaction
-  compaction/ob_compaction_locality_cache.cpp
-  compaction/ob_table_ckm_items.cpp
-  compaction/ob_compaction_time_guard.cpp
+  cache/ob_kvcache_pointer_swizzle.cpp
 )
 
 ob_set_subtarget(ob_share common
@@ -87,8 +128,10 @@ ob_set_subtarget(ob_share common
   ob_column_checksum_error_operator.cpp
   ob_core_table_proxy.cpp
   ob_ddl_checksum.cpp
+  ob_ddl_sim_point.cpp
   ob_ddl_common.cpp
   ob_ddl_error_message_table_operator.cpp
+  ob_tablet_reorganize_history_table_operator.cpp
   ob_ddl_task_executor.cpp
   ob_debug_sync.cpp
   ob_debug_sync_point.cpp
@@ -112,6 +155,7 @@ ob_set_subtarget(ob_share common
   ob_gts_info.cpp
   ob_i_tablet_scan.cpp
   ob_index_builder_util.cpp
+  ob_fts_index_builder_util.cpp
   ob_inner_config_root_addr.cpp
   ob_io_device_helper.cpp
   ob_kv_parser.cpp
@@ -119,11 +163,11 @@ ob_set_subtarget(ob_share common
   ob_label_security_os.cpp
   ob_leader_election_waiter.cpp
   ob_lease_struct.cpp
+  ob_heartbeat_handler.cpp
   ob_heartbeat_struct.cpp
   ob_list_parser.cpp
   ob_local_device.cpp
   ob_locality_info.cpp
-  ob_locality_parser.cpp
   ob_locality_priority.cpp
   ob_locality_table_operator.cpp
   ob_ls_id.cpp
@@ -135,6 +179,7 @@ ob_set_subtarget(ob_share common
   ob_primary_zone_util.cpp
   ob_priv_common.cpp
   ob_proposal_id.cpp
+  ob_plugin_helper.cpp
   ob_replica_info.cpp
   ob_resource_limit.cpp
   ob_root_addr_agent.cpp
@@ -145,6 +190,7 @@ ob_set_subtarget(ob_share common
   ob_server_blacklist.cpp
   ob_server_locality_cache.cpp
   ob_server_status.cpp
+  ob_server_struct.cpp
   ob_server_table_operator.cpp
   ob_service_epoch_proxy.cpp
   ob_share_util.cpp
@@ -184,11 +230,18 @@ ob_set_subtarget(ob_share common
   ob_inner_kv_table_operator.cpp
   ob_inner_table_operator.cpp
   ob_standby_upgrade.cpp
-  ob_primary_standby_service.cpp
   ob_common_id.cpp
   ob_cluster_event_history_table_operator.cpp
   scn.cpp
   ob_throttling_utils.cpp
+  ob_partition_split_query.cpp
+  ob_storage_ha_diagnose_struct.cpp
+  ob_storage_ha_diagnose_operator.cpp
+  ob_vec_index_builder_util.cpp
+  ob_domain_index_builder_util.cpp
+  ob_service_name_proxy.cpp
+  ob_compatibility_control.cpp
+  ob_device_credential_task.cpp
 )
 
 ob_set_subtarget(ob_share common_mixed
@@ -197,6 +250,7 @@ ob_set_subtarget(ob_share common_mixed
   client_feedback/ob_feedback_int_struct.cpp
   client_feedback/ob_feedback_partition_struct.cpp
   datum/ob_datum.cpp
+  datum/ob_datum_cmp_func_def.cpp
   diagnosis/ob_sql_monitor_statname.cpp
   diagnosis/ob_sql_plan_monitor_node_list.cpp
   interrupt/ob_global_interrupt_call.cpp
@@ -208,7 +262,9 @@ ob_set_subtarget(ob_share common_mixed
   location_cache/ob_ls_location_map.cpp
   location_cache/ob_tablet_ls_service.cpp
   location_cache/ob_tablet_ls_map.cpp
+  location_cache/ob_tablet_location_broadcast.cpp
   location_cache/ob_vtable_location_service.cpp
+  location_cache/ob_tablet_location_refresh_service.cpp
   inner_table/ob_inner_table_schema.vt.cpp
   inner_table/ob_inner_table_schema.lob.cpp
   inner_table/ob_inner_table_schema_misc.ipp
@@ -251,9 +307,11 @@ ob_set_subtarget(ob_share common_mixed
   system_variable/ob_system_variable_factory.cpp
   system_variable/ob_system_variable_init.cpp
   ob_lob_access_utils.cpp
+  ob_json_access_utils.cpp
   table/ob_table.cpp
   table/ob_table_rpc_struct.cpp
   table/ob_table_load_define.cpp
+  table/ob_table_load_dml_stat.cpp
   table/ob_table_load_row.cpp
   transfer/ob_transfer_info.cpp
   transfer/ob_transfer_task_operator.cpp
@@ -264,8 +322,45 @@ ob_set_subtarget(ob_share common_mixed
   detect/ob_detect_rpc_processor.cpp
   detect/ob_detect_manager_utils.cpp
   table/ob_table_load_sql_statistics.cpp
+  tenant_snapshot/ob_tenant_snapshot_id.cpp
+  tenant_snapshot/ob_tenant_snapshot_table_operator.cpp
   table/ob_ttl_util.cpp
   table/ob_table_config_util.cpp
+  restore/ob_tenant_clone_table_operator.cpp
+  index_usage/ob_index_usage_info_mgr.cpp
+  index_usage/ob_index_usage_report_task.cpp
+  table/ob_table_util.cpp
+  table/ob_table_object.cpp
+  scheduler/ob_tenant_dag_scheduler.cpp
+  scheduler/ob_sys_task_stat.cpp
+  scheduler/ob_dag_warning_history_mgr.cpp
+  scheduler/ob_partition_auto_split_helper.cpp
+  compaction/ob_compaction_locality_cache.cpp
+  compaction/ob_table_ckm_items.cpp
+  compaction/ob_compaction_time_guard.cpp
+  compaction/ob_schedule_batch_size_mgr.cpp
+  compaction/ob_compaction_timer_task_mgr.cpp
+  compaction/ob_batch_exec_dag.cpp
+  compaction/ob_new_micro_info.cpp
+  storage/ob_i_pre_warmer.cpp
+  partition_table/ob_partition_location.cpp
+  longops_mgr/ob_ddl_longops.cpp
+  longops_mgr/ob_i_longops.cpp
+  longops_mgr/ob_longops_mgr.cpp
+  ash/ob_active_sess_hist_list.cpp
+  ash/ob_active_sess_hist_task.cpp
+  ash/ob_ash_refresh_task.cpp
+  ash/ob_di_util.cpp
+  throttle/ob_share_throttle_define.cpp
+  throttle/ob_throttle_common.cpp
+  restore/ob_restore_data_mode.cpp
+  rebuild_tablet/ob_rebuild_tablet_location.cpp
+  table/redis/ob_redis_parser.cpp
+  table/redis/ob_redis_common.cpp
+  table/redis/ob_redis_util.cpp
+  table/redis/ob_redis_error.cpp
+  table/ob_redis_importer.cpp
+  restore/ob_restore_progress_display_mode.cpp
 )
 
 ob_set_subtarget(ob_share tablet
@@ -303,16 +398,6 @@ ob_set_subtarget(ob_share deadlock
   deadlock/ob_lcl_scheme/ob_lcl_utils.cpp
 )
 
-ob_set_subtarget(ob_share partition_table
-  partition_table/ob_partition_location.cpp
-)
-
-ob_set_subtarget(ob_share longops_mgr
-  longops_mgr/ob_ddl_longops.cpp
-  longops_mgr/ob_i_longops.cpp
-  longops_mgr/ob_longops_mgr.cpp
-)
-
 ob_set_subtarget(ob_share ls
   ls/ob_inmemory_ls_table.cpp
   ls/ob_ls_info.cpp
@@ -329,11 +414,6 @@ ob_set_subtarget(ob_share ls
   ls/ob_ls_creator.cpp
   ls/ob_ls_election_reference_info_operator.cpp
   ls/ob_ls_log_stat_info.cpp
-)
-
-ob_set_subtarget(ob_share ash
-  ash/ob_active_sess_hist_list.cpp
-  ash/ob_active_sess_hist_task.cpp
 )
 
 ob_set_subtarget(ob_share redolog
@@ -438,16 +518,22 @@ ob_set_subtarget(ob_share schema
   schema/ob_ddl_epoch.cpp
   schema/ob_ddl_trans_controller.cpp
   schema/ob_schema_getter_guard.cpp
+  schema/ob_schema_getter_guard_priv.cpp
   schema/ob_schema_struct.cpp
   schema/ob_sequence_sql_service.cpp
   schema/ob_server_schema_service.cpp
   schema/ob_table_schema.cpp
   schema/ob_latest_schema_guard.cpp
+  schema/ob_mlog_info.cpp
+  schema/ob_mview_info.cpp
+  schema/ob_mview_refresh_stats_params.cpp
+  schema/ob_mview_refresh_stats.cpp
 )
 
 ob_set_subtarget(ob_share stat
   stat/ob_basic_stats_estimator.cpp
   stat/ob_opt_stat_monitor_manager.cpp
+  stat/ob_dbms_stats_copy_table_stats.cpp
   stat/ob_dbms_stats_executor.cpp
   stat/ob_dbms_stats_export_import.cpp
   stat/ob_dbms_stats_history_manager.cpp
@@ -473,6 +559,10 @@ ob_set_subtarget(ob_share stat
   stat/ob_opt_stat_gather_stat.cpp
   stat/ob_opt_ds_stat.cpp
   stat/ob_opt_ds_stat_cache.cpp
+  stat/ob_dbms_stats_gather.cpp
+  stat/ob_opt_system_stat.cpp
+  stat/ob_opt_system_stat_cache.cpp
+  stat/ob_min_max_estimator.cpp
 )
 
 ob_set_subtarget(ob_share external_table
@@ -480,14 +570,18 @@ ob_set_subtarget(ob_share external_table
   external_table/ob_external_table_file_rpc_processor.cpp
   external_table/ob_external_table_file_task.cpp
   external_table/ob_external_table_utils.cpp
+  external_table/ob_partition_id_row_pair.cpp
 )
 
 ob_set_subtarget(ob_share io
   io/ob_io_define.cpp
   io/io_schedule/ob_io_mclock.cpp
+  io/io_schedule/ob_io_schedule_v2.cpp
   io/ob_io_struct.cpp
   io/ob_io_calibration.cpp
   io/ob_io_manager.cpp
+  io/ob_storage_io_usage_proxy.cpp
+  io/ob_storage_io_usage_reporter.cpp
 )
 
 ob_set_subtarget(ob_share unit
@@ -501,6 +595,16 @@ ob_set_subtarget(ob_share balance
   balance/ob_balance_job_table_operator.cpp
   balance/ob_balance_task_table_operator.cpp
   balance/ob_balance_task_helper_operator.cpp
+  balance/ob_transfer_partition_task_table_operator.cpp
+)
+
+ob_set_subtarget(ob_share ncomp_dll
+  ncomp_dll/ob_flush_ncomp_dll_task.cpp
+)
+
+ob_set_subtarget(ob_share resource_limit_calculator
+  resource_limit_calculator/ob_resource_commmon.cpp
+  resource_limit_calculator/ob_resource_limit_calculator.cpp
 )
 
 if (OB_ERRSIM)
@@ -511,6 +615,11 @@ if (OB_ERRSIM)
  )
 endif()
 
+ob_set_subtarget(ob_share text_analysis
+  text_analysis/ob_text_analyzer.cpp
+  text_analysis/ob_token_stream.cpp
+)
+
 ob_set_subtarget(ob_share throttle
   throttle/ob_throttle_common.cpp
 )
@@ -520,6 +629,55 @@ ob_set_subtarget(ob_share wr
   wr/ob_wr_task.cpp
   wr/ob_wr_snapshot_rpc_processor.cpp
   wr/ob_wr_collector.cpp
+)
+
+ob_set_subtarget(ob_share object_storage
+  object_storage/ob_device_config_mgr.cpp
+  object_storage/ob_device_config_parser.cpp
+  object_storage/ob_device_connectivity.cpp
+  object_storage/ob_device_manifest.cpp
+  object_storage/ob_device_manifest_task.cpp
+  object_storage/ob_zone_storage_table_operation.cpp
+  object_storage/ob_object_storage_struct.cpp
+)
+
+ob_set_subtarget(ob_share vector
+  vector/ob_vector_base.cpp
+  vector/vector_basic_op.cpp
+  vector/ob_fixed_length_vector.cpp
+  vector/ob_continuous_vector.cpp
+  vector/ob_discrete_vector.cpp
+  vector/ob_uniform_vector.cpp
+  vector/ob_uniform_base.cpp
+  vector/ob_fixed_length_base.cpp
+  vector/ob_discrete_base.cpp
+  vector/ob_continuous_base.cpp
+)
+
+ob_set_subtarget(ob_share vector_index
+  vector_index/ob_plugin_vector_index_adaptor.cpp
+  vector_index/ob_plugin_vector_index_util.cpp
+  vector_index/ob_plugin_vector_index_scheduler.cpp
+  vector_index/ob_plugin_vector_index_service.cpp
+  vector_index/ob_plugin_vector_index_serialize.cpp
+  vector_index/ob_plugin_vector_index_utils.cpp
+  vector_index/ob_vector_index_util.cpp
+  vector_index/ob_vector_kmeans_ctx.cpp
+)
+
+ob_set_subtarget(ob_share vector_type
+  vector_type/ob_vector_add.cpp
+  vector_type/ob_vector_div.cpp
+  vector_type/ob_vector_l2_distance.cpp
+  vector_type/ob_vector_ip_distance.cpp
+  vector_type/ob_vector_cosine_distance.cpp
+  vector_type/ob_vector_l1_distance.cpp
+  vector_type/ob_vector_norm.cpp
+  vector_type/ob_vector_common_util.cpp
+)
+
+ob_set_subtarget(ob_share domain_id
+  domain_id/ob_domain_id.cpp
 )
 
 ob_add_new_object_target(ob_share ob_share)

@@ -11,8 +11,9 @@
  */
 
 #include "storage/access/ob_sample_iter_helper.h"
-#include "storage/memtable/ob_memtable.h"
-#include "storage/access/ob_multiple_multi_scan_merge.h"
+#include "storage/ddl/ob_tablet_ddl_kv.h"
+
+#define USING_LOG_PREFIX STORAGE
 
 namespace oceanbase {
 namespace storage {
@@ -25,9 +26,10 @@ int ObGetSampleIterHelper::check_scan_range_count(bool &res, ObIArray<ObDatumRan
   need_scan_multiple_range_ = false;
   if (scan_param_.sample_info_.is_block_sample()) {
     bool retire_to_memtable_row_sample = false;
-    if (OB_FAIL(get_table_param_.tablet_iter_.refresh_read_tables_from_tablet(
+    if (!get_table_param_.tablet_iter_.table_iter()->is_valid() &&
+        OB_FAIL(get_table_param_.tablet_iter_.refresh_read_tables_from_tablet(
             main_table_ctx_.store_ctx_->mvcc_acc_ctx_.get_snapshot_version().get_val_for_tx(),
-            false /*allow_not_ready*/))) {
+            false/*allow_not_ready*/, false/*major_sstable_only*/, true/*need_split_src_table*/, false/*need_split_dst_table*/))) {
       STORAGE_LOG(WARN, "Fail to read tables", K(ret));
     } else if (OB_FAIL(can_retire_to_memtable_row_sample_(retire_to_memtable_row_sample, sample_ranges))) {
       STORAGE_LOG(WARN, "Fail to try to retire to row sample", K(ret));
@@ -63,9 +65,10 @@ int ObGetSampleIterHelper::can_retire_to_memtable_row_sample_(bool &retire, ObIA
   if (get_table_param_.is_valid()) {
     int64_t memtable_row_count = 0;
     int64_t sstable_row_count = 0;
-    common::ObSEArray<ObITable *, 4> memtables;
+    common::ObSEArray<memtable::ObMemtable *, 4> memtables;
 
     // iter all tables to estimate row count
+    get_table_param_.tablet_iter_.table_iter()->resume();
     while (OB_SUCC(ret)) {
       ObSSTableMetaHandle sst_meta_hdl;
       ObITable *table = nullptr;
@@ -76,12 +79,16 @@ int ObGetSampleIterHelper::can_retire_to_memtable_row_sample_(bool &retire, ObIA
         } else {
           STORAGE_LOG(WARN, "Fail to get next table iter", K(ret), K(get_table_param_.tablet_iter_.table_iter()));
         }
-      } else if (table->is_memtable()) {
-        if (OB_FAIL(memtables.push_back(table))) {
+      } else if (table->is_data_memtable()) {
+        memtable::ObMemtable *memtable = static_cast<memtable::ObMemtable *>(table);
+        if (OB_FAIL(memtables.push_back(memtable))) {
           STORAGE_LOG(WARN, "push back memtable failed", KR(ret));
         } else {
-          memtable_row_count += static_cast<memtable::ObMemtable *>(table)->get_physical_row_cnt();
+          memtable_row_count += memtable->get_physical_row_cnt();
         }
+      } else if (table->is_direct_load_memtable()) {
+        ObDDLKV *ddl_kv = static_cast<ObDDLKV *>(table);
+        sstable_row_count += ddl_kv->get_row_count();
       } else if (table->is_sstable()) {
         sstable_row_count += static_cast<ObSSTable *>(table)->get_row_count();
       }
@@ -110,7 +117,7 @@ int ObGetSampleIterHelper::can_retire_to_memtable_row_sample_(bool &retire, ObIA
   return ret;
 }
 
-int ObGetSampleIterHelper::get_memtable_sample_ranges_(const ObIArray<ObITable *> &memtables,
+int ObGetSampleIterHelper::get_memtable_sample_ranges_(const ObIArray<memtable::ObMemtable *> &memtables,
                                                        ObIArray<ObDatumRange> &sample_ranges)
 {
   int ret = OB_SUCCESS;
@@ -118,34 +125,48 @@ int ObGetSampleIterHelper::get_memtable_sample_ranges_(const ObIArray<ObITable *
   sample_ranges.reuse();
 
   // get split ranges from all memtables
+  ObSEArray<ObDatumRange, 16> single_memtable_sample_ranges;
   for (int64_t i = 0; OB_SUCC(ret) && i < memtables.count(); i++) {
-    memtable::ObMemtable *memtable = static_cast<memtable::ObMemtable *>(memtables.at(i));
+    single_memtable_sample_ranges.reuse();
+    memtable::ObMemtable *memtable = memtables.at(i);
     int tmp_ret = OB_SUCCESS;
     if (OB_ISNULL(memtable)) {
       ret = OB_ERR_UNEXPECTED;
     } else if (OB_TMP_FAIL(memtable->split_ranges_for_sample(table_scan_range_.get_ranges().at(0),
                                                              scan_param_.sample_info_.percent_,
                                                              *(scan_param_.allocator_),
-                                                             sample_ranges))) {
+                                                             single_memtable_sample_ranges))) {
       STORAGE_LOG(WARN, "split range failed", KR(tmp_ret));
       split_failed_count++;
     } else {
-      // split succeed
+      // split succeed. try to record all these ranges into smpale_ranges array
+      for (int64_t range_idx = 0; range_idx < single_memtable_sample_ranges.count(); range_idx++) {
+        if (OB_TMP_FAIL(sample_ranges.push_back(single_memtable_sample_ranges.at(range_idx)))) {
+          STORAGE_LOG(WARN, "push back sample ranges failed", KR(tmp_ret), K(range_idx), K(sample_ranges));
+          if (0 == range_idx) {
+            // if the first range is pushed back failed, inc split_failed_count because we do not record any ranges for
+            // this memtable
+            split_failed_count++;
+          }
+        }
+      }
     }
   }
 
-  // if we can not split ranges from all memtables, just push a whole range into sample ranges array
+  // if we can not split ranges from all memtables, just push the input_range into sample ranges array
   if (split_failed_count == memtables.count()) {
     if (sample_ranges.count() != 0) {
       STORAGE_LOG(WARN, "unexpected sample memtable ranges", K(sample_ranges));
       sample_ranges.reuse();
     }
 
-    blocksstable::ObDatumRange datum_range;
-    datum_range.set_whole_range();
-    if (OB_FAIL(sample_ranges.push_back(datum_range))) {
+    if (OB_FAIL(sample_ranges.push_back(table_scan_range_.get_ranges().at(0)))) {
       STORAGE_LOG(WARN, "push back datum range to sample memtable ranges failed", KR(ret), K(memtables));
     }
+    FLOG_INFO("split memtables failed",
+              KR(ret),
+              "Table Scan Range", table_scan_range_.get_ranges().at(0),
+              K(sample_ranges));
   }
   return ret;
 }
@@ -181,15 +202,6 @@ int ObGetSampleIterHelper::get_sample_iter(ObMemtableRowSampleIterator *&sample_
   int ret = OB_SUCCESS;
   CONSTRUCT_SAMPLE_ITER(ObMemtableRowSampleIterator, sample_iter);
   OPEN_SAMPLE_ITER(ObMemtableRowSampleIterator, sample_iter);
-  return ret;
-}
-int ObGetSampleIterHelper::get_sample_iter(ObRowSampleIterator *&sample_iter,
-                                           ObQueryRowIterator *&main_iter,
-                                           ObMultipleScanMerge *scan_merge)
-{
-  int ret = OB_SUCCESS;
-  CONSTRUCT_SAMPLE_ITER(ObRowSampleIterator, sample_iter);
-  OPEN_SAMPLE_ITER(ObRowSampleIterator, sample_iter);
   return ret;
 }
 

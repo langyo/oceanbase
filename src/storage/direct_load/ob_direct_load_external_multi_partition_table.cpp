@@ -12,9 +12,7 @@
 #define USING_LOG_PREFIX STORAGE
 
 #include "storage/direct_load/ob_direct_load_external_multi_partition_table.h"
-#include "observer/table_load/ob_table_load_stat.h"
 #include "storage/direct_load/ob_direct_load_external_table.h"
-#include "share/table/ob_table_load_define.h"
 
 namespace oceanbase
 {
@@ -57,6 +55,7 @@ ObDirectLoadExternalMultiPartitionTableBuilder::ObDirectLoadExternalMultiPartiti
     is_closed_(false),
     is_inited_(false)
 {
+  allocator_.set_tenant_id(MTL_ID());
 }
 
 ObDirectLoadExternalMultiPartitionTableBuilder::~ObDirectLoadExternalMultiPartitionTableBuilder()
@@ -75,7 +74,6 @@ int ObDirectLoadExternalMultiPartitionTableBuilder::init(
     LOG_WARN("invalid args", KR(ret), K(param));
   } else {
     param_ = param;
-    allocator_.set_tenant_id(MTL_ID());
     if (OB_FAIL(alloc_tmp_file())) {
       LOG_WARN("fail to alloc tmp file", KR(ret));
     } else if (OB_FAIL(external_writer_.init(param_.table_data_desc_.external_data_block_size_,
@@ -110,7 +108,7 @@ int ObDirectLoadExternalMultiPartitionTableBuilder::append_row(const ObTabletID 
     OB_TABLE_LOAD_STATISTICS_TIME_COST(DEBUG, external_append_row_time_us);
     row_.tablet_id_ = tablet_id;
     if (OB_FAIL(row_.external_row_.from_datums(datum_row.storage_datums_, datum_row.count_,
-                                               param_.table_data_desc_.rowkey_column_num_, seq_no))) {
+                                               param_.table_data_desc_.rowkey_column_num_, seq_no, datum_row.row_flag_.is_delete()))) {
       LOG_WARN("fail to from datums", KR(ret));
     } else if (OB_FAIL(external_writer_.write_item(row_))) {
       LOG_WARN("fail to write item", KR(ret));
@@ -210,6 +208,8 @@ int ObDirectLoadExternalMultiPartitionTableBuilder::get_tables(
   } else if (OB_UNLIKELY(!is_closed_)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("direct load external table not closed", KR(ret));
+  } else if (total_row_count_ == 0) {
+    // do nothing
   } else {
     ObDirectLoadExternalTableCreateParam create_param;
     create_param.tablet_id_ = 0; //因为包含了所有的tablet_id，设置为一个无效值

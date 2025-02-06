@@ -22,6 +22,9 @@
 #include "sql/engine/px/ob_px_dtl_msg.h"
 #include "sql/engine/px/ob_granule_util.h"
 #include "sql/engine/ob_engine_op_traits.h"
+#include "sql/engine/connector/ob_jni_scanner.h"
+#include "sql/engine/table/ob_odps_jni_table_row_iter.h"
+
 
 namespace oceanbase
 {
@@ -57,6 +60,7 @@ public:
 
     ObIArray<const ObTableScanSpec *> &get_scan_ops() { return (ObIArray<const ObTableScanSpec *> &)scan_ops_; }
     ObTableModifySpec *get_modify_op() { return (ObTableModifySpec *)modify_op_; }
+    int assign(const ObGranulePumpOpInfo &rhs);
     common::ObArray<const ObTableScanSpec*> scan_ops_;
     const ObTableModifySpec* modify_op_;
   };
@@ -68,7 +72,10 @@ public :
       pruning_status_(READY_PRUNING),
       pruning_ret_(OB_SUCCESS),
       partitions_info_(), parallelism_(0),
-      tablet_size_(0), gi_attri_flag_(0) {}
+      tablet_size_(0), gi_attri_flag_(0),
+      lucky_one_(true),
+      query_range_by_runtime_filter_(),
+      extract_finished_(false) {}
   virtual ~ObGranulePumpArgs() { reset(); };
 
   TO_STRING_KV(K(partitions_info_),
@@ -86,8 +93,11 @@ public :
     tablet_arrays_.reset();
     run_time_pruning_flags_.reset();
     external_table_files_.reset();
+    query_range_by_runtime_filter_.reset();
+    locations_order_.reset();
   }
 
+  int assign(const ObGranulePumpArgs &rhs);
 
   ObExecContext *ctx_;
   ObGranulePumpOpInfo op_info_;
@@ -105,6 +115,12 @@ public :
   int64_t parallelism_;
   int64_t tablet_size_;
   uint64_t gi_attri_flag_;
+  // -----for runtime filter extract query range
+  bool lucky_one_; // atomic, indicatee which thread is luckly to do extract query range
+  ObSEArray<ObNewRange, 16> query_range_by_runtime_filter_;
+  bool extract_finished_;
+  ObSEArray<std::pair<int64_t, bool>, 18> locations_order_;
+  //-----end
 };
 
 // 引入 TaskSet 的概念，是为了处理一个 GI 下管多张表的场景。
@@ -141,13 +157,15 @@ public:
     GI_RANDOM_RANGE,    // a task have only one query range, it can get the best randomness, but it speed more in rescan
   };
 
-  ObGITaskSet() : gi_task_set_(), cur_pos_(0) {}
-  TO_STRING_KV(K(gi_task_set_), K(cur_pos_));
+  ObGITaskSet() : gi_task_set_(), cur_pos_(0), task_count_(0) {}
+  TO_STRING_KV(K(gi_task_set_), K(cur_pos_), K(task_count_));
   int get_task_at_pos(ObGranuleTaskInfo &info, const int64_t &pos) const;
+  int get_task_tablet_id_at_pos(const int64_t &pos, uint64_t &tablet_id) const;
+
   int get_next_gi_task_pos(int64_t &pos);
   int get_next_gi_task(ObGranuleTaskInfo &info);
   int assign(const ObGITaskSet &other);
-  int set_pw_affi_partition_order(bool asc);
+  int set_pw_affi_partition_order(bool asc, bool force_reverse);
   int set_block_order(bool asc);
   int construct_taskset(common::ObIArray<ObDASTabletLoc*> &taskset_tablets,
                         common::ObIArray<ObNewRange> &taskset_ranges,
@@ -157,6 +175,7 @@ public:
 public:
   common::ObArray<ObGITaskInfo> gi_task_set_;
   int64_t cur_pos_;
+  int64_t task_count_;
 private:
   DISALLOW_COPY_AND_ASSIGN(ObGITaskSet);
 };
@@ -195,7 +214,7 @@ public :
   virtual ~ObGranuleSplitter() = default;
 
   static int get_query_range(ObExecContext &ctx,
-                             const ObQueryRange &tsc_pre_query_range,
+                             const ObQueryRangeProvider &tsc_pre_query_range,
                              ObIArray<ObNewRange> &ranges,
                              ObIArray<ObNewRange> &ss_ranges,
                              int64_t table_id,
@@ -318,7 +337,8 @@ public:
                     GITaskArrayMap &gi_task_array_result,
                     ObGITaskSet::ObGIRandomType random_type,
                     bool partition_granule = true);
-  int adjust_task_order(bool asc, ObGITaskArray &taskset_array);
+  int adjust_task_order(bool asc, ObGITaskArray &taskset_array, int64_t tsc_op_id,
+                        const ObIArray<std::pair<int64_t, bool>> &locations_order);
 };
 
 //A task will be send to many DFO and we use many threads to execute the DFO.
@@ -481,7 +501,9 @@ public:
   need_partition_pruning_(false),
   pruning_table_locations_(),
   pump_version_(0),
-  is_taskset_reset_(false)
+  is_taskset_reset_(false),
+  fetch_task_ret_(OB_SUCCESS),
+  finished_cnt_(0)
   {
   }
 
@@ -497,7 +519,8 @@ public:
                            const ObTableModifySpec* modify_op,
                            int64_t parallelism,
                            int64_t tablet_size,
-                           uint64_t gi_attri_flag);
+                           uint64_t gi_attri_flag,
+                           const ObIArray<std::pair<int64_t, bool>> &locations_order);
 
    int init_pump_args(ObExecContext *ctx,
                       ObIArray<const ObTableScanSpec*> &scan_ops,
@@ -507,7 +530,8 @@ public:
                       const ObTableModifySpec* modify_op,
                       int64_t parallelism,
                       int64_t tablet_size,
-                      uint64_t gi_attri_flag);
+                      uint64_t gi_attri_flag,
+                      const ObIArray<std::pair<int64_t, bool>> &locations_order);
 
   int add_new_gi_task(ObGranulePumpArgs &args);
 
@@ -518,7 +542,8 @@ public:
   int fetch_granule_task(const ObGITaskSet *&task_set,
                          int64_t &pos,
                          int64_t worker_id,
-                         uint64_t tsc_op_id);
+                         uint64_t tsc_op_id,
+                         uint64_t fetched_task_cnt);
   // 通过phy op ids获得其对应的gi tasks
   int try_fetch_pwj_tasks(ObIArray<ObGranuleTaskInfo> &infos,
                           const ObIArray<int64_t> &op_ids,
@@ -526,6 +551,8 @@ public:
 
   int64_t get_pump_version() const { return pump_version_; }
   bool is_taskset_reset() const { return is_taskset_reset_; }
+  void set_fetch_task_ret(int ret) { ATOMIC_STORE(&fetch_task_ret_, ret); }
+  int get_fetch_task_ret() const { return ATOMIC_LOAD(&fetch_task_ret_); }
   DECLARE_TO_STRING;
 public:
 
@@ -534,6 +561,7 @@ public:
   int reset_gi_task();
 
   common::ObIArray<ObGranulePumpArgs> &get_pump_args() { return pump_args_; }
+  void set_parallelism(int64_t parallelism) { parallelism_ = parallelism; }
 
   inline void set_need_partition_pruning(bool flag) { need_partition_pruning_ = flag; };
   inline bool need_partition_pruning() { return need_partition_pruning_; }
@@ -542,7 +570,32 @@ public:
   common::ObIArray<ObTableLocation> *get_pruning_table_location() { return &pruning_table_locations_; }
   int get_first_tsc_range_cnt(int64_t &cnt);
   const GITaskArrayMap &get_task_array_map() const { return gi_task_array_map_; }
+#ifdef OB_BUILD_CPP_ODPS
+  inline int get_odps_downloader(int64_t part_id, apsara::odps::sdk::IDownloadPtr &downloader) {
+    int ret = OB_SUCCESS;
+    downloader = NULL;
+    ret = odps_partition_downloader_mgr_.get_odps_downloader(part_id, downloader);
+    return ret;
+  }
+  inline ObOdpsPartitionDownloaderMgr::OdpsMgrMap& get_odps_map() {
+    return odps_partition_downloader_mgr_.get_odps_map();
+  }
+  inline bool is_odps_downloader_inited() {  return odps_partition_downloader_mgr_.is_download_mgr_inited(); }
+  ObOdpsPartitionDownloaderMgr &get_odps_mgr() { return odps_partition_downloader_mgr_; }
+#endif
+#ifdef OB_BUILD_JNI_ODPS
+  inline bool is_odps_scanner_mgr_inited() {
+    return odps_partition_jni_scanner_mgr_.is_jni_scanner_mgr_inited();
+  }
+  ObOdpsPartitionJNIScannerMgr &get_odps_jni_scanner_mgr() {
+    return odps_partition_jni_scanner_mgr_;
+  }
+  ObOdpsJniUploaderMgr &get_odps_jni_uploader_mgr() {
+    return odps_jni_uploader_mgr_;
+  }
+#endif
 private:
+  int init_external_odps_table_downloader(ObGranulePumpArgs &args);
   int fetch_granule_by_worker_id(const ObGITaskSet *&task_set,
                                  int64_t &pos,
                                  int64_t thread_id,
@@ -550,7 +603,8 @@ private:
 
   int fetch_granule_from_shared_pool(const ObGITaskSet *&task_set,
                                      int64_t &pos,
-                                     uint64_t tsc_op_id);
+                                     uint64_t tsc_op_id,
+                                     uint64_t fetched_task_cnt);
 
   int fetch_pw_granule_by_worker_id(ObIArray<ObGranuleTaskInfo> &infos,
                                     const ObIArray<int64_t> &op_ids,
@@ -571,7 +625,8 @@ private:
                const ObTableModifySpec* modify_op,
                int64_t parallelism,
                int64_t tablet_size,
-               uint64_t gi_attri_flag);
+               uint64_t gi_attri_flag,
+               const ObIArray<std::pair<int64_t, bool>> &locations_order);
 
   int check_can_randomize(ObGranulePumpArgs &args, bool &can_randomize);
 
@@ -583,6 +638,13 @@ private:
   bool partition_wise_join_;
   volatile bool no_more_task_from_shared_pool_; // try notify worker exit earlier
   GITaskArrayMap gi_task_array_map_;
+#ifdef OB_BUILD_CPP_ODPS
+  ObOdpsPartitionDownloaderMgr odps_partition_downloader_mgr_;
+#endif
+#ifdef OB_BUILD_JNI_ODPS
+  ObOdpsPartitionJNIScannerMgr odps_partition_jni_scanner_mgr_;
+  ObOdpsJniUploaderMgr         odps_jni_uploader_mgr_;
+#endif
   ObGranuleSplitterType splitter_type_;
   common::ObArray<ObGranulePumpArgs> pump_args_;
   bool need_partition_pruning_;
@@ -593,6 +655,10 @@ private:
   int64_t pump_version_;
 
   bool is_taskset_reset_;
+  // when granule tasks are fetched concurrently, if one thread failed to fetch task,
+  // others should not fetch tasks any more.
+  int fetch_task_ret_;
+  uint64_t finished_cnt_;
 };
 
 }//sql

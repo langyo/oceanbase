@@ -11,14 +11,7 @@
  */
 
 #define USING_LOG_PREFIX SQL_RESV
-#include "sql/resolver/dml/ob_column_namespace_checker.h"
-#include "lib/charset/ob_charset.h"
-#include "sql/resolver/dml/ob_dml_stmt.h"
-#include "sql/resolver/dml/ob_select_stmt.h"
-#include "sql/resolver/ob_resolver_define.h"
-#include "sql/resolver/ob_resolver_utils.h"
-#include "sql/resolver/ob_schema_checker.h"
-#include "common/ob_smart_call.h"
+#include "ob_column_namespace_checker.h"
 #include "sql/resolver/dml/ob_dml_resolver.h"
 
 namespace oceanbase
@@ -29,7 +22,8 @@ namespace sql
 const TableItem *ObColumnNamespaceChecker::ObTableItemIterator::get_next_table_item()
 {
   const TableItem *table_item = NULL;
-  if (table_container_.cur_joined_table_ != NULL) {
+  if (table_container_.cur_joined_table_ != NULL  &&
+      !table_container_.params_.is_resolve_lateral_derived_table_) {
     //current_table_ is not null, means that we are resolving join table at present
     //so we can't touch the attribute of table in the current level
     if (0 == next_table_item_idx_) {
@@ -41,6 +35,11 @@ const TableItem *ObColumnNamespaceChecker::ObTableItemIterator::get_next_table_i
   } else {
     if (next_table_item_idx_ < table_container_.all_table_refs_.count()) {
       table_item = table_container_.all_table_refs_.at(next_table_item_idx_++);
+    } else if (next_table_item_idx_ == table_container_.all_table_refs_.count() &&
+               table_container_.params_.is_resolve_lateral_derived_table_ &&
+               table_container_.cur_joined_table_ != NULL) {
+      ++next_table_item_idx_;
+      table_item = table_container_.cur_joined_table_;
     } else {
       table_item = NULL;
     }
@@ -211,6 +210,39 @@ int ObColumnNamespaceChecker::check_column_existence_in_using_clause(const uint6
   return ret;
 }
 
+int ObColumnNamespaceChecker::check_ext_table_column_namespace(
+    const ObQualifiedName &q_name,
+    const TableItem *&table_item) {
+  int ret = OB_SUCCESS;
+  table_item = nullptr;
+  const TableItem *cur_table = nullptr;
+  ObTableItemIterator table_item_iter(*this);
+  while (OB_SUCC(ret)
+      && (cur_table = table_item_iter.get_next_table_item()) != nullptr) {
+    if (q_name.tbl_name_.empty()) {
+      if (nullptr == table_item) {
+        table_item = cur_table;
+      } else {
+        ret = OB_NON_UNIQ_ERROR;
+        LOG_WARN("column in all tables is ambiguous", K(ret), K(q_name));
+      }
+    } else {
+      bool is_match = true;
+      if (OB_FAIL(ObResolverUtils::name_case_cmp(params_.session_info_,
+              q_name.tbl_name_,
+              cur_table->get_object_name(),
+              OB_TABLE_NAME_CLASS,
+              is_match))) {
+        LOG_WARN("table name case compare failed", K(ret));
+      } else if (is_match) {
+        table_item = cur_table;
+        break;
+      }
+    }
+  }
+  return ret;
+}
+
 int ObColumnNamespaceChecker::check_using_column_namespace(const ObString &column_name,
                                                            const TableItem *&left_table,
                                                             const TableItem *&right_table)
@@ -258,17 +290,21 @@ int ObColumnNamespaceChecker::check_column_exists(const TableItem &table_item, c
     LOG_WARN("params_.session_info_ is null", K(ret));
   } else if (table_item.is_basic_table()) {
     //check column name in schema checker
-    if (OB_FAIL(params_.schema_checker_->check_column_exists(
-                params_.session_info_->get_effective_tenant_id(), table_id, col_name, is_exist))) {
+    if (0 == col_name.case_compare("ORA_ROWSCN") || 0 == col_name.case_compare(OB_MLOG_OLD_NEW_COLUMN_NAME)) {
+      //only basic table has ora_rowscn
+      is_exist = true;
+    } else if (OB_FAIL(params_.schema_checker_->check_column_exists(params_.session_info_->get_effective_tenant_id(),
+                                                                    table_id,
+                                                                    col_name,
+                                                                    is_exist))) {
       LOG_WARN("check column exists failed", K(ret));
     }
-  } else if (table_item.is_generated_table() || table_item.is_temp_table()) {
+  } else if (table_item.is_generated_table() || table_item.is_temp_table() || table_item.is_lateral_table()) {
     ObSelectStmt *ref_stmt = table_item.ref_query_;
     if (OB_ISNULL(ref_stmt)) {
       ret = OB_NOT_INIT;
       LOG_WARN("generate table ref stmt is null");
-    }
-    if (lib::is_oracle_mode()
+    } else if (lib::is_oracle_mode()
         && 0 == col_name.case_compare(OB_HIDDEN_LOGICAL_ROWID_COLUMN_NAME)) {
       is_exist = true;
       LOG_DEBUG("got rowid col when check col name, ignore check", K(ret));
@@ -488,7 +524,8 @@ int ObColumnNamespaceChecker::find_column_in_table(const TableItem &table_item,
   int ret = OB_SUCCESS;
   if (table_item.is_joined_table()) {
     const JoinedTable &joined_table = static_cast<const JoinedTable&>(table_item);
-    ret = find_column_in_joined_table(joined_table, q_name, found_table, need_check_unique);
+    ret = SMART_CALL(find_column_in_joined_table(joined_table, q_name,
+                                                 found_table, need_check_unique));
   } else {
     if (OB_SUCC(find_column_in_single_table(table_item, q_name, need_check_unique))) {
       found_table = &table_item;
@@ -519,44 +556,6 @@ bool ObColumnNamespaceChecker::hit_join_table_using_name(const JoinedTable &join
     }
   }
   return bret;
-}
-
-int ObColumnNamespaceChecker::check_rowscn_table_column_namespace(
-    const ObQualifiedName &q_name,
-    const TableItem *&table_item) {
-  int ret = OB_SUCCESS;
-  table_item = nullptr;
-  const TableItem *cur_table = nullptr;
-  ObTableItemIterator table_item_iter(*this);
-  while (OB_SUCC(ret)
-      && (cur_table = table_item_iter.get_next_table_item()) != nullptr) {
-    if (!cur_table->is_basic_table()) {
-      // 兼容oracle行为，ora_rowscn视图不可见
-    } else if (q_name.tbl_name_.empty()) {
-      if (NULL == table_item) {
-        table_item = cur_table;
-      } else {
-        ret = OB_NON_UNIQ_ERROR;
-        LOG_WARN("column in all tables is ambiguous", K(ret), K(q_name));
-      }
-    } else {
-      // ora_rowscn伪列可以指定属于哪张表
-      bool is_match = true;
-      if (OB_FAIL(ObResolverUtils::name_case_cmp(params_.session_info_,
-              q_name.tbl_name_,
-              cur_table->get_object_name(),
-              OB_TABLE_NAME_CLASS,
-              is_match))) {
-        LOG_WARN("table name case compare failed", K(ret));
-      } else if (is_match) {
-        table_item = cur_table;
-        break;
-      }
-    }
-  }
-  
-
-  return ret;
 }
 
 int ObColumnNamespaceChecker::check_rowid_table_column_namespace(const ObQualifiedName &q_name,

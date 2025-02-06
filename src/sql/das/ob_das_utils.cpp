@@ -12,17 +12,8 @@
 
 #define USING_LOG_PREFIX SQL_DAS
 #include "sql/das/ob_das_utils.h"
-#include "sql/das/ob_das_context.h"
-#include "sql/engine/ob_exec_context.h"
 #include "pl/ob_pl.h"
-#include "sql/optimizer/ob_phy_table_location_info.h"
-#include "share/schema/ob_schema_getter_guard.h"
-#include "share/schema/ob_multi_version_schema_service.h"
-#include "share/location_cache/ob_location_service.h"
-#include "observer/ob_server_struct.h"
-#include "observer/omt/ob_tenant_srs.h"
-#include "lib/geo/ob_s2adapter.h"
-#include "lib/geo/ob_geo_utils.h"
+#include "share/ob_tablet_autoincrement_service.h"
 namespace oceanbase
 {
 using namespace common;
@@ -203,7 +194,7 @@ int ObDASUtils::project_storage_row(const ObDASDMLBaseCtDef &dml_ctdef,
                                     const ObDASWriteBuffer::DmlRow &dml_row,
                                     const IntFixedArray &row_projector,
                                     ObIAllocator &allocator,
-                                    ObNewRow &storage_row)
+                                    blocksstable::ObDatumRow &storage_row)
 {
   int ret = OB_SUCCESS;
   for (int64_t i = 0; OB_SUCC(ret) && i < row_projector.count(); ++i) {
@@ -212,14 +203,17 @@ int ObDASUtils::project_storage_row(const ObDASDMLBaseCtDef &dml_ctdef,
     const ObAccuracy &col_accuracy = dml_ctdef.column_accuracys_.at(i);
     if (projector_idx < 0) {
       //this column is not touched by query, only need to be marked as nop
-      storage_row.cells_[i].set_nop_value();
-    } else if (OB_FAIL(dml_row.cells()[projector_idx].to_obj(storage_row.cells_[i], col_type))) {
-      LOG_WARN("stored row to new row obj failed", K(ret),
-               K(dml_row.cells()[projector_idx]), K(col_type), K(projector_idx), K(i));
-    } else if (OB_FAIL(reshape_storage_value(col_type, col_accuracy, allocator, storage_row.cells_[i]))) {
+      storage_row.storage_datums_[i].set_nop();
+    } else if (FALSE_IT(storage_row.storage_datums_[i].shallow_copy_from_datum(dml_row.cells()[projector_idx]))) {
+    } else if (storage_row.storage_datums_[i].is_null()) {
+      //nothing to do
+    } else if (OB_FAIL(reshape_datum_value(col_type, col_accuracy, true, allocator, storage_row.storage_datums_[i]))) {
       LOG_WARN("reshape storage value failed", K(ret));
+    } else if (col_type.is_lob_storage() && col_type.has_lob_header()) {
+      storage_row.storage_datums_[i].set_has_lob_header();
     }
   }
+
   //to project shadow rowkey with unique index
   if (OB_SUCC(ret) && dml_ctdef.spk_cnt_) {
     bool need_shadow_columns = false;
@@ -229,7 +223,7 @@ int ObDASUtils::project_storage_row(const ObDASDMLBaseCtDef &dml_ctdef,
       //need to fill shadow pk with the real pk value
       bool rowkey_has_null = false;
       for (int64_t i = 0; !rowkey_has_null && i < index_key_cnt; i++) {
-        rowkey_has_null = storage_row.cells_[i].is_null();
+        rowkey_has_null = storage_row.storage_datums_[i].is_null();
       }
       need_shadow_columns = rowkey_has_null;
     } else {
@@ -237,14 +231,14 @@ int ObDASUtils::project_storage_row(const ObDASDMLBaseCtDef &dml_ctdef,
       //need to fill shadow pk with the real pk value
       bool is_rowkey_all_null = true;
       for (int64_t i = 0; is_rowkey_all_null && i < index_key_cnt; i++) {
-        is_rowkey_all_null = storage_row.cells_[i].is_null();
+        is_rowkey_all_null = storage_row.storage_datums_[i].is_null();
       }
       need_shadow_columns = is_rowkey_all_null;
     }
     if (!need_shadow_columns) {
       for (int64_t i = 0; i < dml_ctdef.spk_cnt_; ++i) {
         int64_t spk_idx = index_key_cnt + i;
-        storage_row.cells_[spk_idx].set_null();
+        storage_row.storage_datums_[spk_idx].set_null();
       }
     }
   }
@@ -257,8 +251,21 @@ int ObDASUtils::reshape_storage_value(const ObObjMeta &col_type,
                                       ObObj &value)
 {
   int ret = OB_SUCCESS;
+  if (lib::is_oracle_mode() && value.is_character_type() && value.get_string_len() == 0) {
+    // Oracle compatibility mode: '' as null
+    LOG_DEBUG("reshape empty string to null", K(value));
+    value.set_null();
+  } else if (OB_FAIL(padding_fixed_string_value(col_accuracy.get_length(), allocator, value))) {
+    LOG_WARN("padding char value failed", K(ret), K(col_accuracy), K(value));
+  }
+  return ret;
+}
+
+int ObDASUtils::padding_fixed_string_value(int64_t max_len, ObIAllocator &allocator, ObObj &value)
+{
+  int ret = OB_SUCCESS;
   if (value.is_binary()) {
-    int32_t binary_len = col_accuracy.get_length();
+    int32_t binary_len = max_len;
     int32_t len = value.get_string_len();
     if (binary_len > len) {
       char *dest_str = NULL;
@@ -273,10 +280,6 @@ int ObDASUtils::reshape_storage_value(const ObObjMeta &col_type,
         value.set_binary(ObString(binary_len, dest_str));
       }
     }
-  } else if (lib::is_oracle_mode() && value.is_character_type() && value.get_string_len() == 0) {
-    // Oracle compatibility mode: '' as null
-    LOG_DEBUG("reshape empty string to null", K(value));
-    value.set_null();
   } else if (value.is_fixed_len_char_type()) {
     const char *str = value.get_string_ptr();
     int32_t len = value.get_string_len();
@@ -293,97 +296,452 @@ int ObDASUtils::reshape_storage_value(const ObObjMeta &col_type,
   return ret;
 }
 
-int ObDASUtils::generate_spatial_index_rows(
-    ObIAllocator &allocator,
-    const ObDASDMLBaseCtDef &das_ctdef,
-    const ObString &wkb_str,
-    const IntFixedArray &row_projector,
-    const ObDASWriteBuffer::DmlRow &dml_row,
-    ObSpatIndexRow &spat_rows)
+int ObDASUtils::reshape_datum_value(const ObObjMeta &col_type,
+                                    const ObAccuracy &col_accuracy,
+                                    const bool enable_oracle_empty_char_reshape_to_null,
+                                    ObIAllocator &allocator,
+                                    blocksstable::ObStorageDatum &datum_value)
 {
   int ret = OB_SUCCESS;
-  omt::ObSrsCacheGuard srs_guard;
-  const ObSrsItem *srs_item = NULL;
-  const ObSrsBoundsItem *srs_bound = NULL;
-  uint32_t srid = UINT32_MAX;
-  uint64_t rowkey_num = das_ctdef.table_param_.get_data_table().get_rowkey_column_num();
-  lib::ObMallocHookAttrGuard malloc_guard(lib::ObMemAttr(MTL_ID(), "S2Adapter"));
-
-  if (OB_FAIL(ObGeoTypeUtil::get_srid_from_wkb(wkb_str, srid))) {
-    LOG_WARN("failed to get srid", K(ret), K(wkb_str));
-  } else if (srid != 0 &&
-      OB_FAIL(OTSRS_MGR->get_tenant_srs_guard(srs_guard))) {
-    LOG_WARN("failed to get srs guard", K(ret), K(MTL_ID()), K(srid));
-  } else if (srid != 0 &&
-      OB_FAIL(srs_guard.get_srs_item(srid, srs_item))) {
-    LOG_WARN("failed to get srs item", K(ret), K(MTL_ID()), K(srid));
-  } else if (((srid == 0) || !(srs_item->is_geographical_srs())) &&
-              OB_FAIL(OTSRS_MGR->get_srs_bounds(srid, srs_item, srs_bound))) {
-    LOG_WARN("failed to get srs bound", K(ret), K(srid));
-  } else {
-    ObS2Adapter s2object(&allocator, srid != 0 ? srs_item->is_geographical_srs() : false);
-    ObSpatialMBR spa_mbr;
-    ObObj *obj_arr = NULL;
-    ObS2Cellids cellids;
-    char *mbr = NULL;
-    int64_t mbr_len = 0;
-    if (OB_FAIL(s2object.init(wkb_str, srs_bound))) {
-      LOG_WARN("Init s2object failed", K(ret));
-    } else if (OB_FAIL(s2object.get_cellids(cellids, false))) {
-      LOG_WARN("Get cellids from s2object failed", K(ret));
-    } else if (OB_FAIL(s2object.get_mbr(spa_mbr))) {
-      LOG_WARN("Get mbr from s2object failed", K(ret));
-    } else if (spa_mbr.is_empty()) {
-      if (cellids.size() == 0) {
-        LOG_DEBUG("it's might be empty geometry collection", K(wkb_str));
+  if (col_type.is_binary()) {
+    int32_t binary_len = col_accuracy.get_length();
+    int32_t len = datum_value.len_;
+    if (binary_len > len) {
+      char *dest_str = NULL;
+      const char *str = datum_value.ptr_;
+      if (OB_ISNULL(dest_str = (char *)(allocator.alloc(binary_len)))) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+        LOG_WARN("fail to alloc mem to binary", K(ret), K(binary_len));
       } else {
-        ret = OB_ERR_GIS_INVALID_DATA;
-        LOG_WARN("invalid geometry", K(ret), K(wkb_str));
+        char pad_char = '\0';
+        MEMCPY(dest_str, str, len);
+        MEMSET(dest_str + len, pad_char, binary_len - len);
+        datum_value.set_string(ObString(binary_len, dest_str));
       }
-    } else if (OB_ISNULL(mbr = reinterpret_cast<char *>(allocator.alloc(OB_DEFAULT_MBR_SIZE)))) {
+    }
+  } else if (lib::is_oracle_mode() && !enable_oracle_empty_char_reshape_to_null && col_type.is_character_type() && datum_value.len_ == 0) {
+    // Oracle compatibility mode: '' as null
+    LOG_DEBUG("reshape empty string to null", K(datum_value));
+    datum_value.set_null();
+  } else if (col_type.is_fixed_len_char_type()) {
+    const char *str = datum_value.ptr_;
+    int32_t len = datum_value.len_;
+    ObString space_pattern = ObCharsetUtils::get_const_str(col_type.get_collation_type(), ' ');
+    for (; len >= space_pattern.length(); len -= space_pattern.length()) {
+      if (0 != MEMCMP(str + len - space_pattern.length(), space_pattern.ptr(), space_pattern.length())) {
+        break;
+      }
+    }
+    datum_value.set_string(ObString(len, str));
+  }
+  return ret;
+}
+
+static bool fast_check_vector_is_all_null(ObIVector *vector, const int64_t batch_size)
+{
+  bool is_all_null = false;
+  VectorFormat format = vector->get_format();
+  switch (format) {
+    case VEC_FIXED:
+    case VEC_DISCRETE:
+    case VEC_CONTINUOUS:
+      is_all_null = static_cast<ObBitmapNullVectorBase *>(vector)->get_nulls()->is_all_true(batch_size);
+      break;
+    default:
+      break;
+  }
+  return is_all_null;
+}
+
+static int new_discrete_vector(VecValueTypeClass value_tc,
+                               const int64_t max_batch_size,
+                               ObIAllocator &allocator,
+                               ObDiscreteBase *&result_vec)
+{
+  int ret = OB_SUCCESS;
+  result_vec = nullptr;
+  ObIVector *vector = nullptr;
+  switch (value_tc) {
+#define DISCRETE_VECTOR_INIT_SWITCH(value_tc)                           \
+  case value_tc: {                                                      \
+    using VecType = RTVectorType<VEC_DISCRETE, value_tc>;               \
+    static_assert(sizeof(VecType) <= ObIVector::MAX_VECTOR_STRUCT_SIZE, \
+                  "vector size exceeds MAX_VECTOR_STRUCT_SIZE");        \
+    vector = OB_NEWx(VecType, &allocator, nullptr, nullptr, nullptr);   \
+    break;                                                              \
+  }
+    DISCRETE_VECTOR_INIT_SWITCH(VEC_TC_NUMBER);
+    DISCRETE_VECTOR_INIT_SWITCH(VEC_TC_EXTEND);
+    DISCRETE_VECTOR_INIT_SWITCH(VEC_TC_STRING);
+    DISCRETE_VECTOR_INIT_SWITCH(VEC_TC_ENUM_SET_INNER);
+    DISCRETE_VECTOR_INIT_SWITCH(VEC_TC_RAW);
+    DISCRETE_VECTOR_INIT_SWITCH(VEC_TC_ROWID);
+    DISCRETE_VECTOR_INIT_SWITCH(VEC_TC_LOB);
+    DISCRETE_VECTOR_INIT_SWITCH(VEC_TC_JSON);
+    DISCRETE_VECTOR_INIT_SWITCH(VEC_TC_GEO);
+    DISCRETE_VECTOR_INIT_SWITCH(VEC_TC_UDT);
+    DISCRETE_VECTOR_INIT_SWITCH(VEC_TC_COLLECTION);
+    DISCRETE_VECTOR_INIT_SWITCH(VEC_TC_ROARINGBITMAP);
+#undef DISCRETE_VECTOR_INIT_SWITCH
+    default:
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("unexpected discrete vector value type class", KR(ret), K(value_tc));
+      break;
+  }
+  if (OB_FAIL(ret)) {
+  } else if (OB_ISNULL(vector)) {
+    ret = OB_ALLOCATE_MEMORY_FAILED;
+    LOG_WARN("fail to alloc vecttor", KR(ret));
+  } else {
+    ObDiscreteBase *discrete_vec = static_cast<ObDiscreteBase *>(vector);
+    const int64_t nulls_size = ObBitVector::memory_size(max_batch_size);
+    const int64_t lens_size = sizeof(int32_t) * max_batch_size;
+    const int64_t ptrs_size = sizeof(char *) * max_batch_size;
+    ObBitVector *nulls = nullptr;
+    int32_t *lens = nullptr;
+    char **ptrs = nullptr;
+    if (OB_ISNULL(nulls = to_bit_vector(allocator.alloc(nulls_size)))) {
       ret = OB_ALLOCATE_MEMORY_FAILED;
-      LOG_WARN("failed to alloc memory for spatial index row mbr", K(ret));
-    } else if (OB_FAIL(spa_mbr.to_char(mbr, mbr_len))) {
-      LOG_WARN("failed transform ObSpatialMBR to string", K(ret));
+      LOG_WARN("fail to alloc mem", KR(ret), K(nulls_size));
+    } else if (OB_ISNULL(lens = static_cast<int32_t *>(allocator.alloc(lens_size)))) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+      LOG_WARN("fail to alloc mem", KR(ret), K(lens_size));
+    } else if (OB_ISNULL(ptrs = static_cast<char **>(allocator.alloc(ptrs_size)))) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+      LOG_WARN("fail to alloc mem", KR(ret), K(ptrs_size));
     } else {
-      for (uint64_t i = 0; OB_SUCC(ret) && i < cellids.size(); i++) {
-        if (OB_ISNULL(obj_arr = reinterpret_cast<ObObj *>(allocator.alloc(sizeof(ObObj) * rowkey_num)))) {
-          ret = OB_ALLOCATE_MEMORY_FAILED;
-          LOG_WARN("failed to alloc memory for spatial index row cells", K(ret));
+      nulls->reset(max_batch_size);
+      discrete_vec->set_nulls(nulls);
+      discrete_vec->set_lens(lens);
+      discrete_vec->set_ptrs(ptrs);
+      result_vec = discrete_vec;
+    }
+  }
+  return ret;
+}
+
+int ObDASUtils::reshape_vector_value(const ObObjMeta &col_type,
+                                     const ObAccuracy &col_accuracy,
+                                     ObIAllocator &allocator,
+                                     ObIVector *&vector,
+                                     const int64_t size)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(vector) || size <= 0) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid args", KR(ret), KP(vector), K(size));
+  } else if (fast_check_vector_is_all_null(vector, size)) {
+    // do nothing
+  } else if (col_type.is_binary()) {
+    const int32_t binary_len = col_accuracy.get_length();
+    const char pad_char = '\0';
+    const VectorFormat format = vector->get_format();
+    switch (format) {
+      case VEC_CONTINUOUS:
+      {
+        ObContinuousBase *continuous_vec = static_cast<ObContinuousBase *>(vector);
+        ObDiscreteBase *discrete_vec = nullptr;
+        char *data = continuous_vec->get_data();
+        uint32_t *offsets = continuous_vec->get_offsets();
+        char **ptrs = nullptr;
+        ObLength *lens = nullptr;
+        bool has_value_change = false;
+        VecValueTypeClass value_tc = get_vec_value_tc(col_type.get_type(),
+                                                      col_type.get_scale(),
+                                                      col_type.get_stored_precision());
+        if (OB_FAIL(new_discrete_vector(value_tc, size, allocator, discrete_vec))) {
+          LOG_WARN("fail to new discrete vector", KR(ret));
         } else {
-          // 索引行[cellid_obj][mbr_obj][rowkey_obj]
-          for(uint64_t j = 0; OB_SUCC(ret) && j < rowkey_num; j++) {
-            obj_arr[j].set_nop_value();
-            const ObObjMeta &col_type = das_ctdef.column_types_.at(j);
-            const ObAccuracy &col_accuracy = das_ctdef.column_accuracys_.at(j);
-            int64_t projector_idx = row_projector.at(j);
-            if (OB_FAIL(dml_row.cells()[projector_idx].to_obj(obj_arr[j], col_type))) {
-              LOG_WARN("stored row to new row obj failed", K(ret),
-                  K(dml_row.cells()[projector_idx]), K(col_type), K(projector_idx), K(j));
-            } else if (OB_FAIL(ObDASUtils::reshape_storage_value(col_type, col_accuracy, allocator, obj_arr[j]))) {
-              LOG_WARN("reshape storage value failed", K(ret), K(col_type), K(projector_idx), K(j));
-            }
-          }
-          if (OB_SUCC(ret)) {
-            int64_t cellid_col_idx = 0;
-            int64_t mbr_col_idx = 1;
-            obj_arr[cellid_col_idx].set_uint64(cellids.at(i));
-            ObString mbr_val(mbr_len, mbr);
-            obj_arr[mbr_col_idx].set_varchar(mbr_val);
-            obj_arr[mbr_col_idx].set_collation_type(CS_TYPE_BINARY);
-            obj_arr[mbr_col_idx].set_collation_level(CS_LEVEL_IMPLICIT);
-            ObNewRow row;
-            row.cells_ = obj_arr;
-            row.count_ = rowkey_num;
-            if (OB_FAIL(spat_rows.push_back(row))) {
-              LOG_WARN("failed to push back spatial index row", K(ret), K(row));
+          ptrs = discrete_vec->get_ptrs();
+          lens = discrete_vec->get_lens();
+        }
+        for (int64_t i = 0; OB_SUCC(ret) && i < size; ++i) {
+          if (continuous_vec->is_null(i)) {
+            discrete_vec->set_null(i);
+          } else {
+            const ObLength len = offsets[i + 1] - offsets[i];
+            char *str = data + offsets[i];
+            if (len < binary_len) {
+              char *dest_str = nullptr;
+              if (OB_ISNULL(dest_str = (char *)(allocator.alloc(binary_len)))) {
+                ret = OB_ALLOCATE_MEMORY_FAILED;
+                LOG_WARN("fail to alloc mem to binary", K(ret), K(binary_len));
+              } else {
+                MEMCPY(dest_str, str, len);
+                MEMSET(dest_str + len, pad_char, binary_len - len);
+                ptrs[i] = dest_str;
+                lens[i] = binary_len;
+                has_value_change = true;
+              }
+            } else {
+              ptrs[i] = str;
+              lens[i] = binary_len;
             }
           }
         }
+        if (OB_SUCC(ret) && has_value_change) {
+          vector = discrete_vec;
+        }
+        break;
       }
+      case VEC_DISCRETE:
+      {
+        ObDiscreteBase *discrete_vec = static_cast<ObDiscreteBase *>(vector);
+        char **ptrs = discrete_vec->get_ptrs();
+        ObLength *lens =discrete_vec->get_lens();
+        for (int64_t i = 0; OB_SUCC(ret) && i < size; ++i) {
+          if (!discrete_vec->is_null(i) && lens[i] < binary_len) {
+            char *str = ptrs[i];
+            ObLength len = lens[i];
+            char *dest_str = nullptr;
+            if (OB_ISNULL(dest_str = (char *)(allocator.alloc(binary_len)))) {
+              ret = OB_ALLOCATE_MEMORY_FAILED;
+              LOG_WARN("fail to alloc mem to binary", K(ret), K(binary_len));
+            } else {
+              MEMCPY(dest_str, str, len);
+              MEMSET(dest_str + len, pad_char, binary_len - len);
+              ptrs[i] = dest_str;
+              lens[i] = binary_len;
+            }
+          }
+        }
+        break;
+      }
+      case VEC_UNIFORM:
+      {
+        ObUniformBase *uniform_vec = static_cast<ObUniformBase *>(vector);
+        ObDatum *datums = uniform_vec->get_datums();
+        for (int64_t i = 0; OB_SUCC(ret) && i < size; ++i) {
+          ObDatum &datum = datums[i];
+          if (!datum.is_null() && datum.len_ < binary_len) {
+            const char *str = datum.ptr_;
+            ObLength len = datum.len_;
+            char *dest_str = nullptr;
+            if (OB_ISNULL(dest_str = (char *)(allocator.alloc(binary_len)))) {
+              ret = OB_ALLOCATE_MEMORY_FAILED;
+              LOG_WARN("fail to alloc mem to binary", K(ret), K(binary_len));
+            } else {
+              MEMCPY(dest_str, str, len);
+              MEMSET(dest_str + len, pad_char, binary_len - len);
+              datum.ptr_ = dest_str;
+              datum.len_ = binary_len;
+            }
+          }
+        }
+        break;
+      }
+      case VEC_UNIFORM_CONST:
+      {
+        ObUniformBase *uniform_vec = static_cast<ObUniformBase *>(vector);
+        ObDatum &datum = uniform_vec->get_datums()[0];
+        if (!datum.is_null() && datum.len_ < binary_len) {
+          const char *str = datum.ptr_;
+          ObLength len = datum.len_;
+          char *dest_str = nullptr;
+          if (OB_ISNULL(dest_str = (char *)(allocator.alloc(binary_len)))) {
+            ret = OB_ALLOCATE_MEMORY_FAILED;
+            LOG_WARN("fail to alloc mem to binary", K(ret), K(binary_len));
+          } else {
+            MEMCPY(dest_str, str, len);
+            MEMSET(dest_str + len, pad_char, binary_len - len);
+            datum.ptr_ = dest_str;
+            datum.len_ = binary_len;
+          }
+        }
+        break;
+      }
+      default:
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("unexpected binary vector format", KR(ret), K(format), K(col_type));
+        break;
+    }
+  } else if (col_type.is_fixed_len_char_type()) {
+    const ObString space_pattern = ObCharsetUtils::get_const_str(col_type.get_collation_type(), ' ');
+    const VectorFormat format = vector->get_format();
+    switch (format) {
+      case VEC_CONTINUOUS:
+      {
+        ObContinuousBase *continuous_vec = static_cast<ObContinuousBase *>(vector);
+        ObDiscreteBase *discrete_vec = nullptr;
+        char *data = continuous_vec->get_data();
+        uint32_t *offsets = continuous_vec->get_offsets();
+        char **ptrs = nullptr;
+        ObLength *lens = nullptr;
+        bool has_value_change = false;
+        VecValueTypeClass value_tc = get_vec_value_tc(col_type.get_type(),
+                                                      col_type.get_scale(),
+                                                      col_type.get_stored_precision());
+        if (OB_FAIL(new_discrete_vector(value_tc, size, allocator, discrete_vec))) {
+          LOG_WARN("fail to new discrete vector", KR(ret));
+        } else {
+          ptrs = discrete_vec->get_ptrs();
+          lens = discrete_vec->get_lens();
+        }
+        for (int64_t i = 0; OB_SUCC(ret) && i < size; ++i) {
+          if (continuous_vec->is_null(i)) {
+            discrete_vec->set_null(i);
+          } else {
+            const ObLength length = offsets[i + 1] - offsets[i];
+            if (lib::is_oracle_mode() && 0 == length) {
+              // Oracle compatibility mode: '' as null
+              LOG_DEBUG("reshape empty string to null", K(i));
+              continuous_vec->set_null(i);
+              discrete_vec->set_null(i);
+            } else {
+              ObLength len = length;
+              char *str = data + offsets[i];
+              for (; len >= space_pattern.length(); len -= space_pattern.length()) {
+                if (0 != MEMCMP(str + len - space_pattern.length(), space_pattern.ptr(), space_pattern.length())) {
+                  break;
+                }
+              }
+              ptrs[i] = str;
+              lens[i] = len;
+              if (len != length) {
+                has_value_change = true;
+              }
+            }
+          }
+        }
+        if (OB_SUCC(ret) && has_value_change) {
+          vector = discrete_vec;
+        }
+        break;
+      }
+      case VEC_DISCRETE:
+      {
+        ObDiscreteBase *discrete_vec = static_cast<ObDiscreteBase *>(vector);
+        char **ptrs = discrete_vec->get_ptrs();
+        ObLength *lens =discrete_vec->get_lens();
+        for (int64_t i = 0; OB_SUCC(ret) && i < size; ++i) {
+          if (!discrete_vec->is_null(i)) {
+            ObLength len = lens[i];
+            if (lib::is_oracle_mode() && 0 == len) {
+              // Oracle compatibility mode: '' as null
+              LOG_DEBUG("reshape empty string to null", K(i));
+              discrete_vec->set_null(i);
+            } else {
+              const char *str = ptrs[i];
+              for (; len >= space_pattern.length(); len -= space_pattern.length()) {
+                if (0 != MEMCMP(str + len - space_pattern.length(), space_pattern.ptr(), space_pattern.length())) {
+                  break;
+                }
+              }
+              lens[i] = len;
+            }
+          }
+        }
+        break;
+      }
+      case VEC_UNIFORM:
+      {
+        ObUniformBase *uniform_vec = static_cast<ObUniformBase *>(vector);
+        ObDatum *datums = uniform_vec->get_datums();
+        for (int64_t i = 0; OB_SUCC(ret) && i < size; ++i) {
+          ObDatum &datum = datums[i];
+          if (!datum.is_null()) {
+            ObLength len = datum.len_;
+            if (lib::is_oracle_mode() && 0 == len) {
+              // Oracle compatibility mode: '' as null
+              LOG_DEBUG("reshape empty string to null", K(i));
+              datum.set_null();
+            } else {
+              const char *str = datum.ptr_;
+              for (; len >= space_pattern.length(); len -= space_pattern.length()) {
+                if (0 != MEMCMP(str + len - space_pattern.length(), space_pattern.ptr(), space_pattern.length())) {
+                  break;
+                }
+              }
+              datum.len_ = len;
+            }
+          }
+        }
+        break;
+      }
+      case VEC_UNIFORM_CONST:
+      {
+        ObUniformBase *uniform_vec = static_cast<ObUniformBase *>(vector);
+        ObDatum &datum = uniform_vec->get_datums()[0];
+        if (!datum.is_null()) {
+          ObLength len = datum.len_;
+          if (lib::is_oracle_mode() && 0 == len) {
+            // Oracle compatibility mode: '' as null
+            LOG_DEBUG("reshape empty string to null");
+            datum.set_null();
+          } else {
+            const char *str = datum.ptr_;
+            for (; len >= space_pattern.length(); len -= space_pattern.length()) {
+              if (0 != MEMCMP(str + len - space_pattern.length(), space_pattern.ptr(), space_pattern.length())) {
+                break;
+              }
+            }
+            datum.len_ = len;
+          }
+        }
+        break;
+      }
+      default:
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("unexpected fixed len char vector format", KR(ret), K(format), K(col_type));
+        break;
+    }
+  } else if (lib::is_oracle_mode() && col_type.is_character_type()) {
+    // Oracle compatibility mode: '' as null
+    const VectorFormat format = vector->get_format();
+    switch (format) {
+      case VEC_CONTINUOUS:
+      {
+        ObContinuousBase *continuous_vec = static_cast<ObContinuousBase *>(vector);
+        uint32_t *offsets = continuous_vec->get_offsets();
+        for (int64_t i = 0; i < size; ++i) {
+          if (!continuous_vec->is_null(i) && offsets[i + 1] == offsets[i]) {
+            LOG_DEBUG("reshape empty string to null", K(i));
+            continuous_vec->set_null(i);
+          }
+        }
+        break;
+      }
+      case VEC_DISCRETE:
+      {
+        ObDiscreteBase *discrete_vec = static_cast<ObDiscreteBase *>(vector);
+        ObLength *lens =discrete_vec->get_lens();
+        for (int64_t i = 0; i < size; ++i) {
+          if (!discrete_vec->is_null(i) && 0 == lens[i]) {
+            LOG_DEBUG("reshape empty string to null", K(i));
+            discrete_vec->set_null(i);
+          }
+        }
+        break;
+      }
+      case VEC_UNIFORM:
+      {
+        ObUniformBase *uniform_vec = static_cast<ObUniformBase *>(vector);
+        ObDatum *datums = uniform_vec->get_datums();
+        for (int64_t i = 0; i < size; ++i) {
+          ObDatum &datum = datums[i];
+          if (!datum.is_null() && 0 == datum.len_) {
+            LOG_DEBUG("reshape empty string to null", K(i));
+            datum.set_null();
+          }
+        }
+        break;
+      }
+      case VEC_UNIFORM_CONST:
+      {
+        ObUniformBase *uniform_vec = static_cast<ObUniformBase *>(vector);
+        ObDatum &datum = uniform_vec->get_datums()[0];
+        if (!datum.is_null() && 0 == datum.len_) {
+          LOG_DEBUG("reshape empty string to null");
+          datum.set_null();
+        }
+        break;
+      }
+      default:
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("unexpected character vector format", KR(ret), K(format), K(col_type));
+        break;
     }
   }
-
   return ret;
 }
 
@@ -407,5 +765,119 @@ int ObDASUtils::wait_das_retry(int64_t retry_cnt)
   return ret;
 }
 
+int ObDASUtils::find_child_das_def(const ObDASBaseCtDef *root_ctdef,
+                                   ObDASBaseRtDef *root_rtdef,
+                                   ObDASOpType op_type,
+                                   const ObDASBaseCtDef *&target_ctdef,
+                                   ObDASBaseRtDef *&target_rtdef)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(root_ctdef) || OB_ISNULL(root_rtdef)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("root ctdef or rtdef is nullptr", K(ret), KP(root_ctdef), K(root_rtdef));
+  } else if (OB_UNLIKELY(root_ctdef->op_type_ != root_rtdef->op_type_
+      || root_ctdef->children_cnt_ != root_rtdef->children_cnt_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("the op_type of ctdef and rtdef do not match", K(ret),
+             K(root_ctdef->op_type_), K(root_rtdef->op_type_),
+             K(root_ctdef->children_cnt_), K(root_rtdef->children_cnt_));
+  } else if (root_ctdef->op_type_ == op_type) {
+    target_ctdef = root_ctdef;
+    target_rtdef = root_rtdef;
+  } else {
+    for (int i = 0; OB_SUCC(ret) && i < root_ctdef->children_cnt_; ++i) {
+      if (OB_FAIL(find_child_das_def(root_ctdef->children_[i],
+                                     root_rtdef->children_[i],
+                                     op_type,
+                                     target_ctdef,
+                                     target_rtdef))) {
+        LOG_WARN("find child das def failed", K(ret));
+      }
+    }
+  }
+  return ret;
+}
+
+int ObDASUtils::find_child_das_ctdef(const ObDASBaseCtDef *root_ctdef,
+                                   ObDASOpType op_type,
+                                   const ObDASBaseCtDef *&target_ctdef)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(root_ctdef)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("root ctdef or rtdef is nullptr", K(ret), KP(root_ctdef));
+  } else if (root_ctdef->op_type_ == op_type) {
+    target_ctdef = root_ctdef;
+  } else {
+    for (int i = 0; OB_SUCC(ret) && i < root_ctdef->children_cnt_; ++i) {
+      if (OB_FAIL(find_child_das_ctdef(root_ctdef->children_[i],
+                                     op_type,
+                                     target_ctdef))) {
+        LOG_WARN("find child das def failed", K(ret));
+      }
+    }
+  }
+  return ret;
+}
+
+int ObDASUtils::generate_mlog_row(const ObLSID &ls_id,
+                                  const ObTabletID &tablet_id,
+                                  const storage::ObDMLBaseParam &dml_param,
+                                  blocksstable::ObDatumRow &row,
+                                  ObDASOpType op_type,
+                                  bool is_old_row)
+{
+  int ret = OB_SUCCESS;
+  const uint64_t tenant_id = MTL_ID();
+  uint64_t autoinc_seq = 0;
+  ObTabletAutoincrementService &auto_inc = ObTabletAutoincrementService::get_instance();
+  if (OB_ISNULL(dml_param.table_param_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("table param is null", KR(ret));
+  } else if (!dml_param.table_param_->get_data_table().is_mlog_table()) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("data table is not materialized view log",
+        KR(ret), K(dml_param.table_param_->get_data_table()));
+  } else if (row.count_ < 4) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("each mlog row should at least contain 4 columns", KR(ret), K(row.count_));
+  } else if (OB_FAIL(auto_inc.get_autoinc_seq_for_mlog(tenant_id, ls_id, tablet_id, autoinc_seq))) {
+    LOG_WARN("get_autoinc_seq fail", K(ret), K(tenant_id), K(ls_id), K(tablet_id));
+  } else {
+    // mlog_row = | base_table_rowkey_cols | partition key cols | sequence_col | ... | dmltype_col | old_new_col |
+    int sequence_col = 0;
+    int dmltype_col = row.count_ - 2;
+    int old_new_col = row.count_ - 1;
+    const ObTableDMLParam::ObColDescArray &col_descs = dml_param.table_param_->get_col_descs();
+    bool found_seq_col = false;
+    for (int64_t i = 0; !found_seq_col && (i < row.count_); ++i) {
+      if (OB_MLOG_SEQ_NO_COLUMN_ID == col_descs.at(i).col_id_) {
+        sequence_col = i; // sequence_no is the last rowkey
+        found_seq_col = true;
+      }
+    }
+
+    row.storage_datums_[sequence_col].reuse();
+    row.storage_datums_[dmltype_col].reuse();
+    row.storage_datums_[old_new_col].reuse();
+
+    row.storage_datums_[sequence_col].set_int(static_cast<int64_t>(autoinc_seq));
+    if (sql::DAS_OP_TABLE_DELETE == op_type) {
+      row.storage_datums_[dmltype_col].set_string(ObString("D"));
+      row.storage_datums_[old_new_col].set_string(ObString("O"));
+    } else if (sql::DAS_OP_TABLE_UPDATE == op_type) {
+      row.storage_datums_[dmltype_col].set_string(ObString("U"));
+      if (is_old_row) {
+        row.storage_datums_[old_new_col].set_string(ObString("O"));
+      } else {
+        row.storage_datums_[old_new_col].set_string(ObString("N"));
+      }
+    } else {
+      row.storage_datums_[dmltype_col].set_string(ObString("I"));
+      row.storage_datums_[old_new_col].set_string(ObString("N"));
+    }
+  }
+  return ret;
+}
 }  // namespace sql
 }  // namespace oceanbase

@@ -52,6 +52,7 @@ class ObArchiveSender : public share::ObThreadPool, public ObArchiveWorker
 {
   static const int64_t MAX_SEND_NUM = 10;
   static const int64_t MAX_ARCHIVE_TASK_STATUS_POP_TIMEOUT = 5 * 1000 * 1000L;
+  static const int64_t ARCHIVE_DBA_ERROR_LOG_PRINT_INTERVAL = 10 * 1000 * 1000L; // dba error log print interval
 public:
   ObArchiveSender();
   virtual ~ObArchiveSender();
@@ -121,6 +122,7 @@ private:
 
   // 3. 执行归档
   int archive_log_(const share::ObBackupDest &backup_dest,
+      const int64_t backup_dest_id,
       const ObArchiveSendDestArg &arg,
       ObArchiveSendTask &task,
       ObLSArchiveTask &ls_archive_task);
@@ -159,7 +161,9 @@ private:
   int push_log_(const share::ObLSID &id,
       const ObString &uri,
       const share::ObBackupStorageInfo *storage_info,
+      const int64_t backup_dest_id,
       const bool is_full_file,
+      const bool is_can_seal,
       const int64_t offset,
       char *data,
       const int64_t data_len);

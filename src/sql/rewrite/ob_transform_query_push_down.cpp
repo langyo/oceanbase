@@ -12,10 +12,8 @@
 
 #define USING_LOG_PREFIX SQL_REWRITE
 #include "sql/rewrite/ob_transform_query_push_down.h"
-#include "sql/resolver/dml/ob_insert_stmt.h"
 #include "sql/rewrite/ob_transform_utils.h"
 #include "sql/optimizer/ob_optimizer_util.h"
-#include "common/ob_smart_call.h"
 namespace oceanbase
 {
 using namespace common;
@@ -246,7 +244,8 @@ int ObTransformQueryPushDown::check_transform_validity(ObSelectStmt *select_stmt
   can_transform = false;
   need_distinct = false;
   transform_having = false;
-  if (OB_ISNULL(ctx_) || OB_ISNULL(select_stmt) || OB_ISNULL(view_stmt)) {
+  if (OB_ISNULL(ctx_) || OB_ISNULL(select_stmt) || OB_ISNULL(view_stmt) ||
+      OB_ISNULL(select_stmt->get_query_ctx())) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("stmt is NULL", K(select_stmt), K(view_stmt), K(ret));
   } else if (select_stmt->is_recursive_union() ||
@@ -254,8 +253,11 @@ int ObTransformQueryPushDown::check_transform_validity(ObSelectStmt *select_stmt
              (view_stmt->is_recursive_union() && !select_stmt->is_spj()) ||
              select_stmt->is_set_stmt() ||
              (select_stmt->has_sequence() && !view_stmt->is_spj()) ||
-             view_stmt->has_ora_rowscn() ||
-             view_stmt->is_values_table_query()) {//判断1, 2
+             view_stmt->has_ora_rowscn()) {//判断1, 2
+    can_transform = false;
+    OPT_TRACE("stmt is not spj");
+  } else if (select_stmt->get_query_ctx()->optimizer_features_enable_version_ < COMPAT_VERSION_4_3_2 &&
+             view_stmt->is_values_table_query()) {
     can_transform = false;
     OPT_TRACE("stmt is not spj");
   } else if (OB_FAIL(check_rownum_push_down(select_stmt, view_stmt, check_status))) {//判断3
@@ -462,6 +464,7 @@ int ObTransformQueryPushDown::check_set_op_expr_reference(ObSelectStmt *select_s
   } else {
     ObSEArray<ObRawExpr*, 4> relation_exprs;
     ObSEArray<ObRawExpr*, 4> set_op_exprs;
+    ObSEArray<ObRawExpr*, 4> column_exprs;
     ObBitSet<> selected_set_op_idx;
     ObStmtExprGetter visitor;
     visitor.set_relation_scope();
@@ -470,7 +473,13 @@ int ObTransformQueryPushDown::check_set_op_expr_reference(ObSelectStmt *select_s
       LOG_WARN("failed to get relation exprs", K(ret));
     } else if (OB_FAIL(ObRawExprUtils::extract_set_op_exprs(relation_exprs,
                                                             set_op_exprs))) {
-      LOG_WARN("failed to extract column ids", K(ret));
+      LOG_WARN("failed to extract set op exprs", K(ret));
+    } else if (FALSE_IT(relation_exprs.reuse())) {
+    } else if (OB_FAIL(select_stmt->get_relation_exprs(relation_exprs, visitor))) {
+      LOG_WARN("failed to get relation exprs", K(ret));
+    } else if (OB_FAIL(ObRawExprUtils::extract_column_exprs(relation_exprs,
+                                                            column_exprs))) {
+      LOG_WARN("failed to extract column exprs", K(ret));
     }
     for (int64_t i = 0; OB_SUCC(ret) && i < select_offset.count(); ++i) {
       if (select_offset.at(i) != -1) {
@@ -483,6 +492,15 @@ int ObTransformQueryPushDown::check_set_op_expr_reference(ObSelectStmt *select_s
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("unexpected null expr", K(ret), KPC(set_op_exprs.at(i)));
       } else if (!selected_set_op_idx.has_member(expr->get_idx())) {
+        is_valid = false;
+      }
+    }
+    for (int64_t i = 0; OB_SUCC(ret) && is_valid && i < column_exprs.count(); ++i) {
+      ObColumnRefRawExpr *expr = static_cast<ObColumnRefRawExpr*>(column_exprs.at(i));
+      if (OB_ISNULL(expr)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("unexpected null expr", K(ret), KPC(column_exprs.at(i)));
+      } else if (!selected_set_op_idx.has_member(expr->get_column_id() - OB_APP_MIN_COLUMN_ID)) {
         is_valid = false;
       }
     }
@@ -561,6 +579,9 @@ int ObTransformQueryPushDown::check_select_item_push_down(ObSelectStmt *select_s
   if (OB_ISNULL(select_stmt) || OB_ISNULL(view_stmt)) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("stmt is NULL", K(select_stmt), K(view_stmt), K(ret));
+  } else if (select_stmt->has_rollup()) {
+    can_be = false;
+    OPT_TRACE("outer stmt has rollup, can not merge");
   } else if (OB_FAIL(check_select_item_subquery(*select_stmt, *view_stmt, check_status))) {
     LOG_WARN("failed to check select item has subquery", K(ret));
   } else if (!check_status) {
@@ -599,17 +620,6 @@ int ObTransformQueryPushDown::check_select_item_push_down(ObSelectStmt *select_s
   } else {
     can_be = true;
   }
-  if (OB_SUCC(ret) && select_stmt->has_rollup()) {
-    for (int64_t i = 0; OB_SUCC(ret) && can_be && i < select_exprs.count(); ++i) {
-      if (OB_ISNULL(select_exprs.at(i))) {
-        ret = OB_ERR_UNEXPECTED;
-        LOG_WARN("select expr is null", K(ret));
-      } else {
-        can_be = !select_exprs.at(i)->is_const_expr() &&
-                 !select_exprs.at(i)->has_flag(CNT_SUB_QUERY);
-      }
-    }
-  }
   return ret;
 }
 
@@ -620,6 +630,7 @@ int ObTransformQueryPushDown::check_select_item_subquery(ObSelectStmt &select_st
   int ret = OB_SUCCESS;
   can_be = true;
   ObSEArray<ObRawExpr*, 4> column_exprs_from_subquery;
+  ObSEArray<ObQueryRefRawExpr*, 4> query_ref_exprs;
   ObRawExpr *expr = NULL;
   TableItem *table = NULL;
   ObSqlBitSet<> table_set;
@@ -628,12 +639,25 @@ int ObTransformQueryPushDown::check_select_item_subquery(ObSelectStmt &select_st
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("unexpect select stmt", K(ret), K(select_stmt.get_from_item_size()), K(table));
   }
-  for (int64_t i = 0; OB_SUCC(ret) && i < view.get_select_item_size(); ++i) {
+  for (int64_t i = 0; OB_SUCC(ret) && can_be && i < view.get_select_item_size(); ++i) {
     if (OB_ISNULL(expr = view.get_select_item(i).expr_)) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("unexpect null expr", K(ret));
     } else if (!expr->has_flag(CNT_SUB_QUERY)) {
       /* do nothing */
+    } else if (expr->has_flag(IS_WITH_ANY) || expr->has_flag(IS_WITH_ALL) ||
+               expr->get_expr_type() == T_OP_EXISTS || expr->get_expr_type() == T_OP_NOT_EXISTS) {
+      /*
+      * Disable query pushdown when a select item of view is `any/all/exists subquery` form.
+      * As for the query below, after pushing down, v.c2 will be used for both projection and filtering,
+      * which may result in an incorrect stmt status in the subsequent rewrite loop.
+      * e.g. select * from
+      * (select t1.c1, (exists(select 1 from t2 where (t1.c1 = t2.c1))) as c2 from t1) v
+      * where v.c2 is true;
+      */
+      can_be = false;
+    } else if (OB_FAIL(ObTransformUtils::extract_query_ref_expr(expr, query_ref_exprs, true))) {
+      LOG_WARN("failed to extract query ref exprs", K(ret));
     } else if (OB_ISNULL(expr = select_stmt.get_column_expr_by_id(table->table_id_,
                                                                   i + OB_APP_MIN_COLUMN_ID))) {
       /* do nothing */
@@ -641,7 +665,24 @@ int ObTransformQueryPushDown::check_select_item_subquery(ObSelectStmt &select_st
       LOG_WARN("failed to push back column expr", K(ret));
     }
   }
-  if (OB_FAIL(ret)) {
+
+  // check query ref exprs of view's select items
+  if (OB_FAIL(ret) || !can_be) {
+    /* do nothing */
+  } else if (query_ref_exprs.count() > 0) {
+    for (int64_t i = 0; OB_SUCC(ret) && can_be && i < query_ref_exprs.count(); i++) {
+      ObQueryRefRawExpr* query_ref = NULL;
+      if (OB_ISNULL(query_ref = query_ref_exprs.at(i))) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("unexpected null pointer", K(ret));
+      } else if (query_ref->is_set() || query_ref->get_output_column() != 1) {
+        can_be = false;
+      }
+    }
+  }
+
+  // check query ref exprs of upper select stmt
+  if (OB_FAIL(ret) || !can_be) {
   } else if (column_exprs_from_subquery.empty()) {
     /* do nothing */
   } else if (OB_FAIL(select_stmt.get_table_rel_ids(*table, table_set))) {
@@ -839,6 +880,9 @@ int ObTransformQueryPushDown::push_down_stmt_exprs(ObSelectStmt *select_stmt,
   } else if (OB_FAIL(append(view_stmt->get_window_func_exprs(),
                             select_stmt->get_window_func_exprs()))) {
     LOG_WARN("append select_stmt window func exprs to view stmt window func exprs failed", K(ret));
+  } else if (OB_FAIL(append(view_stmt->get_qualify_filters(),
+                            select_stmt->get_qualify_filters()))) {
+    LOG_WARN("append select_stmt window func filters to view stmt window func filters failed", K(ret));
   } else {
     if (!view_stmt->is_from_pivot()) {
       view_stmt->set_from_pivot(select_stmt->is_from_pivot());

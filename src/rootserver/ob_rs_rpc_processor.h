@@ -30,7 +30,10 @@ namespace rootserver
 inline bool is_parallel_ddl(const obrpc::ObRpcPacketCode pcode)
 {
   return obrpc::OB_TRUNCATE_TABLE_V2 == pcode
-         || obrpc::OB_PARALLEL_CREATE_TABLE == pcode;
+         || obrpc::OB_PARALLEL_CREATE_TABLE == pcode
+         || obrpc::OB_PARALLEL_SET_COMMENT == pcode
+         || obrpc::OB_PARALLEL_CREATE_INDEX == pcode
+         || obrpc::OB_PARALLEL_UPDATE_INDEX_STATUS == pcode;
 }
 
 // precondition: enable_ddl = false
@@ -98,8 +101,8 @@ inline bool is_allow_when_drop_tenant(const obrpc::ObRpcPacketCode pcode)
 class ObRootServerRPCProcessorBase
 {
 public:
-  ObRootServerRPCProcessorBase(ObRootService &rs, const bool full_service, const bool major_freeze_done, const bool is_ddl_like, obrpc::ObDDLArg *arg)
-      : root_service_(rs), full_service_(full_service), major_freeze_done_(major_freeze_done), is_ddl_like_(is_ddl_like), ddl_arg_(arg) {}
+  ObRootServerRPCProcessorBase(ObRootService &rs, const bool full_service, const bool is_ddl_like, obrpc::ObDDLArg *arg)
+      : root_service_(rs), full_service_(full_service), is_ddl_like_(is_ddl_like), ddl_arg_(arg) {}
 protected:
   int process_(const obrpc::ObRpcPacketCode pcode) __attribute__((noinline))
   {
@@ -111,11 +114,7 @@ protected:
       if (full_service_ && !root_service_.is_full_service()) {
         ret = OB_SERVER_IS_INIT;
         RS_LOG(WARN, "RS is initializing, can not process this request",
-            K(ret), K(full_service_), K(root_service_.is_full_service()), K(pcode));
-      } else if (major_freeze_done_ && !root_service_.is_major_freeze_done()) {
-        ret = OB_SERVER_IS_INIT;
-        RS_LOG(WARN, "RS major freeze not finished, can not process ddl request",
-            K(ret), K(pcode));
+            KR(ret), K(full_service_), K(root_service_.is_full_service()), K(pcode));
       } else if (is_ddl_like_
                  && (!GCONF.enable_ddl && !is_allow_when_disable_ddl(pcode, ddl_arg_))) {
         ret = OB_OP_NOT_ALLOW;
@@ -128,11 +127,9 @@ protected:
           } else if (OB_INVALID_TENANT_ID == ddl_arg_->exec_tenant_id_) {
             ret = OB_INVALID_ARGUMENT;
             RS_LOG(WARN, "exec tenant id is invalid", K(ret), "arg", *ddl_arg_);
-          } else if (common::STANDBY_CLUSTER == ObClusterInfoGetter::get_cluster_role_v2()
-                     && !ddl_arg_->is_allow_in_standby()) {
-            ret = OB_OP_NOT_ALLOW;
-            RS_LOG(WARN, "ddl operation not allow in standby", KR(ret), KPC(ddl_arg_));
           } else {
+            // TODO (linqiucen.lqc): check whether the tenant is standby
+            //                       it will be done after DDL is executed by the tenant itself rather than sys tenant
             auto *tsi_value = GET_TSI(share::schema::TSIDDLVar);
             // used for parallel ddl
             auto *tsi_generator = GET_TSI(share::schema::TSISchemaVersionGenerator);
@@ -249,7 +246,6 @@ protected:
 protected:
   ObRootService &root_service_;
   const bool full_service_;
-  const bool major_freeze_done_;
   const bool is_ddl_like_;
   const obrpc::ObDDLArg *ddl_arg_;
 };
@@ -259,8 +255,8 @@ class ObRootServerRPCProcessor
     : public obrpc::ObCommonRpcProxy::Processor<pcode>, public ObRootServerRPCProcessorBase
 {
 public:
-  ObRootServerRPCProcessor(ObRootService &rs, const bool full_service, const bool major_freeze_done, const bool is_ddl_like, obrpc::ObDDLArg *arg = NULL)
-      : ObRootServerRPCProcessorBase(rs, full_service, major_freeze_done, is_ddl_like, arg) {}
+  ObRootServerRPCProcessor(ObRootService &rs, const bool full_service, const bool is_ddl_like, obrpc::ObDDLArg *arg = NULL)
+      : ObRootServerRPCProcessorBase(rs, full_service, is_ddl_like, arg) {}
 protected:
   virtual int before_process()
   {
@@ -281,25 +277,25 @@ protected:
   }
 };
 
-#define DEFINE_RS_RPC_PROCESSOR_(pcode, pname, stmt, full_service, major_freeze_done, is_ddl_like, arg)         \
+#define DEFINE_RS_RPC_PROCESSOR_(pcode, pname, stmt, full_service, is_ddl_like, arg)         \
   class pname : public ObRootServerRPCProcessor<pcode>                                        \
   {                                                                                           \
   public:                                                                                     \
     explicit pname(ObRootService &rs)                                                         \
-      : ObRootServerRPCProcessor<pcode>(rs, full_service, major_freeze_done, is_ddl_like, arg) {}               \
+      : ObRootServerRPCProcessor<pcode>(rs, full_service, is_ddl_like, arg) {}               \
   protected:                                                                                  \
     virtual int leader_process() {                   \
       return root_service_.stmt; }                   \
   };
 
 // RPC need rs in full service status (RS restart task success)
-#define DEFINE_RS_RPC_PROCESSOR(pcode, pname, stmt) DEFINE_RS_RPC_PROCESSOR_(pcode, pname, stmt, true, false, false, NULL)
+#define DEFINE_RS_RPC_PROCESSOR(pcode, pname, stmt) DEFINE_RS_RPC_PROCESSOR_(pcode, pname, stmt, true, false, NULL)
 
 // RPC do not need full service
-#define DEFINE_LIMITED_RS_RPC_PROCESSOR(pcode, pname, stmt) DEFINE_RS_RPC_PROCESSOR_(pcode, pname, stmt, false, false, false, NULL)
+#define DEFINE_LIMITED_RS_RPC_PROCESSOR(pcode, pname, stmt) DEFINE_RS_RPC_PROCESSOR_(pcode, pname, stmt, false, false, NULL)
 
-// DDL RPC need rs in full service status and major freeze done
-#define DEFINE_DDL_RS_RPC_PROCESSOR(pcode, pname, stmt) DEFINE_RS_RPC_PROCESSOR_(pcode, pname, stmt, true, true, true, &arg_)
+// DDL RPC need rs in full service status
+#define DEFINE_DDL_RS_RPC_PROCESSOR(pcode, pname, stmt) DEFINE_RS_RPC_PROCESSOR_(pcode, pname, stmt, true, true, &arg_)
 
 DEFINE_LIMITED_RS_RPC_PROCESSOR(obrpc::OB_RENEW_LEASE, ObRpcRenewLeaseP, renew_lease(arg_, result_));
 DEFINE_LIMITED_RS_RPC_PROCESSOR(obrpc::OB_REPORT_SYS_LS, ObRpcReportSysLSP, report_sys_ls(arg_));
@@ -342,13 +338,21 @@ DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_ALTER_TABLEGROUP, ObRpcAlterTablegroupP, a
 DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_CREATE_TABLE, ObRpcCreateTableP, create_table(arg_, result_));
 DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_RECOVER_RESTORE_TABLE_DDL, ObRpcRecoverRestoreTableDDLP, recover_restore_table_ddl(arg_));
 DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_PARALLEL_CREATE_TABLE, ObRpcParallelCreateTableP, parallel_create_table(arg_, result_));
+DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_PARALLEL_SET_COMMENT, ObRpcSetCommentP, set_comment(arg_, result_));
 DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_ALTER_TABLE, ObRpcAlterTableP, alter_table(arg_, result_));
+DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_EXCHANGE_PARTITION, ObRpcExchangePartitionP, exchange_partition(arg_, result_));
+DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_SPLIT_GLOBAL_INDEX_TABLET, ObSplitGlobalIndexTabletTaskP, split_global_index_tablet(arg_));
 DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_DROP_TABLE, ObRpcDropTableP, drop_table(arg_, result_));
 DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_RENAME_TABLE, ObRpcRenameTableP, rename_table(arg_));
 DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_TRUNCATE_TABLE, ObRpcTruncateTableP, truncate_table(arg_, result_));
 DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_TRUNCATE_TABLE_V2, ObRpcTruncateTableV2P, truncate_table_v2(arg_, result_));
+DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_CREATE_AUX_INDEX, ObRpcCreateAuxIndexP, create_aux_index(arg_, result_));
 DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_CREATE_INDEX, ObRpcCreateIndexP, create_index(arg_, result_));
+DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_PARALLEL_CREATE_INDEX, ObRpcParallelCreateIndexP, parallel_create_index(arg_, result_));
 DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_DROP_INDEX, ObRpcDropIndexP, drop_index(arg_, result_));
+DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_DROP_INDEX_ON_FAILED, ObRpcDropIndexOnFailedP, drop_index_on_failed(arg_, result_));
+DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_REBUILD_VEC_INDEX, ObRpcRebuildVecIndexP, rebuild_vec_index(arg_, result_));
+DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_CREATE_MLOG, ObRpcCreateMLogP, create_mlog(arg_, result_));
 DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_CREATE_TABLE_LIKE, ObRpcCreateTableLikeP, create_table_like(arg_));
 DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_CREATE_USER, ObRpcCreateUserP, create_user(arg_, result_));
 DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_DROP_USER, ObRpcDropUserP, drop_user(arg_, result_));
@@ -361,8 +365,12 @@ DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_ALTER_USER_PROFILE, ObRpcAlterUserProfileP
 DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_SECURITY_AUDIT, ObRpcSecurityAuditP, handle_security_audit(arg_));
 DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_REVOKE_DB, ObRpcRevokeDBP, revoke_database(arg_));
 DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_REVOKE_TABLE, ObRpcRevokeTableP, revoke_table(arg_));
+DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_REVOKE_ROUTINE, ObRpcRevokeRoutineP, revoke_routine(arg_));
 DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_REVOKE_SYSPRIV, ObRpcRevokeSysPrivP, revoke_syspriv(arg_));
 DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_UPDATE_INDEX_TABLE_STATUS, ObUpdateIndexTableStatusP, update_index_status(arg_));
+DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_UPDATE_MVIEW_TABLE_STATUS, ObRpcUpdateMViewTableStatusP, update_mview_status(arg_));
+DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_PARALLEL_UPDATE_INDEX_STATUS, ObUpdateIndexStatusP, parallel_update_index_status(arg_, result_));
+DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_DROP_LOB, ObDropLobP, drop_lob(arg_));
 DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_FLASHBACK_TABLE_FROM_RECYCLEBIN, ObRpcFlashBackTableFromRecyclebinP, flashback_table_from_recyclebin(arg_));
 DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_FLASHBACK_INDEX, ObRpcFlashBackIndexP, flashback_index(arg_));
 DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_PURGE_TABLE, ObRpcPurgeTableP, purge_table(arg_));
@@ -383,12 +391,14 @@ DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_DO_KEYSTORE_DDL, ObRpcDoKeystoreDDLP, do_k
 DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_DO_TABLESPACE_DDL, ObRpcDoTablespaceDDLP, do_tablespace_ddl(arg_));
 DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_EXECUTE_DDL_TASK, ObRpcExecuteDDLTaskP, execute_ddl_task(arg_, result_));
 DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_MAINTAIN_OBJ_DEPENDENCY_INFO, ObRpcMaintainObjDependencyInfoP, maintain_obj_dependency_info(arg_));
+DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_MVIEW_COMPLETE_REFRESH, ObRpcMViewCompleteRefreshP, mview_complete_refresh(arg_, result_));
 
 DEFINE_RS_RPC_PROCESSOR(obrpc::OB_REFRESH_CONFIG, ObRpcRefreshConfigP, refresh_config());
 DEFINE_RS_RPC_PROCESSOR(obrpc::OB_ROOT_MINOR_FREEZE, ObRpcRootMinorFreezeP, root_minor_freeze(arg_));
 DEFINE_RS_RPC_PROCESSOR(obrpc::OB_CREATE_RESOURCE_UNIT, ObRpcCreateResourceUnitP, create_resource_unit(arg_));
 DEFINE_RS_RPC_PROCESSOR(obrpc::OB_ALTER_RESOURCE_UNIT, ObRpcAlterResourceUnitP, alter_resource_unit(arg_));
 DEFINE_RS_RPC_PROCESSOR(obrpc::OB_DROP_RESOURCE_UNIT, ObRpcDropResourceUnitP, drop_resource_unit(arg_));
+DEFINE_RS_RPC_PROCESSOR(obrpc::OB_CLONE_RESOURCE_POOL, ObRpcCloneResourcePoolP, clone_resource_pool(arg_));
 DEFINE_RS_RPC_PROCESSOR(obrpc::OB_CREATE_RESOURCE_POOL, ObRpcCreateResourcePoolP, create_resource_pool(arg_));
 DEFINE_RS_RPC_PROCESSOR(obrpc::OB_ALTER_RESOURCE_POOL, ObRpcAlterResourcePoolP, alter_resource_pool(arg_));
 DEFINE_RS_RPC_PROCESSOR(obrpc::OB_DROP_RESOURCE_POOL, ObRpcDropResoucePoolP, drop_resource_pool(arg_));
@@ -405,7 +415,11 @@ DEFINE_RS_RPC_PROCESSOR(obrpc::OB_DELETE_ZONE, ObRpcDeleteZoneP, delete_zone(arg
 DEFINE_RS_RPC_PROCESSOR(obrpc::OB_START_ZONE, ObRpcStartZoneP, start_zone(arg_));
 DEFINE_RS_RPC_PROCESSOR(obrpc::OB_STOP_ZONE, ObRpcStopZoneP, stop_zone(arg_));
 DEFINE_RS_RPC_PROCESSOR(obrpc::OB_ALTER_ZONE, ObRpcAlterZoneP, alter_zone(arg_));
+DEFINE_RS_RPC_PROCESSOR(obrpc::OB_ADD_STORAGE, ObRpcAddStorageP, add_storage(arg_));
+DEFINE_RS_RPC_PROCESSOR(obrpc::OB_DROP_STORAGE, ObRpcDropStorageP, drop_storage(arg_));
+DEFINE_RS_RPC_PROCESSOR(obrpc::OB_ALTER_STORAGE, ObRpcAlterStorageP, alter_storage(arg_));
 DEFINE_RS_RPC_PROCESSOR(obrpc::OB_CHECK_DANGLING_REPLICA_FINISH, ObCheckDanglingReplicaFinishP, check_dangling_replica_finish(arg_));
+
 
 DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_CREATE_OUTLINE, ObRpcCreateOutlineP, create_outline(arg_));
 DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_ALTER_OUTLINE, ObRpcAlterOutlineP, alter_outline(arg_));
@@ -416,11 +430,14 @@ DEFINE_RS_RPC_PROCESSOR(obrpc::OB_DROP_RESTORE_POINT, ObRpcDropRestorePointP, dr
 //routine ddl
 
 DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_CREATE_ROUTINE, ObRpcCreateRoutineP, create_routine(arg_));
+DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_CREATE_ROUTINE_WITH_RES, ObRpcCreateRoutineWithResP, create_routine_with_res(arg_, result_));
 DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_DROP_ROUTINE, ObRpcDropRoutineP, drop_routine(arg_));
 DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_ALTER_ROUTINE, ObRpcAlterRoutineP, alter_routine(arg_));
+DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_ALTER_ROUTINE_WITH_RES, ObRpcAlterRoutineWithResP, alter_routine_with_res(arg_, result_));
 
 //udt ddl
 DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_CREATE_UDT, ObRpcCreateUDTP, create_udt(arg_));
+DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_CREATE_UDT_WITH_RES, ObRpcCreateUDTWithResP, create_udt_with_res(arg_, result_));
 DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_DROP_UDT, ObRpcDropUDTP, drop_udt(arg_));
 
 DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_CREATE_SYNONYM, ObRpcCreateSynonymP, create_synonym(arg_));
@@ -434,11 +451,15 @@ DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_DROP_USER_DEFINED_FUNCTION, ObRpcDropUserD
 
 //package ddl
 DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_CREATE_PACKAGE, ObRpcCreatePackageP, create_package(arg_));
+DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_CREATE_PACKAGE_WITH_RES, ObRpcCreatePackageWithResP, create_package_with_res(arg_, result_));
 DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_ALTER_PACKAGE, ObRpcAlterPackageP, alter_package(arg_));
+DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_ALTER_PACKAGE_WITH_RES, ObRpcAlterPackageWithResP, alter_package_with_res(arg_, result_));
 DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_DROP_PACKAGE, ObRpcDropPackageP, drop_package(arg_));
 
 DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_CREATE_TRIGGER, ObRpcCreateTriggerP, create_trigger(arg_));
+DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_CREATE_TRIGGER_WITH_RES, ObRpcCreateTriggerWithResP, create_trigger_with_res(arg_, result_));
 DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_ALTER_TRIGGER, ObRpcAlterTriggerP, alter_trigger(arg_));
+DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_ALTER_TRIGGER_WITH_RES, ObRpcAlterTriggerWithResP, alter_trigger_with_res(arg_, result_));
 DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_DROP_TRIGGER, ObRpcDropTriggerP, drop_trigger(arg_));
 
 //profile ddl
@@ -468,6 +489,7 @@ DEFINE_RS_RPC_PROCESSOR(obrpc::OB_ADMIN_RELOAD_SERVER, ObRpcAdminReloadServerP, 
 DEFINE_RS_RPC_PROCESSOR(obrpc::OB_ADMIN_RELOAD_ZONE, ObRpcAdminReloadZoneP, admin_reload_zone());
 DEFINE_RS_RPC_PROCESSOR(obrpc::OB_ADMIN_CLEAR_MERGE_ERROR, ObRpcAdminClearMergeErrorP, admin_clear_merge_error(arg_));
 DEFINE_RS_RPC_PROCESSOR(obrpc::OB_ADMIN_MIGRATE_UNIT, ObRpcAdminMigrateUnitP, admin_migrate_unit(arg_));
+DEFINE_RS_RPC_PROCESSOR(obrpc::OB_ADMIN_ALTER_LS_REPLICA, ObRpcAdminAlterLSReplicaP, admin_alter_ls_replica(arg_));
 #ifdef OB_BUILD_ARBITRATION
 DEFINE_RS_RPC_PROCESSOR(obrpc::OB_ADMIN_ADD_ARBITRATION_SERVICE, ObRpcAdminAddArbitrationServiceP, admin_add_arbitration_service(arg_));
 DEFINE_RS_RPC_PROCESSOR(obrpc::OB_ADMIN_REMOVE_ARBITRATION_SERVICE, ObRpcAdminRemoveArbitrationServiceP, admin_remove_arbitration_service(arg_));
@@ -486,13 +508,15 @@ DEFINE_RS_RPC_PROCESSOR(obrpc::OB_REQUEST_TIME_ZONE_INFO, ObRpcRequestTimeZoneIn
 DEFINE_RS_RPC_PROCESSOR(obrpc::OB_RS_UPDATE_STAT_CACHE, ObRpcUpdateStatCacheP, update_stat_cache(arg_));
 DEFINE_RS_RPC_PROCESSOR(obrpc::OB_CALC_COLUMN_CHECKSUM_RESPONSE, ObRpcCalcColumnChecksumResponseP, calc_column_checksum_repsonse(arg_));
 DEFINE_RS_RPC_PROCESSOR(obrpc::OB_DDL_BUILD_SINGLE_REPLICA_RESPONSE, ObRpcDDLBuildSingleReplicaResponseP, build_ddl_single_replica_response(arg_));
+DEFINE_RS_RPC_PROCESSOR(obrpc::OB_CLEAN_SPLITTED_TABLET, ObRpcCleanSplittedTabletP, clean_splitted_tablet(arg_));
+DEFINE_RS_RPC_PROCESSOR(obrpc::OB_AUTO_SPLIT_TABLET_TASK_REQUEST, ObAutoSplitTabletTaskP, send_auto_split_tablet_task_request(arg_,result_));
 DEFINE_RS_RPC_PROCESSOR(obrpc::OB_CANCEL_DDL_TASK, ObRpcCancelDDLTaskP, cancel_ddl_task(arg_));
 DEFINE_RS_RPC_PROCESSOR(obrpc::OB_FORCE_CREATE_SYS_TABLE, ObForceCreateSysTableP, force_create_sys_table(arg_));
 class ObForceSetLocalityP : public ObRootServerRPCProcessor<obrpc::OB_FORCE_SET_LOCALITY>
 {
 public:
   explicit ObForceSetLocalityP(ObRootService &rs)
-    : ObRootServerRPCProcessor<obrpc::OB_FORCE_SET_LOCALITY>(rs, true, false, false, NULL) {}
+    : ObRootServerRPCProcessor<obrpc::OB_FORCE_SET_LOCALITY>(rs, true, false, NULL) {}
 protected:
   virtual int leader_process() { return root_service_.force_set_locality(arg_); }
   int before_process() {
@@ -526,6 +550,7 @@ DEFINE_RS_RPC_PROCESSOR(obrpc::OB_BACKUP_CLEAN, ObBackupCleanP, handle_backup_de
 DEFINE_RS_RPC_PROCESSOR(obrpc::OB_DELETE_POLICY, ObDeletePolicyP, handle_delete_policy(arg_));
 DEFINE_RS_RPC_PROCESSOR(obrpc::OB_PHYSICAL_RESTORE_RES, ObRpcPhysicalRestoreResultP, send_physical_restore_result(arg_));
 DEFINE_RS_RPC_PROCESSOR(obrpc::OB_RECOVER_TABLE, ObRecoverTableP, handle_recover_table(arg_));
+DEFINE_RS_RPC_PROCESSOR(obrpc::OB_CLONE_TENANT, ObRpcCloneTenantP, clone_tenant(arg_, result_));
 
 DEFINE_RS_RPC_PROCESSOR(obrpc::OB_RS_FLUSH_OPT_STAT_MONITORING_INFO, ObRpcFlushOptStatMonitoringInfoP, flush_opt_stat_monitoring_info(arg_));
 
@@ -553,7 +578,10 @@ DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_HANDLE_RLS_GROUP_DDL, ObRpcHandleRlsGroupD
 DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_HANDLE_RLS_CONTEXT_DDL, ObRpcHandleRlsContextDDLP, handle_rls_context_ddl(arg_));
 #ifdef OB_BUILD_TDE_SECURITY
 DEFINE_RS_RPC_PROCESSOR(obrpc::OB_GET_ROOT_KEY, ObGetRootKeyP, handle_get_root_key(arg_, result_));
+DEFINE_RS_RPC_PROCESSOR(obrpc::OB_RELOAD_MASTER_KEY, ObReloadMasterKeyP, reload_master_key(arg_, result_));
 #endif
+
+DEFINE_DDL_RS_RPC_PROCESSOR(obrpc::OB_ALTER_USER_PROXY, ObRpcAlterUserProxyP, alter_user_proxy(arg_, result_));
 
 #undef DEFINE_RS_RPC_PROCESSOR_
 #undef DEFINE_RS_RPC_PROCESSOR

@@ -14,10 +14,6 @@
 
 #include "sql/engine/expr/ob_expr_truncate.h"
 #include "sql/engine/expr/ob_datum_cast.h"
-#include "sql/engine/expr/ob_expr_util.h"
-#include "objit/common/ob_item_type.h"
-#include "share/object/ob_obj_cast.h"
-#include "sql/session/ob_sql_session_info.h"
 
 #define GET_SCALE_FOR_CALC(scale) (scale < 0 ? max((-1) * OB_MAX_DECIMAL_PRECISION, scale) : \
                                    min(OB_MAX_DECIMAL_SCALE, scale))
@@ -104,10 +100,9 @@ int ObExprTruncate::calc_result_type2(ObExprResType &type,
       ObArenaAllocator oballocator(ObModIds::BLOCK_ALLOC);
       ObCastMode cast_mode = CM_NONE;
       ObCollationType cast_coll_type = type_ctx.get_coll_type();
-      const ObDataTypeCastParams dtc_params =
-            ObBasicSessionInfo::create_dtc_params(session);
-      if (FAILEDx(ObSQLUtils::get_default_cast_mode(session, cast_mode))) {
-        LOG_WARN("failed to get default cast mode", K(ret));
+      const ObDataTypeCastParams dtc_params = type_ctx.get_dtc_params();
+      if (OB_SUCC(ret)) {
+        ObSQLUtils::get_default_cast_mode(type_ctx.get_sql_mode(), cast_mode);
       }
       ObCastCtx cast_ctx(&oballocator,
                          &dtc_params,
@@ -130,7 +125,13 @@ int ObExprTruncate::calc_result_type2(ObExprResType &type,
               precision = 1;
             }
             type.set_precision(precision);
-          } else { /* do nothing */}
+            if (lib::is_mysql_mode() && ob_is_double_tc(type.get_type())) {
+              type.set_precision(PRECISION_UNKNOWN_YET);
+              type.set_scale(SCALE_UNKNOWN_YET);
+            }
+          } else {// result precision set to type1's precision for integer
+            type.set_precision(type1.get_precision());
+          }
         } else if (ret == OB_ERR_TRUNCATED_WRONG_VALUE_FOR_FIELD ||
             ret == OB_ERR_DATA_TRUNCATED){
           type.set_scale(0);
@@ -390,6 +391,18 @@ int ObExprTruncate::cg_expr(ObExprCGCtx &expr_cg_ctx, const ObRawExpr &raw_expr,
   rt_expr.eval_func_ = calc_truncate_expr;
   return ret;
 }
+
+DEF_SET_LOCAL_SESSION_VARS(ObExprTruncate, raw_expr) {
+  int ret = OB_SUCCESS;
+  if (is_mysql_mode()) {
+    SET_LOCAL_SYSVAR_CAPACITY(3);
+    EXPR_ADD_LOCAL_SYSVAR(share::SYS_VAR_SQL_MODE);
+    EXPR_ADD_LOCAL_SYSVAR(share::SYS_VAR_TIME_ZONE);
+    EXPR_ADD_LOCAL_SYSVAR(share::SYS_VAR_COLLATION_CONNECTION);
+  }
+  return ret;
+}
+
 } // namespace sql
 } // namespace oceanbase
 

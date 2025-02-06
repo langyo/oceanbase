@@ -35,12 +35,16 @@ private:
 class ObDDLCtrl final
 {
 public:
-  ObDDLCtrl() : context_id_(0) {}
+  ObDDLCtrl() : direct_load_type_(ObDirectLoadType::DIRECT_LOAD_INVALID), context_id_(0), in_progress_(false) {}
   ~ObDDLCtrl() = default;
-  bool is_valid() const { return context_id_ > 0; }
-  TO_STRING_KV(K_(context_id));
+
+  bool is_in_progress() const { return in_progress_; }
+  TO_STRING_KV(K_(direct_load_type), K_(context_id), K_(in_progress));
 public:
+  ObDirectLoadType direct_load_type_;
   int64_t context_id_;
+  // to tag whether the ddl is in progress (between start_ddl and end_ddl).
+  bool in_progress_;
 };
 }
 }

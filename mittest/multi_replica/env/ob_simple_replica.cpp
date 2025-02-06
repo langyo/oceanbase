@@ -10,17 +10,10 @@
  * See the Mulan PubL v2 for more details.
  */
 
-#include<dirent.h>
-#include <memory>
-#include <net/if.h>
-#include <sys/ioctl.h>
-#include <sys/socket.h>
 
 #define private public
 #define protected public
 
-#include "lib/oblog/ob_log.h"
-#include "observer/ob_server.h"
 #include "storage/tx_storage/ob_ls_service.h"
 
 #undef private
@@ -83,7 +76,7 @@ ObSimpleServerReplica::ObSimpleServerReplica(const std::string &app_name,
                                              const std::string &env_prefix,
                                              const int zone_id,
                                              const int rpc_port,
-                                             const string &rs_list,
+                                             const std::string &rs_list,
                                              const ObServerInfoList &server_list,
                                              bool is_restart,
                                              ObServer &server,
@@ -149,7 +142,7 @@ int ObSimpleServerReplica::simple_init()
             + ",memory_limit=" + std::string(memory_limit_)
             + ",cache_wash_threshold=1G,net_thread_count=4,cpu_count=16,schema_history_expire_time="
               "1d,workers_per_cpu_quota=10,datafile_disk_percentage=2,__min_full_resource_pool_"
-              "memory=1073741824,system_memory=5G,trace_log_slow_query_watermark=100ms,datafile_"
+              "memory=2147483648,system_memory=5G,trace_log_slow_query_watermark=100ms,datafile_"
               "size=10G,stack_size=512K";
   opts.optstr_ = optstr_.c_str();
   // opts.devname_ = "eth0";
@@ -405,10 +398,10 @@ int ObSimpleServerReplica::simple_close()
       SERVER_LOG(INFO, "safe quit need remove ls", K(MTL_ID()), K(ls_ids));
       for (int i = 0; i < ls_ids.count(); i++) {
         if (ls_ids.at(i).id() > share::ObLSID::SYS_LS_ID) {
-          MTL(ObLSService*)->remove_ls(ls_ids.at(i), false);
+          MTL(ObLSService*)->remove_ls(ls_ids.at(i));
         }
       }
-      MTL(ObLSService*)->remove_ls(share::ObLSID{share::ObLSID::SYS_LS_ID}, false);
+      MTL(ObLSService*)->remove_ls(share::ObLSID{share::ObLSID::SYS_LS_ID});
     }
 
   };

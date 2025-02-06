@@ -20,8 +20,7 @@ namespace oceanbase
 {
 namespace observer
 {
-class ObTableLoadClientTask;
-class ObTableLoadTableCtx;
+class ObTableLoadClientTaskParam;
 
 template <table::ObTableDirectLoadOperationType pcode>
 class ObTableDirectLoadRpcExecutor
@@ -60,8 +59,11 @@ class ObTableDirectLoadBeginExecutor
 public:
   ObTableDirectLoadBeginExecutor(ObTableDirectLoadExecContext &ctx,
                                  const table::ObTableDirectLoadRequest &request,
-                                 table::ObTableDirectLoadResult &result);
-  virtual ~ObTableDirectLoadBeginExecutor();
+                                 table::ObTableDirectLoadResult &result)
+    : ParentType(ctx, request, result)
+  {
+  }
+  virtual ~ObTableDirectLoadBeginExecutor() = default;
 
 protected:
   int check_args() override;
@@ -69,12 +71,7 @@ protected:
   int process() override;
 
 private:
-  int create_table_ctx();
-  int do_begin();
-
-private:
-  ObTableLoadClientTask *client_task_;
-  ObTableLoadTableCtx *table_ctx_;
+  int init_param(ObTableLoadClientTaskParam &param);
 };
 
 // commit
@@ -160,7 +157,6 @@ protected:
 private:
   static int decode_payload(const common::ObString &payload,
                             table::ObTableLoadObjRowArray &obj_row_array);
-  int set_batch_seq_no(int64_t batch_id, table::ObTableLoadObjRowArray &obj_row_array);
 };
 
 // heart_beat

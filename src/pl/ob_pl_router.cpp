@@ -13,12 +13,8 @@
 #define USING_LOG_PREFIX PL
 
 #include "pl/ob_pl_router.h"
-#include "share/schema/ob_routine_info.h"
-#include "parser/ob_pl_parser.h"
-#include "pl/ob_pl_resolver.h"
 #include "pl/ob_pl_package.h"
-#include "share/ob_errno.h"
-#include "sql/ob_sql_utils.h"
+#include "sql/resolver/ddl/ob_ddl_resolver.h"
 
 namespace oceanbase {
 using namespace common;
@@ -90,7 +86,8 @@ int ObPLRouter::check_error_in_resolve(int code)
     case OB_ERR_DUP_SIGNAL_SET:
     case OB_ERR_WRONG_PARAMETERS_TO_NATIVE_FCT:
     case OB_ERR_CANNOT_UPDATE_VIRTUAL_COL_IN_TRG:
-    case OB_ERR_VIEW_SELECT_CONTAIN_QUESTIONMARK: {
+    case OB_ERR_VIEW_SELECT_CONTAIN_QUESTIONMARK:
+    case OB_ERR_VIEW_SELECT_CONTAIN_INTO: {
       if (lib::is_mysql_mode()) {
         ret = code;
         break;
@@ -107,7 +104,7 @@ int ObPLRouter::check_error_in_resolve(int code)
   return ret;
 }
 
-int ObPLRouter::analyze(ObString &route_sql, ObIArray<ObDependencyInfo> &dep_info, ObRoutineInfo &routine_info)
+int ObPLRouter::analyze(ObString &route_sql, ObIArray<ObDependencyInfo> &dep_info, ObRoutineInfo &routine_info, obrpc::ObDDLArg *ddl_arg)
 {
   int ret = OB_SUCCESS;
   HEAP_VAR(ObPLFunctionAST, func_ast, inner_allocator_) {
@@ -129,6 +126,8 @@ int ObPLRouter::analyze(ObString &route_sql, ObIArray<ObDependencyInfo> &dep_inf
                                             dep_info,
                                             routine_info_.get_object_type(),
                                             0, dep_attr, dep_attr));
+      OZ (ObDDLResolver::ob_add_ddl_dependency(func_ast.get_dependency_table(),
+                                               *ddl_arg));
     }
     if (OB_SUCC(ret)) {
       if (func_ast.is_modifies_sql_data()) {
@@ -177,6 +176,7 @@ int ObPLRouter::simple_resolve(ObPLFunctionAST &func_ast)
     ObRoutineParam *param = routine_info_.get_routine_params().at(i);
     ObPLDataType param_type;
     CK (OB_NOT_NULL(param));
+    OX (param_type.set_enum_set_ctx(&func_ast.get_enum_set_ctx()));
     OZ (pl::ObPLDataType::transform_from_iparam(param,
                                                 schema_guard_,
                                                 session_info_,
@@ -186,7 +186,7 @@ int ObPLRouter::simple_resolve(ObPLFunctionAST &func_ast)
     if (OB_SUCC(ret)) {
       if (param->is_ret_param()) {
         func_ast.set_ret_type(param_type);
-        if (OB_FAIL(func_ast.set_ret_type_info(param->get_extended_type_info()))) {
+        if (OB_FAIL(func_ast.set_ret_type_info(param->get_extended_type_info(), &func_ast.get_enum_set_ctx()))) {
           LOG_WARN("fail to set type info", K(ret));
         }
       } else if (OB_FAIL(func_ast.add_argument(param->get_param_name(),

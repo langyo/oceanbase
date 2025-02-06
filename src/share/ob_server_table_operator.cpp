@@ -12,15 +12,8 @@
 
 #define USING_LOG_PREFIX RS
 
-#include "share/ob_server_table_operator.h"
 
-#include "lib/mysqlclient/ob_mysql_result.h"
-#include "lib/string/ob_sql_string.h"
-#include "lib/mysqlclient/ob_mysql_proxy.h"
-#include "share/inner_table/ob_inner_table_schema.h"
-#include "share/config/ob_server_config.h"
-#include "share/ob_dml_sql_splicer.h"
-#include "common/ob_timeout_ctx.h"
+#include "ob_server_table_operator.h"
 #include "rootserver/ob_root_utils.h"
 #include "rootserver/ob_heartbeat_service.h"
 
@@ -163,17 +156,21 @@ int ObServerInfoInTable::build_server_status(share::ObServerStatus &server_statu
   int ret = OB_SUCCESS;
   const int64_t now = ::oceanbase::common::ObTimeUtility::current_time();
   server_status.reset();
+  int64_t build_version_len = build_version_.size();
   if (OB_UNLIKELY(!is_valid())) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid server info", KR(ret), KPC(this));
   } else if (OB_FAIL(server_status.zone_.assign(zone_))) {
     LOG_WARN("fail to assign zone", KR(ret), K(zone_));
+  } else if (build_version_len >= OB_SERVER_VERSION_LENGTH) {
+    ret = OB_SIZE_OVERFLOW;
+    LOG_WARN("build_version is too long", KR(ret), K(build_version_len));
   } else {
     server_status.server_ = server_;
     server_status.id_ = server_id_;
     server_status.sql_port_ = sql_port_;
     server_status.with_rootserver_ = with_rootserver_;
-    strncpy(server_status.build_version_, build_version_.ptr(), OB_SERVER_VERSION_LENGTH);
+    strncpy(server_status.build_version_, build_version_.ptr(), build_version_len);
     server_status.stop_time_ = stop_time_;
     server_status.start_service_time_ = start_service_time_;
     server_status.last_offline_time_ = last_offline_time_;
@@ -236,19 +233,21 @@ int ObServerTableOperator::init(common::ObISQLClient *proxy)
 int ObServerTableOperator::get(common::ObIArray<share::ObServerStatus> &server_statuses)
 {
   int ret = OB_SUCCESS;
+  ObZone empty_zone;
   if (OB_UNLIKELY(!inited_)) {
     ret = OB_NOT_INIT;
     LOG_WARN("not init", KR(ret), K(inited_));
   } else if (OB_ISNULL(proxy_)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("proxy_ is null", KR(ret), KP(proxy_));
-  } else if (OB_FAIL(get(*proxy_, server_statuses))) {
+  } else if (OB_FAIL(get(*proxy_, empty_zone, server_statuses))) {
     LOG_WARN("fail to get", KR(ret), KP(proxy_));
   }
   return ret;
 }
 int ObServerTableOperator::get(
     common::ObISQLClient &sql_proxy,
+    const ObZone &zone,
     common::ObIArray<ObServerStatus> &server_statuses)
 {
   int ret = OB_SUCCESS;
@@ -259,7 +258,9 @@ int ObServerTableOperator::get(
     LOG_WARN("fail to get timeout ctx", KR(ret), K(ctx));
   } else if (OB_FAIL(sql.assign_fmt("SELECT *, time_to_usec(gmt_modified) AS last_hb_time "
       "FROM %s", OB_ALL_SERVER_TNAME))) {
-    LOG_WARN("sql assign_fmt failed", KR(ret));
+    LOG_WARN("sql assign_fmt failed", KR(ret), K(sql));
+  } else if (!zone.is_empty() && OB_FAIL(sql.append_fmt(" WHERE zone = '%s'", zone.str().ptr()))) {
+    LOG_WARN("fail to assign zone condition", KR(ret), K(sql));
   } else {
     SMART_VAR(ObMySQLProxy::MySQLResult, res) {
       ObMySQLResult *result = NULL;
@@ -649,7 +650,7 @@ int ObServerTableOperator::get_start_service_time(
           ret = OB_ERR_UNEXPECTED;
           LOG_WARN("fail to get sql result", K(sql), K(ret));
         } else if (OB_FAIL(result->next())) {
-          LOG_WARN("fail to get next", KR(ret), K(sql));;
+          LOG_WARN("fail to get next", KR(ret), K(sql));
         } else {
           EXTRACT_INT_FIELD_MYSQL(*result, "start_service_time", start_service_time, int64_t);
         }
@@ -666,24 +667,112 @@ int ObServerTableOperator::get(
   common::ObISQLClient &sql_proxy,
   common::ObIArray<ObServerInfoInTable> &all_servers_info_in_table)
 {
-  int ret = OB_SUCCESS;
-  ObArray<ObServerStatus> server_statuses;
-  ObServerInfoInTable server_info_in_table;
   all_servers_info_in_table.reset();
-  if (OB_FAIL(get(sql_proxy, server_statuses))) {
-    LOG_WARN("fail to get server status", KR(ret));
+  ObZone empty_zone;
+  const bool ONLY_ACTIVE_SERVERS = false;
+  return get_servers_info_of_zone(sql_proxy, empty_zone, ONLY_ACTIVE_SERVERS, all_servers_info_in_table);
+}
+
+int ObServerTableOperator::get_clusters_server_id(common::ObISQLClient &sql_proxy, ObIArray<uint64_t> &server_id_in_cluster)
+{
+  int ret = OB_SUCCESS;
+  ObSqlString sql;
+  ObTimeoutCtx ctx;
+  server_id_in_cluster.reset();
+  if (OB_FAIL(ObRootUtils::get_rs_default_timeout_ctx(ctx))) {
+    LOG_WARN("fail to get timeout ctx", K(ret), K(ctx));
+  } else if (OB_FAIL(sql.assign_fmt("SELECT id FROM %s", OB_ALL_SERVER_TNAME))) {
+    LOG_WARN("fail to append sql", K(ret));
   } else {
-    ARRAY_FOREACH_X(server_statuses, idx, cnt, OB_SUCC(ret)) {
-      server_info_in_table.reset();
-      if (OB_FAIL(server_info_in_table.build_server_info_in_table(server_statuses.at(idx)))) {
-        LOG_WARN("fail to build server info in table", KR(ret), K(server_statuses.at(idx)));
-      } else if (OB_FAIL(all_servers_info_in_table.push_back(server_info_in_table))) {
-        LOG_WARN("fail to push element into all_servers_info_in_table", KR(ret), K(server_info_in_table));
-      } else {}
+    SMART_VAR(ObMySQLProxy::MySQLResult, res) {
+      ObMySQLResult *result = NULL;
+      if (OB_FAIL(sql_proxy.read(res, OB_SYS_TENANT_ID, sql.ptr()))) {
+        LOG_WARN("fail to execute sql", K(sql), K(ret));
+      } else if (OB_ISNULL(result = res.get_result())) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("fail to get sql result", K(sql), K(ret));
+      } else {
+        while (OB_SUCC(ret)) {
+          if (OB_FAIL(result->next())) {
+            if (OB_ITER_END != ret) {
+              LOG_WARN("result next failed", KR(ret));
+            } else {
+              ret = OB_SUCCESS;
+              break;
+            }
+          } else {
+            uint64_t server_id = 0;
+            EXTRACT_INT_FIELD_MYSQL(*result, "id", server_id, uint64_t);
+            if (FAILEDx(server_id_in_cluster.push_back(server_id))) {
+              LOG_WARN("fail to push back", KR(ret), K(server_id), K(server_id_in_cluster));
+            }
+          }
+        }
+      }
     }
   }
   return ret;
 }
+
+int ObServerTableOperator::get_clusters_max_server_id(uint64_t &max_server_id)
+{
+  int ret = OB_SUCCESS;
+  ObSqlString sql;
+  ObTimeoutCtx ctx;
+  max_server_id = 0;
+  if (OB_ISNULL(GCTX.sql_proxy_)) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("invalid argument", KR(ret), KP(GCTX.sql_proxy_));
+  } else if (OB_FAIL(ObRootUtils::get_rs_default_timeout_ctx(ctx))) {
+    LOG_WARN("fail to get timeout ctx", K(ret), K(ctx));
+  } else if (OB_FAIL(sql.assign_fmt("SELECT max(id) AS max_id FROM %s", OB_ALL_SERVER_TNAME))) {
+    LOG_WARN("fail to append sql", K(ret));
+  } else {
+    SMART_VAR(ObMySQLProxy::MySQLResult, res) {
+      ObMySQLResult *result = NULL;
+      if (OB_FAIL(GCTX.sql_proxy_->read(res, OB_SYS_TENANT_ID, sql.ptr()))) {
+        LOG_WARN("fail to execute sql", K(sql), K(ret));
+      } else if (OB_ISNULL(result = res.get_result())) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("fail to get sql result", K(sql), K(ret));
+      } else if (OB_FAIL(result->next())) {
+        LOG_WARN("fail to get next", KR(ret), K(sql));
+      } else {
+        EXTRACT_INT_FIELD_MYSQL(*result, "max_id", max_server_id, uint64_t);
+      }
+    }
+  }
+  return ret;
+}
+
+
+int ObServerTableOperator::get_servers_info_of_zone(
+    common::ObISQLClient &sql_proxy,
+    const ObZone &zone,
+    const bool only_active_servers,
+    common::ObIArray<ObServerInfoInTable> &all_servers_info_in_zone)
+{
+  int ret = OB_SUCCESS;
+  ObArray<ObServerStatus> server_statuses;
+  all_servers_info_in_zone.reset();
+  if (OB_FAIL(get(sql_proxy, zone, server_statuses))) {
+    LOG_WARN("fail to get server status", KR(ret));
+  } else {
+    ObServerInfoInTable server_info;
+    ARRAY_FOREACH_X(server_statuses, idx, cnt, OB_SUCC(ret)) {
+      server_info.reset();
+      if (OB_FAIL(server_info.build_server_info_in_table(server_statuses.at(idx)))) {
+        LOG_WARN("fail to build server info in table", KR(ret), K(server_statuses.at(idx)));
+      } else if (only_active_servers && !server_info.is_active()) {
+        // do nothing
+      } else if (OB_FAIL(all_servers_info_in_zone.push_back(server_info))) {
+        LOG_WARN("fail to push element into all_servers_info_in_zone", KR(ret), K(server_info));
+      }
+    }
+  }
+  return ret;
+}
+
 int ObServerTableOperator::get(
     common::ObISQLClient &sql_proxy,
     const common::ObAddr &server,
@@ -716,7 +805,7 @@ int ObServerTableOperator::get(
         if (OB_ITER_END == ret) {
           ret = OB_SERVER_NOT_IN_WHITE_LIST;
         }
-        LOG_WARN("fail to get next", KR(ret), K(sql));;
+        LOG_WARN("fail to get next", KR(ret), K(sql));
       } else if (OB_FAIL(build_server_status(*result, server_status))) {
         LOG_WARN("fail to build server_status",KR(ret));
       } else if (OB_FAIL(server_info_in_table.build_server_info_in_table(server_status))) {
@@ -975,6 +1064,7 @@ int ObServerTableOperator::insert_dml_builder(
   char svr_ip[OB_MAX_SERVER_ADDR_SIZE] = "";
   const char *display_status_str = NULL;
   dml.reset();
+  int64_t build_version_len = strlen(server_status.build_version_);
   if (OB_UNLIKELY(!server_status.is_valid()
       || !server_status.server_.ip_to_string(svr_ip, sizeof(svr_ip)))) {
     ret = OB_INVALID_ARGUMENT;
@@ -986,6 +1076,9 @@ int ObServerTableOperator::insert_dml_builder(
   } else if (OB_ISNULL(display_status_str)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("null display status string", KR(ret), KP(display_status_str));
+  } else if (OB_UNLIKELY(build_version_len >= OB_SERVER_VERSION_LENGTH)) {
+    ret = OB_SIZE_OVERFLOW;
+    LOG_WARN("build_version is too long", KR(ret), K(build_version_len));
   } else {
     if (OB_FAIL(dml.add_pk_column(K(svr_ip)))
         || OB_FAIL(dml.add_pk_column("svr_port", server_status.server_.get_port()))

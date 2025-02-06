@@ -20,6 +20,7 @@
 #include "log_net_service.h"                           // LogNetService
 #include "log_meta.h"                                  // LogMeta
 #include "log_define.h"
+#include "log_shared_queue_thread.h"
 
 namespace oceanbase
 {
@@ -34,8 +35,10 @@ class LogRpc;
 class LogGroupEntry;
 class LSN;
 class LogIOWorker;
+class LogSharedQueueTh;
 class PalfHandleImpl;
 class LogIOTask;
+class LogHandleSubmitTask;
 class LogIOFlushLogTask;
 class LogIOTruncateLogTask;
 class LogIOFlushMetaTask;
@@ -52,6 +55,7 @@ class LogIOFlashbackTask;
 class FlashbackCbCtx;
 class LogIOPurgeThrottlingTask;
 class PurgeThrottlingCbCtx;
+class LogFillCacheTask;
 
 #define OVERLOAD_SUBMIT_CHANGE_CONFIG_META_REQ(type)                                \
   virtual int submit_change_config_meta_req(const type &member_list,                \
@@ -100,28 +104,32 @@ public:
            const LogMeta &log_meta,
            common::ObILogAllocator *alloc_mgr,
            ILogBlockPool *log_block_pool,
-           LogHotCache *hot_cache,
+           LogCache *log_cache,
            LogRpc *log_rpc,
            LogIOWorker *log_io_worker,
+           LogSharedQueueTh *log_shared_queue_th,
            LogPlugins *plugins,
            const int64_t palf_epoch,
            const int64_t log_storage_block_size,
-           const int64_t log_meta_storage_block_size);
+           const int64_t log_meta_storage_block_size,
+           LogIOAdapter *io_adapter);
   void destroy();
 
   int load(const int64_t palf_id,
            const char *base_dir,
            common::ObILogAllocator *alloc_mgr,
            ILogBlockPool *log_block_pool,
-           LogHotCache *hot_cache,
+           LogCache *log_cache,
            LogRpc *log_rpc,
            LogIOWorker *log_io_worker,
+           LogSharedQueueTh *log_shared_queue_th,
            LogPlugins *plugins,
            LogGroupEntryHeader &entry_header,
            const int64_t palf_epoch,
-           bool &is_integrity,
            const int64_t log_storage_size,
-           const int64_t log_meta_storage_size);
+           const int64_t log_meta_storage_size,
+           LogIOAdapter *io_adapter,
+           bool &is_integrity);
 
   // ==================== Submit async task start ================
   //
@@ -130,6 +138,7 @@ public:
                             const int64_t buf_len);
 
   virtual int submit_flush_log_task(const FlushLogCbCtx &flush_log_cb_ctx, const LogWriteBuf &write_buf);
+  virtual int submit_handle_submit_task();
 
   int submit_flush_prepare_meta_task(const FlushMetaCbCtx &flush_meta_cb_ctx,
                                      const LogPrepareMeta &prepare_meta);
@@ -152,7 +161,9 @@ public:
       const TruncatePrefixBlocksCbCtx &truncate_prefix_blocks_ctx);
   int submit_flashback_task(const FlashbackCbCtx &flashback_ctx);
   int submit_purge_throttling_task(const PurgeThrottlingType purge_type);
+  int submit_fill_cache_task(const LSN &lsn, const int64_t size);
 
+  virtual int check_config_meta_size(const LogConfigMeta &config_meta) const;
   // ==================== Submit aysnc task end ==================
 
   // ====================== LogStorage start =====================
@@ -172,6 +183,13 @@ public:
   const LSN get_begin_lsn() const;
   int get_block_id_range(block_id_t &min_block_id, block_id_t &max_block_id) const;
   int get_block_min_scn(const block_id_t &block_id, share::SCN &scn) const;
+  int fill_cache_when_slide(const LSN &begin_lsn, const int64_t size);
+  int raw_read(const LSN &lsn,
+               const int64_t in_read_size,
+               const bool need_read_block_header,
+               ReadBuf &read_buf,
+               int64_t &out_read_size,
+               LogIOContext &io_ctx);
   //
   // ====================== LogStorage end =======================
 
@@ -180,7 +198,8 @@ public:
   int update_base_lsn_used_for_gc(const LSN &lsn);
   int update_manifest(const block_id_t block_id);
   int append_meta(const char *buf, const int64_t buf_len);
-  int update_log_snapshot_meta_for_flashback(const LogInfo &prev_log_inf);
+  int update_log_snapshot_meta_for_flashback(const LogInfo &prev_log_inf,
+                                             const LSN &prev_log_tail_lsn);
   //
   // ===================== MetaStorage end =======================
 
@@ -201,29 +220,29 @@ public:
                           const int64_t &prev_log_proposal_id,
                           const LSN &prev_lsn,
                           const LSN &curr_lsn,
-                          const LogWriteBuf &write_buf)
+                          const LogWriteBuf &write_buf,
+                          const bool need_batch_rpc)
   {
     int ret = OB_SUCCESS;
     if (IS_NOT_INIT) {
       ret = OB_NOT_INIT;
       PALF_LOG(ERROR, "LogEngine not init", K(ret), KPC(this));
-    } else if (OB_FAIL(log_net_service_.submit_push_log_req(member_list,
-                                                            push_log_type,
-                                                            msg_proposal_id,
-                                                            prev_log_proposal_id,
-                                                            prev_lsn,
-                                                            curr_lsn,
-                                                            write_buf))) {
-      // PALF_LOG(ERROR,
-      //          "LogNetService submit_group_entry_to_memberlist failed",
-      //          K(ret),
-      //          KPC(this),
-      //          K(member_list),
-      //          K(prev_log_proposal_id),
-      //          K(prev_lsn),
-      //          K(prev_log_proposal_id),
-      //          K(curr_lsn),
-      //          K(write_buf));
+    } else if (!need_batch_rpc
+               && OB_FAIL(log_net_service_.submit_push_log_req(member_list,
+                                                               push_log_type,
+                                                               msg_proposal_id,
+                                                               prev_log_proposal_id,
+                                                               prev_lsn,
+                                                               curr_lsn,
+                                                               write_buf))) {
+    } else if (need_batch_rpc
+               && OB_FAIL(log_net_service_.submit_batch_push_log_req(member_list,
+                                                                     push_log_type,
+                                                                     msg_proposal_id,
+                                                                     prev_log_proposal_id,
+                                                                     prev_lsn,
+                                                                     curr_lsn,
+                                                                     write_buf))) {
     } else {
       PALF_LOG(TRACE,
                "submit_group_entry_to_memberlist success",
@@ -233,7 +252,8 @@ public:
                K(msg_proposal_id),
                K(prev_log_proposal_id),
                K(prev_lsn),
-               K(curr_lsn));
+               K(curr_lsn),
+               K(need_batch_rpc));
     }
     return ret;
   }
@@ -251,7 +271,8 @@ public:
   // @param[in] lsn: the offset of log
   virtual int submit_push_log_resp(const common::ObAddr &server,
                                    const int64_t &msg_proposal_id,
-                                   const LSN &lsn);
+                                   const LSN &lsn,
+                                   const bool is_batch);
 
   template <class List>
   int submit_prepare_meta_req_(const List &member_list, const int64_t &log_proposal_id)
@@ -424,17 +445,15 @@ public:
 
   LogMeta get_log_meta() const;
   const LSN &get_base_lsn_used_for_block_gc() const;
-  // not thread safe
   int get_min_block_info_for_gc(block_id_t &block_id, share::SCN &max_scn);
-  int get_min_block_info(block_id_t &block_id, share::SCN &min_scn) const;
-  //
+  int get_min_block_info(block_id_t &block_id, share::SCN &min_scn);
   // ===================== NetService end ========================
   LogStorage *get_log_storage() { return &log_storage_; }
   LogStorage *get_log_meta_storage() { return &log_meta_storage_; }
   int get_total_used_disk_space(int64_t &total_used_size_byte,
                                 int64_t &unrecyclable_disk_space) const;
   virtual int64_t get_palf_epoch() const { return palf_epoch_; }
-  TO_STRING_KV(K_(palf_id), K_(is_inited), K_(min_block_max_scn), K_(min_block_id), K_(base_lsn_for_block_gc),
+  TO_STRING_KV(K_(palf_id), K_(is_inited), K_(min_block_max_scn), K_(min_block_id), K_(min_block_min_scn), K_(base_lsn_for_block_gc),
       K_(log_meta), K_(log_meta_storage), K_(log_storage), K_(palf_epoch), K_(last_purge_throttling_ts), KP(this));
 private:
   int submit_flush_meta_task_(const FlushMetaCbCtx &flush_meta_cb_ctx, const LogMeta &log_meta);
@@ -444,7 +463,7 @@ private:
   int generate_flush_log_task_(const FlushLogCbCtx &flush_log_cb_ctx,
                                const LogWriteBuf &write_buf,
                                LogIOFlushLogTask *&flush_log_task);
-
+  int generate_handle_submit_task_(LogHandleSubmitTask *&handle_submit_task);
   int generate_truncate_log_task_(const TruncateLogCbCtx &truncate_log_cb_ctx,
                                   LogIOTruncateLogTask *&truncate_log_task);
   int generate_truncate_prefix_blocks_task_(
@@ -458,6 +477,9 @@ private:
                                LogIOFlashbackTask *&flashback_task);
   int generate_purge_throttling_task_(const PurgeThrottlingCbCtx &purge_cb_ctx,
                                       LogIOPurgeThrottlingTask *&purge_task);
+  int generate_fill_cache_task_(const LSN &lsn,
+                                const int64_t size,
+                                LogFillCacheTask *&fill_cache_task);
   int update_config_meta_guarded_by_lock_(const LogConfigMeta &meta, LogMeta &log_meta);
   int try_clear_up_holes_and_check_storage_integrity_(
       const LSN &last_entry_begin_lsn,
@@ -469,22 +491,46 @@ private:
 
   int serialize_log_meta_(const LogMeta &log_meta, char *buf, int64_t buf_len);
 
-  void reset_min_block_info_guarded_by_lock_(const block_id_t min_block_id,
-                                             const share::SCN &min_block_max_scn);
+  void set_min_block_info_(const int64_t min_block_info_cache_version,
+                           const block_id_t min_block_id,
+                           const share::SCN &min_block_min_scn);
+
+  void reset_min_block_info_();
+
+  void set_min_block_info_for_gc_(const int64_t min_block_info_cache_version,
+                                  const block_id_t min_block_id,
+                                  const share::SCN &min_block_max_scn);
 
   int integrity_verify_(const LSN &last_meta_entry_start_lsn,
                         const LSN &last_group_entry_header_lsn,
                         bool &is_integrity);
+  void set_enable_fill_cache_functor(const EnableFillCacheFunctor &functor);
 private:
   DISALLOW_COPY_AND_ASSIGN(LogEngine);
 
   const int64_t PURGE_THROTTLING_INTERVAL = 100 * 1000;//100ml
 private:
-  // used for GC
-  mutable ObSpinLock block_gc_lock_;
+  // ======================== begin used for GC ===========================
+  mutable ObSpinLock min_block_info_lock_;
+  // update it only in:
+  // 1) get min block info for gc.
+  // 2) delete min block.
   share::SCN min_block_max_scn_;
+  // update it only in:
+  // 1) get min block info for gc.
+  // 2) get min block info
+  // 3) delete min block.
   mutable block_id_t min_block_id_;
+  // update it only after write LogSnapshotMeta successfully
   LSN base_lsn_for_block_gc_;
+  // update it only in:
+  // 1) get min block info for gc.
+  // 2) get min block info.
+  // 3) delete min block.
+  share::SCN min_block_min_scn_;
+  // update it only in reset_min_block_info_
+  int64_t min_block_info_cache_version_;
+  // ======================== end used for GC ===========================
 
   mutable ObSpinLock log_meta_lock_;
   LogMeta log_meta_;
@@ -493,6 +539,7 @@ private:
   LogNetService log_net_service_;
   common::ObILogAllocator *alloc_mgr_;
   LogIOWorker *log_io_worker_;
+  LogSharedQueueTh *log_shared_queue_th_;
   LogPlugins *plugins_;
   // Except for LogNetService, this field is just only used for debug
   int64_t palf_id_;
@@ -500,6 +547,7 @@ private:
   int64_t palf_epoch_;
   //used to control frequency of purging throttling
   int64_t last_purge_throttling_ts_;
+  EnableFillCacheFunctor enable_fill_cache_functor_;
   bool is_inited_;
 };
 } // end namespace palf

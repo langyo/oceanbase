@@ -12,15 +12,8 @@
 
 #define USING_LOG_PREFIX SHARE
 
-#include "share/ob_web_service_root_addr.h"
-#include <curl/curl.h>
-#include "lib/json/ob_json.h"
-#include "lib/string/ob_sql_string.h"
-#include "share/config/ob_server_config.h"
+#include "ob_web_service_root_addr.h"
 #include "observer/ob_server_struct.h"
-#include "share/ob_cluster_version.h"
-#include "share/ob_rpc_struct.h"
-#include "share/ob_inner_config_root_addr.h"
 
 namespace oceanbase
 {
@@ -698,9 +691,13 @@ int ObWebServiceRootAddr::to_json(
       } else if (!is_strong_leader(role) && !is_follower(role)) {
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("invalid role type", K(ret), K(role));
-      } else if (OB_FAIL(json.append_fmt("{\"%s\":\"%s:%d\",\"%s\":\"%s\",\"%s\":%ld}",
+      } else if (OB_FAIL(json.append_fmt("{\"%s\":\"%s%s%s:%d\",\"%s\":\"%s\",\"%s\":%ld}",
 
-          JSON_ADDRESS, ip_buf, addr_list.at(i).get_server().get_port(),
+          JSON_ADDRESS,
+          addr_list.at(i).get_server().using_ipv4() ? "" : "[",
+          ip_buf,
+	        addr_list.at(i).get_server().using_ipv4() ? "" : "]",
+	        addr_list.at(i).get_server().get_port(),
           JSON_ROLE, is_strong_leader(role) ? "LEADER" : "FOLLOWER",
           JSON_SQL_PORT, addr_list.at(i).get_sql_port()))) {
         LOG_WARN("append string failed", K(ret));
@@ -888,11 +885,11 @@ int64_t ObWebServiceRootAddr::curl_write_data(
 //        "ObRegion": "ob2.rongxuan.lc",
 //        "ObRegionId": 2,
 //        "RsList": [{
-//            "address": "10.101.67.165:16825",
+//            "address": "127.0.0.1:16825",
 //            "role": "LEADER",
 //            "sql_port": 16860
 //        }, {
-//            "address": "10.218.78.76:16827",
+//            "address": "127.0.0.2:16827",
 //            "role": "FOLLOWER",
 //            "sql_port": 16862
 //        }],
@@ -1107,8 +1104,9 @@ int ObRedoTransportOption::append_redo_transport_options_change(
   if (redo_transport_options_str.empty()) {
   } else {
     SMART_VAR(char[OB_MAX_CONFIG_VALUE_LEN], format_str) {
+      ObCStringHelper helper;
       if (OB_FAIL(ObConfigLogArchiveOptionsItem::format_option_str(
-              to_cstring(redo_transport_options_str),
+              helper.convert(redo_transport_options_str),
               redo_transport_options_str.length(),
               format_str,
               OB_MAX_CONFIG_VALUE_LEN))) {

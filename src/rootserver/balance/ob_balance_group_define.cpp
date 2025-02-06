@@ -11,11 +11,7 @@
  */
 #define USING_LOG_PREFIX BALANCE
 
-#include "lib/string/ob_string.h"             // ObString
-#include "lib/string/ob_sql_string.h"         // ObSqlString
 #include "share/schema/ob_schema_mgr.h"       // ObSimpleTableSchemaV2
-#include "share/schema/ob_table_schema.h"     // ObTableSchema
-#include "share/schema/ob_schema_struct.h"    // ObPartition
 
 #include "ob_balance_group_define.h"
 
@@ -55,7 +51,7 @@ int ObBalanceGroup::init_by_tablegroup(const ObSimpleTablegroupSchema &tg,
     if (OB_FAIL(bg_name_str.append_fmt("TABLEGROUP_%s_PART_GROUP_%ld", tg_name.ptr(), part_group_index))) {
       LOG_WARN("fail to append fmt", KR(ret), K(tg));
     } else {
-      id_ = ObBalanceGroupID(tg.get_tablegroup_id(), 0);
+      id_ = ObBalanceGroupID(tg.get_tablegroup_id(), part_group_index);
     }
   }
 

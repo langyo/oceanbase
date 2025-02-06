@@ -14,16 +14,13 @@
 #define OCEANBASE_SHARE_OB_SHARE_UTIL_H_
 #include "share/ob_define.h"
 #include "share/scn.h"
+#include "share/ob_tenant_role.h"
 namespace oceanbase
 {
 namespace common
 {
 class ObTimeoutCtx;
 class ObISQLClient;
-}
-namespace storage
-{
-  class ObLS;
 }
 namespace share
 {
@@ -82,6 +79,26 @@ public:
   static int check_compat_version_for_arbitration_service(
       const uint64_t tenant_id,
       bool &is_compatible);
+  // tenant data version should up to 430 when cloning primary tenant
+  // tenant data version should up to 432 when cloning standby tenant
+  // params[in]  tenant_id, which tenant to check
+  // params[out] is_compatible, whether it is up to 4.3
+  static int check_compat_version_for_clone_tenant_with_tenant_role(
+      const uint64_t tenant_id,
+      bool &is_compatible);
+
+  // data version must up to 432 with clone standby tenant
+  // params[in]  tenant_id, which tenant to check
+  // params[out] is_compatible, whether it is up to 4.3.2
+  static int check_compat_version_for_clone_standby_tenant(
+      const uint64_t tenant_id,
+      bool &is_compatible);
+  // data version must up to 430 with clone primary tenant
+  // params[in]  tenant_id, which tenant to check
+  // params[out] is_compatible, whether it is up to 4.3.0
+  static int check_compat_version_for_clone_tenant(
+      const uint64_t tenant_id,
+      bool &is_compatible);
   // generate the count of arb replica of a log stream
   // @params[in]  tenant_id, which tenant to check
   // @params[in]  ls_id, which log stream to check
@@ -95,6 +112,13 @@ public:
   // @params[in]  tenant_id, which tenant to check
   // @params[out] is_compatible, whether it is up to 4.2
   static int check_compat_version_for_readonly_replica(
+      const uint64_t tenant_id,
+      bool &is_compatible);
+
+  // data version must up to 4.3.2 with column-store replica
+  // @params[in]  tenant_id, which tenant to check
+  // @params[out] is_compatible, whether it is over 4.3.2
+  static int check_compat_version_for_columnstore_replica(
       const uint64_t tenant_id,
       bool &is_compatible);
 
@@ -122,13 +146,28 @@ public:
     const uint64_t tenant_id,
     const ObSqlString &sql,
     SCN &ora_rowscn);
-  // wait the given ls's end_scn be larger than or equal to sys_ls_target_scn
-  // @params[in]: sys_ls_target_scn
-  // @params[in]: ls
-  static int wait_user_ls_sync_scn_locally(const share::SCN &sys_ls_target_scn, storage::ObLS &ls);
-
   static bool is_tenant_enable_rebalance(const uint64_t tenant_id);
   static bool is_tenant_enable_transfer(const uint64_t tenant_id);
+  static int mtl_get_tenant_role(const uint64_t tenant_id, ObTenantRole::Role &tenant_role);
+  static int mtl_check_if_tenant_role_is_primary(const uint64_t tenant_id, bool &is_primary);
+  static int mtl_check_if_tenant_role_is_standby(const uint64_t tenant_id, bool &is_standby);
+  static int table_get_tenant_role(const uint64_t tenant_id, ObTenantRole &tenant_role);
+  static int table_check_if_tenant_role_is_primary(const uint64_t tenant_id, bool &is_primary);
+  static int table_check_if_tenant_role_is_standby(const uint64_t tenant_id, bool &is_standby);
+  static int table_check_if_tenant_role_is_restore(const uint64_t tenant_id, bool &is_restore);
+  static const char *replica_type_to_string(const ObReplicaType type);
+  static ObReplicaType string_to_replica_type(const char *str);
+  static ObReplicaType string_to_replica_type(const ObString &str);
+  static inline uint64_t compute_server_index(uint64_t server_id) {
+    return server_id % (MAX_SERVER_COUNT + 1);
+  }
+private:
+  static int check_compat_data_version_(
+    const uint64_t required_data_version,
+    const bool check_meta_tenant,
+    const bool check_user_tenant,
+    const uint64_t tenant_id,
+    bool &is_compatible);
 };
 }//end namespace share
 }//end namespace oceanbase

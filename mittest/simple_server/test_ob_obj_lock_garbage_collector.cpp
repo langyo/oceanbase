@@ -1,3 +1,6 @@
+// owner: yichang.yyf
+// owner group: transaction
+
 /**
  * Copyright (c) 2021 OceanBase
  * OceanBase CE is licensed under Mulan PubL v2.
@@ -11,20 +14,16 @@
  */
 
 #include <gtest/gtest.h>
-#include <stdlib.h>
 #define USING_LOG_PREFIX TABLELOCK
 #define protected public
 #define private public
 
 #include "env/ob_simple_cluster_test_base.h"
 #include "env/ob_simple_server_restart_helper.h"
-#include "lib/mysqlclient/ob_mysql_result.h"
 #include "share/schema/ob_tenant_schema_service.h"
-#include "share/schema/ob_part_mgr_util.h"
 #include "storage/tablelock/ob_table_lock_service.h"
 #include "storage/tablelock/ob_lock_memtable.h"
 #include "storage/tx_storage/ob_ls_service.h"
-#include "storage/tx/ob_trans_service.h"
 #include "mittest/mtlenv/tablelock/table_lock_common_env.h"
 
 #undef private
@@ -314,12 +313,14 @@ TEST_F(ObOBJLockGCBeforeRestartTest, obj_lock_gc_with_tablelock_service)
 {
   LOG_INFO("ObOBJLockGCBeforeRestartTest::obj_lock_gc_with_tablelock_service");
   int ret = OB_SUCCESS;
-  ObTableLockOwnerID OWNER_ONE(1);
-  ObTableLockOwnerID OWNER_TWO(2);
+  ObTableLockOwnerID OWNER_ONE;
+  ObTableLockOwnerID OWNER_TWO;
   uint64_t table_id = 0;
   ObTableLockMode lock_mode = EXCLUSIVE;
   share::ObTenantSwitchGuard tenant_guard;
   bool has_obj_lock;
+  OWNER_ONE.convert_from_value(1);
+  OWNER_TWO.convert_from_value(2);
 
   ret = tenant_guard.switch_to(OB_SYS_TENANT_ID);
   ASSERT_EQ(OB_SUCCESS, ret);

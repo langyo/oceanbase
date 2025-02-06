@@ -11,11 +11,8 @@
  */
 
 #include "ob_replay_status.h"
-#include "ob_log_replay_service.h"
-#include "logservice/ob_log_base_type.h"
-#include "logservice/palf/palf_env.h"
-#include "lib/stat/ob_session_stat.h"
-#include "share/ob_errno.h"
+#include "logservice/ob_log_service.h"
+#include "observer/ob_server_event_history_table_operator.h"
 
 namespace oceanbase
 {
@@ -95,16 +92,18 @@ bool ObReplayServiceTask::need_replay_immediately() const
 //---------------ObReplayServiceSubmitTask---------------//
 int ObReplayServiceSubmitTask::init(const palf::LSN &base_lsn,
                                     const SCN &base_scn,
-                                    PalfHandle *palf_handle,
+                                    const share::ObLSID &id,
                                     ObReplayStatus *replay_status)
 {
   int ret = OB_SUCCESS;
   int tmp_ret = OB_SUCCESS;
-  if (OB_ISNULL(replay_status) || OB_ISNULL(palf_handle)) {
+  if (OB_ISNULL(replay_status)) {
     ret = OB_INVALID_ARGUMENT;
-    CLOG_LOG(WARN, "invalid argument", K(type_), K(ret), K(replay_status), K(palf_handle));
-  } else if (OB_FAIL(palf_handle->seek(base_lsn, iterator_))) {
-    CLOG_LOG(WARN, "seek iterator failed", KR(ret), K(type_), K(palf_handle), K(base_lsn));
+    CLOG_LOG(WARN, "invalid argument", K(type_), K(ret), K(replay_status));
+  } else if (OB_FAIL(seek_log_iterator(id, base_lsn, iterator_))) {
+    CLOG_LOG(WARN, "seek iterator failed", KR(ret), K(type_), K(id), K(base_lsn));
+  } else if (OB_FAIL(iterator_.set_io_context(palf::LogIOContext(MTL_ID(), id.id(), palf::LogIOUser::REPLAY)))) {
+    CLOG_LOG(WARN, "iterator set_io_context failed", KR(ret), K(id));
   } else if (OB_UNLIKELY(!base_scn.is_valid())) {
     ret = OB_ERR_UNEXPECTED;
     CLOG_LOG(ERROR, "base_scn is invalid", K(type_), K(base_lsn), K(base_scn), KR(ret));
@@ -120,7 +119,7 @@ int ObReplayServiceSubmitTask::init(const palf::LSN &base_lsn,
       CLOG_LOG(WARN, "iterator next failed", K(iterator_), K(tmp_ret));
     }
     CLOG_LOG(INFO, "submit log task init success", K(type_), K(next_to_submit_lsn_),
-               K(next_to_submit_scn_), K(replay_status_), K(ret));
+             K(next_to_submit_scn_), K(replay_status_));
   }
   return ret;
 }
@@ -235,10 +234,10 @@ int ObReplayServiceSubmitTask::need_skip(const SCN &scn, bool &need_skip)
 }
 
 
-int ObReplayServiceSubmitTask::get_log(const char *&buffer, int64_t &nbytes, SCN &scn,
-                                       palf::LSN &offset, bool &is_raw_write)
+int ObReplayServiceSubmitTask::get_log(const char *&buffer, int64_t &nbytes, SCN &scn, palf::LSN &offset)
 {
-  return iterator_.get_entry(buffer, nbytes, scn, offset, is_raw_write);
+  bool unused_is_raw_write = true;
+  return iterator_.get_entry(buffer, nbytes, scn, offset, unused_is_raw_write);
 }
 
 int ObReplayServiceSubmitTask::next_log(const SCN &replayable_point,
@@ -279,11 +278,26 @@ int ObReplayServiceSubmitTask::next_log(const SCN &replayable_point,
   return ret;
 }
 
-int ObReplayServiceSubmitTask::reset_iterator(PalfHandle &palf_handle, const LSN &begin_lsn)
+int ObReplayServiceSubmitTask::reset_iterator(const share::ObLSID &id,
+                                              const LSN &begin_lsn)
 {
   int ret = OB_SUCCESS;
+  /*
+   * next_to_submit_lsn_ may be bigger than begin_lsn;
+  current replica is A
+  first revoke ObRoleChangeService::switch_follower_to_leader_():
+    T1 A invoke  log_handler->get_end_lsn(end_lsn) and end_lsn is 100.
+    T2 another replica B switches to leader and submits log with lsn[101, 200].
+    T3 A invoke replay_service_->switch_to_leader(ls_id)
+    T4 A failed with invoking role_change_handler->switch_to_leader(cur_task_info_).
+    replica A replayed log [101, 150) between T1 and T3.
+  then
+    T5 replica A invoke ObRoleChangeService::leader_to_follower_forcedly_()
+  within leader_to_follower_forcedly_(), parameter end_lsn passed to
+  replay_service_->switch_to_follower(ls_id, end_lsn) is 100 while next_to_submit_lsn_ is 150.
+  */
   next_to_submit_lsn_ = std::max(next_to_submit_lsn_, begin_lsn);
-  if (OB_FAIL(palf_handle.seek(next_to_submit_lsn_, iterator_))) {
+  if (OB_FAIL(seek_log_iterator(id, next_to_submit_lsn_, iterator_))) {
     ret = OB_ERR_UNEXPECTED;
     CLOG_LOG(WARN, "seek interator failed", K(type_), K(begin_lsn), K(ret));
   } else if (OB_FAIL(iterator_.next())) {
@@ -297,8 +311,7 @@ int ObReplayServiceSubmitTask::update_next_to_submit_scn_(const SCN &scn)
   int ret = OB_SUCCESS;
   if (OB_UNLIKELY(scn <= next_to_submit_scn_)) {
     ret = OB_INVALID_ARGUMENT;
-    CLOG_LOG(WARN, "update_next_to_submit_scn invalid argument", K(type_), K(scn),
-               K(next_to_submit_scn_), K(ret));
+    CLOG_LOG(WARN, "invalid argument", K(type_), K(scn), K(next_to_submit_scn_));
   } else {
     next_to_submit_scn_ = scn;
   }
@@ -310,8 +323,7 @@ int ObReplayServiceSubmitTask::update_next_to_submit_lsn_(const LSN &lsn)
   int ret = OB_SUCCESS;
   if (OB_UNLIKELY(lsn <= next_to_submit_lsn_)) {
     ret = OB_INVALID_ARGUMENT;
-    CLOG_LOG(WARN, "update_next_to_submit_lsn invalid argument", K(type_), K(lsn),
-               K(next_to_submit_lsn_), K(ret));
+    CLOG_LOG(WARN, "invalid argument", K(type_), K(lsn), K(next_to_submit_lsn_));
   } else {
     next_to_submit_lsn_ = lsn;
   }
@@ -325,7 +337,7 @@ int ObReplayServiceReplayTask::init(ObReplayStatus *replay_status,
   int ret = OB_SUCCESS;
   if (OB_ISNULL(replay_status) || idx < 0) {
     ret = OB_INVALID_ARGUMENT;
-    CLOG_LOG(WARN, "invalid argument", K(type_), KP(replay_status), K(ret), K(idx));
+    CLOG_LOG(WARN, "invalid argument", K(type_), KP(replay_status), K(idx));
   } else {
     replay_status_ = replay_status;
     idx_ = idx;
@@ -346,15 +358,15 @@ void ObReplayServiceReplayTask::reset()
       ObLogReplayTask *replay_task = static_cast<ObLogReplayTask *>(top_item);
       //此处一定只能让引用计数归零的任务释放log_buff
       if (replay_task->is_pre_barrier_) {
-        ObLogReplayBuffer *replay_buf = static_cast<ObLogReplayBuffer *>(replay_task->log_buf_);
+        ObLogReplayBuffer *replay_buf = static_cast<ObLogReplayBuffer *>(replay_task->read_log_buf_);
         if (NULL == replay_buf) {
           CLOG_LOG_RET(ERROR, OB_ERR_UNEXPECTED, "replay_buf is NULL when reset", KPC(replay_task));
         } else if (0 == replay_buf->dec_replay_ref()) {
           replay_status_->free_replay_task_log_buf(replay_task);
-          replay_status_->dec_pending_task(replay_task->log_size_);
+          replay_status_->dec_pending_task(replay_task->get_replay_payload_size());
         }
       } else {
-        replay_status_->dec_pending_task(replay_task->log_size_);
+        replay_status_->dec_pending_task(replay_task->get_replay_payload_size());
       }
       replay_status_->free_replay_task(replay_task);
     };
@@ -450,7 +462,7 @@ int64_t ObLogReplayBuffer::get_replay_ref()
 int ObLogReplayTask::init(void *log_buf)
 {
   int ret = OB_SUCCESS;
-  log_buf_ = log_buf;
+  read_log_buf_ = log_buf;
   if (is_pre_barrier_) {
     ObLogReplayBuffer *replay_log_buffer = static_cast<ObLogReplayBuffer *>(log_buf);
     replay_log_buffer->ref_ = REPLAY_TASK_QUEUE_SIZE;
@@ -465,45 +477,59 @@ void ObLogReplayTask::reset()
   ls_id_.reset();
   scn_.reset();
   lsn_.reset();
-  log_size_ = 0;
+  read_log_size_ = 0;
   is_pre_barrier_ = false;
   is_post_barrier_ = false;
   replay_hint_ = 0;
   log_type_ = ObLogBaseType::INVALID_LOG_BASE_TYPE;
-  is_raw_write_ = false;
   init_task_ts_ = common::OB_INVALID_TIMESTAMP;
   first_handle_ts_ = common::OB_INVALID_TIMESTAMP;
   print_error_ts_ = common::OB_INVALID_TIMESTAMP;
   replay_cost_ = common::OB_INVALID_TIMESTAMP;
   retry_cost_ = common::OB_INVALID_TIMESTAMP;
-  log_buf_ = NULL;
+  read_log_buf_ = NULL;
+  decompression_buf_ = NULL;
+  has_decompressed_ = false;
+  decompressed_log_size_ = 0;
+  base_header_len_ = 0;
 }
 
 bool ObLogReplayTask::is_valid()
 {
-  bool ret = false;
-  ret = ls_id_.is_valid()
-        && scn_.is_valid()
-        && lsn_.is_valid()
-        && log_size_ > 0
-        && NULL != log_buf_;
-  return ret;
+  bool b_ret = false;
+  b_ret = ls_id_.is_valid()
+      && scn_.is_valid()
+      && lsn_.is_valid()
+      && read_log_size_ > 0
+      && NULL != read_log_buf_;
+  return b_ret;
+}
+void *ObLogReplayTask::get_replay_payload() const
+{
+  return NULL != decompression_buf_ ? decompression_buf_ : read_log_buf_;
+}
+
+int64_t ObLogReplayTask::get_replay_payload_size() const
+{
+  return decompressed_log_size_ > 0 ? decompressed_log_size_ + base_header_len_ : read_log_size_;
 }
 
 void ObLogReplayTask::shallow_copy(const ObLogReplayTask &other)
 {
   ls_id_ = other.ls_id_;
-  scn_ = other.scn_;
+  log_type_ = other.log_type_;
   lsn_ = other.lsn_;
-  log_size_ = other.log_size_;
+  scn_ = other.scn_;
   is_pre_barrier_ = other.is_pre_barrier_;
   is_post_barrier_ = other.is_post_barrier_;
+  read_log_size_ = other.read_log_size_;
   replay_hint_ = other.replay_hint_;
-  log_type_ = other.log_type_;
-  is_raw_write_ = other.is_raw_write_;
-  log_buf_ = other.log_buf_;
   init_task_ts_ = other.init_task_ts_;
-  first_handle_ts_ = other.init_task_ts_;
+  read_log_buf_ = other.read_log_buf_;
+  decompression_buf_ = other.decompression_buf_;
+  has_decompressed_ = other.has_decompressed_;
+  decompressed_log_size_ = other.decompressed_log_size_;
+  base_header_len_ = other.base_header_len_;
 }
 
 int64_t ObLogReplayTask::to_string(char* buf, const int64_t buf_len) const
@@ -513,19 +539,22 @@ int64_t ObLogReplayTask::to_string(char* buf, const int64_t buf_len) const
   (void) log_base_type_to_string(log_type_, log_base_type_str, logservice::OB_LOG_BASE_TYPE_STR_MAX_LEN);
   J_OBJ_START();
   J_KV(K(ls_id_),
-         K_(log_type),
-         "log_type", log_base_type_str,
-         K(lsn_),
-         K(scn_),
-         K(is_pre_barrier_),
-         K(is_post_barrier_),
-         K(log_size_),
-         K(replay_hint_),
-         K(is_raw_write_),
-         K(first_handle_ts_),
-         K(replay_cost_),
-         K(retry_cost_),
-         KP(log_buf_));
+       K_(log_type),
+       "log_type", log_base_type_str,
+       K(lsn_),
+       K(scn_),
+       K(is_pre_barrier_),
+       K(is_post_barrier_),
+       K(read_log_size_),
+       K(replay_hint_),
+       K(first_handle_ts_),
+       K(replay_cost_),
+       K(retry_cost_),
+       KP(read_log_buf_),
+       KP(decompression_buf_),
+       K(has_decompressed_),
+       K(decompressed_log_size_),
+       K(base_header_len_));
   J_OBJ_END();
   return pos;
 }
@@ -533,9 +562,11 @@ int64_t ObLogReplayTask::to_string(char* buf, const int64_t buf_len) const
 //---------------ObReplayFsCb---------------//
 int ObReplayFsCb::update_end_lsn(int64_t id,
                                  const LSN &end_offset,
+                                 const SCN &end_scn,
                                  const int64_t proposal_id)
 {
   UNUSED(id);
+  UNUSED(end_scn);
   UNUSED(proposal_id);
   return replay_status_->update_end_offset(end_offset);
 }
@@ -672,7 +703,7 @@ int ObReplayStatus::enable_(const LSN &base_lsn, const SCN &base_scn)
     //针对reuse场景的防御检查
     ret = OB_ERR_UNEXPECTED;
     CLOG_LOG(WARN, "remain pending task when enable replay status", K(ret), KPC(this));
-  } else if (OB_FAIL(submit_log_task_.init(base_lsn, base_scn, &palf_handle_, this))) {
+  } else if (OB_FAIL(submit_log_task_.init(base_lsn, base_scn, ls_id_, this))) {
     CLOG_LOG(WARN, "failed to init submit_log_task", K(ret), K(&palf_handle_));
   } else {
     for (int64_t i = 0; OB_SUCC(ret) && i < REPLAY_TASK_QUEUE_SIZE; ++i) {
@@ -684,7 +715,7 @@ int ObReplayStatus::enable_(const LSN &base_lsn, const SCN &base_scn)
       set_last_check_memstore_lsn(base_lsn);
       if (OB_FAIL(submit_task_to_replay_service_(submit_log_task_))) {
         CLOG_LOG(ERROR, "failed to submit submit_log_task to replay service", K(submit_log_task_),
-                    KPC(this), K(ret));
+                 KPC(this), K(ret));
       }
     }
   }
@@ -805,7 +836,7 @@ void ObReplayStatus::switch_to_follower(const palf::LSN &begin_lsn)
     if (!is_enabled_) {
       // do nothing
     } else {
-      (void)submit_log_task_.reset_iterator(palf_handle_, begin_lsn);
+      (void)submit_log_task_.reset_iterator(ls_id_, begin_lsn);
     }
   } while (0);
   do {
@@ -813,12 +844,21 @@ void ObReplayStatus::switch_to_follower(const palf::LSN &begin_lsn)
     role_ = FOLLOWER;
   } while (0);
 
+#ifdef ERRSIM
+int tmp_ret = OB_E(EventTable::EN_REPLAY_SERVICE_SUBMIT_TASK_SLEEP) OB_SUCCESS;
+if (OB_SUCCESS != tmp_ret) {
+  CLOG_LOG(INFO, "fake EN_REPLAY_SERVICE_SUBMIT_TASK_SLEEP ", KPC(this), K(begin_lsn));
+  SERVER_EVENT_SYNC_ADD("REPLAYSERVICE", "BEFORE_PUSH_SUBMIT_TASK");
+}
+  DEBUG_SYNC(REPLAY_SWITCH_TO_FOLLOWER_BEFORE_PUSH_SUBMIT_TASK);
+#endif
+
   RLockGuard rguard(rwlock_);
   if (!is_enabled_) {
     // do nothing
   } else if (OB_FAIL(submit_task_to_replay_service_(submit_log_task_))) {
     CLOG_LOG(ERROR, "failed to submit submit_log_task to replay service", K(submit_log_task_),
-                KPC(this), K(ret));
+             KPC(this), K(ret));
   } else {
     // success
   }
@@ -848,7 +888,7 @@ int ObReplayStatus::is_replay_done(const LSN &end_lsn,
     LSN min_unreplayed_lsn;
     if (!is_enabled_) {
       is_done = false;
-      CLOG_LOG(INFO, "repaly is not enabled", K(end_lsn));
+      CLOG_LOG(INFO, "replay is not enabled", K(end_lsn));
     } else if (OB_FAIL(get_min_unreplayed_lsn(min_unreplayed_lsn))) {
       CLOG_LOG(ERROR, "get_min_unreplayed_lsn failed", K(this), K(ret), K(min_unreplayed_lsn));
     } else if (!min_unreplayed_lsn.is_valid()) {
@@ -865,6 +905,20 @@ int ObReplayStatus::is_replay_done(const LSN &end_lsn,
         }
       }
     }
+  }
+  return ret;
+}
+
+int ObReplayStatus::is_submit_task_clear(bool &is_clear) const
+{
+  int ret = OB_SUCCESS;
+  is_clear = false;
+  if (OB_UNLIKELY(!is_inited_)) {
+    ret = OB_NOT_INIT;
+    CLOG_LOG(ERROR, "replay status has not been inited", K(ret));
+  } else {
+    RLockGuard rlock_guard(rwlock_);
+    is_clear = submit_log_task_.is_idle();
   }
   return ret;
 }
@@ -971,7 +1025,7 @@ int ObReplayStatus::get_min_unreplayed_log_info(LSN &lsn,
     bool is_queue_empty = true;
     for (int64_t i = 0; OB_SUCC(ret) && i < REPLAY_TASK_QUEUE_SIZE; ++i) {
       if (OB_FAIL(task_queues_[i].get_min_unreplayed_log_info(queue_lsn, queue_scn, replay_hint, log_type,
-                                                first_handle_ts, replay_cost, retry_cost, is_queue_empty))) {
+                                                              first_handle_ts, replay_cost, retry_cost, is_queue_empty))) {
         CLOG_LOG(ERROR, "task_queue get_min_unreplayed_log_info failed", K(ret), K(task_queues_[i]));
       } else if (!is_queue_empty
                 && queue_lsn < lsn
@@ -997,31 +1051,43 @@ int ObReplayStatus::get_min_unreplayed_log_info(LSN &lsn,
   return ret;
 }
 
-int ObReplayStatus::get_replay_process(int64_t &replayed_log_size,
+int ObReplayStatus::get_replay_process(int64_t &submitted_log_size,
+                                       int64_t &unsubmitted_log_size,
+                                       int64_t &replayed_log_size,
                                        int64_t &unreplayed_log_size)
 {
   int ret = OB_SUCCESS;
   LSN base_lsn;
   LSN min_unreplayed_lsn;
+  LSN next_to_submit_lsn;
+  SCN next_to_submit_scn;
   LSN committed_end_lsn;
   if (IS_NOT_INIT) {
     ret = OB_NOT_INIT;
     CLOG_LOG(ERROR, "replay status is not inited", K(ret));
   } else if (!is_enabled_) {
+    submitted_log_size = 0;
+    unsubmitted_log_size = 0;
     replayed_log_size = 0;
     unreplayed_log_size = 0;
     CLOG_LOG(INFO, "replay status is not enabled", KPC(this));
   } else if (OB_FAIL(submit_log_task_.get_base_lsn(base_lsn))) {
     CLOG_LOG(WARN, "get_base_lsn failed", K(ret), KPC(this));
+  } else if (OB_FAIL(submit_log_task_.get_next_to_submit_log_info(next_to_submit_lsn, next_to_submit_scn))) {
+    CLOG_LOG(WARN, "get_next_to_submit_log_info failed", K(ret), KPC(this));
   } else if (OB_FAIL(get_min_unreplayed_lsn(min_unreplayed_lsn))) {
     CLOG_LOG(WARN, "get_min_unreplayed_lsn failed", K(ret), KPC(this));
   } else if (!need_submit_log()) {
+    submitted_log_size = next_to_submit_lsn.val_ - base_lsn.val_;
+    unsubmitted_log_size = 0;
     replayed_log_size = min_unreplayed_lsn.val_ - base_lsn.val_;
     unreplayed_log_size = 0;
     CLOG_LOG(INFO, "replay status is not follower", K(min_unreplayed_lsn), K(base_lsn), KPC(this));
   } else if (OB_FAIL(palf_handle_.get_end_lsn(committed_end_lsn))) {
     CLOG_LOG(WARN, "get_end_lsn failed", K(ret), KPC(this));
   } else {
+    submitted_log_size = next_to_submit_lsn.val_ - base_lsn.val_;
+    unsubmitted_log_size = committed_end_lsn.val_ - base_lsn.val_;
     replayed_log_size = min_unreplayed_lsn.val_ - base_lsn.val_;
     unreplayed_log_size = committed_end_lsn.val_ - min_unreplayed_lsn.val_;
     if (replayed_log_size < 0 || unreplayed_log_size < 0) {
@@ -1067,7 +1133,7 @@ int ObReplayStatus::push_log_replay_task(ObLogReplayTask &task)
       share::SCN scn = task.scn_;
       bool is_pre_barrier = task.is_pre_barrier_;
       bool is_post_barrier = task.is_post_barrier_;
-      int64_t log_size = task.log_size_;
+      int64_t log_size = task.read_log_size_;
       for (index = 0; OB_SUCC(ret) && index < REPLAY_TASK_QUEUE_SIZE; ++index) {
         ObLogReplayTask *replay_task = broadcast_task_array[index];
         task_queues_[index].push(replay_task);
@@ -1206,7 +1272,7 @@ int ObReplayStatus::check_replay_barrier(ObLogReplayTask *replay_task,
   } else if (replay_task->is_pre_barrier_) {
     int64_t replay_hint = replay_task->replay_hint_;
     int64_t nv = -1;
-    if (NULL == (replay_log_buf = static_cast<ObLogReplayBuffer *>(replay_task->log_buf_))) {
+    if (NULL == (replay_log_buf = static_cast<ObLogReplayBuffer *>(replay_task->read_log_buf_))) {
       ret = OB_ERR_UNEXPECTED;
       CLOG_LOG(ERROR, "pre barrier log buff is NULL", K(ret), KPC(replay_task));
     } else if (NULL == replay_log_buf->log_buf_) {
@@ -1218,6 +1284,7 @@ int ObReplayStatus::check_replay_barrier(ObLogReplayTask *replay_task,
       //某个事务内的前向barrier日志只能在此队列回放
       CLOG_LOG(TRACE, "skip dec pre barrier log ref", K(ret), K(replay_task), KPC(replay_task),
                K(nv), KPC(this));
+    //TODO(yaoying.yyy):重构下这里
     } else if ((0 == (nv = replay_log_buf->dec_replay_ref()))) {
       if (replay_queue_idx != calc_replay_queue_idx(replay_hint)) {
         ret = OB_ERR_UNEXPECTED;
@@ -1278,8 +1345,7 @@ int ObReplayStatus::submit_task_to_replay_service_(ObReplayServiceTask &task)
      * and placing it into replay Service*/
     inc_ref(); //Add the reference count first, if the task push fails, dec_ref() is required
     if (OB_FAIL(rp_sv_->submit_task(&task))) {
-      CLOG_LOG(ERROR, "failed to submit task to replay service", KPC(this),
-                 K(task), K(ret));
+      CLOG_LOG(ERROR, "failed to submit task to replay service", KPC(this), K(task));
       dec_ref();
     }
   }
@@ -1374,15 +1440,27 @@ int ObReplayStatus::trigger_fetch_log()
 {
   int ret = OB_SUCCESS;
   RLockGuard rlock_guard(rwlock_);
-  if (is_enabled_) {
+  if (is_enabled_ && need_submit_log()) {
     if (OB_FAIL(submit_task_to_replay_service_(submit_log_task_))) {
-      CLOG_LOG(ERROR, "failed to submit submit_log_task to replay service", K(submit_log_task_),
-                  KPC(this), K(ret));
+      CLOG_LOG(ERROR, "failed to submit submit_log_task to replay service", K(submit_log_task_), KPC(this));
     }
   } else {
     // do nothing
   }
   return ret;
 }
+
+int ObReplayStatus::check_can_replay() const
+{
+  int ret = OB_SUCCESS;
+  {
+    RLockGuard guard(rolelock_);
+    if (FOLLOWER != role_) {
+      ret = OB_EAGAIN;
+    }
+  }
+  return ret;
+}
+
 } // namespace logservice
 }

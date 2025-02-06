@@ -13,9 +13,8 @@
 #define USING_LOG_PREFIX RS
 
 #include "ob_backup_service.h"
-#include "ob_backup_schedule_task.h"
+#include "src/rootserver/backup/ob_backup_base_service.h"
 #include "ob_backup_task_scheduler.h"
-#include "rootserver/ob_root_utils.h"
 
 namespace oceanbase 
 {
@@ -88,8 +87,8 @@ void ObBackupService::run2()
       if (can_schedule()) {
         process(last_trigger_ts);
       } else {
+        LOG_INFO("backup service is disable, need wait.");
         task_scheduler_->wakeup();
-        wakeup();
       }
     }
     idle();
@@ -147,6 +146,8 @@ int ObBackupDataService::sub_init(
     LOG_WARN("fail to init backup data scheduler", K(ret));
   } else if (OB_FAIL(create("BackupDataSrv", *this, ObWaitEventIds::BACKUP_DATA_SERVICE_COND_WAIT))) {
     LOG_WARN("failed to create backup data service", K(ret));
+  } else {
+    LOG_INFO("ObBackupDataService init", K(tenant_id));
   }
   return ret;
 }
@@ -248,6 +249,8 @@ int ObBackupCleanService::sub_init(
     LOG_WARN("fail to regist job", K(ret), "job_type", backup_auto_obsolete_delete_trigger_.get_trigger_type());
   } else if (OB_FAIL(create("BackupCleanSrv", *this, ObWaitEventIds::BACKUP_CLEAN_SERVICE_COND_WAIT))) {
     LOG_WARN("create BackupService thread failed", K(ret));
+  } else {
+    LOG_INFO("ObBackupCleanService init", K(tenant_id));
   }
   return ret;
 }
@@ -321,7 +324,7 @@ int ObBackupCleanService::handle_backup_delete(const obrpc::ObBackupCleanArg &ar
     };
     case ObNewBackupCleanType::DELETE_BACKUP_SET: 
     case ObNewBackupCleanType::DELETE_BACKUP_PIECE: {
-    // TODO(wenjinyu.wjy) 4.3 support delete backup set/piece
+    // TODO(xingzhi) 4.4 support delete backup set/piece
       ret = OB_NOT_SUPPORTED;
       break;
     };
@@ -333,7 +336,7 @@ int ObBackupCleanService::handle_backup_delete(const obrpc::ObBackupCleanArg &ar
       break;
     };
     case ObNewBackupCleanType::DELETE_BACKUP_ALL: {
-    // TODO(wenjinyu.wjy) 4.3 support delete backup all function
+    // TODO(xingzhi) 4.4 support delete backup all function
       ret = OB_NOT_SUPPORTED;
       break;
     };

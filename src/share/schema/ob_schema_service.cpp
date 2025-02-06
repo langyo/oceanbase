@@ -12,13 +12,7 @@
 
 #define USING_LOG_PREFIX SHARE_SCHEMA
 #include "share/schema/ob_schema_service.h"
-#include "common/sql_mode/ob_sql_mode.h"
 #include "lib/utility/ob_fast_convert.h"
-#include "lib/utility/utility.h"
-#include "lib/utility/serialization.h"
-#include "lib/oblog/ob_log_module.h"
-#include "ob_schema_macro_define.h"
-#include "share/schema/ob_schema_struct.h"
 
 namespace oceanbase
 {
@@ -187,6 +181,7 @@ void AlterColumnSchema::reset()
   prev_column_name_.reset();
   is_first_ = false;
   column_group_name_.reset();
+  is_set_comment_ = false;
 }
 
 
@@ -204,7 +199,8 @@ OB_SERIALIZE_MEMBER((AlterColumnSchema, ObColumnSchemaV2),
                     next_column_name_,
                     prev_column_name_,
                     is_first_,
-                    column_group_name_);
+                    column_group_name_,
+                    is_set_comment_);
 
 DEFINE_SERIALIZE(AlterTableSchema)
 {
@@ -311,7 +307,9 @@ int64_t AlterColumnSchema::to_string(char* buf, const int64_t buf_len) const
        K_(origin_column_name),
        K_(next_column_name),
        K_(prev_column_name),
-       K_(is_unique_key));
+       K_(is_unique_key),
+       K_(column_group_name),
+       K_(is_set_comment));
   J_COMMA();
   J_NAME(N_ALTER_COLUMN_SCHEMA);
   J_COLON();
@@ -323,7 +321,9 @@ int64_t AlterColumnSchema::to_string(char* buf, const int64_t buf_len) const
 int AlterColumnSchema::assign(const ObColumnSchemaV2 &other)
 {
   int ret = OB_SUCCESS;
-  ObColumnSchemaV2::operator = (other);
+  if (OB_FAIL(ObColumnSchemaV2::assign(other))) {
+    LOG_WARN("fail to assign column", KR(ret), K(other));
+  }
   return ret;
 }
 
@@ -332,7 +332,6 @@ AlterColumnSchema &AlterColumnSchema::operator=(const AlterColumnSchema &src_sch
   int ret = OB_SUCCESS;
   if (this != &src_schema) {
     reset();
-    ObColumnSchemaV2::operator = (src_schema);
     alter_type_ = src_schema.alter_type_;
     is_primary_key_ = src_schema.is_primary_key_;
     is_autoincrement_ = src_schema.is_autoincrement_;
@@ -342,7 +341,9 @@ AlterColumnSchema &AlterColumnSchema::operator=(const AlterColumnSchema &src_sch
     is_set_default_ = src_schema.is_set_default_;
     check_timestamp_column_order_ = src_schema.check_timestamp_column_order_;
     is_no_zero_date_ = src_schema.is_no_zero_date_;
-    if (OB_FAIL(deep_copy_str(src_schema.get_origin_column_name(), origin_column_name_))) {
+    if (OB_FAIL(ObColumnSchemaV2::assign(src_schema))) {
+      LOG_WARN("fail to assign column", KR(ret), K(src_schema));
+    } else if (OB_FAIL(deep_copy_str(src_schema.get_origin_column_name(), origin_column_name_))) {
       SHARE_LOG(WARN, "failed to deep copy origin_column_name", K(ret));
     } else if (OB_FAIL(deep_copy_str(src_schema.get_next_column_name(), next_column_name_))) {
       SHARE_LOG(WARN, "failed to deep copy next_column_name", K(ret));
@@ -352,6 +353,7 @@ AlterColumnSchema &AlterColumnSchema::operator=(const AlterColumnSchema &src_sch
       SHARE_LOG(WARN, "failed to deep copy column_group_name", K(ret));
     } else {
       is_first_ = src_schema.is_first_;
+      is_set_comment_ = src_schema.is_set_comment_;
     }
   }
   if (OB_FAIL(ret)) {
@@ -397,8 +399,10 @@ int AlterTableSchema::assign(const ObTableSchema &src_schema)
       index_attributes_set_ = src_schema.index_attributes_set_;
       session_id_ = src_schema.session_id_;
       compressor_type_ = src_schema.compressor_type_;
+      lob_inrow_threshold_ = src_schema.lob_inrow_threshold_;
       is_column_store_supported_ = src_schema.is_column_store_supported_;
       max_used_column_group_id_ = src_schema.max_used_column_group_id_;
+      micro_index_clustered_ = src_schema.micro_index_clustered_;
       if (OB_FAIL(deep_copy_str(src_schema.tablegroup_name_, tablegroup_name_))) {
         LOG_WARN("Fail to deep copy tablegroup_name", K(ret));
       } else if (OB_FAIL(deep_copy_str(src_schema.comment_, comment_))) {
@@ -415,13 +419,12 @@ int AlterTableSchema::assign(const ObTableSchema &src_schema)
         LOG_WARN("deep copy external_file_format failed", K(ret));
       } else if (OB_FAIL(deep_copy_str(src_schema.external_file_pattern_, external_file_pattern_))) {
         LOG_WARN("deep copy external_file_pattern failed", K(ret));
+      } else if (OB_FAIL(deep_copy_str(src_schema.external_properties_, external_properties_))) {
+        LOG_WARN("deep copy external_properties failed", K(ret));
       }
 
       //view schema
       view_schema_ = src_schema.view_schema_;
-
-      mv_cnt_ = src_schema.mv_cnt_;
-      MEMCPY(mv_tid_array_, src_schema.mv_tid_array_, sizeof(uint64_t) * src_schema.mv_cnt_);
 
       aux_vp_tid_array_ = src_schema.aux_vp_tid_array_;
 
@@ -434,6 +437,7 @@ int AlterTableSchema::assign(const ObTableSchema &src_schema)
 
       aux_lob_meta_tid_ = src_schema.aux_lob_meta_tid_;
       aux_lob_piece_tid_ = src_schema.aux_lob_piece_tid_;
+      mlog_tid_ = src_schema.mlog_tid_;
     }
 
     if (OB_SUCC(ret)) {
@@ -534,6 +538,12 @@ int AlterTableSchema::assign(const ObTableSchema &src_schema)
   if (OB_SUCC(ret) && OB_FAIL(deep_copy_str(src_schema.kv_attributes_, kv_attributes_))) {
     LOG_WARN("Fail to deep copy ttl definition string", K(ret));
   }
+  if (FAILEDx(mv_mode_.assign(src_schema.mv_mode_))) {
+    LOG_WARN("fail to assign mv_mode", K(ret));
+  }
+  if (OB_SUCC(ret) && OB_FAIL(deep_copy_str(src_schema.index_params_, index_params_))) {
+    LOG_WARN("Fail to deep copy vector index param string", K(ret));
+  }
 
   return ret;
 }
@@ -576,7 +586,7 @@ int AlterTableSchema::add_alter_column(const AlterColumnSchema &alter_column_sch
   return ret;
 }
 
-int AlterTableSchema::assign_subpartiton_key_info(const common::ObPartitionKeyInfo& src_info)
+int AlterTableSchema::assign_subpartition_key_info(const common::ObPartitionKeyInfo& src_info)
 {
   int ret = OB_SUCCESS;
 

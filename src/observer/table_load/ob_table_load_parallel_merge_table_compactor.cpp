@@ -15,7 +15,7 @@
 #include "observer/table_load/ob_table_load_parallel_merge_table_compactor.h"
 #include "observer/table_load/ob_table_load_store_ctx.h"
 #include "observer/table_load/ob_table_load_trans_store.h"
-#include "storage/direct_load/ob_direct_load_multiple_sstable.h"
+#include "src/observer/table_load/ob_table_load_store_table_ctx.h"
 
 namespace oceanbase
 {
@@ -77,7 +77,8 @@ int ObTableLoadParallelMergeTableCompactor::inner_init()
 {
   int ret = OB_SUCCESS;
   const uint64_t tenant_id = MTL_ID();
-  if (OB_FAIL(parallel_merge_ctx_.init(compact_ctx_->store_ctx_))) {
+  if (OB_FAIL(parallel_merge_ctx_.init(compact_ctx_->store_ctx_, compact_ctx_->store_table_ctx_,
+                                       compact_ctx_->store_table_ctx_->table_data_desc_))) {
     LOG_WARN("fail to init parallel merge ctx", KR(ret));
   } else if (OB_FAIL(parallel_merge_cb_.init(this))) {
     LOG_WARN("fail to init parallel merge cb", KR(ret));
@@ -92,7 +93,8 @@ int ObTableLoadParallelMergeTableCompactor::start()
     ret = OB_NOT_INIT;
     LOG_WARN("ObTableLoadParallelMergeTableCompactor not init", KR(ret), KP(this));
   } else {
-    ObSEArray<ObTableLoadTransStore *, 64> trans_store_array;
+    ObArray<ObTableLoadTransStore *> trans_store_array;
+    trans_store_array.set_tenant_id(MTL_ID());
     if (OB_FAIL(compact_ctx_->store_ctx_->get_committed_trans_stores(trans_store_array))) {
       LOG_WARN("fail to get committed trans stores", KR(ret));
     }
@@ -132,7 +134,7 @@ void ObTableLoadParallelMergeTableCompactor::stop()
 int ObTableLoadParallelMergeTableCompactor::handle_parallel_merge_success()
 {
   int ret = OB_SUCCESS;
-  if (build_result()) {
+  if (OB_FAIL(build_result())) {
     LOG_WARN("fail to build result", KR(ret));
   } else if (OB_FAIL(compact_ctx_->handle_table_compact_success())) {
     LOG_WARN("fail to notify table compact success", KR(ret));
@@ -160,6 +162,8 @@ int ObTableLoadParallelMergeTableCompactor::build_result()
         LOG_WARN("fail to copy multiple sstable", KR(ret));
       } else if (OB_FAIL(result.add_table(copied_sstable))) {
         LOG_WARN("fail to add table", KR(ret));
+      } else {
+        LOG_INFO("finish compact", K(i), K(copied_sstable->get_tablet_id()), K(copied_sstable->get_row_count()));
       }
       if (OB_FAIL(ret)) {
         if (nullptr != copied_sstable) {

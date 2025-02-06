@@ -13,11 +13,7 @@
 #define USING_LOG_PREFIX OBLOG
 
 #include "ob_log_systable_queryer.h"
-#include "lib/mysqlclient/ob_isql_client.h"  // ObISQLClient
-#include "lib/mysqlclient/ob_mysql_result.h" // ObMySQLResult
-#include "lib/string/ob_sql_string.h"      // ObSqlString
 #include "share/inner_table/ob_inner_table_schema_constants.h" // OB_***_TNAME
-#include "lib/utility/ob_tracepoint.h"
 
 using namespace oceanbase::share;
 namespace oceanbase
@@ -305,7 +301,8 @@ int ObLogSysTableQueryer::do_query_(const uint64_t tenant_id,
     LOG_WARN("errsim do query error", K(ERRSIM_FETCH_LOG_SYS_QUERY_FAILED));
   }
   if (OB_NOT_NULL(err_handler_) && (-ER_CONNECT_FAILED == ret || -ER_ACCESS_DENIED_ERROR == ret
-    || OB_SERVER_IS_INIT == ret || OB_TENANT_NOT_EXIST == ret || OB_TENANT_NOT_IN_SERVER == ret)) {
+    || OB_SERVER_IS_INIT == ret || OB_TENANT_NOT_EXIST == ret || OB_TENANT_NOT_IN_SERVER == ret
+    || OB_SIZE_OVERFLOW == ret || OB_TIMEOUT == ret)) {
     err_handler_->handle_error(share::SYS_LS, logfetcher::IObLogErrHandler::ErrType::FETCH_LOG, trace_id,
       palf::LSN(palf::LOG_INVALID_LSN_VAL)/*no need to pass lsn*/, ret, "%s");
   }

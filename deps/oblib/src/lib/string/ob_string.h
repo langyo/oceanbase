@@ -170,7 +170,7 @@ public:
    * DO NOT USE THIS ANY MORE
    */
 
-  inline void assign(char *bytes, const int64_t length) //TODO(yongle.xh): for -Wshorten-64-to-32, delete it later 4.3
+  inline void assign(char *bytes, const int64_t length) //TODO(yongle.xh): for -Wshorten-64-to-32, delete it later 4.4
   {
     if (length > INT32_MAX) {
       LIB_LOG_RET(ERROR, OB_ERR_UNEXPECTED, "invalid length for assign", K(length));
@@ -207,7 +207,7 @@ public:
     }
   }
 
-  inline void assign_ptr(const char *bytes, const int64_t length)  //TODO(yongle.xh): for -Wshorten-64-to-32, delete it later 4.3
+  inline void assign_ptr(const char *bytes, const int64_t length)  //TODO(yongle.xh): for -Wshorten-64-to-32, delete it later 4.4
   {
     if (length < 0 || length > INT32_MAX) {
       LIB_LOG_RET(ERROR, OB_ERR_UNEXPECTED, "invalid length for assign ptr", K(length));
@@ -215,7 +215,7 @@ public:
     assign_ptr(bytes, static_cast<int32_t>(length));
   }
 
-  inline void assign_ptr(const char *bytes, const uint64_t length)  //TODO(yongle.xh): for -Wshorten-64-to-32, delete it later 4.3
+  inline void assign_ptr(const char *bytes, const uint64_t length)  //TODO(yongle.xh): for -Wshorten-64-to-32, delete it later 4.4
   {
     if (length < 0 || length > INT32_MAX) {
       LIB_LOG_RET(ERROR, OB_ERR_UNEXPECTED, "invalid length for assign ptr", K(length));
@@ -223,7 +223,7 @@ public:
     assign_ptr(bytes, static_cast<int32_t>(length));
   }
 
-  inline void assign_ptr(const char *bytes, const uint32_t length)  //TODO(yongle.xh): for -Wshorten-64-to-32, delete it later 4.3
+  inline void assign_ptr(const char *bytes, const uint32_t length)  //TODO(yongle.xh): for -Wshorten-64-to-32, delete it later 4.4
   {
     if (length > INT32_MAX) {
       LIB_LOG_RET(ERROR, OB_ERR_UNEXPECTED, "invalid length for assign ptr", K(length));
@@ -371,6 +371,38 @@ public:
     return match;
   }
 
+  inline bool suffix_match(const char *str) const
+  {
+    bool match = false;
+    if (OB_NOT_NULL(str)) {
+      const int64_t len = strlen(str);
+      if (len <= data_length_ && 0 == MEMCMP(str, ptr_ + data_length_ - len, len)) {
+        match = true;
+      }
+    }
+    return match;
+  }
+
+  inline bool suffix_match_ci(const ObString &obstr) const
+  {
+    bool match = false;
+    if (data_length_ < obstr.data_length_) {
+    } else if (0 == STRNCASECMP(ptr_ + data_length_ - obstr.data_length_, obstr.ptr_, obstr.data_length_)) {
+      match = true;
+    }
+    return match;
+  }
+
+  inline bool suffix_match_ci(const char *str) const
+  {
+    bool match = false;
+    if (OB_NOT_NULL(str)) {
+      ObString obstr(str);
+      match = suffix_match_ci(obstr);
+    }
+    return match;
+  }
+
   inline bool prefix_match(const char *str) const
   {
     obstr_size_t len = 0;
@@ -476,7 +508,7 @@ public:
     return compare(str) != 0;
   }
 
-  const ObString trim()
+  const ObString trim() const
   {
     ObString ret;
     if (NULL != ptr_) {
@@ -502,6 +534,20 @@ public:
       while (start < end && ' ' == *start) {
         start++;
       }
+      while (start < end && ' ' == *(end - 1)) {
+        end--;
+      }
+      ret.assign_ptr(start, static_cast<obstr_size_t>(end - start));
+    }
+    return ret;
+  }
+
+  const ObString trim_end_space_only()
+  {
+    ObString ret;
+    if (NULL != ptr_) {
+      char *start = ptr_;
+      char *end = ptr_ + data_length_;
       while (start < end && ' ' == *(end - 1)) {
         end--;
       }
@@ -717,6 +763,33 @@ int ob_write_string(AllocatorT &allocator, const ObString &src, ObString &dst, b
       ptr[src_len] = 0;
     }
     dst.assign_ptr(ptr, src_len);
+  }
+  return ret;
+}
+
+template <typename AllocatorT>
+int ob_write_string(AllocatorT &allocator, const ObString &src, ObString &dst, int len, int padding = 0, bool c_style = false)
+{
+  int ret = OB_SUCCESS;
+  const ObString::obstr_size_t src_len = src.length();
+  char *ptr = NULL;
+  if (NULL == (ptr = static_cast<char *>(allocator.alloc(len + (c_style ? 1 : 0))))) {
+    dst.assign(NULL, 0);
+    ret = OB_ALLOCATE_MEMORY_FAILED;
+    LIB_LOG(ERROR, "allocate memory failed", K(ret), "size", len);
+  } else if (OB_NOT_NULL(src.ptr()) && 0 < src_len) {
+    int copy_len = src_len > len ? len : src_len;
+    MEMCPY(ptr, src.ptr(), copy_len);
+    if (len > copy_len) {
+      MEMSET(ptr + copy_len, padding, len - copy_len);
+    }
+    if (c_style) {
+      ptr[len] = 0;
+    }
+    dst.assign_ptr(ptr, len);
+  } else {
+    MEMSET(ptr, padding, len);
+    dst.assign_ptr(ptr, len);
   }
   return ret;
 }

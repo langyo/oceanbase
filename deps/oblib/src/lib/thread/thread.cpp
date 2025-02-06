@@ -13,20 +13,12 @@
 #define USING_LOG_PREFIX LIB
 
 #include "thread.h"
-#include "threads.h"
-#include <pthread.h>
-#include <sys/syscall.h>
-#include "lib/ob_errno.h"
-#include "lib/oblog/ob_log.h"
-#include "lib/ob_running_mode.h"
-#include "lib/allocator/ob_page_manager.h"
 #include "lib/rc/context.h"
-#include "lib/thread_local/ob_tsi_factory.h"
 #include "lib/thread/protected_stack_allocator.h"
-#include "lib/utility/ob_defer.h"
 #include "lib/utility/ob_hang_fatal_error.h"
-#include "lib/utility/ob_tracepoint.h"
 #include "lib/signal/ob_signal_struct.h"
+#include "lib/ash/ob_active_session_guard.h"
+#include "lib/stat/ob_session_stat.h"
 
 using namespace oceanbase;
 using namespace oceanbase::common;
@@ -61,7 +53,8 @@ Thread::Thread(Threads *threads, int64_t idx, int64_t stack_size)
       tid_before_stop_(0),
       tid_(0),
       thread_list_node_(this),
-      cpu_time_(0)
+      cpu_time_(0),
+      create_ret_(OB_NOT_RUNNING)
 {}
 
 Thread::~Thread()
@@ -101,6 +94,13 @@ int Thread::start()
       if (pret != 0) {
         LOG_ERROR("pthread create failed", K(pret), K(errno));
         pth_ = 0;
+      } else {
+        while (ATOMIC_LOAD(&create_ret_) == OB_NOT_RUNNING) {
+          sched_yield();
+        }
+        if (OB_FAIL(create_ret_)) {
+          LOG_ERROR("thread create failed", K(create_ret_));
+        }
       }
     }
     if (0 != pret) {
@@ -120,9 +120,13 @@ int Thread::start()
 
 void Thread::stop()
 {
+  bool stack_addr_flag = true;
+#ifndef OB_USE_ASAN
+  stack_addr_flag = (stack_addr_ != NULL);
+#endif
 #ifdef ERRSIM
   if (!stop_
-      && stack_addr_ != NULL
+      && stack_addr_flag
       && 0 != (OB_E(EventTable::EN_THREAD_HANG) 0)) {
     int tid_offset = 720;
     int tid = *(pid_t*)((char*)pth_ + tid_offset);
@@ -158,9 +162,15 @@ void Thread::run()
 {
   IRunWrapper *run_wrapper_ = threads_->get_run_wrapper();
   if (OB_NOT_NULL(run_wrapper_)) {
-    run_wrapper_->pre_run();
+    {
+      ObDisableDiagnoseGuard disable_guard;
+      run_wrapper_->pre_run();
+    }
     threads_->run(idx_);
-    run_wrapper_->end_run();
+    {
+      ObDisableDiagnoseGuard disable_guard;
+      run_wrapper_->end_run();
+    }
   } else {
     threads_->run(idx_);
   }
@@ -264,6 +274,7 @@ void* Thread::__th_start(void *arg)
   ob_set_thread_tenant_id(th->get_tenant_id());
   current_thread_ = th;
   th->tid_ = gettid();
+
 #ifndef OB_USE_ASAN
   ObStackHeader *stack_header = ProtectedStackAllocator::stack_header(th->stack_addr_);
   abort_unless(stack_header->check_magic());
@@ -303,13 +314,10 @@ void* Thread::__th_start(void *arg)
     if (OB_FAIL(ret)) {
       LOG_ERROR("set tenant ctx failed", K(ret));
     } else {
-      const int cache_size = !lib::is_mini_mode() ? ObPageManager::DEFAULT_CHUNK_CACHE_SIZE :
-        ObPageManager::MINI_MODE_CHUNK_CACHE_SIZE;
-      pm.set_max_chunk_cache_size(cache_size);
       ObPageManager::set_thread_local_instance(pm);
       MemoryContext *mem_context = GET_TSI0(MemoryContext);
       if (OB_ISNULL(mem_context)) {
-        ret = OB_ERR_UNEXPECTED;
+        ret = OB_ALLOCATE_MEMORY_FAILED;
         LOG_ERROR("null ptr", K(ret));
       } else if (OB_FAIL(ROOT_CONTEXT->CREATE_CONTEXT(*mem_context,
                          ContextParam().set_properties(RETURN_MALLOC_DEFAULT)
@@ -319,6 +327,7 @@ void* Thread::__th_start(void *arg)
         WITH_CONTEXT(*mem_context) {
           try {
             in_try_stmt = true;
+            ATOMIC_STORE(&th->create_ret_, OB_SUCCESS);
             th->run();
             in_try_stmt = false;
           } catch (OB_BASE_EXCEPTION &except) {
@@ -326,6 +335,10 @@ void* Thread::__th_start(void *arg)
             _LOG_ERROR("Exception caught!!! errno = %d, exception info = %s", except.get_errno(), except.what());
             ret = OB_ERR_UNEXPECTED;
             in_try_stmt = false;
+            if (1 == th->threads_->get_thread_count() && !th->has_set_stop()) {
+              LOG_WARN("thread exit by itself without set_stop", K(ret));
+              th->threads_->stop();
+            }
           }
         }
       }
@@ -334,7 +347,9 @@ void* Thread::__th_start(void *arg)
       }
     }
   }
-
+  if (OB_FAIL(ret)) {
+    ATOMIC_STORE(&th->create_ret_, ret);
+  }
   ATOMIC_FAA(&total_thread_count_, -1);
   return nullptr;
 }
@@ -387,10 +402,10 @@ int Thread::get_cpu_time_inc(int64_t &cpu_time_inc)
     char *field_ptr = strtok_r(stat_content, " ", &save_ptr);
     while (field_ptr != NULL) {
       if (field_index == USER_TIME_FIELD_INDEX) {
-        cpu_time += std::stoul(field_ptr) * 1000000 / sysconf(_SC_CLK_TCK);
+        cpu_time += strtoul(field_ptr, NULL, 10) * 1000000 / sysconf(_SC_CLK_TCK);
       }
       if (field_index == SYSTEM_TIME_FIELD_INDEX) {
-        cpu_time += std::stoul(field_ptr) * 1000000 / sysconf(_SC_CLK_TCK);
+        cpu_time += strtoul(field_ptr, NULL, 10) * 1000000 / sysconf(_SC_CLK_TCK);
         break;
       }
       field_ptr = strtok_r(NULL, " ", &save_ptr);

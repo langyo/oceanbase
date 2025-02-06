@@ -11,9 +11,7 @@
  */
 
 #define USING_LOG_PREFIX SQL_RESV
-#include "share/schema/ob_schema_struct.h"
 #include "sql/resolver/ob_resolver.h"
-#include "sql/session/ob_sql_session_info.h"
 #include "sql/resolver/dml/ob_insert_resolver.h"
 #include "sql/resolver/dml/ob_merge_resolver.h"
 #include "sql/resolver/dml/ob_update_resolver.h"
@@ -33,9 +31,11 @@
 #include "sql/resolver/ddl/ob_alter_table_resolver.h"
 #include "sql/resolver/ddl/ob_drop_table_resolver.h"
 #include "sql/resolver/ddl/ob_create_index_resolver.h"
+#include "sql/resolver/ddl/ob_create_mlog_resolver.h"
 #include "sql/resolver/ddl/ob_create_synonym_resolver.h"
 #include "sql/resolver/ddl/ob_drop_synonym_resolver.h"
 #include "sql/resolver/ddl/ob_drop_index_resolver.h"
+#include "sql/resolver/ddl/ob_drop_mlog_resolver.h"
 #include "sql/resolver/ddl/ob_create_database_resolver.h"
 #include "sql/resolver/ddl/ob_alter_database_resolver.h"
 #include "sql/resolver/ddl/ob_use_database_resolver.h"
@@ -52,12 +52,10 @@
 #include "sql/resolver/ddl/ob_create_outline_resolver.h"
 #include "sql/resolver/ddl/ob_alter_outline_resolver.h"
 #include "sql/resolver/ddl/ob_drop_outline_resolver.h"
-#include "sql/resolver/ddl/ob_create_routine_resolver.h"
 #include "sql/resolver/ddl/ob_drop_routine_resolver.h"
 #include "sql/resolver/ddl/ob_trigger_resolver.h"
 #include "sql/resolver/ddl/ob_optimize_resolver.h"
 #include "sql/resolver/ddl/ob_create_standby_tenant_resolver.h"
-#include "ddl/ob_create_routine_resolver.h"
 #include "ddl/ob_drop_routine_resolver.h"
 #include "ddl/ob_alter_routine_resolver.h"
 #include "sql/resolver/ddl/ob_create_package_resolver.h"
@@ -87,6 +85,7 @@
 #include "sql/resolver/dcl/ob_create_role_resolver.h"
 #include "sql/resolver/dcl/ob_drop_role_resolver.h"
 #include "sql/resolver/dcl/ob_alter_user_profile_resolver.h"
+#include "sql/resolver/dcl/ob_alter_user_proxy_resolver.h"
 #include "sql/resolver/dcl/ob_alter_user_primary_zone_resolver.h"
 #include "sql/resolver/tcl/ob_start_trans_resolver.h"
 #include "sql/resolver/tcl/ob_end_trans_resolver.h"
@@ -94,7 +93,6 @@
 #include "sql/resolver/cmd/ob_resource_resolver.h"
 #include "sql/resolver/cmd/ob_variable_set_resolver.h"
 #include "sql/resolver/cmd/ob_show_resolver.h"
-#include "sql/resolver/cmd/ob_alter_system_resolver.h"
 #include "sql/resolver/cmd/ob_help_resolver.h"
 #include "sql/resolver/cmd/ob_kill_resolver.h"
 #include "sql/resolver/cmd/ob_set_names_resolver.h"
@@ -124,13 +122,17 @@
 #include "sql/resolver/cmd/ob_drop_restore_point_resolver.h"
 #include "sql/resolver/cmd/ob_get_diagnostics_resolver.h"
 #include "sql/resolver/cmd/ob_switch_tenant_resolver.h"
+#include "sql/resolver/cmd/ob_mock_resolver.h"
 #include "sql/resolver/dcl/ob_alter_role_resolver.h"
 #include "sql/resolver/dml/ob_multi_table_insert_resolver.h"
 #include "sql/resolver/ddl/ob_create_directory_resolver.h"
 #include "sql/resolver/ddl/ob_drop_directory_resolver.h"
 #include "pl/ob_pl_package.h"
-#include "sql/resolver/ddl/ob_create_context_resolver.h"
 #include "sql/resolver/ddl/ob_drop_context_resolver.h"
+#include "sql/resolver/cmd/ob_module_data_resolver.h"
+#include "sql/resolver/cmd/ob_tenant_snapshot_resolver.h"
+#include "sql/resolver/cmd/ob_tenant_clone_resolver.h"
+#include "sql/resolver/cmd/ob_olap_async_job_resolver.h"
 #ifdef OB_BUILD_TDE_SECURITY
 #include "sql/resolver/ddl/ob_create_tablespace_resolver.h"
 #include "sql/resolver/ddl/ob_alter_tablespace_resolver.h"
@@ -201,8 +203,8 @@ int ObResolver::resolve(IsPrepared if_prepared, const ParseNode &parse_tree, ObS
 
   int ret = OB_SUCCESS;
   const ParseNode *real_parse_tree = NULL;
+  int64_t questionmark_count = 0;
   UNUSED(if_prepared);
-
   if (OB_ISNULL(params_.allocator_)
       || OB_ISNULL(params_.schema_checker_)
       || OB_ISNULL(params_.session_info_)
@@ -222,7 +224,8 @@ int ObResolver::resolve(IsPrepared if_prepared, const ParseNode &parse_tree, ObS
                               *(params_.expr_factory_),
                               NULL,
                               params_.is_prepare_protocol_);
-    OZ (resolver.resolve_condition_compile(&parse_tree, real_parse_tree, params_.query_ctx_->question_marks_count_));
+    OZ (resolver.resolve_condition_compile(&parse_tree, real_parse_tree, questionmark_count));
+    OX (params_.query_ctx_->set_questionmark_count(questionmark_count));
   } else {
     real_parse_tree = &parse_tree;
   }
@@ -318,6 +321,14 @@ int ObResolver::resolve(IsPrepared if_prepared, const ParseNode &parse_tree, ObS
         REGISTER_STMT_RESOLVER(CreateIndex);
         break;
       }
+      case T_CREATE_MLOG: {
+        REGISTER_STMT_RESOLVER(CreateMLog);
+        break;
+      }
+      case T_DROP_MLOG: {
+        REGISTER_STMT_RESOLVER(DropMLog);
+        break;
+      }
       case T_CREATE_VIEW: {
         REGISTER_STMT_RESOLVER(CreateView);
         break;
@@ -403,8 +414,29 @@ int ObResolver::resolve(IsPrepared if_prepared, const ParseNode &parse_tree, ObS
         REGISTER_STMT_RESOLVER(FlushIlogCache);
         break;
       }
+      case T_FLUSH_SS_MICRO_CACHE: {
+        REGISTER_STMT_RESOLVER(FlushSSMicroCache);
+        break;
+      }
       case T_FLUSH_DAG_WARNINGS: {
         REGISTER_STMT_RESOLVER(FlushDagWarnings);
+        break;
+      }
+      case T_FLUSH_PRIVILEGES:
+      case T_INSTALL_PLUGIN:
+      case T_UNINSTALL_PLUGIN:
+      case T_FLUSH_MOCK:
+      case T_HANDLER_MOCK:
+      case T_FLUSH_MOCK_LIST:
+      case T_SHOW_PLUGINS:
+      case T_CREATE_SERVER:
+      case T_ALTER_SERVER:
+      case T_DROP_SERVER:
+      case T_CREATE_LOGFILE_GROUP:
+      case T_ALTER_LOGFILE_GROUP:
+      case T_DROP_LOGFILE_GROUP:
+      {
+        REGISTER_STMT_RESOLVER(Mock);
         break;
       }
       case T_SWITCH_REPLICA_ROLE: {
@@ -483,6 +515,10 @@ int ObResolver::resolve(IsPrepared if_prepared, const ParseNode &parse_tree, ObS
         REGISTER_STMT_RESOLVER(SetConfig);
         break;
       }
+      case T_CHANGE_EXTERNAL_STORAGE_DEST: {
+        REGISTER_STMT_RESOLVER(ChangeExternalStorageDest);
+        break;
+      }
       case T_ALTER_SYSTEM_SETTP: {
         REGISTER_STMT_RESOLVER(SetTP);
         break;
@@ -513,6 +549,30 @@ int ObResolver::resolve(IsPrepared if_prepared, const ParseNode &parse_tree, ObS
       }
       case T_MIGRATE_UNIT: {
         REGISTER_STMT_RESOLVER(MigrateUnit);
+        break;
+      }
+      case T_ADD_LS_REPLICA: {
+        REGISTER_STMT_RESOLVER(AddLSReplica);
+        break;
+      }
+      case T_REMOVE_LS_REPLICA: {
+        REGISTER_STMT_RESOLVER(RemoveLSReplica);
+        break;
+      }
+      case T_MIGRATE_LS_REPLICA: {
+        REGISTER_STMT_RESOLVER(MigrateLSReplica);
+        break;
+      }
+      case T_MODIFY_LS_REPLICA_TYPE: {
+        REGISTER_STMT_RESOLVER(ModifyLSReplica);
+        break;
+      }
+      case T_MODIFY_LS_PAXOS_REPLICA_NUM: {
+        REGISTER_STMT_RESOLVER(ModifyLSPaxosReplicaNum);
+        break;
+      }
+      case T_CANCEL_LS_REPLICA_TASK: {
+        REGISTER_STMT_RESOLVER(CancelLSReplicaTask);
         break;
       }
       case T_ADD_ARBITRATION_SERVICE: {
@@ -692,15 +752,24 @@ int ObResolver::resolve(IsPrepared if_prepared, const ParseNode &parse_tree, ObS
       case T_SHOW_TENANT:
       case T_SHOW_CREATE_TENANT:
       case T_SHOW_RECYCLEBIN:
+      case T_SHOW_PROFILE:
       case T_SHOW_PROCEDURE_STATUS:
       case T_SHOW_FUNCTION_STATUS:
+      case T_SHOW_PROCEDURE_CODE:
+      case T_SHOW_FUNCTION_CODE:
       case T_SHOW_TRIGGERS:
       case T_SHOW_CREATE_TABLEGROUP:
       case T_SHOW_RESTORE_PREVIEW:
       case T_SHOW_QUERY_RESPONSE_TIME:
       case T_SHOW_STATUS:
       case T_SHOW_CREATE_TRIGGER:
-      case T_SHOW_SEQUENCES: {
+      case T_SHOW_ENGINE:
+      case T_SHOW_OPEN_TABLES:
+      case T_SHOW_SEQUENCES:
+      case T_SHOW_OLAP_ASYNC_JOB_STATUS:
+      case T_XA_RECOVER:
+      case T_SHOW_CHECK_TABLE:
+      case T_SHOW_CREATE_USER: {
         REGISTER_STMT_RESOLVER(Show);
         break;
       }
@@ -730,11 +799,16 @@ int ObResolver::resolve(IsPrepared if_prepared, const ParseNode &parse_tree, ObS
         REGISTER_STMT_RESOLVER(AlterUserProfile);
         break;
       }
+      case T_ALTER_USER_PROXY: {
+        REGISTER_STMT_RESOLVER(AlterUserProxy);
+        break;
+      }
       case T_ALTER_USER_PRIMARY_ZONE: {
         REGISTER_STMT_RESOLVER(AlterUserPrimaryZone);
         break;
       }
 
+      case T_GRANT_ROLE:
       case T_SYSTEM_GRANT:
       case T_GRANT: {
         REGISTER_STMT_RESOLVER(Grant);
@@ -756,6 +830,10 @@ int ObResolver::resolve(IsPrepared if_prepared, const ParseNode &parse_tree, ObS
       }
       case T_ADMIN_ZONE: {
         REGISTER_STMT_RESOLVER(AdminZone);
+        break;
+      }
+      case T_ADMIN_STORAGE: {
+        REGISTER_STMT_RESOLVER(AdminStorage);
         break;
       }
       case T_ALTER_SYSTEM_SET: {
@@ -896,7 +974,8 @@ int ObResolver::resolve(IsPrepared if_prepared, const ParseNode &parse_tree, ObS
       }
       case T_ANALYZE:
       case T_MYSQL_UPDATE_HISTOGRAM:
-      case T_MYSQL_DROP_HISTOGRAM: {
+      case T_MYSQL_DROP_HISTOGRAM:
+      case T_MYSQL_ANALYZE: {
         REGISTER_STMT_RESOLVER(AnalyzeStmt);
         break;
       }
@@ -1064,6 +1143,10 @@ int ObResolver::resolve(IsPrepared if_prepared, const ParseNode &parse_tree, ObS
         REGISTER_STMT_RESOLVER(BackupKey);
         break;
       }
+      case T_BACKUP_CLUSTER_PARAMETERS: {
+        REGISTER_STMT_RESOLVER(BackupClusterParam);
+        break;
+      }
       case T_RECOVER_TABLE: {
         REGISTER_STMT_RESOLVER(RecoverTable);
         break;
@@ -1148,6 +1231,79 @@ int ObResolver::resolve(IsPrepared if_prepared, const ParseNode &parse_tree, ObS
         REGISTER_STMT_RESOLVER(TableTTL);
         break;
       }
+      case T_CREATE_TENANT_SNAPSHOT: {
+        REGISTER_STMT_RESOLVER(CreateTenantSnapshot);
+        break;
+      }
+      case T_DROP_TENANT_SNAPSHOT: {
+        REGISTER_STMT_RESOLVER(DropTenantSnapshot);
+        break;
+      }
+      case T_CLONE_TENANT: {
+        REGISTER_STMT_RESOLVER(CloneTenant);
+        break;
+      }
+      case T_ALTER_SYSTEM_RESET_PARAMETER: {
+        REGISTER_STMT_RESOLVER(ResetConfig);
+        break;
+      }
+      case T_ALTER_SYSTEM_RESET: {
+        REGISTER_STMT_RESOLVER(AlterSystemReset);
+        break;
+      }
+      case T_CANCEL_CLONE: {
+        REGISTER_STMT_RESOLVER(CancelClone);
+        break;
+      }
+      case T_TRANSFER_PARTITION: {
+        REGISTER_STMT_RESOLVER(TransferPartition);
+        break;
+      }
+      case T_CANCEL_TRANSFER_PARTITION: {
+        REGISTER_STMT_RESOLVER(TransferPartition);
+        break;
+      }
+      case T_CANCEL_BALANCE_JOB: {
+        REGISTER_STMT_RESOLVER(TransferPartition);
+        break;
+      }
+      case T_SERVICE_NAME: {
+        REGISTER_STMT_RESOLVER(ServiceName);
+        break;
+      }
+      case T_REPAIR_TABLE: {
+        REGISTER_STMT_RESOLVER(Mock);
+        break;
+      }
+      case T_CHECKSUM_TABLE: {
+        REGISTER_STMT_RESOLVER(Mock);
+        break;
+      }
+      case T_CACHE_INDEX: {
+        REGISTER_STMT_RESOLVER(Mock);
+        break;
+      }
+      case T_LOAD_INDEX_INTO_CACHE: {
+        REGISTER_STMT_RESOLVER(Mock);
+        break;
+      }
+      case T_MODULE_DATA: {
+        REGISTER_STMT_RESOLVER(ModuleData);
+        break;
+      }
+      case T_OLAP_ASYNC_JOB_SUBMIT: {
+        REGISTER_STMT_RESOLVER(OLAPAsyncJob);
+        break;
+      }
+      case T_OLAP_ASYNC_JOB_CANCEL: {
+        REGISTER_STMT_RESOLVER(OLAPAsyncJob);
+        break;
+      }
+      case T_GRANT_PROXY:
+      case T_REVOKE_PROXY: {
+        REGISTER_STMT_RESOLVER(Mock);
+        break;
+      }
       default: {
         ret = OB_NOT_SUPPORTED;
         const char *type_name = get_type_name(parse_tree.type_);
@@ -1157,8 +1313,15 @@ int ObResolver::resolve(IsPrepared if_prepared, const ParseNode &parse_tree, ObS
       }
     }  // end switch
 
-    if (OB_SUCC(ret) && stmt->is_dml_stmt()) {
+    // 外表写只放开insert
+    if (OB_SUCC(ret) && stmt->is_dml_stmt() && !stmt->is_insert_stmt()) {
       OZ( (static_cast<ObDMLStmt*>(stmt)->disable_writing_external_table()) );
+    }
+
+    if (OB_SUCC(ret) && !params_.session_info_->is_inner()
+        && stmt->is_dml_stmt() && !stmt->is_explain_stmt() && 0 == stmt->get_stmt_id()) {
+      // allowed explain for dml write mv, allowed refresh mv sql write mv
+      OZ( (static_cast<ObDMLStmt*>(stmt)->disable_writing_materialized_view()) );
     }
 
     if (OB_SUCC(ret)) {
@@ -1173,7 +1336,8 @@ int ObResolver::resolve(IsPrepared if_prepared, const ParseNode &parse_tree, ObS
       // todo yanli:检查主备库
     }
     
-    if (OB_SUCC(ret) && stmt->is_dml_stmt()) {
+    if (OB_SUCC(ret) && stmt->is_dml_stmt() && !params_.session_info_->is_varparams_sql_prepare()
+          && lib::is_mysql_mode()) {
       ObDMLStmt *dml_stmt = static_cast<ObDMLStmt*>(stmt);
       ObRawExprWrapEnumSet enum_set_wrapper(*params_.expr_factory_, params_.session_info_);
       if (OB_FAIL(enum_set_wrapper.wrap_enum_set(*dml_stmt))) {
@@ -1205,6 +1369,25 @@ int ObResolver::resolve(IsPrepared if_prepared, const ParseNode &parse_tree, ObS
         params_.query_ctx_->is_contain_inner_table_ = is_contain_inner_table;
         params_.query_ctx_->is_contain_select_for_update_ = is_contain_select_for_update;
         params_.query_ctx_->has_dml_write_stmt_ = dml_stmt->is_dml_write_stmt();
+      }
+
+      if (OB_SUCC(ret)) {
+        if (params_.session_info_->is_force_off_rich_format()) {
+          // do nothing
+        } else {
+          bool has_rich_format_hint = false;
+          bool enable_rich_format = false;
+          ObOptParamHint &opt_hint = params_.query_ctx_->query_hint_.global_hint_.opt_params_;
+          if (OB_FAIL(opt_hint.check_and_get_bool_opt_param(ObOptParamHint::ENABLE_RICH_VECTOR_FORMAT,
+                                                            has_rich_format_hint,
+                                                            enable_rich_format))) {
+            LOG_WARN("check and get bool opt param failed", K(ret));
+          } else if (has_rich_format_hint) {
+            params_.session_info_->set_force_rich_format(
+              enable_rich_format ? ObBasicSessionInfo::ForceRichFormatStatus::FORCE_ON :
+                                   ObBasicSessionInfo::ForceRichFormatStatus::FORCE_OFF);
+          }
+        }
       }
     }
     if (OB_SUCC(ret)) {

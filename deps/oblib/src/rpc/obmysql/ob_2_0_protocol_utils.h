@@ -67,7 +67,8 @@ public:
       tailer_len_(0), next_step_(START_TO_FILL_STEP),
       is_proto20_used_(false), is_checksum_off_(false),
       has_extra_info_(false), is_new_extra_info_(false),
-      curr_proto20_packet_start_pos_(0), txn_free_route_(false) {}
+      curr_proto20_packet_start_pos_(0), txn_free_route_(false),
+      is_filename_packet_(false) {}
   ~ObProto20Context() {}
 
   inline void reset() { MEMSET(this, 0, sizeof(ObProto20Context)); }
@@ -84,7 +85,8 @@ public:
                 K_(has_extra_info),
                 K_(is_new_extra_info),
                 K_(txn_free_route),
-                K_(curr_proto20_packet_start_pos));
+                K_(curr_proto20_packet_start_pos),
+                K_(is_filename_packet));
 
 public:
   uint8_t comp_seq_;
@@ -99,6 +101,9 @@ public:
   bool is_new_extra_info_;
   int64_t curr_proto20_packet_start_pos_;
   bool txn_free_route_;
+  // used in local local.
+  // We should set `is_filename_packet_` when sending PKT_FILENAME packet.
+  bool is_filename_packet_;
 private:
   DISALLOW_COPY_AND_ASSIGN(ObProto20Context);
 };
@@ -125,6 +130,7 @@ public:
 
   const static int64_t MAX_PROTO20_PAYLOAD_LEN;
   const static int64_t PROTO20_SPLIT_LEN;
+  bool is_composed_ok_pkt_;
 
 public:
   ObProtoEncodeParam()
@@ -132,7 +138,7 @@ public:
       seri_size_(0), conn_id_(0), encode_ret_(common::OB_SUCCESS),
       need_flush_(false), is_last_(false), is_pkt_encoded_(false),
       large_pkt_buf_(NULL), large_pkt_buf_len_(0), large_pkt_buf_pos_(0),
-      extra_info_kvs_(NULL), extra_info_ecds_(NULL), conn_(NULL)
+      extra_info_kvs_(NULL), extra_info_ecds_(NULL), conn_(NULL), is_composed_ok_pkt_(false)
   {}
 
   inline bool is_valid() const

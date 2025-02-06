@@ -12,19 +12,9 @@
 
 #define USING_LOG_PREFIX COMMON
 #include "share/ob_virtual_table_iterator.h"
-#include "share/schema/ob_schema_getter_guard.h"
-#include "share/config/ob_server_config.h"
-#include "share/object/ob_obj_cast.h"
-#include "common/rowkey/ob_rowkey_info.h"
-#include "share/inner_table/ob_inner_table_schema.h"
-#include "sql/engine/ob_operator.h"
-#include "sql/engine/basic/ob_pushdown_filter.h"
 #include "sql/engine/expr/ob_expr_column_conv.h"
 #include "sql/session/ob_sql_session_info.h"
-#include "sql/das/ob_das_location_router.h"
-#include "sql/engine/basic/ob_pushdown_filter.h"
 #include "sql/engine/expr/ob_expr_lob_utils.h"
-#include "deps/oblib/src/lib/alloc/memory_sanity.h"
 
 using namespace oceanbase::common;
 using namespace oceanbase::share;
@@ -347,7 +337,8 @@ int ObVirtualTableIterator::convert_output_row(ObNewRow *&cur_row)
       const ObColumnSchemaV2 *col_schema = cols_schema_.at(i);
       if (cur_row->get_cell(i).is_null()
           || (cur_row->get_cell(i).is_string_type() && 0 == cur_row->get_cell(i).get_data_length())
-          || ob_is_empty_lob(cur_row->get_cell(i))) {
+          || ob_is_empty_lob(cur_row->get_cell(i))
+          || (cur_row->get_cell(i).is_timestamp() && cur_row->get_cell(i).get_timestamp() <= 0)) {
         convert_row_.cells_[i].set_null();
       } else if (OB_FAIL(ObObjCaster::to_type(col_schema->get_data_type(),
                                               col_schema->get_collation_type(),
@@ -368,7 +359,13 @@ int ObVirtualTableIterator::get_next_row(ObNewRow *&row)
   int ret = OB_SUCCESS;
   ObNewRow *cur_row = NULL;
   row_calc_buf_.reuse();
-  if (OB_FAIL(inner_get_next_row(cur_row))) {
+  const int64_t abs_timeout_ts = get_scan_param()->timeout_;
+  if (ObClockGenerator::getClock() > abs_timeout_ts) {
+    ret = OB_TIMEOUT;
+    LOG_WARN("iterate virtual table row timeout", KR(ret), KTIME(abs_timeout_ts));
+  } else if (OB_FAIL(THIS_WORKER.check_status())) {
+    LOG_WARN("iterate virtual table row failed", KR(ret), KTIME(abs_timeout_ts));
+  } else if (OB_FAIL(inner_get_next_row(cur_row))) {
     if (OB_UNLIKELY(OB_ITER_END != ret)) {
       LOG_WARN("fail to inner get next row", K(ret), KPC(scan_param_));
     }
@@ -456,6 +453,25 @@ int ObVirtualTableIterator::get_next_row(ObNewRow *&row)
   return ret;
 }
 
+int ObVirtualTableIterator::get_next_rows(int64_t &count, int64_t capacity)
+{
+  int ret = OB_SUCCESS;
+  if (OB_UNLIKELY(capacity < 1)) {
+  } else if (OB_ISNULL(scan_param_) || OB_ISNULL(scan_param_->op_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected null arguments", K(ret));
+  } else {
+    ObEvalCtx::BatchInfoScopeGuard guard(scan_param_->op_->get_eval_ctx());
+    guard.set_batch_size(1);
+    guard.set_batch_idx(0);
+    if (OB_FAIL(get_next_row())) {
+      if (OB_ITER_END != ret) { LOG_WARN("get next row failed", K(ret)); }
+    } else {
+      count = 1;
+    }
+  }
+  return ret;
+}
 int ObVirtualTableIterator::get_next_row()
 {
   ACTIVE_SESSION_FLAG_SETTER_GUARD(in_storage_read);
@@ -537,7 +553,7 @@ int ObVirtualTableIterator::check_priv(const ObString &level_str,
   int ret = OB_SUCCESS;
   share::schema::ObSessionPrivInfo session_priv;
   CK (OB_NOT_NULL(session_) && OB_NOT_NULL(schema_guard_));
-  OX (session_->get_session_priv_info(session_priv));
+  OZ (session_->get_session_priv_info(session_priv));
   // bool allow_show = true;
   if (OB_SUCC(ret)) {
     //tenant_id in table is static casted to int64_t,

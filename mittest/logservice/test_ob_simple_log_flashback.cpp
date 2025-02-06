@@ -1,3 +1,6 @@
+// owner: yunlong.cb
+// owner group: log
+
 // Copyright (c) 2021 OceanBase
 // OceanBase is licensed under Mulan PubL v2.
 // You can use this software according to the terms and conditions of the Mulan PubL v2.
@@ -7,13 +10,6 @@
 // EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
 // MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 // See the Mulan PubL v2 for more details.
-#include "lib/file/file_directory_utils.h"
-#include "lib/utility/ob_macro_utils.h"
-#include "logservice/palf/log_define.h"
-#include <cstdio>
-#include <gtest/gtest.h>
-#include <signal.h>
-#include "lib/utility/ob_defer.h"
 #define private public
 #include "env/ob_simple_log_cluster_env.h"
 
@@ -121,6 +117,7 @@ int64_t ObSimpleLogClusterTestBase::member_cnt_ = 1;
 int64_t ObSimpleLogClusterTestBase::node_cnt_ = 5;
 std::string ObSimpleLogClusterTestBase::test_name_ = TEST_NAME;
 bool ObSimpleLogClusterTestBase::need_add_arb_server_  = false;
+bool ObSimpleLogClusterTestBase::need_shared_storage_ = false;
 
 
 // test cases:
@@ -445,6 +442,62 @@ TEST_F(TestObSimpleLogClusterFlashback, flashback_after_restart)
   EXPECT_GE(flashback_scn, leader1.palf_handle_impl_->sw_.last_slide_scn_);
   LSN new_log_tail1 = leader1.palf_handle_impl_->log_engine_.log_storage_.log_tail_;
   EXPECT_EQ(new_log_tail1, leader1.palf_handle_impl_->sw_.committed_end_lsn_);
+}
+
+TEST_F(TestObSimpleLogClusterFlashback, flashback_log_cache)
+{
+  disable_hot_cache_ = true;
+  SET_CASE_LOG_FILE(TEST_NAME, "flashback_log_cache");
+  OB_LOGGER.set_log_level("TRACE");
+  int server_idx = 0;
+  int64_t leader_idx = 0;
+  int64_t id = ATOMIC_AAF(&palf_id_, 1);
+
+  PalfHandleImplGuard leader;
+  EXPECT_EQ(OB_SUCCESS, create_paxos_group(id, leader_idx, leader));
+
+  EXPECT_EQ(OB_SUCCESS, submit_log(leader, 100, id, MAX_LOG_BODY_SIZE));
+  const LSN max_lsn = leader.get_palf_handle_impl()->get_max_lsn();
+  EXPECT_EQ(OB_SUCCESS, wait_until_has_committed(leader, max_lsn));
+
+  SCN flashback_scn;
+  flashback_scn.convert_from_ts(common::ObTimeUtility::current_time());
+  EXPECT_EQ(OB_SUCCESS, submit_log(leader, 100, id));
+  EXPECT_EQ(OB_SUCCESS, wait_until_has_committed(leader, leader.get_palf_handle_impl()->get_max_lsn()));
+  EXPECT_LT(flashback_scn, leader.get_palf_handle_impl()->get_max_scn());
+
+  PALF_LOG(INFO, "start to hit cache");
+  EXPECT_EQ(OB_ITER_END, read_log(leader));
+
+  int64_t miss_cnt = leader.get_palf_handle_impl()->log_cache_.cold_cache_.log_cache_stat_.miss_cnt_;
+  EXPECT_NE(0, miss_cnt);
+  PALF_LOG(INFO, "miss cnt", K(miss_cnt));
+  EXPECT_EQ(OB_ITER_END, read_log(leader));
+  EXPECT_LE(miss_cnt + 1, leader.get_palf_handle_impl()->log_cache_.cold_cache_.log_cache_stat_.miss_cnt_);
+
+  // switch mode from APPEND to RAW_WRITE
+  int64_t mode_version = INVALID_PROPOSAL_ID;
+  switch_append_to_raw_write(leader, mode_version);
+
+  // execute flashback
+  PALF_LOG(INFO, "start to flashback", K(get_cluster().size()));
+  ObLogFlashbackService *flashback_srv = get_cluster()[0]->get_flashback_service();
+  const int64_t timeout_us = 10 * 1000 * 1000;
+  int64_t flashabck_version = leader.palf_handle_impl_->log_engine_.log_storage_.flashback_version_;
+  EXPECT_EQ(OB_SUCCESS, flashback_srv->flashback(MTL_ID(), flashback_scn, timeout_us));
+
+  LSN new_log_tail1 = leader.palf_handle_impl_->log_engine_.log_storage_.log_tail_;
+  EXPECT_EQ(new_log_tail1, leader.palf_handle_impl_->sw_.committed_end_lsn_);
+  EXPECT_GE(flashback_scn, leader.palf_handle_impl_->sw_.last_slide_scn_);
+  EXPECT_EQ(flashabck_version + 1, leader.palf_handle_impl_->log_engine_.log_storage_.flashback_version_);
+  PALF_LOG(INFO, "miss cnt", K(leader.get_palf_handle_impl()->log_cache_.cold_cache_.log_cache_stat_.miss_cnt_));
+  EXPECT_EQ(OB_ITER_END, read_log(leader));
+  int64_t new_miss_cnt = leader.get_palf_handle_impl()->log_cache_.cold_cache_.log_cache_stat_.miss_cnt_;
+  if (new_miss_cnt < miss_cnt) {
+    EXPECT_NE(0, new_miss_cnt);
+  } else {
+    EXPECT_LT(miss_cnt + 1, new_miss_cnt);
+  }
 }
 
 } // end unittest

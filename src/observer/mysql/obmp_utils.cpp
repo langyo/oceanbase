@@ -12,15 +12,7 @@
 
 #define USING_LOG_PREFIX SERVER
 #include "obmp_utils.h"
-#include "obmp_base.h"
-#include "rpc/obmysql/packet/ompk_ok.h"
-#include "rpc/obmysql/ob_mysql_packet.h"
-#include "lib/utility/ob_proto_trans_util.h"
 #include "observer/mysql/obmp_utils.h"
-#include "rpc/obmysql/ob_2_0_protocol_utils.h"
-#include "sql/monitor/flt/ob_flt_control_info_mgr.h"
-#include "lib/container/ob_bit_set.h"
-#include "share/ob_rpc_struct.h"
 #include "sql/session/ob_sess_info_verify.h"
 namespace oceanbase
 {
@@ -37,12 +29,22 @@ int ObMPUtils::add_changed_session_info(OMPKOK &ok_pkt, sql::ObSQLSessionInfo &s
   if (session.is_session_info_changed()) {
     ok_pkt.set_state_changed(true);
   }
-  if (session.is_database_changed()) {
-    ObString db_name = session.get_database_name();
-    ok_pkt.set_changed_schema(db_name);
-  }
 
   ObIAllocator &allocator = session.get_allocator();
+  if (session.is_database_changed()) {
+    ObCollationType client_cs_type = session.get_local_collation_connection();
+    ObString db_name;
+    if (OB_UNLIKELY(OB_SUCCESS != ObCharset::charset_convert(allocator,
+                                                             session.get_database_name(),
+                                                             CS_TYPE_UTF8MB4_BIN,
+                                                             client_cs_type,
+                                                             db_name,
+                                                             ObCharset::REPLACE_UNKNOWN_CHARACTER))) {
+    } else {
+      ok_pkt.set_changed_schema(db_name);
+    }
+  }
+
   if (session.is_sys_var_changed()) {
     const ObIArray<sql::ObBasicSessionInfo::ChangedVar> &sys_var = session.get_changed_sys_var();
     LOG_DEBUG("sys var changed", K(session.get_tenant_name()), K(sys_var.count()));
@@ -149,7 +151,7 @@ int ObMPUtils::sync_session_info(sql::ObSQLSessionInfo &sess, const common::ObSt
   const char *end = buf + len;
   int64_t pos = 0;
 
-  LOG_TRACE("sync sess_inf", K(sess.get_is_in_retry()),
+  LOG_DEBUG("sync sess_inf", K(sess.get_is_in_retry()),
             K(sess.get_sessid()), KP(data), K(len), KPHEX(data, len));
 
   // decode sess_info
@@ -660,14 +662,15 @@ int ObMPUtils::get_literal_print_length(const ObObj &obj, bool is_plain, int64_t
   len = 0;
   int32_t len_of_string = 0;
   const ObLobLocator *locator = nullptr;
-  if (!obj.is_string_or_lob_locator_type() && !obj.is_json() && !obj.is_geometry()) {
+  if (!obj.is_string_or_lob_locator_type() && !obj.is_json() && !obj.is_geometry() && !obj.is_roaringbitmap()) {
     len = OB_MAX_SYS_VAR_NON_STRING_VAL_LENGTH;
   } else if (OB_UNLIKELY((len_of_string = obj.get_string_len()) < 0)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("string length invalid", K(obj), K(len_of_string));
   } else if (obj.is_char() || obj.is_varchar()
              || obj.is_text() || ob_is_nstring_type(obj.get_type())
-             || obj.is_json() || obj.is_geometry()) {
+             || obj.is_json() || obj.is_geometry()
+             || obj.is_roaringbitmap()) {
     //if is_plain is false, 'j' will be print as "j\0" (with Quotation Marks here)
     //otherwise. as j\0 (withOUT Quotation Marks here)
     ObHexEscapeSqlStr sql_str(obj.get_string());

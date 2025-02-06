@@ -14,14 +14,11 @@
 #include "ob_backup_clean_scheduler.h"
 #include "ob_backup_clean_ls_task_mgr.h"
 #include "ob_backup_clean_task_mgr.h"
-#include "ob_backup_schedule_task.h"
 #include "ob_backup_task_scheduler.h"
 #include "share/backup/ob_backup_clean_operator.h"
 #include "share/backup/ob_archive_persist_helper.h"
-#include "rootserver/ob_root_utils.h"
 #include "share/backup/ob_backup_helper.h"
 #include "share/backup/ob_archive_persist_helper.h"
-#include "share/backup/ob_backup_store.h"
 
 namespace oceanbase
 {
@@ -249,15 +246,10 @@ int ObBackupCleanScheduler::build_task_(
 {
   int ret = OB_SUCCESS;
   int64_t task_deep_copy_size = 0;
-  void *raw_ptr = nullptr;
   ObBackupCleanLSTask tmp_task;
   if (OB_FAIL(tmp_task.build(task_attr, ls_task))) {
     LOG_WARN("failed to build task", K(ret), K(task_attr), K(ls_task));
-  } else if (FALSE_IT(task_deep_copy_size = tmp_task.get_deep_copy_size())) {
-  } else if (nullptr == (raw_ptr = allocator.alloc(task_deep_copy_size))) {
-    ret = OB_ALLOCATE_MEMORY_FAILED;
-    LOG_WARN("fail to allocate task", K(ret));
-  } else if (OB_FAIL(tmp_task.clone(raw_ptr, task))) {
+  } else if (OB_FAIL(tmp_task.clone(allocator, task))) {
     LOG_WARN("fail to clone input task", K(ret));
   } else if (nullptr == task) {
     ret = OB_ERR_UNEXPECTED;
@@ -858,7 +850,7 @@ int ObUserTenantBackupDeleteMgr::check_data_backup_dest_validity_()
     }
   } else if (backup_dest_str.is_empty()) {
     // do nothing
-  } else if (OB_FAIL(dest_mgr.init(job_attr_->tenant_id_, ObBackupDestType::TYPE::DEST_TYPE_BACKUP_DATA, backup_dest_str,  *sql_proxy_))) {
+  } else if (OB_FAIL(dest_mgr.init(job_attr_->tenant_id_, ObBackupDestType::TYPE::DEST_TYPE_BACKUP_DATA, backup_dest_str, *sql_proxy_))) {
     LOG_WARN("failed to init dest manager", K(ret), K(job_attr_), K(backup_dest_str));
   } else if (OB_FAIL(dest_mgr.check_dest_validity(*rpc_proxy_, true/*need_format_file*/))) {
     LOG_WARN("failed to check backup dest validity", K(ret), K(job_attr_), K(backup_dest_str));
@@ -1255,7 +1247,7 @@ int ObUserTenantBackupDeleteMgr::get_delete_backup_set_infos_(ObArray<ObBackupSe
 int ObUserTenantBackupDeleteMgr::get_delete_backup_piece_infos_(ObArray<ObTenantArchivePieceAttr> &piece_list)
 {
   int ret = OB_SUCCESS;
-  // TODO(wenjinyu.wjy) 4.3 support
+  // TODO(xingzhi) 4.4 support
   return ret;
 }
 
@@ -1287,7 +1279,7 @@ int ObUserTenantBackupDeleteMgr::get_delete_obsolete_backup_set_infos_(
   } else if (OB_FAIL(ObBackupSetFileOperator::get_candidate_obsolete_backup_sets(*sql_proxy_, job_attr_->tenant_id_,
       job_attr_->expired_time_, backup_path_str.ptr(), backup_set_infos))) {
     LOG_WARN("failed to get candidate obsolete backup sets", K(ret)); 
-  } else if (FALSE_IT(std::sort(backup_set_infos.begin(), backup_set_infos.end(), backup_set_info_cmp))) {
+  } else if (FALSE_IT(lib::ob_sort(backup_set_infos.begin(), backup_set_infos.end(), backup_set_info_cmp))) {
   } else {
     for (int64_t i = backup_set_infos.count() - 1 ; OB_SUCC(ret) && i >= 0; i--) {
       bool need_deleted = false;
@@ -1380,7 +1372,7 @@ int ObUserTenantBackupDeleteMgr::get_delete_obsolete_backup_piece_infos_(const O
   ObArray<ObTenantArchivePieceAttr> backup_piece_infos;
   if (OB_FAIL(get_all_dest_backup_piece_infos_(clog_data_clean_point, backup_piece_infos))) {
     LOG_WARN("failed to get all dest backup piece infos", K(ret), K(clog_data_clean_point)); 
-  } else if (FALSE_IT(std::sort(backup_piece_infos.begin(), backup_piece_infos.end(), backup_piece_info_cmp))) {
+  } else if (FALSE_IT(lib::ob_sort(backup_piece_infos.begin(), backup_piece_infos.end(), backup_piece_info_cmp))) {
   } else {
     for (int64_t i = 0; OB_SUCC(ret) && i < backup_piece_infos.count(); i++) {
       const ObTenantArchivePieceAttr &backup_piece_info = backup_piece_infos.at(i);
@@ -1991,6 +1983,9 @@ int ObBackupCleanCommon::check_tenant_status(
     LOG_WARN("failed to get schema guard", K(ret), K(tenant_id));
   } else if (OB_FAIL(schema_guard.get_tenant_info(tenant_id, tenant_schema))) {
     LOG_WARN("failed to get tenant info", K(ret), K(tenant_id));
+  } else if (OB_ISNULL(tenant_schema)) {
+    is_valid = false;
+    LOG_WARN("tenant schema is null, tenant may has been dropped", K(ret), K(tenant_id));
   } else if (tenant_schema->is_normal()) {
     is_valid = true;
   } else if (tenant_schema->is_creating()) {

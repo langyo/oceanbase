@@ -14,7 +14,9 @@
 
 #include "lib/coro/co_var.h"
 #include "lib/alloc/alloc_assist.h"
+#include "lib/time/ob_time_utility.h"
 #include "lib/utility/ob_print_utils.h"
+#include "lib/time/ob_time_utility.h"
 
 namespace oceanbase
 {
@@ -74,6 +76,7 @@ struct ObTableLoadStat
   int64_t coordinator_flush_time_us_;
   int64_t store_write_time_us_;
   int64_t store_flush_time_us_;
+  int64_t store_open_tablet_time_us_;
   int64_t external_write_bytes_;
   int64_t external_serialize_bytes_;
   int64_t external_raw_bytes_;
@@ -96,7 +99,8 @@ struct ObTableLoadStat
                K_(memory_add_item_time_us), K_(memory_sort_item_time_us),
                K_(table_compactor_time_us), K_(external_table_compact_merge_store), K_(merge_time_us), K_(merge_get_next_row_time_us),
                K_(coordinator_write_time_us), K_(coordinator_flush_time_us),
-               K_(store_write_time_us), K_(store_flush_time_us), K_(external_write_bytes), K_(external_serialize_bytes), K_(external_raw_bytes),
+               K_(store_write_time_us), K_(store_flush_time_us), K_(store_open_tablet_time_us),
+               K_(external_write_bytes), K_(external_serialize_bytes), K_(external_raw_bytes),
                K_(table_store_append_row), K_(table_store_get_bucket), K_(table_store_bucket_append_row), K_(table_store_row_count),
                K_(fast_heap_table_refresh_pk_cache));
 };

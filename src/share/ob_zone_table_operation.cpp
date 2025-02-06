@@ -13,12 +13,6 @@
 #define USING_LOG_PREFIX SHARE
 
 #include "share/ob_zone_table_operation.h"
-#include "lib/mysqlclient/ob_mysql_result.h"
-#include "lib/oblog/ob_log.h"
-#include "lib/string/ob_sql_string.h"
-#include "share/inner_table/ob_inner_table_schema.h"
-#include "share/ob_zone_info.h"
-#include "common/ob_timeout_ctx.h"
 #include "rootserver/ob_root_utils.h"
 
 namespace oceanbase
@@ -132,6 +126,46 @@ int ObZoneTableOperation::load_zone_info(
     const bool check_zone_exists /* = false */)
 {
   return load_info(sql_client, info, check_zone_exists);
+}
+
+int ObZoneTableOperation::get_zone_region_list(
+    ObISQLClient &sql_client,
+    hash::ObHashMap<ObZone, ObRegion> &zone_info_map)
+{
+  int ret = OB_SUCCESS;
+  ObSqlString sql;
+  SMART_VAR(ObMySQLProxy::MySQLResult, res) {
+    ObMySQLResult *result = NULL;
+    ObTimeoutCtx ctx;
+    if (OB_FAIL(rootserver::ObRootUtils::get_rs_default_timeout_ctx(ctx))) {
+      LOG_WARN("fail to get timeout ctx", KR(ret), K(ctx));
+    } else if (OB_FAIL(sql.assign_fmt("select zone, info as region"
+               " from %s where zone != '' and name = 'region' ", OB_ALL_ZONE_TNAME))) {
+      LOG_WARN("append sql failed", KR(ret));
+    } else if (OB_FAIL(sql_client.read(res, sql.ptr()))) {
+      LOG_WARN("execute sql failed", KR(ret), K(sql));
+    } else if (NULL == (result = res.get_result())) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("failed to get sql result", KR(ret));
+    } else {
+      int64_t tmp_real_str_len = 0;
+      while (OB_SUCCESS == ret && OB_SUCCESS == (ret = result->next())) {
+        ObZone zone;
+        ObRegion region;
+        EXTRACT_STRBUF_FIELD_MYSQL(*result, "zone", zone.ptr(), MAX_ZONE_LENGTH, tmp_real_str_len);
+        EXTRACT_STRBUF_FIELD_MYSQL(*result, "region", region.ptr(), MAX_REGION_LENGTH, tmp_real_str_len);
+        if (OB_FAIL(zone_info_map.set_refactored(zone, region))) {
+          LOG_WARN("failed to set map", KR(ret));
+        }
+      }
+      if (OB_ITER_END != ret) {
+        LOG_WARN("failed to get region list", K(sql), KR(ret));
+      } else {
+        ret = OB_SUCCESS;
+      }
+    }
+  }
+  return ret;
 }
 
 template <typename T>

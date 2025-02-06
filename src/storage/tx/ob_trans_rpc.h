@@ -32,11 +32,6 @@
 
 namespace oceanbase
 {
-namespace observer
-{
-struct ObGlobalContext;
-}
-
 namespace transaction
 {
 class ObTransService;
@@ -78,9 +73,13 @@ public:
   // rollback response has changed to use ObTxRollbackSPRespMsg
   // use this field to indicate handler ignore handle by this msg
   bool ignore_;
+  ObSEArray<transaction::ObTxLSEpochPair, 1> downstream_parts_;
+  // used for transfer info during rollback
+  int64_t output_transfer_epoch_;
 public:
   int get_status() const { return status_; }
-  TO_STRING_KV(K_(status), K_(send_timestamp), K_(born_epoch), K_(addr), K_(ignore));
+  TO_STRING_KV(K_(status), K_(send_timestamp), K_(born_epoch), K_(addr),
+               K_(ignore), K_(output_transfer_epoch), K_(downstream_parts));
 };
 
 class ObTransRpcProxy : public obrpc::ObRpcProxy
@@ -262,8 +261,12 @@ int ObTxRPCCB<PC>::process()
       } else {
         status = result.get_status();
       }
-      if (need_refresh_location_cache_(status)) {
-        if (OB_FAIL(refresh_location_cache(receiver_ls_id_))) {
+      if (status != OB_SUCCESS
+          && !receiver_ls_id_.is_scheduler_ls()
+          && receiver_ls_id_.is_valid()
+          && need_refresh_location_cache_(status)) {
+        int tmp_ret = OB_SUCCESS;
+        if (OB_TMP_FAIL(refresh_location_cache(receiver_ls_id_))) {
           TRANS_LOG(WARN, "refresh location cache error", KR(ret),
                     K_(trans_id), "ls", receiver_ls_id_, K(result), K(dst), K(status), K_(msg_type));
         } else if (REACH_TIME_INTERVAL(LOG_INTERVAL_US)) {
@@ -281,7 +284,7 @@ int ObTxRPCCB<PC>::process()
       }
     }
   }
-  if (OB_SUCCESS != ret || (OB_SUCCESS != status && status != -1)) {
+  if (OB_SUCCESS != ret || (OB_SUCCESS != status && status != -1 && status != OB_NEED_RETRY && status != OB_EAGAIN)) {
     TRANS_LOG(WARN, "trx rpc callback", K(ret), K(status), K(dst), K(result));
   }
   return ret;
@@ -337,7 +340,8 @@ void ObTxRPCCB<PC>::on_timeout()
       if (transaction::ObTxMsgTypeChecker::is_2pc_msg_type(msg_type_)) {
         // do nothing
       } else {
-        if (receiver_ls_id_.is_valid()) {
+        if (receiver_ls_id_.is_scheduler_ls()) {
+        } else if (receiver_ls_id_.is_valid()) {
           if (OB_FAIL(refresh_location_cache(receiver_ls_id_))) {
             TRANS_LOG(WARN, "refresh location cache error", KR(ret), K_(trans_id), K_(receiver_ls_id), K(dst), K_(tenant_id));
           } else {

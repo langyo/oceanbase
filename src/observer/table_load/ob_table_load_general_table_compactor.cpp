@@ -13,8 +13,6 @@
 #define USING_LOG_PREFIX SERVER
 
 #include "observer/table_load/ob_table_load_general_table_compactor.h"
-#include "observer/table_load/ob_table_load_service.h"
-#include "observer/table_load/ob_table_load_stat.h"
 #include "observer/table_load/ob_table_load_store_ctx.h"
 #include "observer/table_load/ob_table_load_table_ctx.h"
 #include "observer/table_load/ob_table_load_task.h"
@@ -22,6 +20,7 @@
 #include "observer/table_load/ob_table_load_trans_store.h"
 #include "storage/direct_load/ob_direct_load_external_table_compactor.h"
 #include "storage/direct_load/ob_direct_load_sstable_compactor.h"
+#include "observer/table_load/ob_table_load_store_table_ctx.h"
 
 namespace oceanbase
 {
@@ -159,6 +158,7 @@ void ObTableLoadGeneralTableCompactor::CompactorTask::stop()
 ObTableLoadGeneralTableCompactor::CompactorTaskIter::CompactorTaskIter()
   : pos_(0)
 {
+  compactor_task_array_.set_tenant_id(MTL_ID());
 }
 
 ObTableLoadGeneralTableCompactor::CompactorTaskIter::~CompactorTaskIter()
@@ -205,13 +205,15 @@ int ObTableLoadGeneralTableCompactor::CompactorTaskIter::get_next_compactor_task
 
 ObTableLoadGeneralTableCompactor::ObTableLoadGeneralTableCompactor()
   : store_ctx_(nullptr),
+    store_table_ctx_(nullptr),
     param_(nullptr),
     allocator_("TLD_GeneralTC"),
-    all_compactor_array_(OB_MALLOC_NORMAL_BLOCK_SIZE, ModulePageAllocator(allocator_)),
     running_thread_count_(0),
     has_error_(false),
     is_stop_(false)
 {
+  allocator_.set_tenant_id(MTL_ID());
+  all_compactor_array_.set_tenant_id(MTL_ID());
 }
 
 ObTableLoadGeneralTableCompactor::~ObTableLoadGeneralTableCompactor()
@@ -223,6 +225,7 @@ void ObTableLoadGeneralTableCompactor::reset()
 {
   abort_unless(compacting_list_.is_empty());
   store_ctx_ = nullptr;
+  store_table_ctx_ = nullptr;
   param_ = nullptr;
   for (int64_t i = 0; i < all_compactor_array_.count(); ++i) {
     ObIDirectLoadTabletTableCompactor *compactor = all_compactor_array_.at(i);
@@ -240,8 +243,8 @@ int ObTableLoadGeneralTableCompactor::inner_init()
 {
   int ret = OB_SUCCESS;
   store_ctx_ = compact_ctx_->store_ctx_;
+  store_table_ctx_ = compact_ctx_->store_table_ctx_;
   param_ = &store_ctx_->ctx_->param_;
-  allocator_.set_tenant_id(MTL_ID());
   return ret;
 }
 
@@ -277,19 +280,21 @@ void ObTableLoadGeneralTableCompactor::stop()
 int ObTableLoadGeneralTableCompactor::construct_compactors()
 {
   int ret = OB_SUCCESS;
-  ObArenaAllocator allocator;
+  ObArenaAllocator allocator("TLD_Tmp");
   CompactorTaskMap *compactor_task_map_array = nullptr;
-  ObSEArray<ObTableLoadTransStore *, 64> trans_store_array;
+  ObArray<ObTableLoadTransStore *> trans_store_array;
+  allocator.set_tenant_id(MTL_ID());
+  trans_store_array.set_block_allocator(ModulePageAllocator(allocator));
   if (OB_FAIL(store_ctx_->get_committed_trans_stores(trans_store_array))) {
     LOG_WARN("fail to get committed trans stores", KR(ret));
   } else if (OB_ISNULL(compactor_task_map_array = static_cast<CompactorTaskMap *>(
-                         allocator.alloc(sizeof(CompactorTaskMap) * param_->session_count_)))) {
+                         allocator.alloc(sizeof(CompactorTaskMap) * param_->write_session_count_)))) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
     LOG_WARN("fail to alloc memory", KR(ret));
   } else {
-    new (compactor_task_map_array) CompactorTaskMap[param_->session_count_];
+    new (compactor_task_map_array) CompactorTaskMap[param_->write_session_count_];
   }
-  for (int64_t i = 0; OB_SUCC(ret) && i < param_->session_count_; ++i) {
+  for (int64_t i = 0; OB_SUCC(ret) && i < param_->write_session_count_; ++i) {
     CompactorTaskMap &compactor_map = compactor_task_map_array[i];
     if (OB_FAIL(compactor_map.create(1024, "TLD_CT_Map", "TLD_CT_Map", MTL_ID()))) {
       LOG_WARN("fail to create compactor map", KR(ret));
@@ -313,7 +318,7 @@ int ObTableLoadGeneralTableCompactor::construct_compactors()
     store_ctx_->clear_committed_trans_stores();
   }
   if (nullptr != compactor_task_map_array) {
-    for (int64_t i = 0; i < param_->session_count_; ++i) {
+    for (int64_t i = 0; i < param_->write_session_count_; ++i) {
       CompactorTaskMap *compactor_map = compactor_task_map_array + i;
       compactor_map->~CompactorTaskMap();
     }
@@ -359,10 +364,10 @@ int ObTableLoadGeneralTableCompactor::create_tablet_table_compactor(
 {
   int ret = OB_SUCCESS;
   table_compactor = nullptr;
-  if (store_ctx_->ctx_->schema_.is_heap_table_) {
+  if (store_table_ctx_->schema_->is_heap_table_) {
     ObDirectLoadExternalTableCompactParam compact_param;
     compact_param.tablet_id_ = tablet_id;
-    compact_param.table_data_desc_ = store_ctx_->table_data_desc_;
+    compact_param.table_data_desc_ = store_table_ctx_->table_data_desc_;
     ObDirectLoadExternalTableCompactor *external_table_compactor = nullptr;
     if (OB_ISNULL(external_table_compactor =
                     OB_NEWx(ObDirectLoadExternalTableCompactor, (&allocator_)))) {
@@ -372,11 +377,11 @@ int ObTableLoadGeneralTableCompactor::create_tablet_table_compactor(
       LOG_WARN("fail to init external table compactor", KR(ret));
     }
     table_compactor = external_table_compactor;
-  } else if (!param_->need_sort_) {
+  } else if (!store_table_ctx_->need_sort_) {
     ObDirectLoadSSTableCompactParam compact_param;
     compact_param.tablet_id_ = tablet_id;
-    compact_param.table_data_desc_ = store_ctx_->table_data_desc_;
-    compact_param.datum_utils_ = &(store_ctx_->ctx_->schema_.datum_utils_);
+    compact_param.table_data_desc_ = store_table_ctx_->table_data_desc_;
+    compact_param.datum_utils_ = &(store_table_ctx_->schema_->datum_utils_);
     ObDirectLoadSSTableCompactor *sstable_compactor = nullptr;
     if (OB_ISNULL(sstable_compactor = OB_NEWx(ObDirectLoadSSTableCompactor, (&allocator_)))) {
       ret = OB_ALLOCATE_MEMORY_FAILED;
@@ -414,6 +419,7 @@ int ObTableLoadGeneralTableCompactor::create_tablet_compactor_task(int32_t sessi
   if (OB_FAIL(create_tablet_table_compactor(session_id, tablet_id, table_compactor))) {
     LOG_WARN("fail to create tablet table compactor", KR(ret));
   } else if (OB_ISNULL(compactor_task = OB_NEWx(CompactorTask, (&allocator_), table_compactor))) {
+    ret = OB_ALLOCATE_MEMORY_FAILED;
     LOG_WARN("fail to new CompactorTask", KR(ret));
   } else if (OB_FAIL(compactor_task_iter_.add(compactor_task))) {
     LOG_WARN("fail to add compactor task", KR(ret));
@@ -521,6 +527,8 @@ int ObTableLoadGeneralTableCompactor::build_result()
       LOG_WARN("fail to get table from table compactor", KR(ret), KPC(table_compactor));
     } else if (OB_FAIL(result.add_table(table))) {
       LOG_WARN("fail to add table", KR(ret));
+    } else {
+      LOG_INFO("finish compact", K(i), K(table->get_tablet_id()), K(table->get_row_count()));
     }
     if (OB_FAIL(ret)) {
       if (nullptr != table) {

@@ -55,6 +55,9 @@ protected:
   virtual int update_last_pkt_pos() { return packet_sender_.update_last_pkt_pos(); }
   virtual bool need_send_extra_ok_packet() { return packet_sender_.need_send_extra_ok_packet(); }
 
+  virtual int read_packet(obmysql::ObICSMemPool& mem_pool, obmysql::ObMySQLPacket*& pkt) override;
+  virtual int release_packet(obmysql::ObMySQLPacket* pkt) override;
+
 
   // Response a packet to client peer.
   //
@@ -115,6 +118,7 @@ protected:
 
   int build_encode_param_(obmysql::ObProtoEncodeParam &param,
                           obmysql::ObMySQLPacket *pkt, const bool is_last);
+  void set_request_expect_group_id(sql::ObSQLSessionInfo *session);
   // 计算并设置当前用户所属 cgroup，用于资源隔离。如未设置，默认 cgroup id 为 0
   int setup_user_resource_group(
       ObSMConnection &conn,
@@ -122,9 +126,15 @@ protected:
       sql::ObSQLSessionInfo *session);
   int response_row(sql::ObSQLSessionInfo &session,
                    common::ObNewRow &row,
-                   const ColumnsFieldIArray *fields);
+                   const ColumnsFieldIArray *fields,
+                   bool is_packed,
+                   sql::ObExecContext *exec_ctx = NULL,
+                   bool is_ps_protocol = true,
+                   ObSchemaGetterGuard *schema_guard = NULL);
   int process_extra_info(sql::ObSQLSessionInfo &session, const obmysql::ObMySQLRawPacket &pkt,
                                 bool &need_response_error);
+  int process_kill_client_session(sql::ObSQLSessionInfo &session, bool is_connect = false);
+  int load_privilege_info_for_change_user(sql::ObSQLSessionInfo *session);
 protected:
   static const int64_t MAX_TRY_STEPS = 5;
   static int64_t TRY_EZ_BUF_SIZES[MAX_TRY_STEPS];

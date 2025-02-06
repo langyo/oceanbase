@@ -11,22 +11,10 @@
  */
 
 #include "ob_ls_mgr.h"
-#include "lib/guard/ob_shared_guard.h"        // ObShareGuard
-#include "lib/ob_define.h"
-#include "lib/time/ob_time_utility.h"
-#include "share/backup/ob_backup_struct.h"    // ObBackupPathString
-#include "share/ob_debug_sync.h"              // DEBUG
-#include "storage/ls/ob_ls.h"                 // ObLS
-#include "storage/tx_storage/ob_ls_map.h"     // ObLSIterator
-#include "storage/tx_storage/ob_ls_service.h" // ObLSService
 #include "logservice/ob_log_service.h"        // ObLogService
-#include "logservice/palf_handle_guard.h"     // PalfHandleGuard
-#include "ob_archive_allocator.h"             // ObArchiveAllocator
 #include "ob_archive_sequencer.h"             // ObArchiveSequencer
-#include "ob_archive_persist_mgr.h"           // ObArchivePersistMgr
-#include "ob_archive_util.h"                  // GET_LS_TASK_CTX
 #include "ob_archive_round_mgr.h"             // ObArchiveRoundMgr
-#include <stdint.h>
+#include "lib/ash/ob_active_session_guard.h"
 
 namespace oceanbase
 {
@@ -129,6 +117,52 @@ public:
     return bret;
   }
 };
+
+// get the end_lsn of palf, and set the end_lsn as the max no_limit lsn
+// so all logs before the end_lsn will be archived as soon as possible
+class ObArchiveLSMgr::FlushAllFunctor
+{
+public:
+  FlushAllFunctor() : log_service_(NULL) {}
+  explicit FlushAllFunctor(logservice::ObLogService *log_service) : log_service_(log_service) {}
+  ~FlushAllFunctor() { log_service_ = NULL; }
+public:
+  bool operator()(const ObLSID &id, ObLSArchiveTask *task)
+  {
+    int ret = OB_SUCCESS;
+    palf::LSN end_lsn;
+    palf::PalfHandleGuard palf_handle_guard;
+    if (NULL == log_service_) {
+      ret = OB_ERR_UNEXPECTED;
+      ARCHIVE_LOG(ERROR, "log_service_ is NULL", K(log_service_));
+    } else if (OB_FAIL(log_service_->open_palf(id, palf_handle_guard))) {
+      ARCHIVE_LOG(WARN, "open_palf failed", K(id));
+    } else if (OB_FAIL(palf_handle_guard.get_end_lsn(end_lsn))) {
+      ARCHIVE_LOG(WARN, "get end_lsn failed", K(id), K(end_lsn));
+    } else if (OB_ISNULL(task)) {
+      ret = OB_ERR_UNEXPECTED;
+      ARCHIVE_LOG(ERROR, "archive task is NULL", K(id), K(task));
+    } else if (OB_FAIL(task->update_no_limit_lsn(end_lsn))) {
+      ARCHIVE_LOG(WARN, "update no_limit lsn failed", K(id), K(end_lsn));
+    }
+    // always return true
+    return true;
+  }
+private:
+  logservice::ObLogService *log_service_;
+};
+
+void ObArchiveLSMgr::flush_all()
+{
+  int ret = OB_SUCCESS;
+  FlushAllFunctor functor(log_service_);
+
+  if (OB_FAIL(ls_map_.for_each(functor))) {
+    ARCHIVE_LOG(WARN, "for_each failed");
+  } else {
+    ARCHIVE_LOG(INFO, "flush_all succ");
+  }
+}
 
 ObArchiveLSMgr::ObArchiveLSMgr() :
   inited_(false),
@@ -328,6 +362,7 @@ void ObArchiveLSMgr::run1()
       int64_t end_tstamp = ObTimeUtility::current_time();
       int64_t wait_interval = THREAD_RUN_INTERVAL - (end_tstamp - begin_tstamp);
       if (wait_interval > 0) {
+        ObBKGDSessInActiveGuard inactive_guard;
         cond_.timedwait(wait_interval);
       }
     }

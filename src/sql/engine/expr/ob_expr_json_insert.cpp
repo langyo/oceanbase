@@ -15,6 +15,7 @@
 
 #include "ob_expr_json_insert.h"
 #include "ob_expr_json_func_helper.h"
+#include "share/ob_json_access_utils.h"
 
 using namespace oceanbase::common;
 using namespace oceanbase::sql;
@@ -83,7 +84,9 @@ int ObExprJsonInsert::eval_json_insert(const ObExpr &expr, ObEvalCtx &ctx, ObDat
 {
   INIT_SUCC(ret);
   ObEvalCtx::TempAllocGuard tmp_alloc_g(ctx);
-  common::ObArenaAllocator &temp_allocator = tmp_alloc_g.get_allocator();
+  uint64_t tenant_id = ObMultiModeExprHelper::get_tenant_id(ctx.exec_ctx_.get_my_session());
+  MultimodeAlloctor temp_allocator(tmp_alloc_g.get_allocator(), expr.type_, tenant_id, ret);
+  lib::ObMallocHookAttrGuard malloc_guard(lib::ObMemAttr(tenant_id, "JSONModule"));
   ObIJsonBase *j_base = NULL;
   ObDatum *json_datum = NULL;
   bool is_null = false;
@@ -106,7 +109,7 @@ int ObExprJsonInsert::eval_json_insert(const ObExpr &expr, ObEvalCtx &ctx, ObDat
   for (int32 i = 1; OB_SUCC(ret) && i < expr.arg_cnt_ && !is_null; i += 2) {
     ObExpr *arg = expr.args_[i];
     json_datum = NULL;
-    if (OB_FAIL(expr.args_[i]->eval(ctx, json_datum))) {
+    if (OB_FAIL(temp_allocator.eval_arg(expr.args_[i], ctx, json_datum))) {
       LOG_WARN("failed: eval json path datum.", K(ret));
     } else if (arg->datum_meta_.type_ == ObNullType || json_datum->is_null()) {
       is_null = true;
@@ -120,7 +123,7 @@ int ObExprJsonInsert::eval_json_insert(const ObExpr &expr, ObEvalCtx &ctx, ObDat
       } else if (j_path->path_node_cnt() == 0) {
         // do nothing
       } else {
-        ObJsonBaseVector hit;
+        ObJsonSeekResult hit;
         // if target exists continue, don't replace
         if (OB_FAIL(j_base->seek(*j_path, j_path->path_node_cnt(), true, true, hit))) {
           LOG_WARN("failed: json seek.", K(j_path_text), K(ret));
@@ -132,11 +135,13 @@ int ObExprJsonInsert::eval_json_insert(const ObExpr &expr, ObEvalCtx &ctx, ObDat
           // do nothing
         } else {
           ObIJsonBase *j_val;
-          if (OB_FAIL(ObJsonExprHelper::get_json_val(expr, ctx, &temp_allocator, i+1, j_val))) {
+          if (OB_FAIL(temp_allocator.add_baseline_size(expr.args_[i+1], ctx))) {
+            LOG_WARN("add baseline size failed.", K(ret), K(i + 1));
+          } else if (OB_FAIL(ObJsonExprHelper::get_json_val(expr, ctx, &temp_allocator, i+1, j_val))) {
             ret = OB_ERR_INVALID_JSON_TEXT_IN_PARAM;
             LOG_WARN("failed: get_json_val.", K(ret));
           } else {
-            ObIJsonBase *j_pos_node = *hit.last();
+            ObIJsonBase *j_pos_node = hit.last();
             ObJsonPathBasicNode *path_last = j_path->last_path_node();
             if (path_last->get_node_type() == JPN_ARRAY_CELL) {
               if (j_pos_node->json_type() == ObJsonNodeType::J_ARRAY) {
@@ -185,7 +190,7 @@ int ObExprJsonInsert::eval_json_insert(const ObExpr &expr, ObEvalCtx &ctx, ObDat
     ObString raw_bin;
     if (is_null) {
       res.set_null();
-    } else if (OB_FAIL(j_base->get_raw_binary(raw_bin, &temp_allocator))) {
+    } else if (OB_FAIL(ObJsonWrapper::get_raw_binary(j_base, raw_bin, &temp_allocator))) {
       LOG_WARN("failed: get json raw binary", K(ret));
     } else if (OB_FAIL(ObJsonExprHelper::pack_json_str_res(expr, ctx, res, raw_bin))) {
       LOG_WARN("fail to pack json result", K(ret));

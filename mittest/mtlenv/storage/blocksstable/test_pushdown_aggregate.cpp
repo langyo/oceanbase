@@ -14,9 +14,6 @@
 #define private public
 #define protected public
 #define USING_LOG_PREFIX STORAGE
-#include "sql/engine/ob_exec_context.h"
-#include "sql/engine/expr/ob_expr_util.h"
-#include "sql/engine/aggregate/ob_aggregate_util.h"
 #include "storage/access/ob_pushdown_aggregate.h"
 #include "ob_index_block_data_prepare.h"
 
@@ -142,6 +139,7 @@ void TestPushdownAggregate::prepare_schema()
   table_schema_.set_compress_func_name("none");
   table_schema_.set_row_store_type(row_store_type_);
   table_schema_.set_storage_format_version(OB_STORAGE_FORMAT_VERSION_V4);
+  table_schema_.set_micro_index_clustered(false);
 
   index_schema_.reset();
 
@@ -191,7 +189,7 @@ void TestPushdownAggregate::prepare_access_param(const bool is_reverse_scan, ObI
   access_param_.iter_param_.pd_storage_flag_.pd_blockscan_ = true;
   access_param_.iter_param_.pd_storage_flag_.pd_filter_ = true;
   access_param_.iter_param_.pd_storage_flag_.pd_group_by_ = true;
-  access_param_.iter_param_.pd_storage_flag_.use_iter_pool_ = true;
+  access_param_.iter_param_.pd_storage_flag_.use_stmt_iter_pool_ = true;
   access_param_.iter_param_.pd_storage_flag_.use_column_store_ = false;
   read_info_.reset();
   ASSERT_EQ(OB_SUCCESS, read_info_.init(allocator_,
@@ -349,7 +347,7 @@ TEST_F(TestPushdownAggregate, test_init_group_by_cell)
   access_param_.iter_param_.group_by_cols_project_ = &group_by_cols_project_;
 
   ObGroupByCell group_by_cell(eval_ctx_.batch_size_, allocator_);
-  ASSERT_EQ(OB_SUCCESS, group_by_cell.init(access_param_, eval_ctx_));
+  ASSERT_EQ(OB_SUCCESS, group_by_cell.init(access_param_, context_, eval_ctx_));
 
   ObIArray<ObAggCell*> &agg_cell = group_by_cell.get_agg_cells();
   ASSERT_EQ(4, group_by_cell.get_agg_cells().count());
@@ -423,7 +421,7 @@ TEST_F(TestPushdownAggregate, test_decide_use_group_by1)
   access_param_.iter_param_.group_by_cols_project_ = &group_by_cols_project_;
 
   ObGroupByCell group_by_cell(eval_ctx_.batch_size_, allocator_);
-  ASSERT_EQ(OB_SUCCESS, group_by_cell.init(access_param_, eval_ctx_));
+  ASSERT_EQ(OB_SUCCESS, group_by_cell.init(access_param_, context_, eval_ctx_));
 
   int64_t row_count = 100;
   int64_t distinct_count = 10;
@@ -508,15 +506,15 @@ TEST_F(TestPushdownAggregate, test_decide_use_group_by2)
   access_param_.iter_param_.group_by_cols_project_ = &group_by_cols_project_;
 
   ObGroupByCell group_by_cell(eval_ctx_.batch_size_, allocator_);
-  ASSERT_EQ(OB_SUCCESS, group_by_cell.init(access_param_, eval_ctx_));
+  ASSERT_EQ(OB_SUCCESS, group_by_cell.init(access_param_, context_, eval_ctx_));
 
   int64_t row_count = 1000;
   int64_t distinct_count = 10;
 
   int64_t true_count = row_count / ObGroupByCell::USE_GROUP_BY_FILTER_FACTOR - 2;
   ObCGBitmap bitmap(allocator_);
-  bitmap.init(row_count);
-  bitmap.reuse(0);
+  bitmap.init(row_count, false);
+  bitmap.reuse(0, false);
   for (int64_t i = 0; i < row_count; i++) {
     if (i < true_count) {
       bitmap.set(i);
@@ -528,7 +526,7 @@ TEST_F(TestPushdownAggregate, test_decide_use_group_by2)
   ASSERT_TRUE(nullptr == group_by_cell.distinct_projector_buf_);
   ASSERT_TRUE(nullptr == group_by_cell.tmp_group_by_datum_buf_);
 
-  bitmap.reuse(0);
+  bitmap.reuse(0, false);
   true_count = row_count / ObGroupByCell::USE_GROUP_BY_FILTER_FACTOR + 2;
   for (int64_t i = 0; i < row_count; i++) {
     if (i < true_count) {
@@ -539,6 +537,13 @@ TEST_F(TestPushdownAggregate, test_decide_use_group_by2)
   ASSERT_TRUE(use_group_by);
   ASSERT_TRUE(nullptr != group_by_cell.distinct_projector_buf_);
   ASSERT_TRUE(nullptr != group_by_cell.tmp_group_by_datum_buf_);
+
+  group_by_cell.set_row_capacity(eval_ctx_.batch_size_ - 1);
+  ASSERT_EQ(OB_SUCCESS, group_by_cell.decide_use_group_by(row_count, row_count, distinct_count, &bitmap, use_group_by));
+  ASSERT_FALSE(use_group_by);
+  group_by_cell.set_row_capacity(eval_ctx_.batch_size_);
+  ASSERT_EQ(OB_SUCCESS, group_by_cell.decide_use_group_by(row_count, row_count, distinct_count, &bitmap, use_group_by));
+  ASSERT_TRUE(use_group_by);
 }
 
 TEST_F(TestPushdownAggregate, test_eval_batch)
@@ -590,7 +595,7 @@ TEST_F(TestPushdownAggregate, test_eval_batch)
   access_param_.iter_param_.group_by_cols_project_ = &group_by_cols_project_;
 
   ObGroupByCell group_by_cell(eval_ctx_.batch_size_, allocator_);
-  ASSERT_EQ(OB_SUCCESS, group_by_cell.init(access_param_, eval_ctx_));
+  ASSERT_EQ(OB_SUCCESS, group_by_cell.init(access_param_, context_, eval_ctx_));
   ASSERT_EQ(eval_ctx_.batch_size_, group_by_cell.get_batch_size());
 
   const int64_t distinct_cnt = 2;
@@ -696,7 +701,7 @@ TEST_F(TestPushdownAggregate, test_eval_batch_with_null)
   access_param_.iter_param_.group_by_cols_project_ = &group_by_cols_project_;
 
   ObGroupByCell group_by_cell(eval_ctx_.batch_size_, allocator_);
-  ASSERT_EQ(OB_SUCCESS, group_by_cell.init(access_param_, eval_ctx_));
+  ASSERT_EQ(OB_SUCCESS, group_by_cell.init(access_param_, context_, eval_ctx_));
   ASSERT_EQ(eval_ctx_.batch_size_, group_by_cell.get_batch_size());
 
   const int64_t distinct_cnt = 2;
@@ -806,7 +811,7 @@ TEST_F(TestPushdownAggregate, test_copy_output_rows)
   access_param_.iter_param_.group_by_cols_project_ = &group_by_cols_project_;
 
   ObGroupByCell group_by_cell(eval_ctx_.batch_size_, allocator_);
-  ASSERT_EQ(OB_SUCCESS, group_by_cell.init(access_param_, eval_ctx_));
+  ASSERT_EQ(OB_SUCCESS, group_by_cell.init(access_param_, context_, eval_ctx_));
   ASSERT_EQ(eval_ctx_.batch_size_, group_by_cell.get_batch_size());
 
   ObDatum *col_datums = output_exprs_.at(1)->locate_batch_datums(eval_ctx_);
@@ -824,7 +829,7 @@ TEST_F(TestPushdownAggregate, test_copy_output_rows)
 
   ObIArray<ObAggCell*> &agg_cell = group_by_cell.get_agg_cells();
   ASSERT_EQ(6, group_by_cell.get_agg_cells().count());
-  ASSERT_EQ(OB_SUCCESS, group_by_cell.copy_output_rows(SQL_BATCH_SIZE));
+  ASSERT_EQ(OB_SUCCESS, group_by_cell.copy_output_rows(SQL_BATCH_SIZE, access_param_.iter_param_));
   ASSERT_EQ(eval_ctx_.batch_size_, group_by_cell.get_distinct_cnt());
 
   for (int64_t agg_idx = 1; agg_idx < 6; ++agg_idx) {

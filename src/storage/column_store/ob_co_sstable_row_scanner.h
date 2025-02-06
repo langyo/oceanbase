@@ -13,6 +13,7 @@
 #define OB_STORAGE_COLUMN_STORE_OB_CO_SSTABLE_ROW_SCANNER_H_
 #include "storage/access/ob_sstable_row_scanner.h"
 #include "storage/access/ob_block_batched_row_store.h"
+#include "storage/access/ob_pushdown_aggregate_vec.h"
 #include "ob_column_store_util.h"
 #include "ob_co_sstable_rows_filter.h"
 #include "ob_i_cg_iterator.h"
@@ -23,7 +24,8 @@ namespace oceanbase
 namespace storage
 {
 class ObBlockBatchedRowStore;
-class ObGroupByCell;
+class ObGroupByCellBase;
+class ObGroupByCellVec;
 class ObCGGroupByScanner;
 class ObCOSSTableRowScanner : public ObStoreRowIterator
 {
@@ -45,6 +47,19 @@ public:
       const void *query_range) override;
   virtual void reset() override;
   virtual void reuse() override;
+  virtual bool can_blockscan() const override
+  {
+    return is_scan(type_) &&
+           nullptr != block_row_store_ &&
+           MAX_STATE != blockscan_state_;
+  }
+  virtual bool can_batch_scan() const override
+  {
+     return can_blockscan() &&
+            !access_ctx_->is_mview_query() &&
+            iter_param_->vectorized_enabled_ &&
+            iter_param_->enable_pd_filter();
+  }
   virtual int get_next_rows() override;
   TO_STRING_KV(KPC_(iter_param),
                KP_(access_ctx),
@@ -62,6 +77,7 @@ public:
                K_(current),
                K_(end),
                K_(group_size),
+               K_(batch_size),
                K_(reverse_scan),
                K_(state),
                K_(blockscan_state),
@@ -94,8 +110,11 @@ private:
       ObTableAccessContext &context,
       ObITable *table);
   int extract_group_by_iters();
+  int construct_cg_iter_params_for_single_row(
+      const ObTableIterParam &row_param,
+      ObTableAccessContext &context,
+      common::ObIArray<ObTableIterParam*> &iter_params);
   int construct_cg_iter_params(
-      const bool project_single_row,
       const ObTableIterParam &row_param,
       ObTableAccessContext &context,
       common::ObIArray<ObTableIterParam*> &iter_params);
@@ -142,12 +161,6 @@ private:
       current_ += count;
     }
   }
-  OB_INLINE void set_filter_not_applied()
-  {
-    if (nullptr != block_row_store_) {
-      block_row_store_->set_filter_applied(false);
-    }
-  }
   OB_INLINE bool is_group_idx_expr(sql::ObExpr *e) const
   {
     return T_PSEUDO_GROUP_ID == e->type_;
@@ -158,6 +171,7 @@ protected:
 private:
   int init_group_by_info(ObTableAccessContext &context);
   int push_group_by_processor(ObICGIterator *cg_iterator);
+
   bool is_new_group_;
   bool reverse_scan_;
   bool is_limit_end_;
@@ -165,6 +179,7 @@ private:
   BlockScanState blockscan_state_;
   int32_t group_by_project_idx_;
   int64_t group_size_;
+  int64_t batch_size_;
   int64_t column_group_cnt_;
   ObCSRowId current_;
   ObCSRowId end_;
@@ -174,7 +189,7 @@ private:
   ObCOSSTableRowsFilter *rows_filter_;
   ObICGIterator *project_iter_;
   ObICGIterator *getter_project_iter_;
-  ObGroupByCell *group_by_cell_;
+  ObGroupByCellBase *group_by_cell_;
   ObBlockBatchedRowStore *batched_row_store_;
   ObCGIterParamPool *cg_param_pool_;
   const blocksstable::ObDatumRange *range_;

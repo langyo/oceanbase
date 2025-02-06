@@ -54,15 +54,19 @@ public:
   virtual int batch_decode(
       const ObColumnDecoderCtx &ctx,
       const ObIRowIndex* row_index,
-      const int64_t *row_ids,
+      const int32_t *row_ids,
       const char **cell_datas,
       const int64_t row_cap,
       common::ObDatum *datums) const override;
+  virtual int decode_vector(
+      const ObColumnDecoderCtx &decoder_ctx,
+      const ObIRowIndex* row_index,
+      ObVectorDecodeCtx &vector_ctx) const override;
 
   virtual int get_null_count(
       const ObColumnDecoderCtx &ctx,
       const ObIRowIndex *row_index,
-      const int64_t *row_ids,
+      const int32_t *row_ids,
       const int64_t row_cap,
       int64_t &null_count) const override;
 
@@ -80,15 +84,18 @@ public:
   virtual int read_distinct(
       const ObColumnDecoderCtx &ctx,
       const char **cell_datas,
-      storage::ObGroupByCell &group_by_cell) const override;
+      storage::ObGroupByCellBase &group_by_cell) const override;
 
   virtual int read_reference(
       const ObColumnDecoderCtx &ctx,
-      const int64_t *row_ids,
+      const int32_t *row_ids,
       const int64_t row_cap,
-      storage::ObGroupByCell &group_by_cell) const override;
+      storage::ObGroupByCellBase &group_by_cell) const override;
 protected:
-  int decode_without_dict(const ObColumnDecoderCtx &ctx, common::ObDatum &datum) const;
+  int decode_without_dict(
+      const ObColumnDecoderCtx &ctx,
+      common::ObDatum &datum,
+      const bool need_deep_copy_number = true) const;
 
   int batch_decode_without_dict(
       const ObColumnDecoderCtx &ctx,
@@ -120,9 +127,10 @@ private:
       const sql::PushdownFilterInfo &pd_filter_info,
       ObBitmap &result_bitmap) const;
 
+  template <typename ObFilterExecutor>
   int in_operator(
       const ObColumnDecoderCtx &col_ctx,
-      const sql::ObWhiteFilterExecutor &filter,
+      const ObFilterExecutor &filter,
       const sql::PushdownFilterInfo &pd_filter_info,
       ObBitmap &result_bitmap) const;
 
@@ -140,12 +148,17 @@ private:
       const sql::PushdownFilterInfo &pd_filter_info,
       ObBitmap &result_bitmap) const;
 
+  template<typename T = ObDatum *>
   int extract_ref_and_null_count(
-      const int64_t *row_ids,
+      const int32_t *row_ids,
       const int64_t row_cap,
-      common::ObDatum *datums,
+      T len_arr,
       int64_t &null_count,
       uint32_t *ref_buf = nullptr) const;
+  template<typename T>
+  uint32_t *get_len_by_type(T vector, uint32_t &ref, uint32_t *ref_buf, const int64_t &trav_idx) const;
+
+  bool has_null_execption_value() const;
 
 private:
   const ObConstMetaHeader *meta_header_;

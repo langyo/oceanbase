@@ -1,3 +1,6 @@
+// owner: zjf225077
+// owner group: log
+
 /**
  * Copyright (c) 2021 OceanBase
  * OceanBase CE is licensed under Mulan PubL v2.
@@ -10,13 +13,8 @@
  * See the Mulan PubL v2 for more details.
  */
 
-#include <cstdio>
-#include <gtest/gtest.h>
-#include <signal.h>
-#include <share/scn.h>
 #define private public
 #include "env/ob_simple_log_cluster_env.h"
-#include "env/ob_simple_log_server.h"
 #undef private
 
 const std::string TEST_NAME = "log_throttling";
@@ -40,6 +38,7 @@ int64_t ObSimpleLogClusterTestBase::member_cnt_ = 1;
 int64_t ObSimpleLogClusterTestBase::node_cnt_ = 1;
 std::string ObSimpleLogClusterTestBase::test_name_ = TEST_NAME;
 bool ObSimpleLogClusterTestBase::need_add_arb_server_  = false;
+bool ObSimpleLogClusterTestBase::need_shared_storage_ = false;
 
 MockLocCB loc_cb;
 
@@ -238,7 +237,7 @@ TEST_F(TestObSimpleLogClusterLogThrottling, test_throttling_basic)
   max_lsn_1 = leader.palf_handle_impl_->sw_.get_max_lsn();
   wait_lsn_until_flushed(max_lsn_1, leader);
 
-  int64_t prev_has_batched_size = log_io_worker->batch_io_task_mgr_.has_batched_size_;
+  int64_t prev_has_batched_size = log_io_worker->batch_io_task_mgr_.handle_count_;
   PALF_LOG(INFO, "[CASE 6] flush meta task no need throttling", K(max_lsn_1));
   int64_t cur_ts = common::ObClockGenerator::getClock();
   palf_env_impl.disk_options_wrapper_.disk_opts_for_stopping_writing_.log_disk_usage_limit_size_ = 300 * MB;
@@ -274,7 +273,7 @@ TEST_F(TestObSimpleLogClusterLogThrottling, test_throttling_basic)
   ASSERT_EQ(0, throttle->stat_.total_throttling_task_cnt_);
   ASSERT_EQ(10, throttle->stat_.total_skipped_task_cnt_);
   ASSERT_EQ(10 * (log_size), throttle->stat_.total_skipped_size_);
-  int64_t cur_has_batched_size = log_io_worker->batch_io_task_mgr_.has_batched_size_;
+  int64_t cur_has_batched_size = log_io_worker->batch_io_task_mgr_.handle_count_;
   // no io reduce during writing throttling
   ASSERT_EQ(cur_has_batched_size, prev_has_batched_size);
   const double old_decay_factor = throttle->decay_factor_;
@@ -371,12 +370,12 @@ TEST_F(TestObSimpleLogClusterLogThrottling, test_throttling_basic)
   usleep(100 * 1000);
 
   PALF_LOG(INFO, "[CASE 10] no io reduce during writing throttling", K(throttle));
-  int64_t batched_size = log_io_worker->batch_io_task_mgr_.has_batched_size_;
+  int64_t batched_size = log_io_worker->batch_io_task_mgr_.handle_count_;
   leader.palf_handle_impl_->sw_.freeze_mode_ = PERIOD_FREEZE_MODE;
   EXPECT_EQ(OB_SUCCESS, submit_log(leader, 100, id, 128));
   max_lsn_3 = leader.palf_handle_impl_->sw_.get_max_lsn();
   wait_lsn_until_flushed(max_lsn_3, leader);
-  int64_t new_batched_size = log_io_worker->batch_io_task_mgr_.has_batched_size_;
+  int64_t new_batched_size = log_io_worker->batch_io_task_mgr_.handle_count_;
   EXPECT_EQ(batched_size, new_batched_size);
 
   PALF_LOG(INFO, "[CASE 11] need break from writing throttling while flashback task is submitted", K(throttle));

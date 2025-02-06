@@ -11,22 +11,54 @@
  */
 
 #include <gtest/gtest.h>
-#include "lib/allocator/ob_malloc.h"
-#include "lib/utility/utility.h"
-#include "lib/number/ob_number_v2.h"
+#include <fstream>
+#include "deps/oblib/src/lib/rc/context.h"
 
 using namespace oceanbase::common;
 using namespace std;
 
+struct TestItem
+{
+  TestItem() : status_(0), disable_assign_(false)
+  {}
+  ~TestItem()
+  {
+    status_ = 1;
+  }
+  int assign(const TestItem &other)
+  {
+    return other.disable_assign_ ? OB_ERROR : OB_SUCCESS;
+  }
+  int status_;
+  bool disable_assign_;
+};
+
+TEST(utility, construct_assign)
+{
+  TestItem item_1, item_2;
+  item_1.disable_assign_ = true;
+  TestItem *item = (TestItem *)ob_malloc(sizeof(TestItem), "TEST");
+  construct_assign(*item, item_1);
+  ASSERT_EQ(1, item->status_);
+  construct_assign(*item, item_2);
+  ASSERT_EQ(0, item->status_);
+}
 
 TEST(utility, load_file_to_string)
 {
   const char *path = NULL;
   CharArena alloc;
   ObString str;
-
   ASSERT_NE(OB_SUCCESS, load_file_to_string(path, alloc, str));
-  ASSERT_EQ(OB_SUCCESS, load_file_to_string(__FILE__, alloc, str));
+
+  // create a tmp file to test
+  const char* testPath = "test_load_file_to_string";
+  std::ofstream testFile(testPath);
+  ASSERT_EQ(true, testFile.is_open());
+  testFile << "test load_file_to_string";
+  testFile.close();
+  ASSERT_EQ(OB_SUCCESS, load_file_to_string(testPath, alloc, str));
+
   ASSERT_EQ(0, str.ptr()[str.length()]);
 }
 

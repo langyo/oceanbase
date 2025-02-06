@@ -13,14 +13,7 @@
 #define USING_LOG_PREFIX SQL_ENG
 
 #include "sql/engine/basic/ob_function_table_op.h"
-#include "share/object/ob_obj_cast.h"
-#include "common/sql_mode/ob_sql_mode_utils.h"
-#include "sql/ob_sql_utils.h"
-#include "sql/session/ob_sql_session_info.h"
-#include "sql/engine/ob_physical_plan.h"
 #include "sql/engine/ob_exec_context.h"
-#include "pl/ob_pl_user_type.h"
-#include "sql/engine/expr/ob_expr.h"
 #include "sql/engine/expr/ob_expr_lob_utils.h"
 
 
@@ -173,7 +166,10 @@ int ObFunctionTableOp::inner_get_next_row_udf()
         pl::ObPLRecord *record = NULL;
         ObObj record_obj;
         OZ (get_current_result(record_obj));
-        if (OB_SUCC(ret) && record_obj.is_pl_extend()) {
+        if (OB_FAIL(ret)) {
+        } else if (ObUserDefinedSQLType == record_obj.get_type()) {
+         obj_stack[0] = record_obj;
+        } else if (OB_SUCC(ret) && record_obj.is_pl_extend()) {
           CK (OB_NOT_NULL(composite = reinterpret_cast<pl::ObPLComposite*>(record_obj.get_ext())));
           CK (composite->is_record());
           OX (record = static_cast<pl::ObPLRecord*>(composite));

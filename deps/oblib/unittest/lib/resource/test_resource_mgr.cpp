@@ -12,10 +12,7 @@
 
 #include <gtest/gtest.h>
 #define private public
-#include "lib/ob_define.h"
-#include "lib/ob_errno.h"
 #include "lib/container/ob_array.h"
-#include "lib/resource/ob_resource_mgr.h"
 #undef private
 namespace oceanbase
 {
@@ -26,7 +23,7 @@ TEST(TestTenantMemoryMgr, basic)
 {
   ObTenantMemoryMgr memory_mgr(1);
   const int64_t limit = 1 * 1024 * 1024 * 1024;
-  memory_mgr.set_limit(1 * 1024 * 1024 * 1024); //1G;
+  memory_mgr.set_max(limit);
   ASSERT_TRUE(NULL ==  memory_mgr.alloc_chunk(-1, ObMemAttr()));
   ObMemAttr attr;
   attr.tenant_id_ = 2;
@@ -51,7 +48,6 @@ TEST(TestTenantMemoryMgr, basic)
   ASSERT_EQ(limit, memory_mgr.get_sum_hold());
   ASSERT_EQ(0, memory_mgr.get_cache_hold());
   ASSERT_EQ(0, memory_mgr.get_cache_item_count());
-  ASSERT_EQ(0, memory_mgr.get_rpc_hold());
   ASSERT_EQ(limit / 2, memory_mgr.get_ctx_hold_bytes()[0]);
   ASSERT_EQ(limit / 2, memory_mgr.get_ctx_hold_bytes()[1]);
   for (int64_t i = 2; i < ObCtxIds::MAX_CTX_ID; ++i) {
@@ -69,7 +65,6 @@ TEST(TestTenantMemoryMgr, basic)
   ASSERT_EQ(0, memory_mgr.get_sum_hold());
   ASSERT_EQ(0, memory_mgr.get_cache_hold());
   ASSERT_EQ(0, memory_mgr.get_cache_item_count());
-  ASSERT_EQ(0, memory_mgr.get_rpc_hold());
   for (int64_t i = 0; i < ObCtxIds::MAX_CTX_ID; ++i) {
     ASSERT_EQ(0, memory_mgr.get_ctx_hold_bytes()[i]);
   }
@@ -95,7 +90,6 @@ TEST(TestTenantMemoryMgr, basic)
   ASSERT_EQ(limit, memory_mgr.get_sum_hold());
   ASSERT_EQ(aligned_size * 10, memory_mgr.get_cache_hold());
   ASSERT_EQ(10, memory_mgr.get_cache_item_count());
-  ASSERT_EQ(0, memory_mgr.get_rpc_hold());
   ASSERT_EQ((max_alloc_count - 10) * aligned_size /2, memory_mgr.get_ctx_hold_bytes()[0]);
   ASSERT_EQ((max_alloc_count - 10) * aligned_size /2, memory_mgr.get_ctx_hold_bytes()[1]);
   for (int64_t i = 2; i < ObCtxIds::MAX_CTX_ID; ++i) {
@@ -115,7 +109,6 @@ TEST(TestTenantMemoryMgr, basic)
   ASSERT_EQ(0, memory_mgr.get_sum_hold());
   ASSERT_EQ(0, memory_mgr.get_cache_hold());
   ASSERT_EQ(0, memory_mgr.get_cache_item_count());
-  ASSERT_EQ(0, memory_mgr.get_rpc_hold());
   for (int64_t i = 0; i < ObCtxIds::MAX_CTX_ID; ++i) {
     ASSERT_EQ(0, memory_mgr.get_ctx_hold_bytes()[i]);
   }
@@ -148,41 +141,26 @@ public:
     return ret;
   }
   int sync_wash_mbs(const uint64_t tenant_id, const int64_t wash_size,
-                    bool wash_single_mb, ObCacheMemBlock *&wash_blocks)
+                    ObCacheMemBlock *&wash_blocks)
   {
     UNUSED(tenant_id);
     int ret = OB_SUCCESS;
-    if (wash_single_mb) {
-      if (wash_size > CHUNK_MGR.aligned(mb_size_)) {
+    int64_t left_to_washed = wash_size;
+    ObCacheMemBlock *washed_blocks = NULL;
+    while (OB_SUCC(ret) && left_to_washed > 0) {
+      if (NULL == mb_blocks_) {
         ret = OB_CACHE_FREE_BLOCK_NOT_ENOUGH;
-        LIB_LOG(WARN, "wash_size > mb_size", K(ret), K(wash_size), K_(mb_size));
-      } else if (NULL == mb_blocks_) {
-        ret = OB_CACHE_FREE_BLOCK_NOT_ENOUGH;
-        LIB_LOG(WARN, "free block not enough", K(ret), K(wash_size), K_(mb_size));
+        LIB_LOG(WARN, "free block not enough", K(ret), K(wash_size));
       } else {
         ObCacheMemBlock *free_block = mb_blocks_;
         mb_blocks_ = free_block->next_;
-        free_block->next_ = NULL;
-        wash_blocks = free_block;
+        free_block->next_ = washed_blocks;
+        washed_blocks = free_block;
+        left_to_washed -= CHUNK_MGR.aligned(mb_size_);
       }
-    } else {
-      int64_t left_to_washed = wash_size;
-      ObCacheMemBlock *washed_blocks = NULL;
-      while (OB_SUCC(ret) && left_to_washed > 0) {
-        if (NULL == mb_blocks_) {
-          ret = OB_CACHE_FREE_BLOCK_NOT_ENOUGH;
-          LIB_LOG(WARN, "free block not enough", K(ret), K(wash_size));
-        } else {
-          ObCacheMemBlock *free_block = mb_blocks_;
-          mb_blocks_ = free_block->next_;
-          free_block->next_ = washed_blocks;
-          washed_blocks = free_block;
-          left_to_washed -= CHUNK_MGR.aligned(mb_size_);
-        }
-      }
-      if (OB_SUCC(ret)) {
-        wash_blocks = washed_blocks;
-      }
+    }
+    if (OB_SUCC(ret)) {
+      wash_blocks = washed_blocks;
     }
     return ret;
   }
@@ -239,18 +217,18 @@ TEST(TestTenantMemoryMgr, sync_wash)
       ++alloc_count;
     }
   }
-
   // check stat, left one mb in cache
-  ASSERT_EQ(aligned_size, memory_mgr.get_cache_hold());
-  ASSERT_EQ(1, memory_mgr.get_cache_item_count());
-  ASSERT_EQ(aligned_size * mb_count, memory_mgr.get_sum_hold());
-
-  ASSERT_EQ(mb_count - 1, alloc_count);
+  mb_count -= alloc_count;
+  ASSERT_EQ(aligned_size * mb_count, memory_mgr.get_cache_hold());
+  ASSERT_EQ(mb_count, memory_mgr.get_cache_item_count());
+  ASSERT_EQ(aligned_size * (mb_count + alloc_count), memory_mgr.get_sum_hold());
 
   for (int64_t i = 0; i < chunks.count(); ++i) {
     memory_mgr.free_chunk((AChunk *)chunks.at(i), attr);
   }
-  washer.free_mbs(memory_mgr);
+  for (int64_t i = 0; i < mb_count; ++i) {
+    washer.free_mbs(memory_mgr);
+  }
   ASSERT_EQ(0, memory_mgr.get_cache_hold());
   ASSERT_EQ(0, memory_mgr.get_cache_item_count());
   ASSERT_EQ(0, memory_mgr.get_ctx_hold_bytes()[0]);
@@ -365,7 +343,7 @@ TEST(TestResourceMgr, basic)
 
 int main(int argc, char *argv[])
 {
-  OB_LOGGER.set_log_level("INFO");
+  OB_LOGGER.set_disable_logging(true);
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
 }

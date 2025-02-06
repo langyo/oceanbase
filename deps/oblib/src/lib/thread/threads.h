@@ -55,10 +55,11 @@ public:
   ///         adjust to that number, i.e. there are such exact number
   ///         of threads are running if it has started, or would run
   ///         after call \c start() function.
-  int do_set_thread_count(int64_t n_threads);
+  int do_set_thread_count(int64_t n_threads, bool async_recycle=false);
   int set_thread_count(int64_t n_threads);
   int inc_thread_count(int64_t inc = 1);
   int thread_recycle();
+  int try_thread_recycle();
 
   int init();
   // IRunWrapper 用于创建多租户线程时指定租户上下文
@@ -103,15 +104,15 @@ public:
     }
     return pth;
   }
-protected:
   int64_t get_thread_count() const { return n_threads_; }
+protected:
   uint64_t get_thread_idx() const { return thread_idx_; }
   void set_thread_idx(int64_t idx) { thread_idx_ = idx; }
 
 private:
   virtual void run1() {}
 
-  int do_thread_recycle();
+  int do_thread_recycle(bool try_mode);
   /// \brief Create thread
   int create_thread(Thread *&thread, int64_t idx);
 

@@ -53,11 +53,14 @@ public:
   virtual int batch_decode(
       const ObColumnDecoderCtx &ctx,
       const ObIRowIndex* row_index,
-      const int64_t *row_ids,
+      const int32_t *row_ids,
       const char **cell_datas,
       const int64_t row_cap,
       common::ObDatum *datums) const override;
-
+  virtual int decode_vector(
+      const ObColumnDecoderCtx &ctx,
+      const ObIRowIndex* row_index,
+      ObVectorDecodeCtx &vector_ctx) const override;
   virtual int pushdown_operator(
       const sql::ObPushdownFilterExecutor *parent,
       const ObColumnDecoderCtx &col_ctx,
@@ -70,13 +73,13 @@ public:
   virtual int get_null_count(
       const ObColumnDecoderCtx &ctx,
       const ObIRowIndex *row_index,
-      const int64_t *row_ids,
+      const int32_t *row_ids,
       const int64_t row_cap,
       int64_t &null_count) const override;
 private:
   int batch_get_bitpacked_values(
       const ObColumnDecoderCtx &ctx,
-      const int64_t *row_ids,
+      const int32_t *row_ids,
       const int64_t row_cap,
       const int64_t datum_len,
       const int64_t data_offset,
@@ -123,10 +126,12 @@ private:
       const sql::PushdownFilterInfo &pd_filter_info,
       ObBitmap &result_bitmap,
       int (*lambda)(
-          const ObObjMeta &obj_meta,
           const ObDatum &cur_datum,
           const sql::ObWhiteFilterExecutor &filter,
           bool &result)) const;
+
+  template<typename VectorType, bool HAS_NULL>
+  int inner_decode_vector(const ObColumnDecoderCtx &decoder_ctx, ObVectorDecodeCtx &vector_ctx) const;
 private:
   const ObIntegerBaseDiffHeader *header_;
   uint64_t base_;

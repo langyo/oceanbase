@@ -13,14 +13,7 @@
 #define USING_LOG_PREFIX SQL_ENG
 
 #include "sql/engine/dml/ob_link_dml_op.h"
-#include "sql/engine/ob_exec_context.h"
-#include "observer/ob_server_struct.h"
-#include "share/schema/ob_dblink_mgr.h"
-#include "lib/mysqlclient/ob_mysql_connection.h"
-#include "lib/mysqlclient/ob_mysql_connection_pool.h"
-#include "sql/ob_sql_utils.h"
 #include "sql/dblink/ob_tm_service.h"
-#include "share/config/ob_server_config.h"
 namespace oceanbase
 {
 using namespace common;
@@ -67,13 +60,16 @@ int ObLinkDmlOp::send_reverse_link_info(transaction::ObTransID &tx_id)
     const oceanbase::common::ObString &tenant_name = dblink_schema_->get_reverse_tenant_name();
     const oceanbase::common::ObString &cluster_name = dblink_schema_->get_reverse_cluster_name();
     const oceanbase::common::ObString &passwd = dblink_schema_->get_plain_reverse_password();
+    const oceanbase::common::ObString &host_name = dblink_schema_->get_reverse_host_name();
+    const int32_t port = dblink_schema_->get_reverse_host_port();
     const oceanbase::common::ObAddr &addr = dblink_schema_->get_reverse_host_addr();
     if (user_name.empty() ||
         tenant_name.empty() ||
         passwd.empty() ||
-        !addr.is_valid()) {
+        host_name.empty() ||
+        port == 0) {
       ret = OB_ERR_UNEXPECTED;
-      LOG_WARN("reverse link has invalid credentials", K(ret), K(user_name), K(tenant_name), K(passwd.empty()), K(addr));
+      LOG_WARN("reverse link has invalid credentials", K(ret), K(user_name), K(tenant_name), K(passwd.empty()), K(host_name), K(port));
       LOG_USER_ERROR(OB_ERR_UNEXPECTED, "check if the database link was created with local credentials");
     } else {
       ObReverseLink reverse_link_info;
@@ -81,7 +77,9 @@ int ObLinkDmlOp::send_reverse_link_info(transaction::ObTransID &tx_id)
       reverse_link_info.set_tenant(tenant_name);
       reverse_link_info.set_cluster(cluster_name);
       reverse_link_info.set_passwd(passwd);
-      reverse_link_info.set_addr(addr);
+      reverse_link_info.set_addr(addr);// discard
+      reverse_link_info.set_host_name(host_name);
+      reverse_link_info.set_port(port);
       common::ObAddr local_addr = GCTX.self_addr();
       local_addr.set_port(ObServerConfig::get_instance().mysql_port);
       reverse_link_info.set_self_addr(local_addr);
@@ -111,16 +109,14 @@ int ObLinkDmlOp::send_reverse_link_info(transaction::ObTransID &tx_id)
   return ret;
 }
 
-int ObLinkDmlOp::inner_execute_link_stmt(const char *link_stmt)
+int ObLinkDmlOp::inner_execute_link_stmt(const ObString &link_stmt)
 {
   int ret = OB_SUCCESS;
-  transaction::ObTransID tx_id;
-  if (OB_ISNULL(dblink_proxy_) || OB_ISNULL(dblink_conn_) || OB_ISNULL(link_stmt)) {
+  ObSQLSessionInfo *session = ctx_.get_my_session();
+  if (OB_ISNULL(dblink_proxy_) || OB_ISNULL(dblink_conn_) || link_stmt.empty() || OB_ISNULL(session)) {
     ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("dblink_proxy or link_stmt is NULL", K(ret), KP(dblink_proxy_), KP(link_stmt), KP(dblink_conn_));
-  } else if (OB_FAIL(ObTMService::tm_rm_start(ctx_, link_type_, dblink_conn_, tx_id))) {
-    LOG_WARN("failed to tm_rm_start", K(ret), K(dblink_id_), K(dblink_conn_));
-  } else if (MY_SPEC.is_reverse_link_ && OB_FAIL(send_reverse_link_info(tx_id))) {
+    LOG_WARN("dblink_proxy or link_stmt is NULL", K(ret), KP(dblink_proxy_), K(link_stmt), KP(dblink_conn_), KP(session));
+  } else if (MY_SPEC.is_reverse_link_ && OB_FAIL(send_reverse_link_info(session->get_dblink_context().get_tx_id()))) {
     LOG_WARN("failed to send reverse link info", K(ret), K(link_stmt));
   } else if (OB_FAIL(dblink_proxy_->dblink_write(dblink_conn_, affected_rows_, link_stmt))) {
     LOG_WARN("write failed", K(ret), K(link_stmt));
@@ -133,7 +129,8 @@ int ObLinkDmlOp::inner_execute_link_stmt(const char *link_stmt)
 void ObLinkDmlOp::reset_dblink()
 {
   int tmp_ret = OB_SUCCESS;
-  // when it is oci connection, does need terminate stmt like read, because write will terminate stmt after execute_update immediately
+  // when it is oci connection, does not need terminate stmt like read, because write will terminate stmt after execute_update immediately
+  ObDblinkCtxInSession::revert_dblink_conn(dblink_conn_); // release rlock locked by get_dblink_conn
   tenant_id_ = OB_INVALID_ID;
   dblink_id_ = OB_INVALID_ID;
   dblink_proxy_ = NULL;
@@ -146,19 +143,22 @@ int ObLinkDmlOp::inner_open()
   ObSQLSessionInfo *session = ctx_.get_my_session();
   ObPhysicalPlanCtx *plan_ctx = ctx_.get_physical_plan_ctx();
   stmt_buf_len_ += head_comment_length_;
-  if (OB_ISNULL(session) || OB_ISNULL(plan_ctx)) {
+  in_xa_transaction_ = true; // link dml aways in xa trasaction
+  dblink_id_ = MY_SPEC.dblink_id_;
+  dblink_proxy_ = GCTX.dblink_proxy_;
+  if (OB_ISNULL(session) || OB_ISNULL(plan_ctx) || OB_ISNULL(dblink_proxy_)) {
     ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("session or plan_ctx is NULL", K(ret), KP(session), KP(plan_ctx));
+    LOG_WARN("session or plan_ctx or dblink_proxy_ is NULL", K(ret), KP(session), KP(plan_ctx), KP(dblink_proxy_));
   } else if (FALSE_IT(tenant_id_ = session->get_effective_tenant_id())) {
+  } else if (FALSE_IT(sessid_ = session->get_sessid())) {
   } else if (OB_FAIL(set_next_sql_req_level())) {
     LOG_WARN("failed to set next sql req level", K(ret));
-  } else if (OB_FAIL(init_dblink(MY_SPEC.dblink_id_, GCTX.dblink_proxy_, true))) {
-    LOG_WARN("failed to init dblink", K(ret), K(MY_SPEC.dblink_id_));
+  } else if (OB_FAIL(init_dblink())) {
+    LOG_WARN("failed to init dblink", K(ret), K(dblink_id_));
   } else if (OB_ISNULL(stmt_buf_ = static_cast<char *>(allocator_.alloc(stmt_buf_len_)))) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
     LOG_WARN("failed to init stmt buf", K(ret), K(stmt_buf_len_));
   } else {
-
     LOG_DEBUG("succ to open link dml", K(lbt()));
   }
   return ret;

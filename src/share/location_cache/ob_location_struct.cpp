@@ -14,10 +14,7 @@
 
 #include "share/location_cache/ob_location_struct.h"
 #include "share/config/ob_server_config.h" // GCONF
-#include "lib/utility/ob_unify_serialize.h"
-#include "lib/oblog/ob_log_module.h"
-#include "lib/net/ob_addr.h"
-#include "lib/stat/ob_diagnose_info.h"
+#include "share/transfer/ob_transfer_info.h"
 
 namespace oceanbase
 {
@@ -53,11 +50,6 @@ OB_SERIALIZE_MEMBER(ObTabletLSKey,
     tenant_id_,
     tablet_id_);
 
-OB_SERIALIZE_MEMBER(ObTabletLSCache,
-    cache_key_,
-    ls_id_,
-    renew_time_);
-
 ObLSReplicaLocation::ObLSReplicaLocation()
     : server_(),
       role_(FOLLOWER),
@@ -76,7 +68,7 @@ void ObLSReplicaLocation::reset()
   sql_port_ = OB_INVALID_INDEX;
   replica_type_ = REPLICA_TYPE_FULL;
   property_.reset();
-  restore_status_ = ObLSRestoreStatus::Status::RESTORE_NONE;
+  restore_status_ = ObLSRestoreStatus::Status::NONE;
   proposal_id_ = OB_INVALID_ID;
 }
 
@@ -370,17 +362,17 @@ bool ObLSLocation::operator!=(const ObLSLocation &other) const
   return !(*this == other);
 }
 
-int ObLSLocation::get_replica_count(int64_t &full_replica_cnt, int64_t &readonly_replica_cnt)
+int ObLSLocation::get_replica_count(int64_t &full_replica_cnt, int64_t &non_paxos_replica_cnt)
 {
   int ret = OB_SUCCESS;
   full_replica_cnt = 0;
-  readonly_replica_cnt = 0;
+  non_paxos_replica_cnt = 0;
   for (int64_t i = 0; OB_SUCC(ret) && i < replica_locations_.count(); ++i) {
     const ObLSReplicaLocation &replica = replica_locations_.at(i);
     if (REPLICA_TYPE_FULL == replica.get_replica_type()) {
       full_replica_cnt++;
-    } else if (REPLICA_TYPE_READONLY == replica.get_replica_type()) {
-      readonly_replica_cnt++;
+    } else if (ObReplicaTypeCheck::is_non_paxos_replica(replica.get_replica_type())) {
+      non_paxos_replica_cnt++;
     }
   }
   return ret;
@@ -702,7 +694,8 @@ int ObTabletLocation::deep_copy(
 ObTabletLSCache::ObTabletLSCache()
     : cache_key_(),
       ls_id_(),
-      renew_time_(0)
+      renew_time_(0),
+      transfer_seq_(OB_INVALID_TRANSFER_SEQ)
 {
 }
 
@@ -716,6 +709,7 @@ void ObTabletLSCache::reset()
   cache_key_.reset();
   ls_id_.reset();
   renew_time_ = 0;
+  transfer_seq_ = OB_INVALID_TRANSFER_SEQ;
 }
 
 int ObTabletLSCache::assign(const ObTabletLSCache &other)
@@ -725,6 +719,7 @@ int ObTabletLSCache::assign(const ObTabletLSCache &other)
     cache_key_ = other.cache_key_;
     ls_id_ = other.ls_id_;
     renew_time_ = other.renew_time_;
+    transfer_seq_ = other.transfer_seq_;
   }
   return ret;
 }
@@ -733,19 +728,16 @@ bool ObTabletLSCache::is_valid() const
 {
   return cache_key_.is_valid()
       && ls_id_.is_valid()
-      && renew_time_ > 0;
-}
-
-bool ObTabletLSCache::mapping_is_same_with(const ObTabletLSCache &other) const
-{
-  return cache_key_ == other.cache_key_
-      && ls_id_ == other.ls_id_;
+      && renew_time_ > 0
+      && transfer_seq_ > OB_INVALID_TRANSFER_SEQ;
 }
 
 bool ObTabletLSCache::operator==(const ObTabletLSCache &other) const
 {
-  return mapping_is_same_with(other)
-      && renew_time_ == other.renew_time_;
+  return cache_key_ == other.cache_key_
+         && ls_id_ == other.ls_id_
+         && renew_time_ == other.renew_time_
+         && transfer_seq_ == other.transfer_seq_;
 }
 
 bool ObTabletLSCache::operator!=(const ObTabletLSCache &other) const
@@ -758,7 +750,7 @@ int ObTabletLSCache::init(
     const ObTabletID &tablet_id,
     const ObLSID &ls_id,
     const int64_t renew_time,
-    const int64_t row_scn)
+    const int64_t transfer_seq)
 {
   int ret = OB_SUCCESS;
   if (OB_FAIL(cache_key_.init(tenant_id, tablet_id))) {
@@ -766,6 +758,7 @@ int ObTabletLSCache::init(
   } else {
     ls_id_ = ls_id;
     renew_time_ = renew_time;
+    transfer_seq_ = transfer_seq;
     ObLink::reset();
   }
   return ret;
@@ -954,100 +947,6 @@ bool ObLocationServiceUtility::treat_sql_as_timeout(const int error_code)
     }
   }
   return bool_ret;
-}
-
-ObVTableLocationCacheKey::ObVTableLocationCacheKey()
-  : tenant_id_(common::OB_INVALID_TENANT_ID),
-    table_id_(common::OB_INVALID_ID)
-{
-}
-
-ObVTableLocationCacheKey::ObVTableLocationCacheKey(
-    const uint64_t tenant_id,
-    const uint64_t table_id)
-    : tenant_id_(tenant_id),
-      table_id_(table_id)
-{
-}
-
-ObVTableLocationCacheKey::~ObVTableLocationCacheKey()
-{
-}
-
-bool ObVTableLocationCacheKey::operator ==(const ObIKVCacheKey &other) const
-{
-  const ObVTableLocationCacheKey &other_key =
-      reinterpret_cast<const ObVTableLocationCacheKey &>(other);
-  return tenant_id_ == other_key.tenant_id_
-      && table_id_ == other_key.table_id_;
-}
-
-bool ObVTableLocationCacheKey::operator !=(const ObIKVCacheKey &other) const
-{
-  const ObVTableLocationCacheKey &other_key =
-      reinterpret_cast<const ObVTableLocationCacheKey &>(other);
-  return tenant_id_ != other_key.tenant_id_
-      || table_id_ != other_key.table_id_;
-}
-
-uint64_t ObVTableLocationCacheKey::get_tenant_id() const
-{
-  return common::OB_SYS_TENANT_ID;
-}
-
-uint64_t ObVTableLocationCacheKey::hash() const
-{
-  uint64_t hash_val = 0;
-  hash_val = murmurhash(&tenant_id_, sizeof(tenant_id_), hash_val);
-  hash_val = murmurhash(&table_id_, sizeof(table_id_), hash_val);
-  return hash_val;
-}
-
-int64_t ObVTableLocationCacheKey::size() const
-{
-  return sizeof(*this);
-}
-
-int ObVTableLocationCacheKey::deep_copy(
-    char *buf,
-    const int64_t buf_len,
-    ObIKVCacheKey *&key) const
-{
-  int ret = OB_SUCCESS;
-  if (NULL == buf || buf_len < size()) {
-    ret = common::OB_INVALID_ARGUMENT;
-    LOG_WARN("invalid argument", KR(ret), KP(buf), K(buf_len), "size", size());
-  } else {
-    ObVTableLocationCacheKey *pkey = new (buf) ObVTableLocationCacheKey();
-    *pkey = *this;
-    key = pkey;
-  }
-  return ret;
-}
-
-int ObLocationKVCacheValue::deep_copy(
-    char *buf,
-    const int64_t buf_len,
-    ObIKVCacheValue *&value) const
-{
-  int ret = OB_SUCCESS;
-  if (NULL == buf || buf_len < size()) {
-    ret = OB_INVALID_ARGUMENT;
-    LOG_WARN("invalid argument", KR(ret), KP(buf), K(buf_len), "size", size());
-  } else {
-    ObLocationKVCacheValue *pvalue = new (buf) ObLocationKVCacheValue();
-    pvalue->size_ = size_;
-    pvalue->buffer_ = buf + sizeof(*this);
-    MEMCPY(pvalue->buffer_, buffer_, size_);
-    value = pvalue;
-  }
-  return ret;
-}
-
-void ObLocationKVCacheValue::reset()
-{
-  size_ = 0;
-  buffer_ = NULL;
 }
 
 ObLocationSem::ObLocationSem() : cur_count_(0), max_count_(0), cond_()

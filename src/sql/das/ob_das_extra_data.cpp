@@ -26,14 +26,17 @@ ObDASExtraData::ObDASExtraData()
     result_(),
     result_iter_(),
     has_more_(false),
-    need_check_output_datum_(false)
+    need_check_output_datum_(false),
+    enable_rich_format_(false),
+    tsc_monitor_info_(nullptr)
 {
 }
 
 int ObDASExtraData::init(const int64_t task_id,
                          const int64_t timeout_ts,
                          const common::ObAddr &result_addr,
-                         rpc::frame::ObReqTransport *transport)
+                         rpc::frame::ObReqTransport *transport,
+                         const bool enable_rich_format)
 {
   int ret = OB_SUCCESS;
   if (OB_FAIL(rpc_proxy_.init(transport))) {
@@ -44,6 +47,7 @@ int ObDASExtraData::init(const int64_t task_id,
     result_addr_ = result_addr;
     has_more_ = false;
     need_check_output_datum_ = false;
+    enable_rich_format_ = enable_rich_format;
   }
   return ret;
 }
@@ -56,6 +60,7 @@ int ObDASExtraData::fetch_result()
   int64_t tenant_id = MTL_ID();
   int64_t timeout = timeout_ts_ - ObTimeUtility::current_time();
   result_.get_datum_store().reset();
+  result_.get_vec_row_store().reset();
   if (OB_UNLIKELY(timeout <= 0)) {
     ret = OB_TIMEOUT;
     LOG_WARN("das extra data fetch result timeout", KR(ret), K(timeout_ts_), K(timeout));
@@ -67,11 +72,19 @@ int ObDASExtraData::fetch_result()
                      .timeout(timeout)
                      .sync_fetch_das_result(req, result_))) {
     LOG_WARN("rpc sync fetch das result failed", KR(ret));
-  } else if (OB_FAIL(result_.get_datum_store().begin(result_iter_))) {
+  } else if (!enable_rich_format_ && OB_FAIL(result_.get_datum_store().begin(result_iter_))) {
+    LOG_WARN("begin result iter failed", KR(ret));
+  } else if (enable_rich_format_ && OB_FAIL(result_.get_vec_row_store().begin(vec_result_iter_))) {
     LOG_WARN("begin result iter failed", KR(ret));
   } else {
     LOG_TRACE("das fetch task result", KR(ret), K(req), K(result_));
     has_more_ = result_.has_more();
+    if (OB_NOT_NULL(tsc_monitor_info_)) {
+      tsc_monitor_info_->add_io_read_bytes(result_.io_read_bytes_);
+      tsc_monitor_info_->add_ssstore_read_bytes(result_.ssstore_read_bytes_);
+      tsc_monitor_info_->add_ssstore_read_row_cnt(result_.ssstore_read_row_cnt_);
+      tsc_monitor_info_->add_memstore_read_row_cnt(result_.memstore_read_row_cnt_);
+    }
   }
   return ret;
 }
@@ -109,14 +122,17 @@ int ObDASExtraData::get_next_rows(int64_t &count, int64_t capacity)
 {
   int ret = OB_SUCCESS;
   bool got_row = false;
-  if (!result_iter_.is_valid()) {
+  if ((enable_rich_format_ && !vec_result_iter_.is_valid())
+      || (!enable_rich_format_ && !result_iter_.is_valid())) {
     // hasn't fetched any data yet
     if (OB_FAIL(fetch_result())) {
       LOG_WARN("fetch result failed", KR(ret));
     }
   }
   while (!got_row && OB_SUCC(ret)) {
-    if (OB_UNLIKELY(need_check_output_datum_)) {
+    if (enable_rich_format_) {
+      ret = vec_result_iter_.get_next_batch(*output_exprs_, *eval_ctx_, capacity, count);
+    } else if (OB_UNLIKELY(need_check_output_datum_)) {
       ret = result_iter_.get_next_batch<true>(*output_exprs_, *eval_ctx_,
                                                          capacity, count);
     } else {
@@ -134,7 +150,8 @@ int ObDASExtraData::get_next_rows(int64_t &count, int64_t capacity)
       }
     } else {
       got_row = true;
-      PRINT_VECTORIZED_ROWS(SQL, DEBUG, *eval_ctx_, *output_exprs_, count, KR(ret));
+      const ObBitVector *skip = NULL;
+      PRINT_VECTORIZED_ROWS(SQL, DEBUG, *eval_ctx_, *output_exprs_, count, skip, KR(ret));
     }
   }
   return ret;

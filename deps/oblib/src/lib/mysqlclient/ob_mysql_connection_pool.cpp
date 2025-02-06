@@ -12,12 +12,9 @@
 
 #define USING_LOG_PREFIX LIB_MYSQLC
 #include "lib/mysqlclient/ob_isql_connection_pool.h"
-#include "lib/oblog/ob_log_module.h"
-
 #include "lib/mysqlclient/ob_mysql_connection_pool.h"
 #include "lib/mysqlclient/ob_server_connection_pool.h"
 #include "lib/mysqlclient/ob_mysql_server_provider.h"
-#include "lib/mysqlclient/ob_mysql_result.h"
 #include "lib/mysqlclient/ob_mysql_proxy.h"
 #include "lib/thread/thread_mgr.h"
 
@@ -459,11 +456,12 @@ int ObMySQLConnectionPool::acquire(const uint64_t tenant_id, ObMySQLConnection *
     }
   }
   if (OB_FAIL(ret)) {
+    // do nothing
     connection = NULL;
   }
 
   if (OB_ISNULL(connection)) {
-    ret = OB_ERR_UNEXPECTED;
+    ret = OB_SUCC(ret) ? OB_ERR_UNEXPECTED: ret;
     LOG_WARN("failed to acquire connection",
              K(this), K(tenant_id), K(server_count), K(busy_conn_count_), K(ret));
     obsys::ObRLockGuard lock(get_lock_);
@@ -599,9 +597,10 @@ int ObMySQLConnectionPool::release(ObMySQLConnection *connection, const bool suc
   } else {
     const int64_t cost_time = ::oceanbase::common::ObTimeUtility::current_time() - connection->get_timestamp();
     if (cost_time > config_.connection_pool_warn_time_) {
+      char time_buf[OB_MAX_TIME_STR_LENGTH] = {'\0'};
       LOG_WARN_RET(OB_ERR_TOO_MUCH_TIME, "this connection cost too much time", K(this), K(cost_time),
                K(config_.connection_pool_warn_time_), K(connection->get_server()),
-               "start time", time2str(connection->get_timestamp()));
+               "start time", time2str(connection->get_timestamp(), time_buf, sizeof(time_buf)));
     }
     //reset_trace_id(connection);//we just set a new one when acquire next time
     if (OB_ISNULL(pool = connection->get_root())) {
@@ -678,8 +677,10 @@ void ObMySQLConnectionPool::runTimerTask()
       // - remove invalid server connection pool
       // - close long idle connection
       // - renew tenant_server_conn_pool_map
-      if (OB_FAIL(purge_connection_pool())) {
-        LOG_ERROR("fail to update mysql connection pool", K(ret));
+      int tmp_ret = OB_SUCCESS;
+      if (OB_TMP_FAIL(purge_connection_pool())) {
+        ret = OB_SUCC(ret) ? tmp_ret : ret;
+        LOG_ERROR("fail to update mysql connection pool", K(ret), K(tmp_ret));
       }
     }
 
@@ -688,9 +689,9 @@ void ObMySQLConnectionPool::runTimerTask()
     if (MySQLConnectionPoolType::TENANT_POOL == pool_type_ && OB_FAIL(renew_tenant_server_pool_map())) {
       LOG_ERROR("renew_tenant_server_pool_map failed", K(ret));
     }
-
-    if (OB_FAIL(server_provider_->end_refresh())) {
-      LOG_WARN("server_provider_ end_refresh failed", K(ret), K(this));
+    if (OB_TMP_FAIL(server_provider_->end_refresh())) {
+      ret = OB_FAIL(ret) ? ret : tmp_ret;
+      LOG_WARN("server_provider_ end_refresh failed", K(ret), K(tmp_ret), K(this));
     }
     // end LOCK BLOCK
     if (count > 0) {
@@ -766,7 +767,7 @@ int ObMySQLConnectionPool::escape(const char *from, const int64_t from_size,
   }
   return ret;
 }
-int ObMySQLConnectionPool::create_dblink_pool(const dblink_param_ctx &param_ctx, const ObAddr &server,
+int ObMySQLConnectionPool::create_dblink_pool(const dblink_param_ctx &param_ctx, const ObString &host_name, int32_t port,
                                               const ObString &db_tenant, const ObString &db_user,
                                               const ObString &db_pass, const ObString &db_name,
                                               const common::ObString &conn_str,
@@ -793,14 +794,14 @@ int ObMySQLConnectionPool::create_dblink_pool(const dblink_param_ctx &param_ctx,
       ret = OB_ALLOCATE_MEMORY_FAILED;
       LOG_ERROR("out of memory", K(ret));
     } else if (OB_FAIL(dblink_pool->init_dblink(param_ctx.tenant_id_, param_ctx.dblink_id_,
-                                                server, db_tenant, db_user, db_pass,
+                                                host_name, port, db_tenant, db_user, db_pass,
                                                 db_name, conn_str, cluster_str,
                                                 this, config_.sqlclient_per_observer_conn_limit_))) {
       LOG_WARN("fail to init dblink connection pool", K(ret));
     } else if (OB_FAIL(server_list_.push_back(dblink_pool))) {
       LOG_WARN("fail to push pool to list", K(ret));
     } else {
-      LOG_DEBUG("new dblink pool created", K(server), K(config_.sqlclient_per_observer_conn_limit_));
+      LOG_DEBUG("new dblink pool created", K(host_name), K(port), K(config_.sqlclient_per_observer_conn_limit_));
     }
   }
   if (OB_FAIL(ret) && OB_NOT_NULL(dblink_pool)) {
@@ -933,10 +934,9 @@ int ObMySQLConnectionPool::renew_tenant_server_pool_map()
         LOG_WARN("renew_tenant_server_pool_ failed", K(ret), K(tenant_id), K(tenant_idx), K(tenant_array));
       }
     } // end for tenant_array
-
-    if (OB_FAIL(purge_tenant_server_pool_map_(tenant_array))) {
-      LOG_WARN("purge_tenant_server_pool_map_ failed, skip this error", K(ret), K(tenant_array));
-      ret = OB_SUCCESS;
+    int tmp_ret = OB_SUCCESS;
+    if (OB_TMP_FAIL(purge_tenant_server_pool_map_(tenant_array))) {
+      LOG_WARN("purge_tenant_server_pool_map_ failed, skip this error", K(ret), K(tmp_ret), K(tenant_array));
     } else {
       LOG_TRACE("renew tenant_server_conn_pool_map succ");
     }

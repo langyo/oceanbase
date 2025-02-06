@@ -259,10 +259,24 @@ extern "C" void ob_zfree(void *ptr);
   ({                                            \
     T* ret = NULL;                              \
     if (OB_NOT_NULL(pool)) {                    \
-      void *buf = (pool)->alloc(sizeof(T));       \
-      if (OB_NOT_NULL(buf))                     \
+      void *_buf_ = (pool)->alloc(sizeof(T));   \
+      if (OB_NOT_NULL(_buf_))                   \
       {                                         \
-        ret = new(buf) T(__VA_ARGS__);          \
+        ret = new(_buf_) T(__VA_ARGS__);        \
+      }                                         \
+    }                                           \
+    ret;                                        \
+  })
+
+#define OB_NEW_ARRAY(T, pool, count)            \
+  ({                                            \
+    T* ret = NULL;                              \
+    if (OB_NOT_NULL(pool) && count > 0) {       \
+      int64_t _size_ = sizeof(T) * count;       \
+      void *_buf_ = (pool)->alloc(_size_);      \
+      if (OB_NOT_NULL(_buf_))                   \
+      {                                         \
+        ret = new(_buf_) T[count];              \
       }                                         \
     }                                           \
     ret;                                        \
@@ -288,6 +302,16 @@ extern "C" void ob_zfree(void *ptr);
     }                                           \
   } while(0)
 
+#define OB_DELETEx(T, pool, ptr)                \
+  do {                                          \
+    if (NULL != ptr)                            \
+    {                                           \
+      ptr->~T();                                \
+      abort_unless(!OB_ISNULL(pool));           \
+      (pool)->free(ptr);                        \
+      ptr = NULL;                               \
+    }                                           \
+  } while(0)                                    \
 
 
 #endif /* OCEANBASE_SRC_COMMON_OB_MALLOC_H_ */

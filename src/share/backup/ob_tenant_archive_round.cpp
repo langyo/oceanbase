@@ -13,15 +13,6 @@
 #define USING_LOG_PREFIX SHARE
 #include "share/backup/ob_tenant_archive_round.h"
 #include "storage/tx/ob_ts_mgr.h"
-#include "lib/utility/ob_macro_utils.h"
-#include "lib/utility/utility.h"
-#include "lib/oblog/ob_log_module.h"
-#include "common/ob_smart_var.h"
-#include "share/backup/ob_tenant_archive_mgr.h"
-#include "share/ob_tenant_info_proxy.h"
-#include "rootserver/ob_rs_event_history_table_operator.h"
-#include "share/ls/ob_ls_i_life_manager.h"
-#include "share/scn.h"
 
 using namespace oceanbase;
 using namespace share;
@@ -137,8 +128,8 @@ bool ObArchiveRoundHandler::can_stop_archive(const ObTenantArchiveRoundAttr &rou
 
 bool ObArchiveRoundHandler::can_suspend_archive(const ObTenantArchiveRoundAttr &round) const
 {
-  // only tenant with archive state of DOING or INTERRUPTED can defer archive.
-  return round.state_.is_doing() || round.state_.is_interrupted();
+  // only tenant with archive state of DOING can defer archive.
+  return round.state_.is_doing();
 }
 
 int ObArchiveRoundHandler::decide_start_scn_(SCN &start_scn)
@@ -379,7 +370,7 @@ int ObArchiveRoundHandler::checkpoint_to(
     if (OB_FAIL(start_trans_(trans))) {
       LOG_WARN("failed to start transaction", K(ret), K(old_round), K(new_round), K(pieces));
     } else {
-      if (new_round.state_.is_stop() && OB_FAIL(archive_table_op_.stop_round(trans, new_round))) {
+      if (new_round.state_.is_stop() && OB_FAIL(archive_table_op_.stop_round(trans, old_round, new_round))) {
         LOG_WARN("failed to del round", K(ret), K(old_round), K(new_round));
       } else if (new_round.state_.is_stop() && OB_FAIL(archive_table_op_.insert_his_round(trans, his_round))) {
         LOG_WARN("failed to insert his round", K(ret), K(old_round), K(new_round), K(his_round));

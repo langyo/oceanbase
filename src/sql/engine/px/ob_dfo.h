@@ -62,6 +62,7 @@ class ObSqcTaskMgr;
 class ObPxSqcHandler;
 class ObJoinFilter;
 class ObPxCoordInfo;
+class ObDfo;
 
 // 在 PX 端描述每个 SQC 的 task
 // 通过 exec_addr 区分 SQC
@@ -185,15 +186,13 @@ public:
 struct ObQCMonitoringInfo {
   OB_UNIS_VERSION(1);
 public:
-  int init(const ObExecContext &exec_ctx);
+  int init(const ObDfo &dfo);
   int assign(const ObQCMonitoringInfo &other);
   void reset();
 public:
   common::ObString cur_sql_;
   // in nested px situation, it is the current px coordinator's thread id
   int64_t qc_tid_;
-  // no need to deserialize
-  static constexpr int64_t LIMIT_LENGTH = 100;
   TO_STRING_KV(K_(cur_sql), K_(qc_tid));
 };
 
@@ -207,6 +206,7 @@ public:
               qc_id_(common::OB_INVALID_ID),
               sqc_id_(common::OB_INVALID_ID),
               dfo_id_(common::OB_INVALID_ID),
+              branch_id_base_(0),
               access_table_locations_(),
               qc_ch_info_(),
               sqc_ch_info_(),
@@ -245,7 +245,8 @@ public:
               px_detectable_ids_(),
               interrupt_by_dm_(false),
               p2p_dh_map_info_(),
-              sqc_order_gi_tasks_(false)
+              sqc_order_gi_tasks_(false),
+              locations_order_()
   {}
   ~ObPxSqcMeta() = default;
   int assign(const ObPxSqcMeta &other);
@@ -366,10 +367,21 @@ public:
   int64_t get_sqc_count() const { return sqc_count_;}
   void set_sqc_order_gi_tasks(bool v) { sqc_order_gi_tasks_ = v; }
   bool sqc_order_gi_tasks() const { return sqc_order_gi_tasks_; }
+  inline void set_partition_random_affinitize(bool partition_random_affinitize)
+  {
+    partition_random_affinitize_ = partition_random_affinitize;
+  }
+  inline bool partition_random_affinitize() const
+  {
+    return partition_random_affinitize_;
+  }
   ObQCMonitoringInfo &get_monitoring_info() { return monitoring_info_; }
   const ObQCMonitoringInfo &get_monitoring_info() const { return monitoring_info_; }
+  void set_branch_id_base(const int16_t branch_id_base) { branch_id_base_ = branch_id_base; }
+  int16_t get_branch_id_base() const { return branch_id_base_; }
+  ObIArray<std::pair<int64_t, bool>> &get_locations_order() { return locations_order_; }
   TO_STRING_KV(K_(need_report), K_(execution_id), K_(qc_id), K_(sqc_id), K_(dfo_id), K_(exec_addr), K_(qc_addr),
-               K_(qc_ch_info), K_(sqc_ch_info),
+               K_(branch_id_base), K_(qc_ch_info), K_(sqc_ch_info),
                K_(task_count), K_(max_task_count), K_(min_task_count),
                K_(thread_inited), K_(thread_finish), K_(px_int_id),
                K_(transmit_use_interm_result),
@@ -380,6 +392,9 @@ private:
   uint64_t qc_id_;
   int64_t sqc_id_;
   int64_t dfo_id_;
+  // branch id is used to distinguish datas written concurrently by px-workers
+  // for replace and insert update operator, they need branch_id to rollback writes by one px-worker
+  int16_t branch_id_base_;
   ObQCMonitoringInfo monitoring_info_;
   // The partition location information of the all table_scan op and dml op
   // used for px worker execution
@@ -443,6 +458,9 @@ private:
   ObP2PDhMapInfo p2p_dh_map_info_;
   int64_t sqc_count_;
   bool sqc_order_gi_tasks_;
+  bool partition_random_affinitize_{true}; // whether do partition random in gi task split
+  // record ordering of locations. first is operator id of table scan and second is asc.
+  ObSEArray<std::pair<int64_t, bool>, 18> locations_order_;
 };
 
 class ObDfo
@@ -471,7 +489,9 @@ public:
     root_op_spec_(nullptr),
     child_dfos_(),
     has_scan_(false),
+    has_das_(false),
     has_dml_op_(false),
+    has_need_branch_id_op_(false),
     has_temp_scan_(false),
     is_active_(false),
     is_scheduled_(false),
@@ -504,7 +524,9 @@ public:
     need_p2p_info_(false),
     p2p_dh_map_info_(),
     coord_info_ptr_(nullptr),
-    force_bushy_(false)
+    force_bushy_(false),
+    query_sql_(),
+    has_into_odps_(false)
   {
   }
 
@@ -539,10 +561,18 @@ public:
   inline void get_root(const ObOpSpec *&root) const { root = root_op_spec_; }
   inline void set_scan(bool has_scan) { has_scan_ = has_scan; }
   inline bool has_scan_op() const { return has_scan_; }
+
+  inline void set_das(bool has_das) { has_das_ = has_das; }
+
+  inline bool has_das_op() const { return has_das_; }
   inline void set_dml_op(bool has_dml_op) { has_dml_op_ = has_dml_op; }
   inline bool has_dml_op() { return has_dml_op_; }
+  inline void set_need_branch_id_op(bool has_need_branch_id_op) { has_need_branch_id_op_ = has_need_branch_id_op; }
+  inline bool has_need_branch_id_op() const { return has_need_branch_id_op_; }
   inline void set_temp_table_scan(bool has_scan) { has_temp_scan_ = has_scan; }
   inline bool has_temp_table_scan() const { return has_temp_scan_; }
+  inline void set_into_odps(bool has_into_odps) { has_into_odps_ = has_into_odps; }
+  inline bool has_into_odps() const { return has_into_odps_; }
   inline bool is_fast_dfo() const { return is_prealloc_receive_channel() || is_prealloc_transmit_channel(); }
   inline void set_slave_mapping_type(SlaveMappingType v) { slave_mapping_type_ = v; }
   inline SlaveMappingType get_slave_mapping_type() { return slave_mapping_type_; }
@@ -677,6 +707,16 @@ public:
   ObP2PDhMapInfo &get_p2p_dh_map_info() { return p2p_dh_map_info_;};
   bool force_bushy() { return force_bushy_; }
   void set_force_bushy(bool flag) { force_bushy_ = flag; }
+  inline void set_partition_random_affinitize(bool partition_random_affinitize)
+  {
+    partition_random_affinitize_ = partition_random_affinitize;
+  }
+  inline bool partition_random_affinitize() const
+  {
+    return partition_random_affinitize_;
+  }
+  const ObString &query_sql() const { return query_sql_; }
+  void set_query_sql(const ObString &query_sql) { query_sql_ = query_sql; }
   TO_STRING_KV(K_(execution_id),
                K_(dfo_id),
                K_(is_active),
@@ -740,7 +780,9 @@ private:
   const ObOpSpec *root_op_spec_;
   common::ObSEArray<ObDfo *, 4> child_dfos_;
   bool has_scan_; // DFO 中包含至少一个 scan 算子，或者仅仅包含一个dml
+  bool has_das_;  // DFO 中包含至少一个 das 算子
   bool has_dml_op_; // DFO中可能包含一个dml
+  bool has_need_branch_id_op_; // DFO 中有算子需要分配branch_id
   bool has_temp_scan_;
   bool is_active_;
   bool is_scheduled_;
@@ -782,6 +824,9 @@ private:
   // ---------------
   ObPxCoordInfo *coord_info_ptr_;
   bool force_bushy_;
+  bool partition_random_affinitize_{true}; // whether do partition random in gi task split
+  ObString query_sql_;
+  bool has_into_odps_;
 };
 
 
@@ -906,6 +951,7 @@ public:
       dfo_id_(0),
       sqc_id_(0),
       task_id_(-1),
+      branch_id_(0),
       execution_id_(0),
       task_channel_(NULL),
       sqc_channel_(NULL),
@@ -922,7 +968,9 @@ public:
       tx_desc_(NULL),
       is_use_local_thread_(false),
       fb_info_(),
-      err_msg_()
+      err_msg_(),
+      memstore_read_row_count_(0),
+      ssstore_read_row_count_(0)
   {
 
   }
@@ -933,6 +981,7 @@ public:
     dfo_id_ = other.dfo_id_;
     sqc_id_ = other.sqc_id_;
     task_id_ = other.task_id_;
+    branch_id_ = other.branch_id_;
     execution_id_ = other.execution_id_;
     sqc_ch_info_ = other.sqc_ch_info_;
     task_ch_info_ = other.task_ch_info_;
@@ -951,6 +1000,8 @@ public:
     tx_desc_ = other.tx_desc_;
     is_use_local_thread_ = other.is_use_local_thread_;
     fb_info_.assign(other.fb_info_);
+    memstore_read_row_count_ = other.memstore_read_row_count_;
+    ssstore_read_row_count_ = other.ssstore_read_row_count_;
     return *this;
   }
 public:
@@ -958,6 +1009,7 @@ public:
                K_(dfo_id),
                K_(sqc_id),
                K_(task_id),
+               K_(branch_id),
                K_(execution_id),
                K_(sqc_ch_info),
                K_(task_ch_info),
@@ -975,7 +1027,9 @@ public:
                K_(interm_result_ids),
                K_(tx_desc),
                K_(is_use_local_thread),
-               K_(fb_info));
+               K_(fb_info),
+               K_(memstore_read_row_count),
+               K_(ssstore_read_row_count));
   dtl::ObDtlChannelInfo &get_sqc_channel_info() { return sqc_ch_info_; }
   dtl::ObDtlChannelInfo &get_task_channel_info() { return task_ch_info_; }
   void set_task_channel(dtl::ObDtlChannel *ch) { task_channel_ = ch; }
@@ -986,6 +1040,8 @@ public:
   inline bool is_task_state_set(int32_t flag) const { return 0 != (state_ & flag); }
   inline void set_task_id(int64_t task_id) { task_id_ = task_id; }
   inline int64_t get_task_id() const { return task_id_; }
+  inline void set_branch_id(int16_t branch_id) { branch_id_ = branch_id; }
+  inline int16_t get_branch_id() const { return branch_id_; }
   inline void set_qc_id(uint64_t qc_id) { qc_id_ = qc_id; }
   inline int64_t get_qc_id() const { return qc_id_; }
   inline void set_sqc_id(int64_t sqc_id) { sqc_id_ = sqc_id; }
@@ -998,7 +1054,6 @@ public:
   inline void set_execution_id(int64_t execution_id) { execution_id_ = execution_id; }
   inline int64_t get_execution_id() const { return execution_id_; }
   inline void set_result(int rc) { rc_ = rc; }
-  inline bool has_result() const { return rc_ <= 0; }
   inline int get_result() const { return rc_; }
   void set_das_retry_rc(int das_retry_rc)
   { das_retry_rc_ = (das_retry_rc_ == common::OB_SUCCESS ? das_retry_rc : das_retry_rc_); }
@@ -1021,6 +1076,10 @@ public:
   ObExecFeedbackInfo &get_feedback_info() { return fb_info_; };
   const ObPxUserErrorMsg &get_err_msg() const { return err_msg_; }
   ObPxUserErrorMsg &get_err_msg() { return err_msg_; }
+  void set_memstore_read_row_count(int64_t v) { memstore_read_row_count_ = v; }
+  void set_ssstore_read_row_count(int64_t v) { ssstore_read_row_count_ = v; }
+  int64_t get_memstore_read_row_count() const { return memstore_read_row_count_; }
+  int64_t get_ssstore_read_row_count() const { return ssstore_read_row_count_; }
 public:
   // 小于等于0表示设置了rc 值, task default ret值为1
   static const int64_t TASK_DEFAULT_RET_VALUE = 1;
@@ -1029,6 +1088,7 @@ public:
   int64_t dfo_id_;
   int64_t sqc_id_;
   int64_t task_id_;
+  int16_t branch_id_;
   int64_t execution_id_;
   dtl::ObDtlChannelInfo sqc_ch_info_;
   dtl::ObDtlChannelInfo task_ch_info_;
@@ -1051,6 +1111,8 @@ public:
   bool is_use_local_thread_;
   ObExecFeedbackInfo fb_info_; //for feedback info
   ObPxUserErrorMsg err_msg_; // for error msg & warning msg
+  int64_t memstore_read_row_count_; // the count of row from mem
+  int64_t ssstore_read_row_count_; // the count of row from disk
 };
 
 class ObPxRpcInitTaskArgs
@@ -1167,8 +1229,7 @@ class ObPxWorkerEnvArgs
 public :
   typedef common::ObCurTraceId::TraceId TraceId;
   ObPxWorkerEnvArgs () : trace_id_(), log_level_(OB_LOG_LEVEL_NONE),
-  is_oracle_mode_(false), enqueue_timestamp_(-1), gctx_(nullptr),
-  group_id_(0) { }
+  is_oracle_mode_(false), enqueue_timestamp_(-1), gctx_(nullptr){ }
 
   virtual ~ObPxWorkerEnvArgs() { }
 
@@ -1178,7 +1239,6 @@ public :
     is_oracle_mode_ = other.is_oracle_mode_;
     enqueue_timestamp_ = other.enqueue_timestamp_;
     gctx_ = other.gctx_;
-    group_id_ = other.group_id_;
     return *this;
   }
 
@@ -1192,8 +1252,6 @@ public :
   int64_t get_enqueue_timestamp() const { return enqueue_timestamp_; }
   void set_gctx(const observer::ObGlobalContext *ctx) { gctx_ = ctx; }
   const observer::ObGlobalContext *get_gctx() { return gctx_; }
-  void set_group_id(int32_t v) { group_id_ = v; }
-  int32_t get_group_id() const { return group_id_; }
 
 private:
   TraceId trace_id_;
@@ -1201,7 +1259,6 @@ private:
   bool is_oracle_mode_;
   int64_t enqueue_timestamp_;
   const observer::ObGlobalContext *gctx_;
-  int32_t group_id_;
 };
 
 }

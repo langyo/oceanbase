@@ -37,8 +37,14 @@ const static char *ObSysTaskTypeStr[] = {
     "BACKFILL_TX",
     "REMOVE_MEMBER",
     "TRANSFER",
-    "MDS_TABLE_MERGE",
-    "TTL_TASK"
+    "MDS_MINI_MERGE",
+    "TTL_TASK",
+    "TENANT_SNAPSHOT_CREATE",
+    "TENANT_SNAPSHOT_GC",
+    "BATCH_FREEZE_TABLET_TASK",
+    "VECTOR_INDEX_TASK",
+    "DDL_TABLET_SPLIT",
+    "SSTABLE_MICRO_MINI_MERGE"
 };
 
 const char *sys_task_type_to_str(const ObSysTaskType &type)

@@ -32,6 +32,8 @@ namespace share
 {
 class ObIAliveServerTracer;
 struct ObTabletReplicaChecksumItem;
+class ObTenantDagScheduler;
+class ObIDag;
 }
 namespace storage
 {
@@ -124,7 +126,14 @@ public:
   // ObRpcSwitchSchemaP @RS DDL
   int switch_schema(const obrpc::ObSwitchSchemaArg &arg, obrpc::ObSwitchSchemaResult &result);
   int calc_column_checksum_request(const obrpc::ObCalcColumnChecksumRequestArg &arg, obrpc::ObCalcColumnChecksumRequestRes &res);
+  int build_split_tablet_data_start_request(const obrpc::ObTabletSplitStartArg &arg, obrpc::ObTabletSplitStartResult &res);
+  int build_split_tablet_data_finish_request(const obrpc::ObTabletSplitFinishArg &arg, obrpc::ObTabletSplitFinishResult &res);
+  int freeze_split_src_tablet(const obrpc::ObFreezeSplitSrcTabletArg &arg, obrpc::ObFreezeSplitSrcTabletRes &res, const int64_t abs_timeout_us);
+  int fetch_split_tablet_info(const obrpc::ObFetchSplitTabletInfoArg &arg, obrpc::ObFetchSplitTabletInfoRes &res, const int64_t abs_timeout_us);
+  int build_ddl_single_replica_request(const obrpc::ObDDLBuildSingleReplicaRequestArg &arg);
   int build_ddl_single_replica_request(const obrpc::ObDDLBuildSingleReplicaRequestArg &arg, obrpc::ObDDLBuildSingleReplicaRequestResult &res);
+  int check_and_cancel_ddl_complement_data_dag(const obrpc::ObDDLBuildSingleReplicaRequestArg &arg, bool &is_dag_exist);
+  int check_and_cancel_delete_lob_meta_row_dag(const obrpc::ObDDLBuildSingleReplicaRequestArg &arg, bool &is_dag_exist);
   int stop_partition_write(const obrpc::Int64 &switchover_timestamp, obrpc::Int64 &result);
   int check_partition_log(const obrpc::Int64 &switchover_timestamp, obrpc::Int64 &result);
   int get_wrs_info(const obrpc::ObGetWRSArg &arg, obrpc::ObGetWRSResult &result);
@@ -137,6 +146,7 @@ public:
   int backup_ls_data(const obrpc::ObBackupDataArg &arg);
   int backup_completing_log(const obrpc::ObBackupComplLogArg &arg);
   int backup_build_index(const obrpc::ObBackupBuildIdxArg &arg);
+  int backup_fuse_tablet_meta(const obrpc::ObBackupFuseTabletMetaArg &arg);
   int check_backup_dest_connectivity(const obrpc::ObCheckBackupConnectivityArg &arg);
   int backup_meta(const obrpc::ObBackupMetaArg &arg);
   int check_backup_task_exist(const obrpc::ObBackupCheckTaskArg &arg, bool &res);
@@ -160,6 +170,8 @@ public:
                                   obrpc::ObEstBlockRes &res) const;
   int update_tenant_info_cache(const obrpc::ObUpdateTenantInfoCacheArg &arg,
                                   obrpc::ObUpdateTenantInfoCacheRes &result);
+  int refresh_service_name(const obrpc::ObRefreshServiceNameArg &arg,
+                           obrpc::ObRefreshServiceNameRes &result);
   ////////////////////////////////////////////////////////////////
   // ObRpcMinorFreezeP @RS minor freeze
   int minor_freeze(const obrpc::ObMinorFreezeArg &arg,
@@ -172,6 +184,19 @@ public:
       const obrpc::ObCheckSchemaVersionElapsedArg &arg,
       obrpc::ObCheckSchemaVersionElapsedResult &result);
   // ObRpcGetChecksumCalSnapshotP
+
+  // ObRpcCheckMemtableCntP
+  int check_memtable_cnt(
+      const obrpc::ObCheckMemtableCntArg &arg,
+      obrpc::ObCheckMemtableCntResult &result);
+  // ObRpcCheckMediumCompactionInfoListP
+  int check_medium_compaction_info_list_cnt(
+      const obrpc::ObCheckMediumCompactionInfoListArg &arg,
+      obrpc::ObCheckMediumCompactionInfoListResult &result);
+  int prepare_tablet_split_task_ranges(
+      const obrpc::ObPrepareSplitRangesArg &arg,
+      obrpc::ObPrepareSplitRangesRes &result);
+
   int check_modify_time_elapsed(
       const obrpc::ObCheckModifyTimeElapsedArg &arg,
       obrpc::ObCheckModifyTimeElapsedResult &result);
@@ -179,7 +204,6 @@ public:
   int check_ddl_tablet_merge_status(
     const obrpc::ObDDLCheckTabletMergeStatusArg &arg,
     obrpc::ObDDLCheckTabletMergeStatusResult &result);
-
   ////////////////////////////////////////////////////////////////
   // ObRpcBatchSwitchRsLeaderP @RS leader coordinator & admin
   int batch_switch_rs_leader(const ObAddr &arg);
@@ -189,16 +213,24 @@ public:
   ////////////////////////////////////////////////////////////////
   // ObRpcBootstrapP @RS bootstrap
   int bootstrap(const obrpc::ObBootstrapArg &arg);
-  // ObRpcCheckServerForAddingServerP @RS add server
-  int check_server_for_adding_server(
-      const obrpc::ObCheckServerForAddingServerArg &arg,
-      obrpc::ObCheckServerForAddingServerResult &result);
+  // ObRpcPrepareServerForAddingServerP @RS add server
+  int prepare_server_for_adding_server(
+      const obrpc::ObPrepareServerForAddingServerArg &arg,
+      obrpc::ObPrepareServerForAddingServerResult &result);
   // ObRpcGetServerStatusP @RS
   int get_server_resource_info(const obrpc::ObGetServerResourceInfoArg &arg, obrpc::ObGetServerResourceInfoResult &result);
   int get_server_resource_info(share::ObServerResourceInfo &resource_info);
   static int get_build_version(share::ObServerInfoInTable::ObBuildVersion &build_version);
+  // log stream replica task related
+  static int do_remove_ls_paxos_replica(const obrpc::ObLSDropPaxosReplicaArg &arg);
+  static int do_remove_ls_nonpaxos_replica(const obrpc::ObLSDropNonPaxosReplicaArg &arg);
+  static int do_add_ls_replica(const obrpc::ObLSAddReplicaArg &arg);
+  // ObRpcCheckServerEmptyP @RS bootstrap
+  int check_server_empty(const obrpc::ObCheckServerEmptyArg &arg, obrpc::Bool &is_empty);
+  int check_server_empty_with_result(const obrpc::ObCheckServerEmptyArg &arg, obrpc::ObCheckServerEmptyResult &result);
+  static int do_migrate_ls_replica(const obrpc::ObLSMigrateReplicaArg &arg);
   // ObRpcIsEmptyServerP @RS bootstrap
-  int is_empty_server(const obrpc::ObCheckServerEmptyArg &arg, obrpc::Bool &is_empty);
+
   // ObRpcCheckDeploymentModeP
   int check_deployment_mode_match(const obrpc::ObCheckDeploymentModeArg &arg, obrpc::Bool &match);
   int get_leader_locations(
@@ -257,15 +289,15 @@ public:
   int handle_heartbeat(
       const share::ObHBRequest &hb_request,
       share::ObHBResponse &hb_response);
+  int check_storage_operation_status(
+      const obrpc::ObCheckStorageOperationStatusArg &arg,
+      obrpc::ObCheckStorageOperationStatusResult &result);
   int ob_admin_unlock_member_list(
       const obrpc::ObAdminUnlockMemberListOpArg &arg);
+  int check_server_empty(bool &server_empty);
+  int change_external_storage_dest(obrpc::ObAdminSetConfigArg &arg);
 
 private:
-  int get_role_from_palf_(
-      logservice::ObLogService &log_service,
-      const share::ObLSID &ls_id,
-      common::ObRole &role,
-      int64_t &proposal_id);
   int inner_fill_tablet_info_(
       const int64_t tenant_id,
       const ObTabletID &tablet_id,
@@ -273,15 +305,14 @@ private:
       share::ObTabletReplica &tablet_replica,
       share::ObTabletReplicaChecksumItem &tablet_checksum,
       const bool need_checksum);
-
   int register_self();
-  int check_server_empty(bool &server_empty);
+  int set_server_id_(const int64_t server_id);
 
   int handle_server_freeze_req_(const obrpc::ObMinorFreezeArg &arg);
   int handle_tenant_freeze_req_(const obrpc::ObMinorFreezeArg &arg);
   int handle_ls_freeze_req_(const obrpc::ObMinorFreezeArg &arg);
   int tenant_freeze_(const uint64_t tenant_id);
-  int ls_freeze_(const uint64_t tenant_id, const share::ObLSID &ls_id, const common::ObTabletID &tablet_id);
+  int handle_ls_freeze_req_(const uint64_t tenant_id, const share::ObLSID &ls_id, const common::ObTabletID &tablet_id);
   int generate_master_rs_ls_info_(
       const share::ObLSReplica &cur_leader,
       share::ObLSInfo &ls_info);

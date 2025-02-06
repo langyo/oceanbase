@@ -12,20 +12,7 @@
 
 #define USING_LOG_PREFIX SQL_ENG
 #include "sql/engine/dml/ob_table_merge_op.h"
-#include "lib/utility/ob_unify_serialize.h"
-#include "share/ob_autoincrement_service.h"
-#include "sql/engine/ob_physical_plan_ctx.h"
-#include "sql/session/ob_sql_session_info.h"
-#include "sql/engine/ob_physical_plan.h"
-#include "common/sql_mode/ob_sql_mode_utils.h"
-#include "common/rowkey/ob_rowkey.h"
-#include "sql/engine/ob_physical_plan.h"
-#include "sql/engine/ob_exec_context.h"
-#include "sql/ob_sql_utils.h"
 #include "sql/engine/dml/ob_dml_service.h"
-#include "sql/engine/dml/ob_trigger_handler.h"
-#include "sql/engine/expr/ob_expr_calc_partition_id.h"
-#include "sql/engine/dml/ob_fk_checker.h"
 
 namespace oceanbase
 {
@@ -371,7 +358,7 @@ int ObTableMergeOp::check_is_match(bool &is_match)
     if (OB_ISNULL(e)) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("expr is null", K(ret));
-    } else if (e->eval(eval_ctx_, datum)) {
+    } else if (OB_FAIL(e->eval(eval_ctx_, datum))) {
       LOG_WARN("failed to evaluate expression", K(ret));
     } else {
       is_match = !datum->is_null();

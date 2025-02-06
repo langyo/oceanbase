@@ -23,6 +23,11 @@
 #include "sql/plan_cache/ob_plan_cache_util.h"
 #include "sql/engine/user_defined_function/ob_udf_ctx_mgr.h"
 #include "sql/engine/expr/ob_expr.h"
+#include "lib/udt/ob_udt_type.h"
+#include "lib/enumset/ob_enum_set_meta.h"
+#include "sql/engine/ob_subschema_ctx.h"
+#include "sql/engine/expr/ob_expr_util.h"
+
 namespace oceanbase
 {
 namespace sql
@@ -93,6 +98,15 @@ class ObPhysicalPlanCtx
 public:
   explicit ObPhysicalPlanCtx(common::ObIAllocator &allocator);
   virtual ~ObPhysicalPlanCtx();
+  void destroy()
+  {
+    total_memstore_read_row_count_ = 0;
+    total_ssstore_read_row_count_ = 0;
+    // Member variables that need to request additional memory
+    // with another allocator should call destroy here.
+    subschema_ctx_.destroy();
+    all_local_session_vars_.destroy();
+  }
   inline void set_tenant_id(uint64_t tenant_id) { tenant_id_ = tenant_id; }
   inline void set_show_seed(bool show_seed) { is_show_seed_ = show_seed; }
   inline uint64_t get_tenant_id() { return tenant_id_; }
@@ -160,6 +174,15 @@ public:
   inline common::ObConsistencyLevel get_consistency_level() const
   {
     return consistency_level_;
+  }
+  bool check_consistency_level_validation(const bool contain_inner_table)
+  {
+    bool bool_ret = true;
+    if (contain_inner_table) {
+      // Statement which contain inner tables should be strong read;
+      bool_ret = (consistency_level_ == ObConsistencyLevel::STRONG);
+    }
+    return bool_ret;
   }
   void restore_param_store(const int64_t param_count);
   // param store
@@ -230,6 +253,22 @@ public:
   inline void add_affected_rows(int64_t affected_rows)
   {
     affected_rows_ += affected_rows;
+  }
+  inline void add_total_memstore_read_row_count(int64_t v)
+  {
+    total_memstore_read_row_count_ += v;
+  }
+  inline void add_total_ssstore_read_row_count(int64_t v)
+  {
+    total_ssstore_read_row_count_ += v;
+  }
+  inline int64_t get_total_memstore_read_row_count()
+  {
+    return total_memstore_read_row_count_;
+  }
+  inline int64_t get_total_ssstore_read_row_count()
+  {
+    return total_ssstore_read_row_count_;
   }
   int64_t get_found_rows() const
   {
@@ -307,6 +346,12 @@ public:
       last_insert_id_cur_stmt_ = autoinc_id_tmp_;
     }
   }
+  inline void record_last_insert_id_cur_stmt_for_batch()
+  {
+    if (autoinc_id_tmp_ > 0) {
+      last_insert_id_cur_stmt_ = autoinc_id_tmp_;
+    }
+  }
   inline void set_last_insert_id_cur_stmt(const uint64_t last_insert_id)
   {
     last_insert_id_cur_stmt_ = last_insert_id;
@@ -360,6 +405,15 @@ public:
   {
     return is_or_expand_transformed_;
   }
+  inline void set_check_pdml_affected_rows(const bool check_pdml_affected_rows)
+  {
+    check_pdml_affected_rows_ = check_pdml_affected_rows;
+  }
+  inline bool get_check_pdml_affected_rows() const
+  {
+    return check_pdml_affected_rows_;
+  }
+
   /*
   ** 目前OB有语句级重试和语句内部重试，当我们遇到错误码OB_TRANSACTION_SET_VIOLATION,
   ** 不会重新执行sql，而是重新执行计划，此时plan_ctx有些变量需要重置，目前梳理只有下面几种，
@@ -430,6 +484,7 @@ public:
   { return implicit_cursor_infos_; }
   int merge_implicit_cursor_info(const ObImplicitCursorInfo &implicit_cursor_info);
   int merge_implicit_cursors(const common::ObIArray<ObImplicitCursorInfo> &implicit_cursors);
+  int replace_implicit_cursor_info(const ObImplicitCursorInfo &implicit_cursor_info);
   void reset_cursor_info();
   void set_cur_stmt_id(int64_t cur_stmt_id) { cur_stmt_id_ = cur_stmt_id; }
   int64_t get_cur_stmt_id() const { return cur_stmt_id_; }
@@ -444,6 +499,7 @@ public:
   bool is_ps_protocol() const { return is_ps_protocol_; }
   void set_original_param_cnt(const int64_t cnt) { original_param_cnt_ = cnt; }
   int64_t get_original_param_cnt() const { return original_param_cnt_; }
+  bool is_exec_param_readable() const { return param_store_.count() > original_param_cnt_; }
   void set_orig_question_mark_cnt(const int64_t cnt) { orig_question_mark_cnt_ = cnt; }
   int64_t get_orig_question_mark_cnt() const { return orig_question_mark_cnt_; }
   void set_is_ps_rewrite_sql() { is_ps_rewrite_sql_ = true; }
@@ -458,13 +514,58 @@ public:
   const common::ObCurTraceId::TraceId &get_last_trace_id() const { return last_trace_id_; }
   common::ObCurTraceId::TraceId &get_last_trace_id() { return last_trace_id_; }
   void set_spm_timeout_timestamp(const int64_t timeout) { spm_ts_timeout_us_ = timeout; }
+  void set_rich_format(bool v) { enable_rich_format_ = v; }
+  bool is_rich_format() const { return enable_rich_format_; }
+
+  int get_sqludt_meta_by_subschema_id(uint16_t subschema_id, ObSqlUDTMeta &udt_meta);
+  int get_sqludt_meta_by_subschema_id(uint16_t subschema_id, ObSubSchemaValue &sub_meta);
+  bool is_subschema_ctx_inited();
+  int get_enumset_meta_by_subschema_id(uint16_t subschema_id, const ObEnumSetMeta *&meta) const;
+  int get_subschema_id_by_udt_id(uint64_t udt_type_id,
+                                 uint16_t &subschema_id,
+                                 share::schema::ObSchemaGetterGuard *schema_guard = NULL);
+  int get_subschema_id_by_collection_elem_type(ObNestedType coll_type,
+                                               const ObDataType &elem_type,
+                                               uint16_t &subschema_id);
+  int get_subschema_id_by_type_string(const ObString &type_string, uint16_t &subschema_id);
+  int get_subschema_id_by_type_info(const ObObjMeta &obj_meta,
+                                    const ObIArray<common::ObString> &type_info,
+                                    uint16_t &subschema_id);
+  int build_subschema_by_fields(const ColumnsFieldIArray *fields,
+                                share::schema::ObSchemaGetterGuard *schema_guard);
+  int build_subschema_ctx_by_param_store(share::schema::ObSchemaGetterGuard *schema_guard);
+  ObSubSchemaCtx &get_subschema_ctx() { return subschema_ctx_; }
   const ObIArray<ObArrayParamGroup> &get_array_param_groups() const { return array_param_groups_; }
   ObIArray<ObArrayParamGroup> &get_array_param_groups() { return array_param_groups_; }
+  int set_all_local_session_vars(ObIArray<ObLocalSessionVar> &all_local_session_vars);
+  int get_local_session_vars(int64_t idx, const ObSolidifiedVarsContext *&local_vars);
+  common::ObFixedArray<uint64_t, common::ObIAllocator> &get_mview_ids() {  return mview_ids_; }
+  common::ObFixedArray<uint64_t, common::ObIAllocator> &get_last_refresh_scns() {  return last_refresh_scns_; }
+  uint64_t get_last_refresh_scn(uint64_t mview_id) const;
+  void set_tx_id(int64_t tx_id) { tx_id_ = tx_id; }
+  int64_t get_tx_id() const { return tx_id_; }
+  void set_tm_sessid(int64_t tm_sessid) { tm_sessid_ = tm_sessid; }
+  int64_t get_tm_sessid() const { return tm_sessid_; }
+  void set_hint_xa_trans_stop_check_lock(int64_t hint_xa_trans_stop_check_lock) { hint_xa_trans_stop_check_lock_ = hint_xa_trans_stop_check_lock; }
+  int64_t get_hint_xa_trans_stop_check_lock() const { return hint_xa_trans_stop_check_lock_; }
+  void set_main_xa_trans_branch(int64_t main_xa_trans_branch) { main_xa_trans_branch_ = main_xa_trans_branch; }
+  int64_t get_main_xa_trans_branch() const { return main_xa_trans_branch_; }
+  ObIArray<uint64_t> &get_dblink_ids() { return dblink_ids_; }
+  inline int keep_dblink_id(uint64_t dblink_id) { return add_var_to_array_no_dup(dblink_ids_, dblink_id); }
+  inline void set_is_direct_insert_plan(const bool is_direct_insert_plan)
+  {
+    is_direct_insert_plan_ = is_direct_insert_plan;
+  }
+  inline bool get_is_direct_insert_plan() const { return is_direct_insert_plan_; }
 private:
+  int init_param_store_after_deserialize();
   void reset_datum_frame(char *frame, int64_t expr_cnt);
   int extend_param_frame(const int64_t old_size);
   int reserve_param_frame(const int64_t capacity);
-  void get_param_frame_info(int64_t param_idx, ObDatum *&datum, ObEvalInfo *&eval_info);
+  void get_param_frame_info(int64_t param_idx,
+                            ObDatum *&datum,
+                            ObEvalInfo *&eval_info,
+                            VectorHeader *&vec_header);
 private:
   DISALLOW_COPY_AND_ASSIGN(ObPhysicalPlanCtx);
 private:
@@ -594,6 +695,22 @@ private:
   bool is_ps_rewrite_sql_;
   // timeout use by spm, don't need to serialize
   int64_t spm_ts_timeout_us_;
+  ObSubSchemaCtx subschema_ctx_;
+  bool enable_rich_format_;
+  // for dependant exprs of generated columns
+  common::ObFixedArray<ObSolidifiedVarsContext, common::ObIAllocator> all_local_session_vars_;
+  // for last_refresh_scn expr to get last_refresh_scn for rt mview used in query
+  common::ObFixedArray<uint64_t, common::ObIAllocator> mview_ids_;
+  common::ObFixedArray<uint64_t, common::ObIAllocator> last_refresh_scns_;
+  int64_t tx_id_; //for dblink recover xa tx
+  uint32_t tm_sessid_; //for dblink get connection attached on tm session
+  bool hint_xa_trans_stop_check_lock_; // for dblink to stop check stmt lock in xa trans
+  bool main_xa_trans_branch_; // for dblink to indicate weather this sql is executed in main_xa_trans_branch
+  ObSEArray<uint64_t, 8> dblink_ids_;
+  int64_t total_memstore_read_row_count_;
+  int64_t total_ssstore_read_row_count_;
+  bool is_direct_insert_plan_; // for direct load: insert into/overwrite select
+  bool check_pdml_affected_rows_; // now only worked for pdml checking affected_rows
 };
 
 }

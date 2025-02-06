@@ -30,6 +30,9 @@ void ObCOPrefetcher::reuse()
   set_range_scan_finish();
   block_scan_border_row_id_ = OB_INVALID_CS_ROW_ID;
   ObIndexTreeMultiPassPrefetcher::reuse();
+  for (int i = 0; i < max_range_prefetching_cnt_; ++i) {
+    read_handles_[i].reuse();
+  }
 }
 
 int ObCOPrefetcher::refresh_blockscan_checker(const int64_t start_micro_idx, const ObDatumRowkey &border_rowkey)
@@ -258,7 +261,6 @@ int ObCOPrefetcher::refresh_blockscan_checker_in_leaf_level(
   const bool is_reverse = access_ctx_->query_flag_.is_reverse_scan();
   ObSSTableReadHandle &read_handle = read_handles_[cur_range_fetch_idx_ % max_range_prefetching_cnt_];
   int64_t micro_end_idx = read_handle.micro_end_idx_;
-  bool is_out_row_found = false;
 
   // pos points to the next data micro block that we should open.
   int64_t pos = start_micro_idx;
@@ -271,7 +273,7 @@ int ObCOPrefetcher::refresh_blockscan_checker_in_leaf_level(
       pos = micro_end_idx + 1;
     } else {
       for (; pos <= micro_end_idx; ++pos) {
-        if (!micro_data_infos_[pos % max_micro_handle_cnt_].can_blockscan(false)) {
+        if (!micro_data_infos_[pos % max_micro_handle_cnt_].can_blockscan_) {
           break;
         }
       }
@@ -292,8 +294,7 @@ int ObCOPrefetcher::refresh_blockscan_checker_in_leaf_level(
       int32_t cur_block_scan_level = get_cur_level_of_block_scan();
       if (pos <= micro_end_idx
            || INVALID_LEVEL == cur_block_scan_level
-           || is_reverse
-           || is_out_row_found) {
+           || is_reverse) {
         if (INVALID_LEVEL != cur_block_scan_level) {
           reset_blockscan_for_target_level(cur_block_scan_level);
         }
@@ -307,10 +308,10 @@ int ObCOPrefetcher::refresh_blockscan_checker_in_leaf_level(
                 K(pos), K_(block_scan_state));
     }
     LOG_DEBUG("ObCOPrefetcher::refresh_blockscan_checker_in_leaf_level advance",
-               K(ret), K(start_micro_idx), K(pos), K(is_range_end), K(is_out_row_found), K_(block_scan_state));
+               K(ret), K(start_micro_idx), K(pos), K(is_range_end), K_(block_scan_state));
   }
   LOG_DEBUG("ObCOPrefetcher::refresh_blockscan_checker_in_leaf_level end",
-             K(ret), K(start_micro_idx), K(pos), K(border_rowkey), K(is_out_row_found), KPC(this));
+             K(ret), K(start_micro_idx), K(pos), K(border_rowkey), KPC(this));
   return ret;
 }
 
@@ -419,10 +420,17 @@ int ObCOPrefetcher::ObCOIndexTreeLevelHandle::try_advancing_fetch_idx(
     const int32_t idx = prefetch_idx % INDEX_TREE_PREFETCH_DEPTH;
     ObMicroIndexInfo &index_info = index_block_read_handles_[idx].index_info_;
     bool is_range_end = !is_reverse && index_info.is_right_border();
-    const ObDatumRowkey &endkey = prefetch_idx == fetch_idx_ ? index_scanner_.get_end_key()
-                                                             : *(index_info.endkey_);
+    ObCommonDatumRowkey endkey;
+    if (prefetch_idx == fetch_idx_) {
+      if (OB_FAIL(index_scanner_.get_end_key(endkey))) {
+        LOG_WARN("Failed to get end key", K(ret));
+      }
+    } else {
+      endkey = index_info.endkey_;
+    }
     // For reverse scan, there is no need to judge is_range_end.
-    if (range_idx != index_info.range_idx()) {
+    if (OB_FAIL(ret)) {
+    } else if (range_idx != index_info.range_idx()) {
     } else {
       int cmp_ret = 0;
       if (OB_FAIL(endkey.compare(border_rowkey, *prefetcher.datum_utils_,
@@ -492,7 +500,7 @@ int ObCOPrefetcher::ObCOIndexTreeLevelHandle::forward(
     int8_t fetch_idx = fetch_idx_ % INDEX_TREE_PREFETCH_DEPTH;
     ObMicroIndexInfo &index_info = index_block_read_handles_[fetch_idx].index_info_;
     if (OB_FAIL(index_block_read_handles_[fetch_idx].data_handle_.get_micro_block_data(nullptr, index_block_, false))) {
-      LOG_WARN("Fail to get index block data", K(ret), KPC(this));
+      LOG_WARN("Fail to get index block data", K(ret), KPC(this), K(index_block_), K(fetch_idx_), K(prefetch_idx_));
     } else if (index_info.is_get()) {
       if (OB_FAIL(index_scanner_.open(
           index_info.get_macro_id(),

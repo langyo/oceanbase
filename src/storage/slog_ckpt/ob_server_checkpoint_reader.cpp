@@ -13,9 +13,6 @@
 #define USING_LOG_PREFIX STORAGE
 
 #include "storage/slog_ckpt/ob_server_checkpoint_reader.h"
-#include "common/log/ob_log_cursor.h"
-#include "storage/blocksstable/ob_macro_block_id.h"
-#include "observer/omt/ob_tenant_meta.h"
 
 namespace oceanbase
 {
@@ -41,9 +38,10 @@ int ObServerCheckpointReader::read_checkpoint(const ObServerSuperBlock &super_bl
 int ObServerCheckpointReader::read_tenant_meta_checkpoint(const MacroBlockId &entry_block)
 {
   int ret = OB_SUCCESS;
+  ObMemAttr mem_attr(OB_SERVER_TENANT_ID, ObModIds::OB_CHECKPOINT);
   if (OB_UNLIKELY(!entry_block.is_valid())) {
     LOG_INFO("has no tenant config checkpoint");
-  } else if (OB_FAIL(tenant_meta_item_reader_.init(entry_block))) {
+  } else if (OB_FAIL(tenant_meta_item_reader_.init(entry_block, mem_attr))) {
     LOG_WARN("fail to init tenant config item reader", K(ret));
   } else {
     char *item_buf = nullptr;

@@ -26,8 +26,9 @@ public:
   ObDirectLoadMultipleSSTableCompactParam();
   ~ObDirectLoadMultipleSSTableCompactParam();
   bool is_valid() const;
-  TO_STRING_KV(K_(table_data_desc), KP_(datum_utils));
+  TO_STRING_KV(K_(tablet_id), K_(table_data_desc), KP_(datum_utils));
 public:
+  common::ObTabletID tablet_id_;
   ObDirectLoadTableDataDesc table_data_desc_;
   const blocksstable::ObStorageDatumUtils *datum_utils_;
 };
@@ -48,7 +49,9 @@ private:
   ObDirectLoadMultipleSSTableCompactParam param_;
   int64_t index_block_count_;
   int64_t data_block_count_;
+  int64_t rowkey_block_count_;
   int64_t row_count_;
+  int64_t rowkey_count_;
   int64_t max_data_block_size_;
   common::ObArenaAllocator start_key_allocator_;
   common::ObArenaAllocator end_key_allocator_;

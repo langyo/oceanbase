@@ -21,7 +21,9 @@ static int pktc_sk_check_connect(pktc_sk_t* s) {
     err = EIO;
   } else {
     s->conn_ok = 1;
-    rk_info("sock connect OK: %p %s", s, T2S(sock_fd, s->fd));
+    s->sk_diag_info.local_addr = get_local_addr(s->fd);
+    char sock_fd_buf[PNIO_NIO_FD_ADDR_LEN] = {'\0'};
+    rk_info("sock connect OK: %p %s", s, sock_fd_str(s->fd, sock_fd_buf, sizeof(sock_fd_buf)));
 	  //send handshake by ussl back-ground thread
     /*
     pktc_t* pc = structof(s->fty, pktc_t, sf);
@@ -59,7 +61,7 @@ static int pktc_sk_init(pktc_sf_t* sf, pktc_sk_t* s) {
 static void pktc_sk_destroy(pktc_sf_t* sf, pktc_sk_t* s) {
   pktc_t* pc = structof(sf, pktc_t, sf);
   if (s) {
-    ihash_del(&pc->sk_map, *(uint64_t*)&s->dest);
+    ihash_del(&pc->sk_map, &s->dest);
     dlink_delete(&s->list_link);
   }
 }
@@ -67,9 +69,11 @@ static void pktc_sk_destroy(pktc_sf_t* sf, pktc_sk_t* s) {
 static pktc_sk_t* pktc_sk_new(pktc_sf_t* sf) {
   pktc_sk_t* s = (pktc_sk_t*)pktc_sk_alloc(sizeof(*s));
   if (s) {
+    memset(s, 0, sizeof(*s));
     s->fty = (sf_t*)sf;
     s->ep_fd = -1;
     s->handle_event = (handle_event_t)pktc_sk_handle_event;
+    s->sk_diag_info.establish_time = rk_get_us();
     pktc_sk_init(sf, s);
   }
   rk_info("sk_new: s=%p", s);
@@ -80,8 +84,8 @@ static void pktc_sk_delete(pktc_sf_t* sf, pktc_sk_t* s) {
   pktc_t* io = structof(sf, pktc_t, sf);
   rk_info("sk_destroy: s=%p io=%p", s, io);
   pktc_sk_destroy(sf, s);
-  pktc_write_queue_on_sk_destroy(io, s);
   pktc_resp_cb_on_sk_destroy(io, s);
+  pktc_write_queue_on_sk_destroy(io, s);
   ib_destroy(&s->ib);
   dlink_delete(&s->rl_ready_link);
   pktc_sk_free(s);

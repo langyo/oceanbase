@@ -12,11 +12,6 @@
 
 #define USING_LOG_PREFIX SQL_ENG
 #include "ob_expr_reverse.h"
-#include <string.h>
-#include "lib/charset/ob_charset.h"
-#include "share/object/ob_obj_cast.h"
-#include "objit/common/ob_item_type.h"
-#include "sql/session/ob_sql_session_info.h"
 #include "sql/engine/expr/ob_expr_lob_utils.h"
 
 namespace oceanbase
@@ -44,6 +39,7 @@ int ObExprReverse::do_reverse(const ObString &input_str,
   int64_t input_length = input_str.length();
   char *buf = NULL;
   if (OB_ISNULL(allocator)) {
+    ret = OB_ERR_UNEXPECTED;
     LOG_WARN("nullptr allocator.", K(allocator));
   } else if (OB_UNLIKELY(input_length == 0)) {
     res_str.reset();
@@ -159,5 +155,13 @@ int ObExprReverse::cg_expr(ObExprCGCtx &expr_cg_ctx, const ObRawExpr &raw_expr,
   rt_expr.eval_func_ = calc_reverse_expr;
   return ret;
 }
+
+DEF_SET_LOCAL_SESSION_VARS(ObExprReverse, raw_expr) {
+  int ret = OB_SUCCESS;
+  SET_LOCAL_SYSVAR_CAPACITY(1);
+  EXPR_ADD_LOCAL_SYSVAR(share::SYS_VAR_COLLATION_CONNECTION);
+  return ret;
+}
+
 }
 }

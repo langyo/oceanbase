@@ -11,10 +11,6 @@
  */
 #include "ob_all_virtual_tx_data.h"
 
-#include "observer/ob_server_struct.h"
-#include "observer/omt/ob_tenant.h"
-#include "observer/omt/ob_multi_tenant.h"
-#include "storage/tx_storage/ob_ls_handle.h"
 #include "storage/tx_storage/ob_ls_service.h"
 
 namespace oceanbase {
@@ -99,6 +95,10 @@ int ObAllVirtualTxData::fill_in_row_(const VirtualTxDataRow &row_data, common::O
       }
       case UNDO_STATUS_COL:
         cur_row_.cells_[i].set_varchar(row_data.undo_status_list_str_);
+        cur_row_.cells_[i].set_collation_type(ObCharset::get_default_collation(ObCharset::get_default_charset()));
+        break;
+      case TX_OP_COL:
+        cur_row_.cells_[i].set_varchar(row_data.tx_op_str_);
         cur_row_.cells_[i].set_collation_type(ObCharset::get_default_collation(ObCharset::get_default_charset()));
         break;
       default:

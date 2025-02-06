@@ -10,11 +10,8 @@
  * See the Mulan PubL v2 for more details.
  */
 
-#include <fcntl.h>
-#include <stdint.h>
 #include "lib/allocator/ob_malloc.h"
 #include "lib/timezone/ob_timezone_util.h"
-#include "lib/oblog/ob_log.h"
 
 #define O_BINARY  0 /* Flag to my_open for binary files */
 #define FILE_BINARY O_BINARY
@@ -415,7 +412,8 @@ int ObTimezoneUtils::prepare_tz_info(TIME_ZONE_INFO &tz_info)
   }
   /* set maximum end_l as finisher */
   revts[tz_info.revcnt] = end_l;
-  if(!(tz_info.revts = (my_time_t*)ob_malloc(sizeof(my_time_t) * (tz_info.revcnt + 1), "TimeZoneUtils"))
+  if (OB_FAIL(ret)) {
+  } else if(!(tz_info.revts = (my_time_t*)ob_malloc(sizeof(my_time_t) * (tz_info.revcnt + 1), "TimeZoneUtils"))
       || !(tz_info.revtis = (REVT_INFO*)ob_malloc(sizeof(REVT_INFO) * tz_info.revcnt, "TimeZoneUtils"))
     ){
     OB_LOG(ERROR, "ob_malloc for tz_info.revts tz_info.revtis failed");

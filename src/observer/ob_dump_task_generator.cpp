@@ -15,11 +15,7 @@
 #include "observer/ob_dump_task_generator.h"
 #include "lib/alloc/memory_dump.h"
 #include "lib/allocator/ob_mem_leak_checker.h"
-#include "lib/utility/ob_fast_convert.h"
-#include "share/ob_define.h"
-#include "share/ob_errno.h"
 #include "sql/parser/ob_parser.h"
-#include "observer/ob_server_struct.h"
 
 namespace oceanbase
 {
@@ -143,21 +139,7 @@ int ObDumpTaskGenerator::generate_task_from_file()
 
 int ObDumpTaskGenerator::generate_mod_stat_task()
 {
-  int ret = OB_SUCCESS;
-  auto &mem_dump = ObMemoryDump::get_instance();
-  ObMemoryDumpTask *task = mem_dump.alloc_task();
-  if (OB_ISNULL(task)) {
-    ret = OB_ALLOCATE_MEMORY_FAILED;
-    LOG_WARN("alloc task failed");
-  } else {
-    task->type_ = STAT_LABEL;
-    COMMON_LOG(INFO, "task info", K(*task));
-    if (OB_FAIL(mem_dump.push(task))) {
-      LOG_WARN("push task failed", K(ret));
-      mem_dump.free_task(task);
-    }
-  }
-  return ret;
+  return ObMemoryDump::get_instance().generate_mod_stat_task();
 }
 
 void ObDumpTaskGenerator::dump_memory_leak()

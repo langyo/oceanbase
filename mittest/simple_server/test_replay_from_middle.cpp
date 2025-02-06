@@ -1,3 +1,6 @@
+// owner: gengli.wzy
+// owner group: transaction
+
 /**
  * Copyright (c) 2021 OceanBase
  * OceanBase CE is licensed under Mulan PubL v2.
@@ -11,31 +14,14 @@
  */
 
 #include <gtest/gtest.h>
-#include <stdlib.h>
 #define USING_LOG_PREFIX STORAGE
 #define protected public
 #define private public
 
 #include "env/ob_simple_cluster_test_base.h"
 #include "env/ob_simple_server_restart_helper.h"
-#include "lib/mysqlclient/ob_mysql_result.h"
-#include "logservice/rcservice/ob_role_change_service.h"
+#include "src/storage/tx_storage/ob_ls_service.h"
 #include "logservice/ob_ls_adapter.h"
-#include "storage/access/ob_rows_info.h"
-#include "storage/checkpoint/ob_data_checkpoint.h"
-#include "storage/compaction/ob_schedule_dag_func.h"
-#include "storage/compaction/ob_tablet_merge_task.h"
-#include "storage/ls/ob_freezer.h"
-#include "storage/ls/ob_ls.h"
-#include "storage/ls/ob_ls_meta.h"
-#include "storage/ls/ob_ls_tablet_service.h"
-#include "storage/ls/ob_ls_tx_service.h"
-#include "storage/meta_mem/ob_tablet_handle.h"
-#include "storage/meta_mem/ob_tenant_meta_mem_mgr.h"
-#include "storage/ob_relative_table.h"
-#include "storage/ob_storage_table_guard.h"
-#include "storage/tx_storage/ob_ls_map.h"
-#include "storage/tx_storage/ob_ls_service.h"
 
 #undef private
 #undef protected
@@ -446,6 +432,7 @@ void ObReplayRestartTest::restart_test()
 {
   int ret = OB_SUCCESS;
   ObLS *ls = nullptr;
+  ObTxTable *tx_table = nullptr;
   ObTxDataTable *tx_data_table = nullptr;
   share::SCN max_decided_scn = share::SCN::min_scn();
   share::SCN upper_trans_version = share::SCN::min_scn();
@@ -457,11 +444,12 @@ void ObReplayRestartTest::restart_test()
     ASSERT_EQ(OB_SUCCESS, ls->get_max_decided_scn(max_decided_scn));
     ASSERT_EQ(false, max_decided_scn.is_min());
 
-    tx_data_table = ls->get_tx_table()->get_tx_data_table();
+    tx_table = ls->get_tx_table();
+    tx_data_table = tx_table->get_tx_data_table();
 
     {
       // 场景一： keep alive日志没有被回放，min_start_scn为初始值状态，跳过计算upper_trans_version
-      ASSERT_EQ(SCN::min_scn(), tx_data_table->calc_upper_info_.min_start_scn_in_ctx_);
+      ASSERT_EQ(SCN::min_scn(), tx_table->ctx_min_start_scn_info_.min_start_scn_in_ctx_);
       upper_trans_version.set_min();
       FLOG_INFO("get upper trans version, situation 1:", K(SSTABLE_END_SCN));
       ASSERT_EQ(OB_SUCCESS,
@@ -473,8 +461,8 @@ void ObReplayRestartTest::restart_test()
       REPLAY_BARRIER = SCN::plus(KEEP_ALIVE_SCN, 1);
       int64_t retry_times = 100;
       while (--retry_times > 0) {
-        tx_data_table->update_calc_upper_info_(SCN::max_scn() /*max_decided_scn*/);
-        if ( !tx_data_table->calc_upper_info_.min_start_scn_in_ctx_.is_min()) {
+        tx_table->update_min_start_scn_info(SCN::max_scn() /*max_decided_scn*/);
+        if ( !tx_table->ctx_min_start_scn_info_.min_start_scn_in_ctx_.is_min()) {
           break;
         } else {
           ::sleep(1);
@@ -502,8 +490,8 @@ void ObReplayRestartTest::restart_test()
       MinStartScnStatus status;
       while (--retry_times > 0) {
         ls->get_min_start_scn(min_start_scn, keep_alive_scn, status);
-        tx_data_table->update_calc_upper_info_(SCN::max_scn() /*max_decided_scn*/);
-        if (tx_data_table->calc_upper_info_.min_start_scn_in_ctx_ > SSTABLE_END_SCN) {
+        tx_table->update_min_start_scn_info(SCN::max_scn() /*max_decided_scn*/);
+        if (tx_table->ctx_min_start_scn_info_.min_start_scn_in_ctx_ > SSTABLE_END_SCN) {
           break;
         } else {
           ::sleep(1);
@@ -514,21 +502,21 @@ void ObReplayRestartTest::restart_test()
                   status);
         }
       }
-      ASSERT_GT(tx_data_table->calc_upper_info_.min_start_scn_in_ctx_, SSTABLE_END_SCN);
+      ASSERT_GT(tx_table->ctx_min_start_scn_info_.min_start_scn_in_ctx_, SSTABLE_END_SCN);
 
       retry_times = 60;
       while (--retry_times > 0) {
         ASSERT_EQ(OB_SUCCESS, ls->get_max_decided_scn(max_decided_scn));
-        if (max_decided_scn > tx_data_table->calc_upper_info_.keep_alive_scn_) {
+        if (max_decided_scn > tx_table->ctx_min_start_scn_info_.keep_alive_scn_) {
           break;
         } else {
           ::sleep(1);
           fprintf(stdout, "waiting max decided scn, max_decided_scn = %lu keep_alive_scn = %lu\n",
                   max_decided_scn.get_val_for_inner_table_field(),
-                  tx_data_table->calc_upper_info_.keep_alive_scn_.get_val_for_inner_table_field());
+                  tx_table->ctx_min_start_scn_info_.keep_alive_scn_.get_val_for_inner_table_field());
         }
       }
-      ASSERT_GT(max_decided_scn, tx_data_table->calc_upper_info_.keep_alive_scn_);
+      ASSERT_GT(max_decided_scn, tx_table->ctx_min_start_scn_info_.keep_alive_scn_);
 
       upper_trans_version.set_min();
       FLOG_INFO("get upper trans version, situation 3:", K(SSTABLE_END_SCN));
@@ -537,7 +525,7 @@ void ObReplayRestartTest::restart_test()
 
 
       ::sleep(10);
-      STORAGE_LOG(INFO, "finish restart test", K(upper_trans_version), K(SSTABLE_END_SCN), K(tx_data_table->calc_upper_info_));
+      STORAGE_LOG(INFO, "finish restart test", K(upper_trans_version), K(SSTABLE_END_SCN), K(tx_table->ctx_min_start_scn_info_));
       ASSERT_LT(upper_trans_version, SCN::max_scn());
     }
   }
@@ -640,48 +628,7 @@ int main(int argc, char **argv)
 namespace oceanbase {
 namespace storage {
 
-void ObTxDataTable::update_calc_upper_info_(const SCN &max_decided_scn)
-{
-  int64_t cur_ts = common::ObTimeUtility::fast_current_time();
-  SpinWLockGuard lock_guard(calc_upper_info_.lock_);
-  // recheck update condition and do update calc_upper_info
-
-  /**********************************************************/
-  //if (cur_ts - calc_upper_info_.update_ts_ > 30_s && max_decided_scn> calc_upper_info_.keep_alive_scn_) {
-  /**********************************************************/
-
-  SCN min_start_scn = SCN::min_scn();
-  SCN keep_alive_scn = SCN::min_scn();
-  MinStartScnStatus status;
-  ls_->get_min_start_scn(min_start_scn, keep_alive_scn, status);
-  if (MinStartScnStatus::UNKOWN == status) {
-    // do nothing
-  } else {
-    int ret = OB_SUCCESS;
-    CalcUpperInfo tmp_calc_upper_info;
-    tmp_calc_upper_info.keep_alive_scn_ = keep_alive_scn;
-    tmp_calc_upper_info.update_ts_ = cur_ts;
-    if (MinStartScnStatus::NO_CTX == status) {
-      // use the previous keep_alive_scn as min_start_scn
-      tmp_calc_upper_info.min_start_scn_in_ctx_ = calc_upper_info_.keep_alive_scn_;
-    } else if (MinStartScnStatus::HAS_CTX == status) {
-      tmp_calc_upper_info.min_start_scn_in_ctx_ = min_start_scn;
-    } else {
-      ret = OB_ERR_UNEXPECTED;
-      STORAGE_LOG(ERROR, "invalid min start scn status", K(min_start_scn), K(keep_alive_scn), K(status));
-    }
-
-    if (OB_FAIL(ret)) {
-    } else if (tmp_calc_upper_info.min_start_scn_in_ctx_ < calc_upper_info_.min_start_scn_in_ctx_) {
-      ret = OB_ERR_UNEXPECTED;
-      STORAGE_LOG(ERROR, "invalid min start scn", K(tmp_calc_upper_info), K(calc_upper_info_));
-    } else {
-      calc_upper_info_ = tmp_calc_upper_info;
-    }
-  }
-}
-
-int ObLSService::enable_replay()
+int ObLSService::online_ls()
 {
   // do nothing
   int ret = OB_SUCCESS;
@@ -711,10 +658,9 @@ int ObLSService::enable_replay()
   /**************************** addtional code *****************************/
 
   int tmp_ret = OB_SUCCESS;
-  ObInnerLSStatus ls_status;
   common::ObSharedGuard<ObLSIterator> ls_iter;
   ObLS *ls = nullptr;
-  bool can_replay = true;
+  int64_t create_type = ObLSCreateType::NORMAL;
   if (OB_FAIL(get_ls_iter(ls_iter, ObLSGetMod::TXSTORAGE_MOD))) {
     LOG_WARN("failed to get ls iter", K(ret));
   } else {
@@ -726,12 +672,13 @@ int ObLSService::enable_replay()
       } else if (nullptr == ls) {
         ret = OB_ERR_UNEXPECTED;
         LOG_ERROR("ls is null", K(ret));
-      } else if (OB_FAIL(ls->check_can_replay_clog(can_replay))) {
-        LOG_WARN("failed to check ls can replay clog", K(ret), KPC(ls));
-      } else if (!can_replay) {
-        // ls can not enable replay
-      } else if (OB_FAIL(ls->enable_replay())) {
-        LOG_ERROR("fail to enable replay", K(ret));
+      } else {
+        ObLSLockGuard lock_ls(ls);
+        if (OB_FAIL(ls->get_create_type(create_type))) {
+          LOG_WARN("get ls create type failed", K(ret));
+        } else if (OB_FAIL(post_create_ls_(create_type, ls))) {
+          LOG_WARN("post create ls failed", K(ret));
+        }
       }
     }
     if (OB_ITER_END == ret) {
@@ -774,8 +721,8 @@ int ObLSAdapter::replay(ObLogReplayTask *replay_task)
     ret = OB_EAGAIN;
   /**************************** addtional code *****************************/
   } else if (OB_FAIL(ls->replay(replay_task->log_type_,
-                                replay_task->log_buf_,
-                                replay_task->log_size_,
+                                replay_task->get_replay_payload(),
+                                replay_task->get_replay_payload_size(),
                                 replay_task->lsn_,
                                 replay_task->scn_))) {
     CLOG_LOG(WARN, "log stream do replay failed", K(ret), KPC(replay_task));

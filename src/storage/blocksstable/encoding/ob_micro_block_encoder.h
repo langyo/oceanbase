@@ -76,7 +76,7 @@ public:
   virtual int64_t get_block_size() const override { return header_size_ + estimate_size_ * 100 / expand_pct_; }
   virtual int64_t get_column_count() const override { return ctx_.column_cnt_;}
   virtual int64_t get_original_size() const override { return estimate_size_; }
-  virtual void dump_diagnose_info() const override;
+  virtual void dump_diagnose_info() override;
 private:
   int inner_init();
   int reserve_header(const ObMicroBlockEncodingCtx &ctx);
@@ -143,7 +143,7 @@ private:
 
   void update_estimate_size_limit(const ObMicroBlockEncodingCtx &ctx);
 
-  int store_encoding_meta_and_fix_cols(int64_t &encoding_meta_offset);
+  int store_encoding_meta_and_fix_cols(ObBufferWriter &buf_writer, int64_t &encoding_meta_offset);
   int init_all_col_values(const ObMicroBlockEncodingCtx &ctx);
   void print_micro_block_encoder_status() const;
   int set_datum_rows_ptr();
@@ -151,9 +151,11 @@ private:
 private:
   ObMicroBlockEncodingCtx ctx_;
   ObMicroBlockHeader *header_;
+  ObArenaAllocator encoding_meta_allocator_;
   ObMicroBufferWriter data_buffer_;
   ObConstDatumRowArray datum_rows_;
   common::ObArray<ObColDatums *> all_col_datums_;
+  ObArenaAllocator pivot_allocator_;
   int64_t estimate_size_;
   int64_t estimate_size_limit_;
   int64_t header_size_;
@@ -173,6 +175,7 @@ private:
   int64_t estimate_base_store_size_;
   common::ObArray<ObColumnEncodingCtx> col_ctxs_;
   int64_t length_;
+  bool encoder_freezed_;
   bool is_inited_;
 
   DISALLOW_COPY_AND_ASSIGN(ObMicroBlockEncoder);

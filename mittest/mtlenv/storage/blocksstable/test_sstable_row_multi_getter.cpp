@@ -10,11 +10,9 @@
  * See the Mulan PubL v2 for more details.
  */
 
-#include <gtest/gtest.h>
 #define private public
 #define protected public
 
-#include "storage/access/ob_index_tree_prefetcher.h"
 #include "storage/access/ob_sstable_row_multi_getter.h"
 #include "ob_index_block_data_prepare.h"
 
@@ -135,8 +133,8 @@ void TestSSTableRowMultiGetter::test_one_case(
       ASSERT_EQ(OB_SUCCESS, ret);
     }
     if (part_rowkeys.count() > 0) {
-      ASSERT_EQ(OB_SUCCESS, getter.inner_open(iter_param_, context_, &sstable_, &part_rowkeys));
-      ASSERT_EQ(OB_SUCCESS, kv_getter.inner_open(iter_param_, context_, &ddl_kv_, &part_rowkeys));
+      ASSERT_EQ(OB_SUCCESS, getter.init(iter_param_, context_, &sstable_, &part_rowkeys));
+      ASSERT_EQ(OB_SUCCESS, kv_getter.init(iter_param_, context_, &ddl_kv_, &part_rowkeys));
       for (int64_t i = 0; i < part_rowkeys.count(); ++i) {
         ret = getter.inner_get_next_row(prow);
         ASSERT_EQ(OB_SUCCESS, ret);
@@ -153,8 +151,8 @@ void TestSSTableRowMultiGetter::test_one_case(
   }
 
   // in io
-  ASSERT_EQ(OB_SUCCESS, getter.inner_open(iter_param_, context_, &sstable_, &rowkeys));
-  ASSERT_EQ(OB_SUCCESS, kv_getter.inner_open(iter_param_, context_, &ddl_kv_, &rowkeys));
+  ASSERT_EQ(OB_SUCCESS, getter.init(iter_param_, context_, &sstable_, &rowkeys));
+  ASSERT_EQ(OB_SUCCESS, kv_getter.init(iter_param_, context_, &ddl_kv_, &rowkeys));
   for (int64_t i = 0; i < seeds.count(); ++i) {
     ret = getter.inner_get_next_row(prow);
     ASSERT_EQ(OB_SUCCESS, ret);
@@ -178,8 +176,8 @@ void TestSSTableRowMultiGetter::test_one_case(
 
   // in cache
   if (hit_mode == HIT_ALL) {
-    ASSERT_EQ(OB_SUCCESS, getter.inner_open(iter_param_, context_, &sstable_, &rowkeys));
-    ASSERT_EQ(OB_SUCCESS, kv_getter.inner_open(iter_param_, context_, &ddl_kv_, &rowkeys));
+    ASSERT_EQ(OB_SUCCESS, getter.init(iter_param_, context_, &sstable_, &rowkeys));
+    ASSERT_EQ(OB_SUCCESS, kv_getter.init(iter_param_, context_, &ddl_kv_, &rowkeys));
     for (int64_t i = 0; i < seeds.count(); ++i) {
       ret = getter.inner_get_next_row(prow);
       ret = kv_getter.inner_get_next_row(kv_prow);
@@ -219,7 +217,7 @@ void TestSSTableRowMultiGetter::test_border(const bool is_reverse_scan)
   rowkeys.reuse();
   ret = rowkeys.push_back(rowkey);
   ASSERT_EQ(OB_SUCCESS, ret);
-  ASSERT_EQ(OB_SUCCESS, getter.inner_open(iter_param_, context_, &sstable_, &rowkeys));
+  ASSERT_EQ(OB_SUCCESS, getter.init(iter_param_, context_, &sstable_, &rowkeys));
 
   // uinited sstable
   ObSSTable sstable;
@@ -227,7 +225,7 @@ void TestSSTableRowMultiGetter::test_border(const bool is_reverse_scan)
   ret = rowkeys.push_back(rowkey);
   ASSERT_EQ(OB_SUCCESS, ret);
   ret = rowkeys.push_back(rowkey);
-  ASSERT_EQ(OB_SUCCESS, getter.inner_open(iter_param_, context_, &sstable_, &rowkeys));
+  ASSERT_EQ(OB_SUCCESS, getter.init(iter_param_, context_, &sstable_, &rowkeys));
   */
 
   // the row of sstable

@@ -28,22 +28,57 @@ namespace observer
 class ObTableLoadSchema
 {
 public:
-  static int get_schema_guard(uint64_t tenant_id, share::schema::ObSchemaGetterGuard &schema_guard);
-  static int get_table_schema(uint64_t tenant_id, uint64_t database_id,
-                              const common::ObString &table_name,
+  static int get_schema_guard(uint64_t tenant_id,
                               share::schema::ObSchemaGetterGuard &schema_guard,
+                              const int64_t schema_version = common::OB_INVALID_VERSION);
+  static int get_table_schema(share::schema::ObSchemaGetterGuard &schema_guard,
+                              uint64_t tenant_id,
+                              uint64_t database_id,
+                              const common::ObString &table_name,
                               const share::schema::ObTableSchema *&table_schema);
-  static int get_table_id(uint64_t tenant_id, uint64_t database_id,
-                          const common::ObString &table_name, uint64_t &table_id);
+  // 获取最新schema_guard和table_schema
   static int get_table_schema(uint64_t tenant_id, uint64_t table_id,
                               share::schema::ObSchemaGetterGuard &schema_guard,
                               const share::schema::ObTableSchema *&table_schema);
-  static int get_column_names(const share::schema::ObTableSchema *table_schema,
-                              common::ObIAllocator &allocator,
-                              common::ObIArray<common::ObString> &column_names);
-  static int get_column_idxs(const share::schema::ObTableSchema *table_schema,
-                             common::ObIArray<int64_t> &column_idxs);
-  static int check_has_udt_column(const share::schema::ObTableSchema *table_schema, bool &bret);
+  // 指定schema_guard获取table_schema
+  static int get_table_schema(share::schema::ObSchemaGetterGuard &schema_guard,
+                              uint64_t tenant_id, uint64_t table_id,
+                              const share::schema::ObTableSchema *&table_schema);
+
+  static int get_user_column_schemas(const share::schema::ObTableSchema *table_schema,
+                                     ObIArray<const share::schema::ObColumnSchemaV2 *> &column_schemas);
+  static int get_user_column_schemas(share::schema::ObSchemaGetterGuard &schema_guard,
+                                     uint64_t tenant_id,
+                                     uint64_t table_id,
+                                     ObIArray<const share::schema::ObColumnSchemaV2 *> &column_schemas);
+  static int get_user_column_ids(const share::schema::ObTableSchema *table_schema,
+                                 common::ObIArray<uint64_t> &column_ids);
+  static int get_user_column_ids(share::schema::ObSchemaGetterGuard &schema_guard,
+                                 uint64_t tenant_id,
+                                 uint64_t table_id,
+                                 common::ObIArray<uint64_t> &column_ids);
+  static int get_user_column_names(const share::schema::ObTableSchema *table_schema,
+                                   common::ObIArray<common::ObString> &column_names);
+  static int get_user_column_id_and_names(const share::schema::ObTableSchema *table_schema,
+                                          common::ObIArray<uint64_t> &column_ids,
+                                          common::ObIArray<common::ObString> &column_names);
+
+  static int get_column_ids(const share::schema::ObTableSchema *table_schema,
+                            common::ObIArray<uint64_t> &column_ids,
+                            bool contain_hidden_pk_column = false);
+  static int get_column_ids(share::schema::ObSchemaGetterGuard &schema_guard,
+                            uint64_t tenant_id,
+                            uint64_t table_id,
+                            common::ObIArray<uint64_t> &column_ids,
+                            bool contain_hidden_pk_column = false);
+
+  static int check_has_non_local_index(share::schema::ObSchemaGetterGuard &schema_guard,
+                                       const share::schema::ObTableSchema *table_schema,
+                                       bool &bret);
+  static int get_tenant_optimizer_gather_stats_on_load(const uint64_t tenant_id, bool &value);
+  static int get_tablet_ids_by_part_ids(const ObTableSchema *table_schema,
+                                        const ObIArray<ObObjectID> &part_ids,
+                                        ObIArray<ObTabletID> &tablet_ids);
 public:
   ObTableLoadSchema();
   ~ObTableLoadSchema();
@@ -55,31 +90,41 @@ public:
                K_(collation_type), K_(column_descs), K_(is_inited));
 private:
   int init_table_schema(const share::schema::ObTableSchema *table_schema);
+  int init_cmp_funcs(const common::ObIArray<share::schema::ObColDesc> &column_descs,
+                     const bool is_oracle_mode);
+  int init_lob_storage(common::ObIArray<share::schema::ObColDesc> &column_descs);
   int update_decimal_int_precision(const share::schema::ObTableSchema *table_schema,
                                    common::ObIArray<share::schema::ObColDesc> &cols_desc);
 
   int prepare_col_desc(const ObTableSchema *table_schema, common::ObIArray<share::schema::ObColDesc> &col_descs);
-  int init_cmp_funcs(const common::ObIArray<share::schema::ObColDesc> &column_descs,
-                     const bool is_oracle_mode);
+  int gen_lob_meta_datum_utils();
 public:
   common::ObArenaAllocator allocator_;
   common::ObString table_name_;
   bool is_partitioned_table_;
   bool is_heap_table_;
+  bool is_column_store_;
   bool has_autoinc_column_;
   bool has_identity_column_;
   int64_t rowkey_column_count_;
   // column count in store, does not contain virtual generated columns
   int64_t store_column_count_;
   common::ObCollationType collation_type_;
+  share::schema::ObPartitionLevel part_level_;
   int64_t schema_version_;
+  uint64_t lob_meta_table_id_;
+  int64_t lob_inrow_threshold_;
+  int64_t index_table_count_;
+  common::ObArray<int64_t> lob_column_idxs_;
   // if it is a heap table, it contains hidden primary key column
   // does not contain virtual generated columns
   common::ObArray<share::schema::ObColDesc> column_descs_;
   common::ObArray<share::schema::ObColDesc> multi_version_column_descs_;
   blocksstable::ObStorageDatumUtils datum_utils_;
+  common::ObArray<share::schema::ObColDesc> lob_meta_column_descs_;
+  blocksstable::ObStorageDatumUtils lob_meta_datum_utils_;
   blocksstable::ObStoreCmpFuncs cmp_funcs_; // for sql statistics
-  table::ObTableLoadArray<table::ObTableLoadPartitionId> partition_ids_;
+  common::ObIVector *non_partitioned_tablet_id_vector_;
   bool is_inited_;
 };
 

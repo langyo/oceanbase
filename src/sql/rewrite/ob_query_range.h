@@ -87,6 +87,7 @@ private:
   struct ObQueryRangeCtx
   {
     ObQueryRangeCtx(ObExecContext *exec_ctx,
+                    ObQueryCtx *query_ctx,
                     ExprConstrantArray *expr_constraints,
                     const ParamsIArray *params)
       : need_final_extract_(false),
@@ -96,10 +97,15 @@ private:
         ignore_calc_failure_(false),
         range_optimizer_max_mem_size_(100*1024*1024),
         exec_ctx_(exec_ctx),
+        query_ctx_(query_ctx),
         expr_constraints_(expr_constraints),
         params_(params),
         use_in_optimization_(false),
-        row_in_offsets_()
+        row_in_offsets_(),
+        only_one_expr_(false),
+        is_oracle_char_gt_varchar_(false),
+        index_prefix_(-1),
+        cur_datetime_(0)
     {
     }
     ~ObQueryRangeCtx()
@@ -115,12 +121,17 @@ private:
     int64_t range_optimizer_max_mem_size_;
     common::ObSEArray<ObRangeExprItem, 4, common::ModulePageAllocator, true> precise_range_exprs_;
     ObExecContext *exec_ctx_;
+    ObQueryCtx *query_ctx_;
     ExprConstrantArray *expr_constraints_;
     const ParamsIArray *params_;
     common::ObSEArray<const ObRawExpr *, 16> final_exprs_;
     ObSEArray<ObKeyPartPos*, 8> key_part_pos_array_;
     bool use_in_optimization_;
     ObSEArray<int64_t, 4> row_in_offsets_;
+    bool only_one_expr_;
+    bool is_oracle_char_gt_varchar_;
+    int64_t index_prefix_;
+    int64_t cur_datetime_;
   };
 public:
   enum ObQueryRangeState
@@ -365,6 +376,8 @@ public:
 
   void reset();
 
+  virtual inline bool is_new_query_range() const { return false; }
+
   //  preliminary_extract_query_range will preliminary extract query range
   //  from query conditions, which is only occurred in generating the physical plan.
   //  During this stage, some consts are not really known, for example,
@@ -379,9 +392,11 @@ public:
                                       const ObRawExpr *expr_root,
                                       const common::ObDataTypeCastParams &dtc_params,
                                       ObExecContext *exec_ctx,
+                                      ObQueryCtx *query_ctx,
                                       ExprConstrantArray *expr_constraints = NULL,
                                       const ParamsIArray *params = NULL,
-                                      const bool use_in_optimization = false);
+                                      const bool use_in_optimization = false,
+                                      const int64_t index_prefix = -1);
   /**
    * @brief
    * @param range_columns: columns used to extract range, index column or partition column
@@ -400,11 +415,13 @@ public:
                                       const ExprIArray &root_exprs,
                                       const common::ObDataTypeCastParams &dtc_params,
                                       ObExecContext *exec_ctx,
+                                      ObQueryCtx *query_ctx,
                                       ExprConstrantArray *expr_constraints = NULL,
                                       const ParamsIArray *params = NULL,
                                       const bool phy_rowid_for_table_loc = false,
                                       const bool ignore_calc_failure = true,
-                                      const bool use_in_optimization = false);
+                                      const bool use_in_optimization = false,
+                                      const int64_t index_prefix = -1);
 
   //  final_extract_query_range extracts the final query range of its physical plan.
   //  It will get the real-time value of some const which are unknown during physical plan generating.
@@ -425,15 +442,28 @@ public:
                               ObQueryRangeArray &ranges,
                               bool &all_single_value_ranges,
                               const common::ObDataTypeCastParams &dtc_params) const;
-  int get_ss_tablet_ranges(common::ObIAllocator &allocator,
-                           ObExecContext &exec_ctx,
-                           ObQueryRangeArray &ss_ranges,
-                           const ObDataTypeCastParams &dtc_params) const;
-  int get_tablet_ranges(common::ObIAllocator &allocator,
-                        ObExecContext &exec_ctx,
-                        ObQueryRangeArray &ranges,
-                        bool &all_single_value_ranges,
-                        const common::ObDataTypeCastParams &dtc_params) const;
+  virtual int get_ss_tablet_ranges(common::ObIAllocator &allocator,
+                                   ObExecContext &exec_ctx,
+                                   ObQueryRangeArray &ss_ranges,
+                                   const ObDataTypeCastParams &dtc_params) const;
+  virtual int get_tablet_ranges(common::ObIAllocator &allocator,
+                                ObExecContext &exec_ctx,
+                                ObQueryRangeArray &ranges,
+                                bool &all_single_value_ranges,
+                                const common::ObDataTypeCastParams &dtc_params) const;
+  virtual int get_tablet_ranges(common::ObIAllocator &allocator,
+                                ObExecContext &exec_ctx,
+                                ObQueryRangeArray &ranges,
+                                bool &all_single_value_ranges,
+                                const common::ObDataTypeCastParams &dtc_params,
+                                ObIArray<common::ObSpatialMBR> &mbr_filters) const;
+  virtual int get_fast_nlj_tablet_ranges(ObFastFinalNLJRangeCtx &fast_nlj_range_ctx,
+                                         common::ObIAllocator &allocator,
+                                         ObExecContext &exec_ctx,
+                                         const ParamStore &param_store,
+                                         void *range_buffer,
+                                         ObQueryRangeArray &ranges,
+                                         const common::ObDataTypeCastParams &dtc_params) const;
   // deep copy query range except the pointer of phy_plan_
   int deep_copy(const ObQueryRange &other, const bool copy_for_final = false);
   // necessary condition:
@@ -443,7 +473,7 @@ public:
   //  or maybe all ranges are get-conditions after final extraction.
 
   // USE only in test.
-  bool is_precise_whole_range() const
+  virtual bool is_precise_whole_range() const
   {
     bool bret = false;
     if (NULL == table_graph_.key_part_head_) {
@@ -455,13 +485,15 @@ public:
     }
     return bret;
   }
-  int is_at_most_one_row(bool &is_one_row) const;
-  int is_get(bool &is_get) const;
+  virtual int is_get(bool &is_get) const;
   int is_get(int64_t column_count, bool &is_get) const;
-  bool is_precise_get() const { return table_graph_.is_precise_get_; }
-  common::ObGeoRelationType get_geo_relation(ObItemType type) const;
-  const common::ObIArray<ObRawExpr*> &get_range_exprs() const { return range_exprs_; }
-  const common::ObIArray<ObRawExpr*> &get_ss_range_exprs() const { return ss_range_exprs_; }
+  inline void reset_range_exprs() { range_exprs_.reset(); }
+  virtual bool is_precise_get() const { return table_graph_.is_precise_get_; }
+  static common::ObDomainOpType get_geo_relation(ObItemType type);
+  static common::ObDomainOpType get_domain_op_type(ObItemType type);
+  virtual const common::ObIArray<ObRawExpr*> &get_range_exprs() const { return range_exprs_; }
+  virtual const common::ObIArray<ObRawExpr*> &get_ss_range_exprs() const { return ss_range_exprs_; }
+  virtual const common::ObIArray<ObRawExpr*> &get_unprecise_range_exprs() const { return unprecise_range_exprs_; }
   int check_graph_type(ObKeyPart &key_part_head);
   int check_skip_scan_range(ObKeyPart *key_part_head,
                             const bool is_standard_range,
@@ -469,26 +501,29 @@ public:
                             ObKeyPart *&ss_head,
                             int64_t &skip_scan_offset,
                             int64_t &ss_max_precise_pos);
-  int reset_skip_scan_range();
+  virtual int reset_skip_scan_range();
   bool is_precise_get(const ObKeyPart &key_part_head,
                       int64_t &max_precise_pos,
                       bool ignore_head = false);
   int fill_range_exprs(const int64_t max_precise_pos,
                        const int64_t ss_offset,
                        const int64_t ss_max_precise_pos);
-  bool is_ss_range() const {  return table_graph_.skip_scan_offset_ > -1; }
-  int64_t get_skip_scan_offset() const {  return table_graph_.skip_scan_offset_; }
+  virtual bool is_ss_range() const {  return table_graph_.skip_scan_offset_ > -1; }
+  virtual int64_t get_skip_scan_offset() const {  return table_graph_.skip_scan_offset_; }
 
   static bool can_be_extract_range(ObItemType cmp_type, const ObExprResType &col_type,
                             const ObExprCalcType &res_type, common::ObObjType data_type,
                             bool &always_true);
+  static bool can_domain_be_extract_range(const ObDomainOpType &op_type, const ObExprResType &col_type,
+                                          const ObExprCalcType &res_type, common::ObObjType data_type,
+                                          bool &always_true);
 
   // that mean the query range contain non-standard range graph,
   // need copy from ObTableScan operator to physical operator context to extract query range
 
   bool need_deep_copy() const { return !table_graph_.is_standard_range_; }
-  inline bool has_range() const { return column_count_ > 0; }
-  inline int64_t get_column_count() const { return column_count_; }
+  virtual inline bool has_range() const { return column_count_ > 0; }
+  virtual inline int64_t get_column_count() const { return column_count_; }
   const ObRangeGraph &get_table_grapth() const { return table_graph_; }
   int get_result_value(common::ObObj &val, ObExecContext &exec_ctx, ObIAllocator *allocator) const;
   int get_result_value_with_rowid(const ObKeyPart &key_part,
@@ -496,7 +531,7 @@ public:
                                   ObExecContext &exec_ctx,
                                   bool &is_inconsistent_rowid,
                                   ObIAllocator *allocator = NULL) const;
-  bool inline has_exec_param() const { return has_exec_param_; }
+  virtual bool inline has_exec_param() const { return has_exec_param_; }
   bool inline get_is_equal_and() const { return is_equal_and_; }
   void inline set_is_equal_and(int64_t is_equal_and) { is_equal_and_ = is_equal_and; }
   const common::ObIArray<ObEqualOff> &get_raw_equal_offs() const { return equal_offs_; }
@@ -510,17 +545,32 @@ public:
   int set_columnId_map(uint64_t columnId, const ObGeoColumnInfo &column_info);
   MbrFilterArray &ut_get_mbr_filter() { return mbr_filters_; }
   ColumnIdInfoMap &ut_get_columnId_map() { return columnId_map_; }
-  bool is_contain_geo_filters() const { return contain_geo_filters_; }
+  virtual bool is_contain_geo_filters() const { return contain_geo_filters_; }
+  virtual int get_prefix_info(int64_t &equal_prefix_count,
+                              int64_t &range_prefix_count,
+                              bool &contain_always_false) const;
+  void inner_get_prefix_info(const ObKeyPart *key_part,
+                             int64_t &equal_prefix_count,
+                             int64_t &range_prefix_count,
+                             bool &contain_always_false) const;
+  virtual bool is_fast_nlj_range() const { return false; }
+  // get prefix string (without wildcards) length of like pattern
+  static int get_pattern_prefix_len(const ObCollationType &cs_type,
+                                    const ObString &escape_str,
+                                    const ObString &pattern_str,
+                                    int32_t &pattern_prefix_len);
 private:
 
   int init_query_range_ctx(common::ObIAllocator &allocator,
                            const ColumnIArray &range_columns,
                            ObExecContext *exec_ctx,
+                           ObQueryCtx *query_ctx,
                            ExprConstrantArray *expr_constraints,
                            const ParamsIArray *params,
                            const bool phy_rowid_for_table_loc,
                            const bool ignore_calc_failure,
-                           const bool use_in_optimization);
+                           const bool use_in_optimization,
+                           const int64_t index_prefix);
   void destroy_query_range_ctx(common::ObIAllocator &allocator);
   int add_expr_offsets(ObIArray<int64_t> &cur_pos, const ObKeyPart *cur_key);
   int extract_valid_exprs(const ExprIArray &root_exprs,
@@ -582,16 +632,7 @@ private:
   int get_normal_cmp_keypart(ObItemType cmp_type,
                              const common::ObObj &val,
                              ObKeyPart &out_keypart) const;
-  int get_geo_single_keypart(const ObObj &val_start, const ObObj &val_end, ObKeyPart &out_keypart) const;
-  int get_geo_intersects_keypart(uint32_t input_srid,
-                                 const common::ObString &wkb,
-                                 const common::ObGeoRelationType op_type,
-                                 ObKeyPart *out_key_part);
-  int get_geo_coveredby_keypart(uint32_t input_srid,
-                                const common::ObString &wkb,
-                                const common::ObGeoRelationType op_type,
-                                ObKeyPart *out_key_part);
-  int set_geo_keypart_whole_range(ObKeyPart &out_key_part);
+  int set_domain_normal_keypart(const ObObj &val_start, const ObObj &val_end, ObKeyPart &out_keypart) const;
   int get_row_key_part(const ObRawExpr *l_expr,
                        const ObRawExpr *r_expr,
                        ObItemType cmp_type,
@@ -651,6 +692,7 @@ private:
   int pre_extract_geo_op(const ObOpRawExpr *geo_expr,
                          ObKeyPart *&out_key_part,
                          const ObDataTypeCastParams &dtc_params);
+  int can_be_extract_orcl_spatial_range(const ObRawExpr *const_expr, bool& can_extract);
   int prepare_multi_in_info(const ObOpRawExpr *l_expr,
                             const ObOpRawExpr *r_expr,
                             ObKeyPart *&tmp_key_part,
@@ -729,7 +771,8 @@ private:
                             const common::ObDataTypeCastParams &dtc_params,
                             bool &is_bound_modified);
   int or_single_head_graphs(ObKeyPartList &or_list, ObExecContext *exec_ctx,
-                            const common::ObDataTypeCastParams &dtc_params);
+                            const common::ObDataTypeCastParams &dtc_params,
+                            const bool& need_geo_rebuild);
   int union_in_with_in(ObKeyPartList &or_list,
                        ObKeyPart *cur1,
                        ObKeyPart *cur2,
@@ -816,8 +859,94 @@ private:
   bool is_get_graph(int deepth, ObKeyPart *key_part);
   int get_like_range(const common::ObObj &pattern, const common::ObObj &escape,
                      ObKeyPart &out_key_part, const ObDataTypeCastParams &dtc_params);
-  int get_geo_range(const common::ObObj &wkb, const common::ObGeoRelationType op_type, ObKeyPart *out_key_part);
-  int get_dwithin_item(const ObRawExpr *expr, const ObConstRawExpr *&extra_item);
+// domain index interface functions
+  int pre_extract_domain_op(const ObOpRawExpr *domain_expr,
+                            ObKeyPart *&out_key_part,
+                            const ObDataTypeCastParams &dtc_params,
+                            const bool is_single_op);
+
+  // check if only domain op (use in optimizer when is true)
+  bool is_single_domain_op(const ObRawExpr *expr_root);
+  // following functions are expected to be used only by domain index:
+  // check param type, and make sure can be extract query range
+  int domain_index_check_can_be_extracted(const ObOpRawExpr *domain_expr, ObKeyPart *&out_key_part, bool& need_extract);
+  // init domain key part: domain_op, obj, and check if need final extract
+  int domain_index_init_key_part(const ObRawExpr *expr, ObKeyPart *&out_key_part,
+                                ObDomainOpType & op_type, bool& need_extract);
+  // use for simple predicate, which connect by only one way
+  int doamain_index_get_simple_range(const ObDomainOpType op_type, ObKeyPart *&out_key_part,
+                                    ObExecContext *exec_ctx, const ObDataTypeCastParams &dtc_params,
+                                    bool is_single_op);
+  // use for simple predicate, get all keyparts that need to be connected
+  int doamain_index_get_keyparts(const ObDomainOpType op_type, ObIArray<ObKeyPart*> &key_parts,
+                                ObKeyPart *&out_key_part, ObExecContext *exec_ctx,
+                                const ObDataTypeCastParams &dtc_params, bool is_single_op);
+  // use for simple predicate, chose connect way: and/or
+  int doamain_index_connect_keyparts(const ObDomainOpType op_type, ObIArray<ObKeyPart*> &key_parts,
+                              ObKeyPart *&out_key_part, ObExecContext *exec_ctx,
+                              const ObDataTypeCastParams &dtc_params);
+  // use for simple predicate, connect key parts
+  int doamain_index_connect_and_or(ObIArray<ObKeyPart*> &key_parts, ObKeyPart *&out_key_part,
+                                    ObExecContext *exec_ctx, const ObDataTypeCastParams &dtc_params,
+                                    bool is_and_op);
+  int domain_index_set_equal_keyparts(const common::ObObj &const_param,
+                                      ObKeyPart *&out_key_part,
+                                      const ObDataTypeCastParams &dtc_params);
+  // for domain predicate that need third arg
+  int domain_get_extra_param(ObDomainOpType& op, const ObRawExpr *expr, const ObConstRawExpr *&extra_item);
+  int get_json_array_keyparts(ObIJsonBase* j_base, ObIArray<ObKeyPart*> &key_parts,
+                              ObKeyPart *&out_key_part, ObExecContext *exec_ctx,
+                              const ObDataTypeCastParams &dtc_params);
+  int get_json_array_in_keyparts(ObIJsonBase* j_base, ObKeyPart *&out_key_part,
+                                ObExecContext *exec_ctx, const ObDataTypeCastParams &dtc_params);
+  // functions used for geo predicate
+  int get_geo_range(const common::ObObj &wkb, const ObDomainOpType op_type, ObKeyPart *out_key_part);
+  int get_spatial_relationship_by_mask(ObKeyPart *out_key_part, ObDomainOpType& op_type);
+  int get_domain_equal_keypart(const ObObj &val_start, const ObObj &val_end, ObKeyPart &out_keypart) const;
+  int get_geo_intersects_keypart(uint32_t input_srid,
+                                 const common::ObString &wkb,
+                                 const ObDomainOpType op_type,
+                                 ObKeyPart *out_key_part);
+  int get_geo_coveredby_keypart(uint32_t input_srid,
+                                const common::ObString &wkb,
+                                const ObDomainOpType op_type,
+                                ObKeyPart *out_key_part);
+  int set_geo_keypart_whole_range(ObKeyPart &out_key_part);
+  int overwrite_keypart(ObKeyPart* out_key_part, ObKeyPart* src_key_part);
+  int reset_domain_op_by_param_pos(const bool is_left_column, ObDomainOpType & op_type);
+  int get_domain_range(const common::ObObj &const_param, const common::ObDomainOpType op_type,
+                       ObKeyPart *&out_key_part, ObExecContext *exec_ctx,
+                       const ObDataTypeCastParams &dtc_params, bool is_single_op = false);
+  int get_simple_domain_range(const common::ObObj &const_param, const common::ObDomainOpType op_type,
+                              ObKeyPart *&out_key_part, ObExecContext *exec_ctx,
+                              const ObDataTypeCastParams &dtc_params, bool is_single_op);
+  int get_simple_domain_keyparts(const common::ObObj &const_param, const common::ObDomainOpType op_type,
+                                ObIArray<ObKeyPart*> &key_parts, ObKeyPart *&out_key_part,
+                                ObExecContext *exec_ctx, const ObDataTypeCastParams &dtc_params,
+                                bool is_single_op);
+  int connect_domain_keyparts(const common::ObDomainOpType op_type, ObIArray<ObKeyPart*> &key_parts,
+                              ObKeyPart *&out_key_part, ObExecContext *exec_ctx,
+                              const ObDataTypeCastParams &dtc_params);
+  int connect_and_or_domain_keyparts(ObIArray<ObKeyPart*> &key_parts, ObKeyPart *&out_key_part,
+                                    ObExecContext *exec_ctx, const ObDataTypeCastParams &dtc_params,
+                                    bool is_and_op);
+  int set_normal_key_true_or_false(ObKeyPart *&out_key_part, bool is_always_true);
+  int get_member_of_keyparts(const common::ObObj &const_param, ObKeyPart *&out_key_part,
+                             const ObDataTypeCastParams &dtc_params, const int64_t cur_datetime);
+  int get_contain_or_overlaps_keyparts(const common::ObObj &const_param, const common::ObDomainOpType op_type,
+                                      ObIArray<ObKeyPart*> &key_parts, ObKeyPart *&out_key_part,
+                                      ObExecContext *exec_ctx, const ObDataTypeCastParams &dtc_params,
+                                      bool is_single_op);
+  int get_complex_domain_range(const common::ObObj &const_param, const common::ObDomainOpType op_type,
+                               ObKeyPart *&out_key_part, const ObDataTypeCastParams &dtc_params);
+  int get_extra_param(const ObRawExpr *expr, const ObConstRawExpr *&extra_item);
+  int need_extract_domain_range(const ObOpRawExpr *domain_expr, ObKeyPart *&out_key_part, bool& need_extract);
+  int init_domain_key_part(const ObRawExpr *expr,  ObKeyPart *&out_key_part,
+                          ObDomainOpType & op_type, bool& need_extract);
+  inline bool is_simple_domain_op(const common::ObDomainOpType op_type) { return op_type > common::ObDomainOpType::T_INVALID
+                                                                              || op_type < common::ObDomainOpType::T_DOMAIN_OP_END;}
+  bool is_single_op(const ObRawExpr *expr_root);
+  bool need_extra_param(ObDomainOpType & op_type);
   int get_like_const_range(const ObRawExpr *text,
                            const ObRawExpr *pattern,
                            const ObRawExpr *escape,
@@ -832,6 +961,7 @@ private:
                                   ObExecContext &exec_ctx,
                                   ObSearchState &search_state,
                                   const common::ObDataTypeCastParams &dtc_params,
+                                  const int64_t cur_datetime,
                                   int64_t skip_offset = 0) const;
   int gen_simple_get_range(const ObKeyPart &root,
                            common::ObIAllocator &allocator,
@@ -857,6 +987,7 @@ private:
   int cold_cast_cur_node(const ObKeyPart *cur,
                          common::ObIAllocator &allocator,
                          const common::ObDataTypeCastParams &dtc_params,
+                         const int64_t cur_datetime,
                          common::ObObj &cur_val,
                          bool &always_false) const;
   int remove_precise_range_expr(int64_t offset);
@@ -898,11 +1029,16 @@ private:
   int check_null_param_compare_in_row(const ObRawExpr *l_expr,
                                       const ObRawExpr *r_expr,
                                       ObKeyPart *&out_key_part);
+  int check_inner_row_cmp_type(const ObRawExpr *l_expr,
+                               const ObRawExpr *r_expr,
+                               bool &use_ori_cmp_type);
+
+  virtual int get_total_range_sizes(common::ObIArray<uint64_t> &total_range_sizes) const;
 private:
   static const int64_t RANGE_BUCKET_SIZE = 1000;
   static const int64_t MAX_RANGE_SIZE_OLD = 10000;
   static const int64_t MAX_RANGE_SIZE_NEW = 100000;
-  static const int64_t MAX_NOT_IN_SIZE = 10; //do not extract range for not in row over this size
+  static const int64_t MAX_JSON_ARRAY_CHANGE_TO_OR_SIZE = 10;
   typedef common::ObObjStore<ObKeyPart*, common::ObIAllocator&> KeyPartStore;
 private:
   ObRangeGraph table_graph_;
@@ -923,6 +1059,7 @@ private:
   //this flag used by optimizer, so don't need to serialize it
   common::ObFixedArray<ObRawExpr*, common::ObIAllocator> range_exprs_;
   common::ObFixedArray<ObRawExpr*, common::ObIAllocator> ss_range_exprs_;
+  common::ObFixedArray<ObRawExpr*, common::ObIAllocator> unprecise_range_exprs_;
   MbrFilterArray mbr_filters_;
   bool has_exec_param_;
   bool is_equal_and_;

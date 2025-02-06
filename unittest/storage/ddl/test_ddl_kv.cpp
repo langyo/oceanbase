@@ -22,6 +22,7 @@
 #include "storage/meta_mem/ob_tenant_meta_mem_mgr.h"
 #include "storage/blocksstable/ob_row_generate.h"
 #include "storage/blocksstable/ob_data_file_prepare.h"
+#include "storage/ddl/ob_direct_insert_sstable_ctx_new.h"
 #undef private
 
 namespace oceanbase
@@ -68,7 +69,8 @@ void TestBlockMetaTree::SetUp()
   ObMallocAllocator::get_instance()->create_and_add_tenant_allocator(TEST_TENANT_ID);
   ObTenantEnv::set_tenant(&tenant_base_);
   prepare_schema();
-  ASSERT_OK(data_desc_.init(table_schema_, ObLSID(1), ObTabletID(1), MAJOR_MERGE, 1/*snapshot*/, 1/*data_version*/));
+  ASSERT_OK(data_desc_.init(table_schema_, ObLSID(1), ObTabletID(1), MAJOR_MERGE,
+                            1/*snapshot*/, 1/*data_version*/, table_schema_.get_micro_index_clustered(), 0 /*transfer_seq*/));
   data_desc_.get_col_desc().allocator_.set_tenant_id(500);
   ASSERT_OK(row_generate_.init(table_schema_, &allocator_));
 }
@@ -154,7 +156,8 @@ TEST_F(TestBlockMetaTree, random_keybtree)
   for (int64_t i = 0; i < 10; ++i) {
     ASSERT_OK(meta_tree.block_tree_.init());
     meta_tree.is_inited_ = true;
-    ASSERT_OK(meta_tree.data_desc_.assign(data_desc_.get_desc()));
+    ASSERT_OK(meta_tree.data_desc_.assign(data_desc_));
+    meta_tree.datum_utils_ = &meta_tree.data_desc_.get_desc().get_datum_utils();
     for (int64_t j = 0; j < 10000; ++j) {
       void *buf = allocator_.alloc(sizeof(ObDatumRow));
       ASSERT_TRUE(nullptr != buf);
@@ -195,13 +198,13 @@ TEST_F(TestBlockMetaTree, random_keybtree)
   //for (int64_t i = 1; i <= 5; ++i) {
     //void *buf = arena.alloc(sizeof(ObSSTable));
     //ObSSTable *tmp_sstable = new (buf) ObSSTable();
-    //tmp_sstable->key_.table_type_ = ObITable::DDL_DUMP_SSTABLE;
+    //tmp_sstable->key_.table_type_ = ObITable::DDL_MERGE_CO_SSTABLE;
     //tmp_sstable->key_.scn_range_.start_scn_ = SCN::plus(SCN::min_scn(), 10 * i);
     //tmp_sstable->key_.scn_range_.end_scn_ = SCN::plus(SCN::min_scn(), 10 * (i + 1));
     //ASSERT_OK(ddl_sstables.push_back(tmp_sstable));
   //}
   //ObSSTable compact_sstable;
-  //compact_sstable.key_.table_type_ = ObITable::DDL_DUMP_SSTABLE;
+  //compact_sstable.key_.table_type_ = ObITable::DDL_MERGE_CO_SSTABLE;
   //compact_sstable.key_.scn_range_.start_scn_ = SCN::plus(SCN::min_scn(), 10);
   //compact_sstable.key_.scn_range_.end_scn_ = SCN::plus(SCN::min_scn(), 60);
 

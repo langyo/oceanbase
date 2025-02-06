@@ -11,9 +11,6 @@
  */
 
 #include "observer/virtual_table/ob_all_virtual_id_service.h"
-#include "lib/time/ob_time_utility.h"
-#include "observer/ob_server.h"
-#include "observer/ob_server_utils.h"
 #include "storage/tx_storage/ob_ls_service.h"
 
 using namespace oceanbase::common;
@@ -66,7 +63,8 @@ int ObAllVirtualIDService::get_next_tenant_id_info_()
 {
   int ret = OB_SUCCESS;
   if (tenant_ids_index_ >= all_tenants_.count()) {
-    if (transaction::ObIDService::MAX_SERVICE_TYPE == service_types_index_ + 1) {
+    if (transaction::ObIDService::MAX_SERVICE_TYPE == service_types_index_ + 1 ||
+        all_tenants_.empty()) {
       ret = OB_ITER_END;
     } else {
       service_types_index_++;

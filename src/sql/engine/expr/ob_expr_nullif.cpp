@@ -14,16 +14,10 @@
 
 #include "sql/engine/expr/ob_expr_nullif.h"
 
-#include "lib/charset/ob_charset.h"
 
-#include "share/object/ob_obj_cast.h"
 
-//#include "sql/engine/expr/ob_expr_promotion_util.h"
-#include "sql/engine/expr/ob_expr_equal.h"
-#include "sql/session/ob_sql_session_info.h"
 #include "sql/engine/expr/ob_datum_cast.h"
 #include "sql/engine/ob_exec_context.h"
-#include "sql/engine/expr/ob_expr_lob_utils.h"
 
 namespace oceanbase
 {
@@ -53,6 +47,7 @@ int ObExprNullif::calc_result_type2(ObExprResType &type,
   if (type1.is_null()) {
     // eval_nullif() just return null, no need to set cmp type
     type.set_type(ObCharType);
+    type.set_length(0);
     type.set_collation_level(type1.get_collation_level());
     type.set_default_collation_type();
     type.set_calc_type(ObCharType);
@@ -86,15 +81,15 @@ int ObExprNullif::se_deduce_type(ObExprResType &type,
   } else if (ob_is_enumset_tc(type.get_type()) || ob_is_enumset_inner_tc(type.get_type())) {
     type.set_varchar();
   }
-  OZ(calc_cmp_type2(cmp_type, type1, type2, type_ctx.get_coll_type()));
+  OZ(calc_cmp_type2(cmp_type, type1, type2, type_ctx));
   if (OB_SUCC(ret)) {
     if (ob_is_enumset_tc(type1.get_type()) || ob_is_enumset_tc(type2.get_type())) {
-      ObObjType calc_type = enumset_calc_types_[OBJ_TYPE_TO_CLASS[cmp_type.get_calc_type()]];
+      ObObjType calc_type = get_enumset_calc_type(cmp_type.get_calc_type(), -1);
       CK(ObMaxType != calc_type);
       if (OB_SUCC(ret)) {
         cmp_type.set_calc_type(calc_type);
         cmp_type.set_calc_collation_type(ObCharset::get_system_collation());
-        if (ObVarcharType == calc_type) {
+        if (ob_is_string_type(calc_type)) {
           if (ob_is_enumset_tc(type1.get_type())) {
             // only set calc type when calc_type is varchar.
             // EnumWrapper will add EnumToStr when calc_type is varchar, and otherwise add EnumToInner.
@@ -102,21 +97,25 @@ int ObExprNullif::se_deduce_type(ObExprResType &type,
             // implicit cast from enum_inner to uint64 will be added on EnumToInner expression.
             type1.set_calc_type(calc_type);
             type1.set_calc_collation_type(cmp_type.get_calc_collation_type());
+            type1.set_calc_collation_level(cmp_type.get_calc_collation_level());
           }
         }
         if (type1.is_decimal_int()) {
           type1.set_calc_type(calc_type);
         }
-        // set calc type for type2 no matter whether calc_type is varchar or not, and no matther which param is enum.
+        // set calc type for type2 no matter whether calc_type is varchar or not, and no matter which param is enum.
         type2.set_calc_type(calc_type);
         type2.set_calc_collation_type(cmp_type.get_calc_collation_type());
+        type2.set_calc_collation_level(cmp_type.get_calc_collation_level());
       }
     }
     if (OB_FAIL(ret)) {
     } else if (ob_is_decimal_int(cmp_type.get_calc_type())) {
       ObAccuracy calc_acc;
-      calc_acc.precision_ = MAX(type1.get_precision(), type2.get_precision());
       calc_acc.scale_ = MAX(type1.get_scale(), type2.get_scale());
+      const int64_t int_len1 = type1.get_precision() - type1.get_scale();
+      const int64_t int_len2 = type2.get_precision() - type2.get_scale();
+      calc_acc.precision_ = MIN(MAX(int_len1, int_len2) + calc_acc.scale_, OB_MAX_DECIMAL_POSSIBLE_PRECISION);
       cmp_type.set_calc_accuracy(calc_acc);
     }
     if (OB_SUCC(ret)) {
@@ -130,7 +129,7 @@ int ObExprNullif::se_deduce_type(ObExprResType &type,
 
 int ObExprNullif::set_extra_info(ObExprCGCtx &expr_cg_ctx, const ObObjType cmp_type,
                                  const ObCollationType cmp_cs_type,
-                                 ObExpr &rt_expr) const
+                                 ObSQLMode sql_mode, ObExpr &rt_expr) const
 {
   int ret = OB_SUCCESS;
   ObCastMode cm = CM_NONE;
@@ -143,10 +142,11 @@ int ObExprNullif::set_extra_info(ObExprCGCtx &expr_cg_ctx, const ObObjType cmp_t
   } else if (OB_ISNULL(expr_cg_ctx.session_)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("ctx.session is null", K(ret));
-  } else if (OB_FAIL(ObSQLUtils::get_default_cast_mode(is_explicit_cast, result_flag,
-                                                      expr_cg_ctx.session_, cm))) {
-    LOG_WARN("get default cast mode failed", K(ret));
   } else {
+    ObSQLUtils::get_default_cast_mode(is_explicit_cast, result_flag,
+                                      expr_cg_ctx.session_->get_stmt_type(),
+                                      expr_cg_ctx.session_->is_ignore_stmt(),
+                                      sql_mode, cm);
     info->cmp_meta_.type_ = cmp_type;
     info->cmp_meta_.cs_type_ = cmp_cs_type;
     info->cmp_meta_.scale_ = result_type_.get_calc_accuracy().get_scale();
@@ -166,9 +166,14 @@ int ObExprNullif::cg_expr(ObExprCGCtx &expr_cg_ctx, const ObRawExpr &raw_expr,
   const uint32_t param_num = rt_expr.arg_cnt_;
   const ObObjMeta &cmp_meta = result_type_.get_calc_meta();
   const ObAccuracy &calc_acc = result_type_.get_calc_accuracy();
+  ObSQLMode sql_mode = expr_cg_ctx.session_->get_sql_mode();
   if (ObNullType == rt_expr.args_[0]->datum_meta_.type_) {
     OX(rt_expr.eval_func_ = eval_nullif);
+  } else if (OB_FAIL(ObSQLUtils::merge_solidified_var_into_sql_mode(&raw_expr.get_local_session_var(),
+                                                                    sql_mode))) {
+    LOG_WARN("try get local sql mode failed", K(ret));
   } else if (OB_FAIL(set_extra_info(expr_cg_ctx, cmp_meta.get_type(), cmp_meta.get_collation_type(),
+                                    sql_mode,
                                     rt_expr))) {
     LOG_WARN("set extra info failed", K(ret));
   } else if (ob_is_enumset_inner_tc(rt_expr.args_[0]->datum_meta_.type_)) {
@@ -216,6 +221,7 @@ int ObExprNullif::cg_expr(ObExprCGCtx &expr_cg_ctx, const ObRawExpr &raw_expr,
           // assign null type means can compare directly.
           info->cmp_meta_.type_ = ObNullType;
         } else {
+          bool has_lob_header = is_lob_storage(cmp_meta.get_type()) && expr_cg_ctx.cur_cluster_version_ >= CLUSTER_VERSION_4_1_0_0;
           if (OB_ISNULL(cmp_func = ObExprCmpFuncsHelper::get_datum_expr_cmp_func(
                                                             cmp_meta.get_type(),
                                                             cmp_meta.get_type(),
@@ -225,7 +231,7 @@ int ObExprNullif::cg_expr(ObExprCGCtx &expr_cg_ctx, const ObRawExpr &raw_expr,
                                                             calc_acc.get_precision(),
                                                             lib::is_oracle_mode(),
                                                             cmp_meta.get_collation_type(),
-                                                            cmp_meta.has_lob_header()))){
+                                                            has_lob_header))){
             ret = OB_INVALID_ARGUMENT;
             LOG_WARN("cmp func is null", K(ret), K(cmp_meta));
           } else {
@@ -407,6 +413,16 @@ int ObExprNullif::eval_nullif_enumset(const ObExpr &expr, ObEvalCtx &ctx, ObDatu
     } else {
       res = *cmp_e0;
     }
+  }
+  return ret;
+}
+
+DEF_SET_LOCAL_SESSION_VARS(ObExprNullif, raw_expr) {
+  int ret = OB_SUCCESS;
+  if (is_mysql_mode()) {
+    SET_LOCAL_SYSVAR_CAPACITY(2);
+    EXPR_ADD_LOCAL_SYSVAR(SYS_VAR_SQL_MODE);
+    EXPR_ADD_LOCAL_SYSVAR(SYS_VAR_COLLATION_CONNECTION);
   }
   return ret;
 }

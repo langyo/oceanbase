@@ -17,6 +17,7 @@
 #include "storage/checkpoint/ob_common_checkpoint.h"
 #include "lib/lock/ob_spin_lock.h"
 #include "storage/checkpoint/ob_freeze_checkpoint.h"
+#include "storage/ls/ob_freezer_define.h"
 #include "share/scn.h"
 #include "share/ob_errno.h"
 
@@ -37,7 +38,7 @@ struct ObCheckpointDList
   ~ObCheckpointDList() {}
 
   void reset();
-  bool is_empty();
+  bool is_empty() const;
   ObFreezeCheckpoint *get_header();
   int unlink(ObFreezeCheckpoint *ob_freeze_checkpoint);
   int insert(ObFreezeCheckpoint *ob_freeze_checkpoint, bool ordered = true);
@@ -114,9 +115,10 @@ public:
   }
 
   share::SCN get_rec_scn();
+  share::SCN get_active_rec_scn();
   // if min_rec_scn <= the input rec_scn
   // logstream freeze
-  int flush(share::SCN recycle_scn, bool need_freeze = true);
+  int flush(share::SCN recycle_scn, int64_t trace_id, bool need_freeze = true);
   // if min_rec_scn <= the input rec_scn
   // add ls_freeze task
   // logstream freeze optimization
@@ -145,6 +147,10 @@ public:
   static void reset_tenant_freeze() { is_tenant_freeze_for_flush_ = false; }
   static bool is_tenant_freeze() { return is_tenant_freeze_for_flush_; }
 
+  static void set_freeze_source(const ObFreezeSourceFlag source) { freeze_source_ = source; }
+  static void reset_freeze_source() { freeze_source_ = ObFreezeSourceFlag::INVALID_SOURCE; }
+  static ObFreezeSourceFlag get_freeze_source() { return freeze_source_; }
+
 private:
   // traversal prepare_list to flush memtable
   // case1: some memtable flush failed when ls freeze
@@ -171,11 +177,12 @@ private:
   void pop_new_create_to_ls_frozen_();
   void ls_frozen_to_active_(int64_t &last_time);
   void ls_frozen_to_prepare_(int64_t &last_time);
+  void add_diagnose_info_for_ls_frozen_();
   void print_list_(ObCheckpointDList &list);
   void set_ls_freeze_finished_(bool is_finished);
   int get_need_flush_tablets_(const share::SCN recycle_scn,
                               common::ObIArray<ObTabletID> &flush_tablets);
-  int freeze_base_on_needs_(share::SCN recycle_scn);
+  int freeze_base_on_needs_(const int64_t trace_id, share::SCN recycle_scn);
   int decide_freeze_clock_(ObFreezeCheckpoint *ob_freeze_checkpoint);
 
   static const int64_t LOOP_TRAVERSAL_INTERVAL_US = 1000L * 50;  // 50ms
@@ -213,6 +220,7 @@ private:
   bool ls_freeze_finished_;
 
   static __thread bool is_tenant_freeze_for_flush_;
+  static __thread ObFreezeSourceFlag freeze_source_;
 };
 
 // list lock for DataChcekpoint

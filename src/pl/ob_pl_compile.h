@@ -15,7 +15,9 @@
 
 #include "ob_pl.h"
 #include "ob_pl_stmt.h"
+#include "ob_pl_persistent.h"
 #include "lib/hash/ob_hashmap.h"
+#include "lib/alloc/ob_malloc_callback.h"
 
 namespace oceanbase
 {
@@ -34,6 +36,26 @@ class ObPLPackage;
 class ObPLPackageGuard;
 class ObPLResolver;
 class ObPLVarDebugInfo;
+class ObRoutinePersistentInfo;
+
+class ObPLCGMallocCallback final : public lib::ObMallocCallback
+{
+public:
+  ObPLCGMallocCallback(int64_t &mem_used)
+    : mem_used_(mem_used) {}
+  virtual ~ObPLCGMallocCallback() {}
+  virtual void operator()(const ObMemAttr &attr, int64_t add_size) override
+  {
+    if ((ObLabel(GET_PL_MOD_STRING(pl::OB_PL_JIT)) == attr.label_
+        || ObLabel(GET_PL_MOD_STRING(pl::OB_PL_CODE_GEN)) == attr.label_)
+        && attr.ctx_id_ == ObCtxIds::GLIBC) {
+      mem_used_ += add_size;
+    }
+  }
+private:
+  int64_t &mem_used_;
+}; // end of class ObPLCGMallocCallback
+
 class ObPLCompiler
 {
 public:
@@ -55,11 +77,12 @@ public:
               ParamStore *params,
               bool is_prepare_protocol); //匿名块接口
 
+
   int compile(const uint64_t id, ObPLFunction &func); //Procedure/Function接口
 
   int analyze_package(const ObString &source, const ObPLBlockNS *parent_ns,
                       ObPLPackageAST &package_ast, bool is_for_trigger);
-  int generate_package(const ObString &exec_env, ObPLPackageAST &package_ast, ObPLPackage &package);
+  int generate_package(const ObString &exec_env, ObPLPackageAST &package_ast, ObPLPackage &package, bool &is_from_disk);
   int compile_package(const share::schema::ObPackageInfo &package_info, const ObPLBlockNS *parent_ns,
                       ObPLPackageAST &package_ast, ObPLPackage &package); //package
   static int compile_subprogram_table(common::ObIAllocator &allocator,
@@ -87,13 +110,13 @@ public:
                                            uint64_t dep_obj_id,
                                            uint64_t schema_version,
                                            share::schema::ObObjectType dep_obj_type);
-private:
-  int init_function(const share::schema::ObRoutineInfo *proc, ObPLFunction &func);
-
   static int init_function(share::schema::ObSchemaGetterGuard &schema_guard,
                            const sql::ObExecEnv &exec_env,
                            const ObPLRoutineInfo &routine_signature,
                            ObPLFunction &routine);
+private:
+  int init_function(const share::schema::ObRoutineInfo *proc, ObPLFunction &func);
+
   int generate_package_cursors(const ObPLPackageAST &package_ast,
                                const ObPLCursorTable &ast_cursor_table,
                                ObPLPackage &package);
@@ -114,12 +137,22 @@ private:
                                 const uint64_t package_id,
                                 ObString &database_name,
                                 ObString &package_name);
+  int compile(const share::schema::ObRoutineInfo &routine, ObPLFunctionAST &func_ast, ObPLFunction &func);
+  int read_dll_from_disk(bool enable_persistent,
+                         ObRoutinePersistentInfo &routine_storage,
+                         ObPLFunctionAST &func_ast,
+                         ObPLCodeGenerator &cg,
+                         const ObRoutineInfo &routine,
+                         ObPLFunction &func,
+                         ObRoutinePersistentInfo::ObPLOperation &op);
 private:
   common::ObIAllocator &allocator_;
   sql::ObSQLSessionInfo &session_info_;
   share::schema::ObSchemaGetterGuard &schema_guard_;
   ObPLPackageGuard &package_guard_;
   common::ObMySQLProxy &sql_proxy_;
+
+  static ObMutex package_dep_info_lock_;
 };
 
 class ObPLCompilerEnvGuard
@@ -128,7 +161,8 @@ public:
   ObPLCompilerEnvGuard(const ObPackageInfo &info,
                        ObSQLSessionInfo &session_info,
                        share::schema::ObSchemaGetterGuard &schema_guard,
-                       int &ret);
+                       int &ret,
+                       const ObPLBlockNS *prarent_ns = nullptr);
 
   ObPLCompilerEnvGuard(const ObRoutineInfo &info,
                        ObSQLSessionInfo &session_info,
@@ -139,7 +173,11 @@ public:
 
 private:
   template<class Info>
-  void init(const Info &info, ObSQLSessionInfo &sessionInfo, share::schema::ObSchemaGetterGuard &schema_guard, int &ret);
+  void init(const Info &info,
+            ObSQLSessionInfo &sessionInfo,
+            share::schema::ObSchemaGetterGuard &schema_guard,
+            int &ret,
+            const ObPLBlockNS *parent_ns = nullptr);
 
 private:
   int &ret_;
@@ -149,6 +187,7 @@ private:
   uint64_t old_db_id_;
   bool need_reset_exec_env_;
   bool need_reset_default_database_;
+  ObArenaAllocator allocator_;
 };
 
 }

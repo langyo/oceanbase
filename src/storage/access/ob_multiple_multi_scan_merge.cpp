@@ -11,10 +11,6 @@
  */
 
 #include "ob_multiple_multi_scan_merge.h"
-#include <math.h>
-#include "storage/ob_row_fuse.h"
-#include "storage/blocksstable/ob_datum_row.h"
-#include "storage/ob_storage_schema.h"
 
 #if !USE_NEW_MULTIPLE_MULTI_SCAN_MERGE
 namespace oceanbase
@@ -111,7 +107,7 @@ int ObMultipleMultiScanMerge::calc_scan_range()
           const ObDatumRowkey &range_key = is_reverse_scan ? range.get_start_key() : range.get_end_key();
           if (OB_FAIL(range_key.compare(curr_rowkey_, read_info->get_datum_utils(), cmp_ret))) {
             STORAGE_LOG(WARN, "Failed to cmopare range key ", K(ret), K(range_key), K(curr_rowkey_));
-          } else if (cmp_ret > 0) {
+          } else if ((is_reverse_scan && cmp_ret < 0) || (!is_reverse_scan && cmp_ret > 0)) {
             range.change_boundary(curr_rowkey_, is_reverse_scan);
             range_idx_delta_ += i;
             if (OB_FAIL(cow_ranges_.push_back(range))) {
@@ -140,12 +136,6 @@ int ObMultipleMultiScanMerge::is_range_valid() const
     ret = OB_ITER_END;
   }
   return ret;
-}
-
-void ObMultipleMultiScanMerge::collect_merge_stat(ObTableStoreStat &stat) const
-{
-  stat.multi_scan_stat_.call_cnt_++;
-  stat.multi_scan_stat_.output_row_cnt_ += access_ctx_->table_store_stat_.output_row_cnt_;
 }
 
 int ObMultipleMultiScanMerge::construct_iters()

@@ -13,12 +13,8 @@
 #define USING_LOG_PREFIX SQL_REWRITE
 
 #include "ob_transform_left_join_to_anti.h"
-#include "common/ob_common_utility.h"
-#include "share/ob_errno.h"
-#include "lib/oblog/ob_log_module.h"
 #include "sql/rewrite/ob_transform_utils.h"
 #include "sql/optimizer/ob_optimizer_util.h"
-#include "common/ob_smart_call.h"
 
 namespace oceanbase
 {
@@ -454,8 +450,8 @@ int ObTransformLeftJoinToAnti::check_condition_expr_validity(const ObRawExpr *ex
       }
     }
   } else if (expr->get_expr_type() == T_OP_AND) {
+    ObArray<ObRawExpr *> tmp_constraints;
     for (int64_t i = 0; OB_SUCC(ret) && i < expr->get_param_count(); i++) {
-      ObArray<ObRawExpr *> tmp_constraints;
       if (OB_FAIL(SMART_CALL(check_condition_expr_validity(expr->get_param_expr(i),
                                                            stmt,
                                                            joined_table,
@@ -463,12 +459,13 @@ int ObTransformLeftJoinToAnti::check_condition_expr_validity(const ObRawExpr *ex
                                                            is_valid)))) {
         LOG_WARN("fail to check condition expr validity", K(ret));
       } else if (!is_valid) {
-        // do nothing
-      } else if (OB_FAIL(append(constraints, tmp_constraints))) {
-        LOG_WARN("failed to append constraints", K(ret));
-      } else {
         break;
       }
+    }
+    if (OB_FAIL(ret) || !is_valid) {
+      // do nothing
+    } else if (OB_FAIL(append(constraints, tmp_constraints))) {
+      LOG_WARN("failed to append constraints", K(ret));
     }
   } else if (expr->get_expr_type() == T_OP_OR) {
     for (int64_t i = 0; OB_SUCC(ret) && i < expr->get_param_count(); i++) {
@@ -497,6 +494,7 @@ int ObTransformLeftJoinToAnti::check_can_be_trans(ObDMLStmt *stmt,
   is_valid = false;
   TableItem *right_table = NULL;
   bool is_table_valid = true;
+  bool is_contain_lateral = false;
   if (OB_ISNULL(stmt) ||
       OB_ISNULL(ctx_) || OB_ISNULL(ctx_->schema_checker_)) {
     ret = OB_ERR_UNEXPECTED;
@@ -506,6 +504,12 @@ int ObTransformLeftJoinToAnti::check_can_be_trans(ObDMLStmt *stmt,
              OB_ISNULL(right_table = joined_table->right_table_)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("invalid joined table", K(ret), K(joined_table));
+  } else if (OB_FAIL(ObTransformUtils::check_contain_correlated_lateral_table(
+                                       joined_table, is_contain_lateral))) {
+    LOG_WARN("failed to check contain correlated lateral table", K(ret));
+  } else if (is_contain_lateral) {
+    is_table_valid = false;
+    OPT_TRACE("contain lateral derived table, cannot do left to anti");
   } else if (stmt->is_delete_stmt() || stmt->is_update_stmt()) {
     // transformation is not allowed if the updated/deleted table is 
     // on the right side of the join table

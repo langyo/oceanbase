@@ -12,26 +12,8 @@
 
 #define USING_LOG_PREFIX CLOG
 #include "ob_remote_fetch_log_worker.h"
-#include "lib/utility/ob_macro_utils.h"
-#include "lib/ob_define.h"
-#include "lib/profile/ob_trace_id.h"
-#include "lib/restore/ob_storage.h"                     // is_io_error
-#include "lib/utility/ob_tracepoint.h"                  // EventTable
-#include "share/ob_errno.h"
-#include "share/rc/ob_tenant_base.h"                    // mtl_alloc
 #include "storage/tx_storage/ob_ls_service.h"           // ObLSService
-#include "storage/ls/ob_ls.h"                           // ObLS
-#include "logservice/palf/log_group_entry.h"            // LogGroupEntry
-#include "logservice/palf/lsn.h"                        // LSN
 #include "ob_log_restore_service.h"                     // ObLogRestoreService
-#include "share/scn.h"                        // SCN
-#include "ob_fetch_log_task.h"                          // ObFetchLogTask
-#include "ob_log_restore_handler.h"                     // ObLogRestoreHandler
-#include "ob_log_restore_allocator.h"                       // ObLogRestoreAllocator
-#include "storage/tx_storage/ob_ls_handle.h"            // ObLSHandle
-#include "logservice/archiveservice/ob_archive_define.h"   // archive
-#include "storage/tx_storage/ob_ls_map.h"               // ObLSIterator
-#include "logservice/archiveservice/large_buffer_pool.h"
 
 namespace oceanbase
 {
@@ -229,6 +211,7 @@ void ObRemoteFetchWorker::run1()
       int64_t end_tstamp = ObTimeUtility::current_time();
       int64_t wait_interval = THREAD_RUN_INTERVAL - (end_tstamp - begin_tstamp);
       if (wait_interval > 0) {
+        common::ObBKGDSessInActiveGuard inactive_guard;
         cond_.timedwait(wait_interval);
       }
     }
@@ -277,9 +260,19 @@ int ObRemoteFetchWorker::handle_single_task_()
     }
 
     // only fatal error report fail, retry with others
-    if (is_fatal_error_(ret)) {
+    if (is_fatal_error_(ret) && need_fetch_log_(id)) {
       report_error_(id, ret, cur_lsn, ObLogRestoreErrorContext::ErrorType::FETCH_LOG);
     }
+//errsim: inject restore failed error
+#ifdef ERRSIM
+  if (OB_SUCC(ret)) {
+    ret = OB_E(EventTable::EN_RESTORE_LOG_FAILED) OB_SUCCESS;
+    if (OB_FAIL(ret) && is_fatal_error_(ret)) {
+      report_error_(id, ret, cur_lsn, ObLogRestoreErrorContext::ErrorType::FETCH_LOG);
+      LOG_WARN("inject restore failed error", K(ret));
+    }
+  }
+#endif
   }
   return ret;
 }
@@ -297,17 +290,21 @@ int ObRemoteFetchWorker::handle_fetch_log_task_(ObFetchLogTask *task)
           task->cur_lsn_, task->end_lsn_, allocator_->get_buferr_pool(),
           &log_ext_handler_, DEFAULT_BUF_SIZE))) {
     LOG_WARN("ObRemoteLogIterator init failed", K(ret), K_(tenant_id), KPC(task));
+  } else if (OB_FAIL(task->iter_.set_io_context(palf::LogIOContext(tenant_id_, task->id_.id(), palf::LogIOUser::RESTORE)))) {
+    LOG_WARN("set_io_context failed", K(ret), K_(tenant_id), KPC(task));
   } else if (!need_fetch_log_(task->id_)) {
     LOG_TRACE("no need fetch log", KPC(task));
   } else if (OB_FAIL(task->iter_.pre_read(empty))) {
     LOG_WARN("pre_read failed", K(ret), KPC(task));
   } else if (empty) {
+    LOG_TRACE("pre read empty");
     // do nothing
   } else if (OB_FAIL(push_submit_array_(*task))) {
     LOG_WARN("push submit array failed", K(ret));
   }
 
   if (OB_SUCC(ret) && ! empty) {
+    LOG_TRACE("pre_read succ and push submit array succ, do nothing");
     // pre_read succ and push submit array succ, do nothing,
   } else {
     if (is_fatal_error_(ret)) {
@@ -329,12 +326,6 @@ int ObRemoteFetchWorker::handle_fetch_log_task_(ObFetchLogTask *task)
       LOG_WARN("retire task failed", K(tmp_ret), KP(task));
     }
   }
-
-#ifdef ERRSIM
-  if (OB_SUCC(ret)) {
-    ret = OB_E(EventTable::EN_RESTORE_LOG_FAILED) OB_SUCCESS;
-  }
-#endif
   return ret;
 }
 

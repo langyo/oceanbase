@@ -13,9 +13,7 @@
 #include "ob_all_virtual_tenant_parameter_stat.h"
 #include "observer/ob_server_utils.h"
 #include "observer/ob_server_struct.h"
-#include "observer/omt/ob_multi_tenant.h"
 #include "observer/ob_sql_client_decorator.h"
-#include "share/inner_table/ob_inner_table_schema_constants.h"
 
 namespace oceanbase
 {
@@ -264,17 +262,42 @@ int ObAllVirtualTenantParameterStat::fill_row_(common::ObNewRow *&row,
             break;
           }
           case DATA_TYPE: {
-            cells[i].set_null();
+            cells[i].set_varchar(iter->second->data_type());
+            cells[i].set_collation_type(
+                  ObCharset::get_default_collation(ObCharset::get_default_charset()));
             break;
           }
           case VALUE: {
-            if (0 == ObString("compatible").case_compare(iter->first.str())
-                && !iter->second->value_updated()) {
-              // `compatible` is used for tenant compatibility,
-              // default value should not be used when `compatible` is not loaded yet.
-              cells[i].set_varchar("0.0.0.0");
+            if (0 == ObString("compatible").case_compare(iter->first.str())) {
+              const uint64_t tenant_id = tenant_id_list_.at(cur_tenant_idx_);
+              uint64_t data_version = 0;
+              char *dv_buf = NULL;
+              if (GET_MIN_DATA_VERSION(tenant_id, data_version) != OB_SUCCESS) {
+                // `compatible` is used for tenant compatibility,
+                // default value should not be used when `compatible` is not
+                // loaded yet.
+                cells[i].set_varchar("0.0.0.0");
+              } else if (OB_ISNULL(dv_buf = (char *)allocator_->alloc(OB_SERVER_VERSION_LENGTH))) {
+                ret = OB_ALLOCATE_MEMORY_FAILED;
+                SERVER_LOG(ERROR, "fail to alloc buf", K(ret), K(tenant_id),
+                           K(OB_SERVER_VERSION_LENGTH));
+              } else if (OB_INVALID_INDEX ==
+                         VersionUtil::print_version_str(
+                             dv_buf, OB_SERVER_VERSION_LENGTH, data_version)) {
+                ret = OB_INVALID_ARGUMENT;
+                SERVER_LOG(ERROR, "fail to print data_version", K(ret),
+                           K(tenant_id), K(data_version));
+              } else {
+                cells[i].set_varchar(dv_buf);
+              }
             } else {
-              cells[i].set_varchar(iter->second->str());
+              if (!is_sys_tenant(effective_tenant_id_) &&
+                  (0 == ObString(SSL_EXTERNAL_KMS_INFO).case_compare(iter->first.str()) ||
+                   0 == ObString(EXTERNAL_KMS_INFO).case_compare(iter->first.str()))) {
+                cells[i].set_varchar("");
+              } else {
+                cells[i].set_varchar(iter->second->str());
+              }
             }
             cells[i].set_collation_type(
                 ObCharset::get_default_collation(ObCharset::get_default_charset()));
@@ -316,6 +339,17 @@ int ObAllVirtualTenantParameterStat::fill_row_(common::ObNewRow *&row,
             } else {
               cells[i].set_int(*tenant_id_ptr);
             }
+            break;
+          }
+          case DEFAULT_VALUE: {
+            cells[i].set_varchar(iter->second->default_str());
+            cells[i].set_collation_type(
+              ObCharset::get_default_collation(ObCharset::get_default_charset()));
+            break;
+          }
+          case ISDEFAULT: {
+            int isdefault = iter->second->is_default(iter->second->str(),iter->second->default_str(),sizeof(iter->second->default_str())) ? 1 : 0;
+            cells[i].set_int(isdefault);
             break;
           }
           default : {

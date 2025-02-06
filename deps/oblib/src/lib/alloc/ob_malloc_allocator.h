@@ -122,9 +122,11 @@ public:
   int64_t get_urgent() const;
   void set_reserved(int64_t bytes);
   int64_t get_reserved() const;
+  int set_tenant_max_min(int64_t tenant_id, int64_t max_memory, int64_t min_memory);
   int set_tenant_limit(uint64_t tenant_id, int64_t bytes);
   int64_t get_tenant_limit(uint64_t tenant_id);
   int64_t get_tenant_hold(uint64_t tenant_id);
+  int64_t get_tenant_cache_hold(uint64_t tenant_id);
   int64_t get_tenant_remain(uint64_t tenant_id);
   int64_t get_tenant_ctx_hold(const uint64_t tenant_id, const uint64_t ctx_id) const;
   void get_tenant_label_usage(uint64_t tenant_id, ObLabel &label, common::ObLabelItem &item) const;
@@ -138,6 +140,9 @@ public:
   int recycle_tenant_allocator(uint64_t tenant_id);
   int64_t get_max_used_tenant_id() { return max_used_tenant_id_; }
   void make_allocator_create_on_demand() { create_on_demand_ = true; }
+  bool is_tenant_allocator_exist(int64_t tenant_id);
+  void set_tenant_parent_limiter(int64_t tenant_id, ObResourceLimiter& parent);
+  ObResourceLimiter* get_tenant_parent_limiter(int64_t tenant_id);
   static bool is_inited_;
 private:
   using InvokeFunc = std::function<int (ObTenantMemoryMgr*)>;
@@ -157,7 +162,8 @@ public:
 #endif
 public:
   bool force_explict_500_malloc_ = false;
-  bool pl_leaked_times_ = 0;
+  int pl_leaked_times_ = 0;
+  int di_leaked_times_ = 0;
   bool force_malloc_for_absent_tenant_ = false;
 private:
   DISALLOW_COPY_AND_ASSIGN(ObMallocAllocator);
@@ -194,6 +200,12 @@ private:
     {
       for (int i = 0; i < BUCKET_COUNT; i++) {
         locks_[i].unlock();
+      }
+    }
+    void enable_record_stat(const bool need_record)
+    {
+      for (int64_t i = 0; i < BUCKET_COUNT; ++i) {
+        locks_[i].enable_record_stat(need_record);
       }
     }
   private:
@@ -258,7 +270,22 @@ public:
 
 extern int64_t mtl_id();
 
+class ObMallocHook
+{
+public:
+  static ObMallocHook &get_instance();
+  void *alloc(const int64_t size);
+  void free(void *ptr);
+private:
+  ObMallocHook();
+private:
+  char label_[AOBJECT_LABEL_SIZE + 1];
+  ObMemAttr attr_;
+  ObjectMgrV2 mgr_;
+};
+
 } // end of namespace lib
 } // end of namespace oceanbase
 
+extern void enable_malloc_v2(bool enable);
 #endif /* _OB_MALLOC_ALLOCATOR_H_ */

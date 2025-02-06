@@ -13,12 +13,7 @@
 
 #define USING_LOG_PREFIX SQL_ENG
 #include "sql/engine/expr/ob_expr_st_geomfromtext.h"
-#include "lib/geo/ob_wkt_parser.h"
-#include "observer/omt/ob_tenant_srs.h"
 #include "sql/engine/expr/ob_geo_expr_utils.h"
-#include "lib/geo/ob_geo_coordinate_range_visitor.h"
-#include "lib/geo/ob_geo_reverse_coordinate_visitor.h"
-#include "lib/geo/ob_geo_func_common.h"
 
 
 using namespace oceanbase::common;
@@ -64,8 +59,8 @@ int ObExprSTGeomFromText::calc_result_typeN(ObExprResType& type,
         if (ob_is_null(types_stack[i].get_type())) {
         } else if (!ob_is_string_type(types_stack[i].get_type())
                    || ObCharset::is_cs_nonascii(types_stack[i].get_collation_type())) {
-          ret = OB_ERR_GIS_INVALID_DATA;
-          LOG_USER_ERROR(OB_ERR_GIS_INVALID_DATA, get_name());
+          types_stack[i].set_calc_type(common::ObVarcharType);
+          types_stack[i].set_calc_collation_type(CS_TYPE_BINARY);
         }
       }
       // srid
@@ -95,7 +90,8 @@ int ObExprSTGeomFromText::eval_st_geomfromtext_common(const ObExpr &expr,
 {
   int ret = OB_SUCCESS;
   ObEvalCtx::TempAllocGuard tmp_alloc_g(ctx);
-  common::ObArenaAllocator &tmp_allocator = tmp_alloc_g.get_allocator();
+  uint64_t tenant_id = ObMultiModeExprHelper::get_tenant_id(ctx.exec_ctx_.get_my_session());
+  MultimodeAlloctor tmp_allocator(tmp_alloc_g.get_allocator(), expr.type_, tenant_id, ret, func_name);
   ObDatum *datum = NULL;
   int num_args = expr.arg_cnt_;
   bool is_null_result = false;
@@ -109,22 +105,24 @@ int ObExprSTGeomFromText::eval_st_geomfromtext_common(const ObExpr &expr,
   bool is_lat_long = false;
   bool is_geog = false;
   bool need_reverse = false;
+  bool is_3d_geo = false;
 
   // get wkt
-  if (OB_FAIL(expr.args_[0]->eval(ctx, datum))) {
+  if (OB_FAIL(tmp_allocator.eval_arg(expr.args_[0], ctx, datum))) {
     LOG_WARN("failed to eval first argument", K(ret));
   } else if (datum->is_null()) {
     is_null_result = true;
   } else {
     wkt = datum->get_string();
-    if (OB_FAIL(ObTextStringHelper::read_real_string_data(tmp_allocator, *datum,
+    if (OB_FAIL(ObTextStringHelper::read_real_string_data_with_copy(tmp_allocator, *datum,
         expr.args_[0]->datum_meta_, expr.args_[0]->obj_meta_.has_lob_header(), wkt))) {
       LOG_WARN("fail to get real string data", K(ret), K(wkt));
+    } else if (FALSE_IT(tmp_allocator.set_baseline_size(wkt.length()))) {
     }
   }
   // get srid
   if (!is_null_result && OB_SUCC(ret) && num_args > 1) {
-    if (OB_FAIL(expr.args_[1]->eval(ctx, datum))) {
+    if (OB_FAIL(tmp_allocator.eval_arg(expr.args_[1], ctx, datum))) {
       LOG_WARN("failed to eval second argument", K(ret));
     } else if (datum->is_null()) {
       is_null_result = true;
@@ -150,12 +148,12 @@ int ObExprSTGeomFromText::eval_st_geomfromtext_common(const ObExpr &expr,
   // get axis_order
   if (!is_null_result && OB_SUCC(ret) && num_args > 2 ) {
     ObString axis_str;
-    if (OB_FAIL(expr.args_[2]->eval(ctx, datum))) {
+    if (OB_FAIL(tmp_allocator.eval_arg(expr.args_[2], ctx, datum))) {
       LOG_WARN("failed to eval third argument", K(ret));
     } else if (datum->is_null()){
       is_null_result = true;
     } else if (FALSE_IT(axis_str = datum->get_string())) {
-    } else if (OB_FAIL(ObTextStringHelper::read_real_string_data(tmp_allocator, *datum,
+    } else if (OB_FAIL(ObTextStringHelper::read_real_string_data_with_copy(tmp_allocator, *datum,
               expr.args_[2]->datum_meta_, expr.args_[2]->obj_meta_.has_lob_header(), axis_str))) {
       LOG_WARN("fail to get real string data", K(ret), K(axis_str));
     } else if (OB_FAIL(ObGeoExprUtils::parse_axis_order(axis_str, func_name, axis_order))) {
@@ -189,15 +187,11 @@ int ObExprSTGeomFromText::eval_st_geomfromtext_common(const ObExpr &expr,
       LOG_WARN("failed to parse wkt", K(ret));
     } else if (OB_ISNULL(geo)) {
       ret = OB_ERR_UNEXPECTED;
-      LOG_WARN("unexpected null geo afer parse_wkt", K(ret), K(wkt));
+      LOG_WARN("unexpected null geo after parse_wkt", K(ret), K(wkt));
     } else {
-      if (is_geog && need_reverse) {
-        ObGeoReverseCoordinateVisitor rcoord_visitor;
-        if (OB_FAIL(geo->do_visit(rcoord_visitor))) {
-          ret = OB_ERR_GIS_INVALID_DATA;
-          LOG_USER_ERROR(OB_ERR_GIS_INVALID_DATA, func_name);
-          LOG_WARN("failed to reverse geometry coordinate", K(ret));
-        }
+      is_3d_geo = ObGeoTypeUtil::is_3d_geo_type(geo->type());
+      if (is_geog && need_reverse && OB_FAIL(ObGeoExprUtils::reverse_coordinate(geo, func_name))) {
+        LOG_WARN("failed to reverse geometry coordinate", K(ret));
       }
       if (is_geog && OB_SUCC(ret)) {
         if (OB_FAIL(ObGeoExprUtils::check_coordinate_range(srs_item, geo, func_name))) {

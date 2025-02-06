@@ -12,18 +12,7 @@
 
 #define USING_LOG_PREFIX RS
 #include "ob_primary_ls_service.h"
-#include "lib/profile/ob_trace_id.h"
-#include "share/ob_errno.h"
-#include "share/ls/ob_ls_creator.h" //ObLSCreator
-#include "share/ls/ob_ls_life_manager.h"//ObLSLifeAgentManager
-#include "share/ls/ob_ls_table_operator.h"//ls_opt
-#include "share/ob_share_util.h"//ObShareUtil
-#include "observer/ob_server_struct.h"//GCTX
-#include "storage/tx_storage/ob_ls_service.h"
-#include "storage/tx_storage/ob_ls_handle.h"  //ObLSHandle
-#include "logservice/palf/palf_base_info.h"//PalfBaseInfo
-#include "rootserver/ob_ls_service_helper.h"//ObTenantLSInfo
-#include "rootserver/ob_ls_recovery_reportor.h"//update_ls_recovery
+#include "src/storage/tx_storage/ob_ls_map.h"
 #include "rootserver/ob_tenant_info_loader.h"
 
 namespace oceanbase
@@ -229,7 +218,7 @@ int ObPrimaryLSService::set_tenant_dropping_status_(
   }
   return ret;
 }
-
+ERRSIM_POINT_DEF(ERRSIM_BEFORE_LS_STATUS_NORMAL);
 int ObPrimaryLSService::try_set_next_ls_status_(
     const common::ObIArray<ObLSStatusMachineParameter> &status_machine_array)
 {
@@ -269,7 +258,9 @@ int ObPrimaryLSService::try_set_next_ls_status_(
           }
         } else if (status_info.ls_is_created()) {
           //set ls to normal
-          if (OB_FAIL(ls_operator.update_ls_status(
+          if (OB_UNLIKELY(ERRSIM_BEFORE_LS_STATUS_NORMAL)) {
+            FLOG_INFO("ERRSIM_BEFORE_LS_STATUS_NORMAL, skip update ls status to normal", K(tenant_id_), K(status_info));
+          } else if (OB_FAIL(ls_operator.update_ls_status(
                   machine.ls_id_, ls_info.get_ls_status(), share::OB_LS_NORMAL, working_sw_status))) {
             LOG_WARN("failed to update ls status", KR(ret), K(machine));
           }

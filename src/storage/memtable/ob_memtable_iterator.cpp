@@ -14,19 +14,9 @@
 
 #include "storage/memtable/ob_memtable_iterator.h"
 
-#include "share/object/ob_obj_cast.h"
-#include "common/ob_common_types.h"
 
-#include "storage/memtable/ob_memtable_interface.h"
-#include "storage/memtable/ob_memtable_data.h"
-#include "storage/memtable/mvcc/ob_mvcc_engine.h"
-#include "storage/memtable/mvcc/ob_mvcc_row.h"
 #include "storage/memtable/ob_row_conflict_handler.h"
-#include "storage/tx/ob_trans_define.h"
-#include "ob_memtable_context.h"
 #include "ob_memtable.h"
-#include "storage/blocksstable/ob_datum_row.h"
-#include "storage/ob_tenant_tablet_stat_mgr.h"
 
 namespace oceanbase
 {
@@ -70,7 +60,7 @@ ObMemtableGetIterator::~ObMemtableGetIterator()
 int ObMemtableGetIterator::init(
     const storage::ObTableIterParam &param,
     storage::ObTableAccessContext &context,
-    ObIMemtable &memtable)
+    storage::ObIMemtable &memtable)
 {
   int ret = OB_SUCCESS;
   char *trans_info_ptr = nullptr;
@@ -173,8 +163,7 @@ ObMemtableScanIterator::ObMemtableScanIterator()
       memtable_(NULL),
       cur_range_(),
       row_iter_(),
-      row_(),
-      iter_flag_(0)
+      row_()
 {
   GARL_ADD(&active_resource_, "scan_iter");
 }
@@ -195,7 +184,7 @@ ObMemtableScanIterator::~ObMemtableScanIterator()
   while(ITER_END != scan_iter.get_next_row());
  */
 int ObMemtableScanIterator::init(
-    ObIMemtable* memtable,
+    storage::ObIMemtable* memtable,
     const storage::ObTableIterParam &param,
     storage::ObTableAccessContext &context)
 {
@@ -254,6 +243,7 @@ int ObMemtableScanIterator::prepare_scan()
   ObMemtableKey* start_key = NULL;
   ObMemtableKey* end_key = NULL;
   const ObColDescIArray *out_cols = nullptr;
+
   if (OB_UNLIKELY(!is_inited_)) {
     ret = OB_NOT_INIT;
   } else if (is_scan_start_) {
@@ -273,6 +263,9 @@ int ObMemtableScanIterator::prepare_scan()
   } else if (OB_FAIL(ObMemtableKey::build(
               end_key, *out_cols, &range.get_end_key().get_store_rowkey(), *context_->get_range_allocator()))) {
     TRANS_LOG(WARN, "end key build fail", K(param_->table_id_), K(range));
+  } else if (OB_ISNULL(memtable_)) {
+    ret = OB_ERR_UNEXPECTED;
+    TRANS_LOG(WARN, "fail to get memtable", K(ret));
   } else {
     ObMvccEngine& mvcc_engine = ((ObMemtable*)memtable_)->get_mvcc_engine();
     ObMvccScanRange mvcc_scan_range;
@@ -283,12 +276,12 @@ int ObMemtableScanIterator::prepare_scan()
     if (OB_FAIL(mvcc_engine.scan(context_->store_ctx_->mvcc_acc_ctx_,
                                  context_->query_flag_,
                                  mvcc_scan_range,
+                                 memtable_->get_ls_id(),
                                  row_iter_))) {
       TRANS_LOG(WARN, "mvcc engine scan fail", K(ret), K(mvcc_scan_range));
     } else if (OB_FAIL(bitmap_.init(read_info_->get_request_count(), read_info_->get_schema_rowkey_count()))) {
       TRANS_LOG(WARN, "Failed to init bitmap ", K(ret));
     } else {
-      iter_flag_ = 0;
       is_scan_start_ = true;
       TRANS_LOG(DEBUG, "mvcc engine scan success",
                 K_(memtable), K(mvcc_scan_range), KPC(context_->store_ctx_),
@@ -359,7 +352,7 @@ int ObMemtableScanIterator::inner_get_next_row(const ObDatumRow *&row)
     ret = OB_NOT_INIT;
   } else if (OB_FAIL(prepare_scan())) {
     TRANS_LOG(WARN, "prepare scan fail", K(ret));
-  } else if (OB_FAIL(row_iter_.get_next_row(key, value_iter, iter_flag_, lock_state))
+  } else if (OB_FAIL(row_iter_.get_next_row(key, value_iter, lock_state))
       || NULL == key || NULL == value_iter) {
     if (OB_TRY_LOCK_ROW_CONFLICT == ret || OB_TRANSACTION_SET_VIOLATION == ret) {
       if (!context_->query_flag_.is_for_foreign_key_check()) {
@@ -382,7 +375,7 @@ int ObMemtableScanIterator::inner_get_next_row(const ObDatumRow *&row)
       TRANS_LOG(WARN, "row_iter_ get_next_row fail", K(ret), KP(key), KP(value_iter));
     }
   } else {
-    TRANS_LOG(DEBUG, "chaser debug memtable next row", KPC(key), K(iter_flag_), K(bitmap_.get_nop_cnt()));
+    TRANS_LOG(DEBUG, "chaser debug memtable next row", KPC(key), K(bitmap_.get_nop_cnt()));
     const ObStoreRowkey *rowkey = NULL;
     int64_t row_scn = 0;
     key->get_rowkey(rowkey);
@@ -422,9 +415,6 @@ int ObMemtableScanIterator::inner_get_next_row(const ObDatumRow *&row)
       row = &row_;
     }
   }
-  if (OB_FAIL(ret)) {
-    iter_flag_ = 0;
-  }
   return ret;
 }
 
@@ -439,7 +429,6 @@ void ObMemtableScanIterator::reset()
   cur_range_.reset();
   row_.reset();
   bitmap_.reuse();
-  iter_flag_ = 0;
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -816,7 +805,7 @@ int ObMemtableMultiVersionScanIterator::init(
     } else if (OB_FAIL(row_.init(*context.allocator_, read_info_->get_request_count()))) {
       TRANS_LOG(WARN, "Failed to init datum row", K(ret));
     } else {
-      TRANS_LOG(INFO, "multi version scan iterator init succ", K(param.table_id_), K(range), KPC(read_info_), K(row_));
+      TRANS_LOG(TRACE, "multi version scan iterator init succ", K(param.table_id_), K(range), KPC(read_info_), K(row_));
       trans_version_col_idx_ = param.get_schema_rowkey_count();
       sql_sequence_col_idx_ = param.get_schema_rowkey_count() + 1;
       context_ = &context;
@@ -913,6 +902,7 @@ int ObMemtableMultiVersionScanIterator::inner_get_next_row(const ObDatumRow *&ro
       TRANS_LOG(TRACE, "after inner get next row", K(*row), K(scan_state_));
     }
   }
+
   return ret;
 }
 
@@ -995,8 +985,9 @@ int ObMemtableMultiVersionScanIterator::set_compacted_row_state(const bool add_s
   row_.row_flag_.fuse_flag(value_iter_->get_row_first_dml_flag());
   row_.mvcc_row_flag_.set_last_multi_version_row(value_iter_->is_multi_version_iter_end());
   if (add_shadow_row) {
-    row_.set_shadow_row();
-    row_.storage_datums_[sql_sequence_col_idx_].set_int(-INT64_MAX);
+    if (OB_FAIL(ObShadowRowUtil::make_shadow_row(sql_sequence_col_idx_, row_))) {
+      LOG_WARN("failed to make shadow row", K(ret), K(row_), K_(sql_sequence_col_idx));
+    }
   } else {
     // sql_sequence of committed data is 0
     row_.storage_datums_[sql_sequence_col_idx_].set_int(0);

@@ -22,6 +22,16 @@
 
 namespace oceanbase
 {
+namespace omt
+{
+  class ObTenantConfig;
+}
+
+namespace rootserver
+{
+  class ObAdminSetConfig;
+}
+
 namespace common
 {
 
@@ -50,6 +60,21 @@ enum ObConfigItemType{
   OB_CONF_ITEM_TYPE_MODE = 12,
 };
 
+static const char *const DATA_TYPE_UNKNOWN = "UNKNOWN";
+static const char *const DATA_TYPE_BOOL = "BOOL";
+static const char *const DATA_TYPE_INT = "INT";
+static const char *const DATA_TYPE_DOUBLE = "DOUBLE";
+static const char *const DATA_TYPE_STRING = "STRING";
+static const char *const DATA_TYPE_INTEGRAL = "INTEGRAL";
+static const char *const DATA_TYPE_STRLIST = "STR_LIST";
+static const char *const DATA_TYPE_INTLIST = "INT_LIST";
+static const char *const DATA_TYPE_TIME = "TIME";
+static const char *const DATA_TYPE_MOMENT = "MOMENT";
+static const char *const DATA_TYPE_CAPACITY = "CAPACITY";
+static const char *const DATA_TYPE_LOGARCHIVEOPT = "LOGARCHIVEOPT";
+static const char *const DATA_TYPE_VERSION = "VERSION";
+static const char *const DATA_TYPE_MODE = "MODE";
+
 enum class ObConfigRangeOpts {
   OB_CONF_RANGE_NONE,
   OB_CONF_RANGE_GREATER_THAN,
@@ -59,8 +84,16 @@ enum class ObConfigRangeOpts {
 };
 
 extern ObMemAttr g_config_mem_attr;
+class ObBaseConfig;
+class ObCommonConfig;
+class ObSystemConfig;
 class ObConfigItem
 {
+  friend class oceanbase::omt::ObTenantConfig;
+  friend class oceanbase::rootserver::ObAdminSetConfig;
+  friend class ObBaseConfig;
+  friend class ObCommonConfig;
+  friend class ObSystemConfig;
 public:
   ObConfigItem();
   virtual ~ObConfigItem();
@@ -85,40 +118,19 @@ public:
   }
   bool set_value(const common::ObString &string)
   {
-    int64_t pos = 0;
-    int ret = OB_SUCCESS;
-    ObLatchWGuard wr_guard(lock_, ObLatchIds::CONFIG_LOCK);
-    const char *ptr = value_ptr();
-    if (nullptr == ptr) {
-      value_valid_ = false;
-    } else if (OB_FAIL(databuff_printf(const_cast<char *>(ptr), value_len(), pos,
-                                       "%.*s", string.length(), string.ptr()))) {
-      value_valid_ = false;
-    } else {
-      value_valid_ = set(ptr);
-      if (inited_ && value_valid_) {
-        value_updated_ = true;
-      }
-    }
-    return value_valid_;
+#ifdef CONFIG_LOCK_EXEMPTION
+    return set_value_unsafe(string);
+#else
+    return set_value_with_lock(string);
+#endif
   }
   bool set_value(const char *str)
   {
-    int64_t pos = 0;
-    int ret = OB_SUCCESS;
-    ObLatchWGuard wr_guard(lock_, ObLatchIds::CONFIG_LOCK);
-    const char *ptr = value_ptr();
-    if (nullptr == ptr) {
-      value_valid_ = false;
-    } else if (OB_FAIL(databuff_printf(const_cast<char *>(ptr), value_len(), pos, "%s", str))) {
-      value_valid_ = false;
-    } else {
-      value_valid_ = set(str);
-      if (inited_ && value_valid_) {
-        value_updated_ = true;
-      }
-    }
-    return value_valid_;
+#ifdef CONFIG_LOCK_EXEMPTION
+    return set_value_unsafe(str);
+#else
+    return set_value_with_lock(str);
+#endif
   }
   // 重启生效的配置项，需要保存并dump到spfile中
   bool set_reboot_value(const char *str)
@@ -179,6 +191,11 @@ public:
     ObLatchRGuard rd_guard(const_cast<ObLatch&>(lock_), ObLatchIds::CONFIG_LOCK);
     return ObString::make_string(value_ptr()).case_compare(str);
   }
+  const char *default_str() const
+  {
+    ObLatchRGuard rd_guard(const_cast<ObLatch&>(lock_), ObLatchIds::CONFIG_LOCK);
+    return value_default_ptr();
+  }
   virtual const char *spfile_str() const
   {
     const char *ret = nullptr;
@@ -198,6 +215,7 @@ public:
   const char *scope() const { return attr_.get_scope(); }
   const char *source() const { return attr_.get_source(); }
   const char *edit_level() const { return attr_.get_edit_level(); }
+  const char *data_type() const;
   /*obs启动首次读库设置该值*/
   void initial_value_set() { initial_value_set_ = true; }
   bool is_initial_value_set() const { return initial_value_set_; }
@@ -217,6 +235,9 @@ public:
   {
     return attr_.is_static();
   }
+  virtual bool is_default(const char *value_str_,
+                          const char *value_default_str_,
+                          int64_t size) const;
   virtual bool operator >(const char *) const { return false; }
   virtual bool operator >=(const char *) const { return false; }
   virtual bool operator <(const char *) const { return false; }
@@ -225,15 +246,14 @@ public:
   virtual ObConfigItemType get_config_item_type() const {
     return ObConfigItemType::OB_CONF_ITEM_TYPE_UNKNOWN;
   }
-
 protected:
   //use current value to do input operation
   virtual bool set(const char *str) = 0;
   virtual const char *value_ptr() const = 0;
   virtual const char *value_reboot_ptr() const = 0;
+  virtual const char *value_default_ptr() const = 0;
   virtual uint64_t value_len() const = 0;
   virtual uint64_t value_reboot_len() const = 0;
-
   const ObConfigChecker *ck_;
   int64_t version_;
   int64_t dumped_version_;
@@ -245,6 +265,13 @@ protected:
   const char* info_str_;
   const char* range_str_;
   common::ObLatch lock_;
+private:
+  // without lock, only used inner
+  bool set_value_unsafe(const common::ObString &string);
+  // without lock, only used inner
+  bool set_value_unsafe(const char *str);
+  bool set_value_with_lock(const common::ObString &string);
+  bool set_value_with_lock(const char *str);
 private:
   ObParameterAttr attr_;
   DISALLOW_COPY_AND_ASSIGN(ObConfigItem);
@@ -297,7 +324,6 @@ protected:
   {
     return sizeof(value_reboot_str_);
   }
-
   static const int64_t MAX_INDEX_SIZE = 64;
   struct ObInnerConfigIntListItem
   {
@@ -317,7 +343,6 @@ protected:
   static const uint64_t VALUE_BUF_SIZE = 32 * MAX_INDEX_SIZE;
   char value_str_[VALUE_BUF_SIZE];
   char value_reboot_str_[VALUE_BUF_SIZE];
-
 private:
   DISALLOW_COPY_AND_ASSIGN(ObConfigIntListItem);
 };
@@ -366,7 +391,6 @@ public:
   virtual ObConfigItemType get_config_item_type() const {
     return ObConfigItemType::OB_CONF_ITEM_TYPE_STRLIST;
   }
-
 public:
   static const int64_t MAX_INDEX_SIZE = 64;
   static const uint64_t VALUE_BUF_SIZE = 65536UL;
@@ -442,7 +466,6 @@ protected:
 
   char value_str_[VALUE_BUF_SIZE];
   char value_reboot_str_[VALUE_BUF_SIZE];
-
 private:
   DISALLOW_COPY_AND_ASSIGN(ObConfigStrListItem);
 };
@@ -555,7 +578,6 @@ public:
     return ObConfigItemType::OB_CONF_ITEM_TYPE_DOUBLE;
   }
   virtual bool check() const override;
-
 protected:
   //use current value to do input operation
   bool set(const char *str);
@@ -636,13 +658,16 @@ public:
     return is_valid;
   }
 
+  virtual ObConfigItemType get_config_item_type() const {
+    return ObConfigItemType::OB_CONF_ITEM_TYPE_CAPACITY;
+  }
 protected:
   int64_t parse(const char *str, bool &valid) const;
   const char *value_ptr() const override
   {
     return value_str_;
   }
-  char const *value_reboot_ptr() const override
+  const char *value_reboot_ptr() const override
   {
     return value_reboot_str_;
   }
@@ -691,7 +716,9 @@ public:
                    const ObParameterAttr attr = ObParameterAttr());
   virtual ~ObConfigTimeItem() {}
   ObConfigTimeItem &operator = (int64_t value);
-
+  virtual ObConfigItemType get_config_item_type() const {
+    return ObConfigItemType::OB_CONF_ITEM_TYPE_TIME;
+  }
 protected:
   int64_t parse(const char *str, bool &valid) const;
   const char *value_ptr() const override
@@ -746,7 +773,9 @@ public:
                   const ObParameterAttr attr = ObParameterAttr());
   virtual ~ObConfigIntItem() {}
   ObConfigIntItem &operator = (int64_t value);
-
+  virtual ObConfigItemType get_config_item_type() const {
+    return ObConfigItemType::OB_CONF_ITEM_TYPE_INT;
+  }
 protected:
   int64_t parse(const char *str, bool &valid) const;
   const char *value_ptr() const override
@@ -811,7 +840,6 @@ public:
     }
     return *this;
   }
-
 public:
   struct ObInnerConfigMomentItem
   {
@@ -867,7 +895,6 @@ public:
   virtual ObConfigItemType get_config_item_type() const {
     return ObConfigItemType::OB_CONF_ITEM_TYPE_BOOL;
   }
-
 protected:
   //use current value to do input operation
   bool set(const char *str);
@@ -892,7 +919,6 @@ protected:
   static const uint64_t VALUE_BUF_SIZE = 8UL;
   char value_str_[VALUE_BUF_SIZE];
   char value_reboot_str_[VALUE_BUF_SIZE];
-
 private:
   bool value_;
   DISALLOW_COPY_AND_ASSIGN(ObConfigBoolItem);
@@ -942,7 +968,6 @@ public:
     }
     return *this;
   }
-
 protected:
   //use current value to do input operation
   bool set(const char *str) { UNUSED(str); return true; }
@@ -1158,7 +1183,6 @@ public:
     return ret;
   }
   ObConfigVersionItem &operator = (int64_t value);
-
 protected:
   virtual bool set(const char *str) override;
   virtual int64_t parse(const char *str, bool &valid) const override;
@@ -1235,6 +1259,7 @@ private:
   common::ObSArray<ObConfigPair> config_array_;
 };
 
+class ObIConfigMode;
 class ObConfigModeItem: public ObConfigItem
 {
 public:
@@ -1255,6 +1280,8 @@ public:
   virtual ObConfigItemType get_config_item_type() const {
     return ObConfigItemType::OB_CONF_ITEM_TYPE_MODE;
   }
+  int init_mode(ObIConfigMode &mode);
+  static const int64_t MAX_MODE_BYTES = 32;
 protected:
   //use current value to do input operation
   bool set(const char *str);
@@ -1274,9 +1301,9 @@ protected:
   {
     return sizeof(value_reboot_str_);
   }
+
 protected:
   static const uint64_t VALUE_BUF_SIZE = 65536UL;
-  static const int64_t MAX_MODE_BYTES = 32;
   ObConfigParser *parser_;
   char value_str_[VALUE_BUF_SIZE];
   char value_reboot_str_[VALUE_BUF_SIZE];
@@ -1284,6 +1311,16 @@ protected:
   uint8_t value_[MAX_MODE_BYTES];
 private:
   DISALLOW_COPY_AND_ASSIGN(ObConfigModeItem);
+};
+
+class ObIConfigMode
+{
+public:
+  ObIConfigMode() {}
+  ~ObIConfigMode() {}
+  virtual int set_value(const ObConfigModeItem &mode_item) = 0;
+private:
+  DISALLOW_COPY_AND_ASSIGN(ObIConfigMode);
 };
 
 } // namespace common

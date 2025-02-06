@@ -14,19 +14,9 @@
 
 #include "obmp_stmt_get_piece_data.h"
 
-#include "lib/worker.h"
-#include "lib/oblog/ob_log.h"
-#include "sql/ob_sql_context.h"
-#include "lib/stat/ob_session_stat.h"
-#include "rpc/ob_request.h"
-#include "share/schema/ob_schema_getter_guard.h"
-#include "sql/ob_sql_context.h"
-#include "sql/session/ob_sql_session_info.h"
 #include "sql/ob_sql.h"
-#include "observer/ob_req_time_service.h"
-#include "observer/mysql/obmp_utils.h"
 #include "observer/mysql/obmp_stmt_send_piece_data.h"
-#include "rpc/obmysql/packet/ompk_piece.h"
+#include "deps/oblib/src/rpc/obmysql/packet/ompk_piece.h"
 #include "observer/omt/ob_tenant.h"
 #include "sql/plan_cache/ob_ps_cache.h"
 
@@ -115,6 +105,7 @@ int ObMPStmtGetPieceData::process()
     THIS_WORKER.set_session(sess);
     ObSQLSessionInfo::LockGuard lock_guard(session.get_query_lock());
     session.set_current_trace_id(ObCurTraceId::get_trace_id());
+    session.init_use_rich_format();
     session.get_raw_audit_record().request_memory_used_ = 0;
     observer::ObProcessMallocCallback pmcb(0,
           session.get_raw_audit_record().request_memory_used_);
@@ -126,6 +117,8 @@ int ObMPStmtGetPieceData::process()
     if (OB_UNLIKELY(!session.is_valid())) {
       ret = OB_ERR_UNEXPECTED;
       LOG_ERROR("invalid session", K_(stmt_id), K(ret));
+    } else if (OB_FAIL(process_kill_client_session(session))) {
+      LOG_WARN("client session has been killed", K(ret));
     } else if (OB_UNLIKELY(session.is_zombie())) {
       ret = OB_ERR_SESSION_INTERRUPTED;
       LOG_WARN("session has been killed", K(session.get_session_state()), K_(stmt_id),
@@ -183,15 +176,9 @@ int ObMPStmtGetPieceData::process_get_piece_data_stmt(ObSQLSessionInfo &session)
   setup_wb(session);
 
   ObVirtualTableIteratorFactory vt_iter_factory(*gctx_.vt_iter_creator_);
-  ObSessionStatEstGuard stat_est_guard(get_conn()->tenant_->id(), session.get_sessid());
-  const bool enable_trace_log = lib::is_trace_log_enabled();
-  if (enable_trace_log) {
-    ObThreadLogLevelUtils::init(session.get_log_id_level_map());
-  }
+  ObThreadLogLevelUtils::init(session.get_log_id_level_map());
   ret = do_process(session);
-  if (enable_trace_log) {
-    ObThreadLogLevelUtils::clear();
-  }
+  ObThreadLogLevelUtils::clear();
 
   //对于tracelog的处理，不影响正常逻辑，错误码无须赋值给ret
   int tmp_ret = OB_SUCCESS;
@@ -205,22 +192,28 @@ int ObMPStmtGetPieceData::do_process(ObSQLSessionInfo &session)
 {
   int ret = OB_SUCCESS;
   ObAuditRecordData &audit_record = session.get_raw_audit_record();
+  ObExecutingSqlStatRecord sqlstat_record;
   audit_record.try_cnt_++;
   const bool enable_perf_event = lib::is_diagnose_info_enabled();
   const bool enable_sql_audit = GCONF.enable_sql_audit
                                 && session.get_local_ob_enable_sql_audit();
+  const bool enable_sqlstat = session.is_sqlstat_enabled();
   single_process_timestamp_ = ObTimeUtility::current_time();
   bool is_diagnostics_stmt = false;
 
   ObWaitEventStat total_wait_desc;
-  ObDiagnoseSessionInfo *di = ObDiagnoseSessionInfo::get_local_diagnose_info();
   {
     ObMaxWaitGuard max_wait_guard(enable_perf_event 
                                     ? &audit_record.exec_record_.max_wait_event_ 
-                                    : NULL, di);
-    ObTotalWaitGuard total_wait_guard(enable_perf_event ? &total_wait_desc : NULL, di);
+                                    : nullptr);
+    ObTotalWaitGuard total_wait_guard(enable_perf_event ? &total_wait_desc : nullptr);
     if (enable_perf_event) {
-      audit_record.exec_record_.record_start(di);
+      audit_record.exec_record_.record_start();
+    }
+    if (enable_sqlstat) {
+      sqlstat_record.record_sqlstat_start_value();
+      sqlstat_record.set_is_in_retry(session.get_is_in_retry());
+      session.sql_sess_record_sql_stat_start_value(sqlstat_record);
     }
     int64_t execution_id = 0;
     ObString sql = "get piece info";
@@ -245,7 +238,7 @@ int ObMPStmtGetPieceData::do_process(ObSQLSessionInfo &session)
       audit_record.exec_timestamp_.update_stage_time();
 
       if (enable_perf_event) {
-        audit_record.exec_record_.record_end(di);
+        audit_record.exec_record_.record_end();
         audit_record.exec_record_.wait_time_end_ = total_wait_desc.time_waited_;
         audit_record.exec_record_.wait_count_end_ = total_wait_desc.total_waits_;
         audit_record.update_event_stage_state();
@@ -253,6 +246,12 @@ int ObMPStmtGetPieceData::do_process(ObSQLSessionInfo &session)
         EVENT_INC(SQL_PS_PREPARE_COUNT);
         EVENT_ADD(SQL_PS_PREPARE_TIME, time_cost);
       }
+
+      if (enable_sqlstat) {
+        sqlstat_record.record_sqlstat_end_value();
+        sqlstat_record.move_to_sqlstat_cache(session, sql);
+      }
+
     }
   } // diagnose end
 
@@ -306,7 +305,7 @@ int ObMPStmtGetPieceData::response_result(ObSQLSessionInfo &session)
 {
   int ret = OB_SUCCESS;
   ObPieceBuffer piece_buf;
-  ObPieceCache *piece_cache = static_cast<ObPieceCache*>(session.get_piece_cache());
+  ObPieceCache *piece_cache = session.get_piece_cache();
   if (OB_ISNULL(piece_cache)) {
     // must be init in fetch
     ret = OB_ERR_UNEXPECTED;

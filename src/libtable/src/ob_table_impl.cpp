@@ -12,8 +12,6 @@
 
 #define USING_LOG_PREFIX CLIENT
 #include "ob_table_impl.h"
-#include "lib/string/ob_sql_string.h"
-#include "common/data_buffer.h"
 #include "share/ob_dml_sql_splicer.h"
 using namespace oceanbase;
 using namespace oceanbase::common;
@@ -719,7 +717,7 @@ int ObTableImpl::execute_query_and_mutate(const ObTableQueryAndMutate &query_and
   return ret;
 }
 
-int ObTableImpl::query_start(const ObTableQuery& query, const ObTableRequestOptions &request_options, ObTableQuerySyncResult *&result)
+int ObTableImpl::query_start(const ObTableQuery& query, const ObTableRequestOptions &request_options, ObTableQueryAsyncResult *&result)
 {
   int ret = OB_NOT_IMPLEMENT;
   UNUSED(query);
@@ -728,7 +726,7 @@ int ObTableImpl::query_start(const ObTableQuery& query, const ObTableRequestOpti
   return ret;
 }
 
-int ObTableImpl::query_next(const ObTableRequestOptions &request_options, ObTableQuerySyncResult *&result)
+int ObTableImpl::query_next(const ObTableRequestOptions &request_options, ObTableQueryAsyncResult *&result)
 {
   int ret = OB_NOT_IMPLEMENT;
   UNUSED(request_options);

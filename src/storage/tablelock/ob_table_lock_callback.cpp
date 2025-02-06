@@ -12,11 +12,8 @@
 
 #define USING_LOG_PREFIX TABLELOCK
 
-#include "storage/memtable/ob_memtable_context.h"
-#include "storage/tx/ob_trans_ctx.h"
-#include "storage/tablelock/ob_table_lock_callback.h"
+#include "ob_table_lock_callback.h"
 #include "storage/tablelock/ob_lock_memtable.h"
-#include "storage/tablelock/ob_mem_ctx_table_lock.h"
 #include "storage/tx/ob_trans_part_ctx.h"
 
 namespace oceanbase
@@ -30,34 +27,14 @@ namespace transaction
 namespace tablelock
 {
 
-bool ObOBJLockCallback::on_memtable(const memtable::ObIMemtable * const memtable)
+bool ObOBJLockCallback::on_memtable(const storage::ObIMemtable * const memtable)
 {
   return memtable == memtable_;
 }
 
-memtable::ObIMemtable* ObOBJLockCallback::get_memtable() const
+storage::ObIMemtable* ObOBJLockCallback::get_memtable() const
 {
   return memtable_;
-}
-
-int ObOBJLockCallback::log_sync(const SCN scn)
-{
-  int ret = OB_SUCCESS;
-  ObMemtableCtx *mem_ctx = static_cast<ObMemtableCtx*>(ctx_);
-  if (OB_UNLIKELY(SCN::max_scn() == scn)) {
-    ret = OB_INVALID_ARGUMENT;
-    LOG_ERROR("log ts should not be invalid", K(ret), K(scn), K(*this));
-  } else if (OB_ISNULL(mem_ctx) || OB_ISNULL(lock_op_)) {
-    ret = OB_ERR_UNEXPECTED;
-    LOG_ERROR("unexpected error", K(ret), K(mem_ctx), K_(lock_op));
-  } else {
-    // only version after 3.3 has table lock.
-    mem_ctx->update_max_submitted_seq_no(lock_op_->lock_op_.lock_seq_no_);
-    // TODO: yanyuan.cxf maybe need removed.
-    mem_ctx->set_log_synced(lock_op_, scn);
-    scn_ = scn;
-  }
-  return ret;
 }
 
 int ObOBJLockCallback::print_callback()

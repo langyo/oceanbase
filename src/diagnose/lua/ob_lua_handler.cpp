@@ -13,22 +13,13 @@
 #include "ob_lua_api.h"
 #include "ob_lua_handler.h"
 
-#include <algorithm>
-#include <functional>
 #include <thread>
 
 #include <sys/epoll.h>
-#include <sys/socket.h>
-#include <sys/un.h>
-#include <unistd.h>
 
-#include "lib/oblog/ob_log.h"
-#include "lib/atomic/ob_atomic.h"
 #include "lib/signal/ob_signal_utils.h"
 #include "lib/thread/ob_thread_name.h"
-#include "lib/thread/protected_stack_allocator.h"
 #include "lib/utility/utility.h"
-#include "lib/thread/thread.h"
 
 extern "C" {
   #include <lua.h>
@@ -76,22 +67,27 @@ void *ObLuaHandler::realloc_functor(void *userdata, void *ptr, size_t osize, siz
 int ObLuaHandler::process(const char* lua_code)
 {
   bool has_segv = false;
-  auto func = [&, lua_code] {
-    OB_LOG(INFO, "Lua code was executed", K(alloc_count_), K(free_count_), K(alloc_size_), K(free_size_));
-    lua_State* L = lua_newstate(realloc_functor, nullptr);
-    if (OB_ISNULL(L)) {
-      OB_LOG_RET(ERROR, OB_INVALID_ARGUMENT, "luastate is NULL");
-    } else {
-      luaL_openlibs(L);
-      APIRegister::get_instance().register_api(L);
-      try {
-        luaL_dostring(L, lua_code);
-      } catch (std::exception& e) {
-        _OB_LOG_RET(ERROR, OB_ERR_UNEXPECTED, "exception during lua code execution, reason %s", e.what());
+  struct LuaExec {
+    LuaExec(const char* lua_code) : code_(lua_code) {}
+    void operator()() {
+      lua_State* L = lua_newstate(realloc_functor, nullptr);
+      if (OB_ISNULL(L)) {
+        OB_LOG_RET(ERROR, OB_INVALID_ARGUMENT, "luastate is NULL");
+      } else {
+        luaL_openlibs(L);
+        APIRegister::get_instance().register_api(L);
+        try {
+          luaL_dostring(L, code_);
+        } catch (std::exception& e) {
+          _OB_LOG_RET(ERROR, OB_ERR_UNEXPECTED, "exception during lua code execution, reason %s", e.what());
+        }
+        lua_close(L);
       }
-      lua_close(L);
     }
+    const char* code_;
   };
+  OB_LOG(INFO, "Lua code was executed", K(alloc_count_), K(free_count_), K(alloc_size_), K(free_size_));
+  LuaExec func(lua_code);
   do_with_crash_restore(func, has_segv);
   if (has_segv) {
     _OB_LOG(INFO, "restore from sigsegv, coredump during lua code execution at %s\n", crash_restore_buffer);
@@ -99,12 +95,18 @@ int ObLuaHandler::process(const char* lua_code)
     OB_LOG(INFO, "Lua code was executed successfully", K(alloc_count_), K(free_count_), K(alloc_size_), K(free_size_));
   }
 
-  do_with_crash_restore([&] {
-    for (int64_t i = destructors_.size() - 1; i >= 0 ; --i) {
-      destructors_[i]();
+  struct LuaGC {
+    LuaGC(common::ObVector<Function>& destructors) : destructors_(destructors) {}
+    void operator()() {
+      for (int64_t i = destructors_.size() - 1; i >= 0 ; --i) {
+        destructors_[i]();
+      }
+      destructors_.clear();
     }
-    destructors_.clear();
-  }, has_segv);
+    common::ObVector<Function>& destructors_;
+  };
+  LuaGC gc(destructors_);
+  do_with_crash_restore(gc, has_segv);
   if (has_segv) {
     _OB_LOG(INFO, "restore from sigsegv, coredump during lua gc at %s\n", crash_restore_buffer);
   } else {
@@ -150,7 +152,11 @@ void ObUnixDomainListener::run1()
       while (OB_LIKELY(!has_set_stop())) {
         int conn_fd = -1;
         int ret = OB_SUCCESS;
-        int64_t event_cnt = ob_epoll_wait(epoll_fd, events, EPOLL_EVENT_BUFFER_SIZE, TIMEOUT);
+        int64_t event_cnt = 0;
+        {
+          common::ObBKGDSessInActiveGuard inactive_guard;
+          event_cnt = ob_epoll_wait(epoll_fd, events, EPOLL_EVENT_BUFFER_SIZE, TIMEOUT);
+        }
         if (event_cnt < 0) {
           if (EINTR == errno) {
             // timeout, ignore

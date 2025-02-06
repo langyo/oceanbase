@@ -14,13 +14,11 @@
 
 #define USING_LOG_PREFIX OBLOG_FETCHER
 
-#include "ob_log_fetcher_dead_pool.h"
 
+#include "ob_log_fetcher_dead_pool.h"
 #include "lib/oblog/ob_log_module.h"      // LOG_ERROR
-#include "lib/allocator/ob_mod_define.h"  // ObModIds
 
 #include "ob_log_fetcher_err_handler.h"   // IObLogErrHandler
-#include "ob_log_ls_fetch_mgr.h"          // IObLogLSFetchMgr
 #include "ob_log_fetcher.h"               // IObLogFetcher
 
 namespace oceanbase
@@ -112,6 +110,9 @@ int ObLogFetcherDeadPool::push(LSFetchCtx *task)
   return ret;
 }
 
+#ifdef ERRSIM
+ERRSIM_POINT_DEF(LOG_FETCHER_DEAD_POOL_START_FAIL);
+#endif
 int ObLogFetcherDeadPool::start()
 {
   int ret = OB_SUCCESS;
@@ -119,6 +120,10 @@ int ObLogFetcherDeadPool::start()
   if (OB_UNLIKELY(! inited_)) {
     LOG_ERROR("not inited");
     ret = OB_NOT_INIT;
+#ifdef ERRSIM
+  } else if (OB_FAIL(LOG_FETCHER_DEAD_POOL_START_FAIL)) {
+    LOG_ERROR("ERRSIM: LOG_FETCHER_DEAD_POOL_START_FAIL");
+#endif
   } else if (OB_FAIL(TG_SET_HANDLER_AND_START(tg_id_, *this))) {
     LOG_WARN("TG_SET_HANDLER_AND_START failed", KR(ret), K(tg_id_));
   } else {

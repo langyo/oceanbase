@@ -17,6 +17,7 @@
 #include "storage/ob_i_store.h"
 #include "storage/ob_relative_table.h"
 #include "share/scn.h"
+#include "storage/lob/ob_lob_tablet_dml.h"
 
 namespace oceanbase
 {
@@ -47,9 +48,9 @@ public:
     ObStoreCtx &store_ctx,
     const ObDMLBaseParam &dml_param,
     common::ObIAllocator &allocator,
-    common::ObIAllocator &lob_allocator,
-    const blocksstable::ObDmlFlag dml_flag);
-  ~ObDMLRunningCtx() {}
+    const blocksstable::ObDmlFlag dml_flag,
+    bool is_need_row_datum_utils = false);
+  ~ObDMLRunningCtx();
 
   int init(
       const common::ObIArray<uint64_t> *column_ids,
@@ -66,6 +67,8 @@ private:
       const share::schema::ObTableSchemaParam &schema,
       ObTabletHandle &tablet_handle,
       const share::SCN &read_snapshot);
+  int check_need_old_row_legitimacy();
+  int init_cmp_funcs();
   int check_schema_version(share::schema::ObMultiVersionSchemaService &schema_service,
                            const uint64_t tenant_id,
                            const uint64_t table_id,
@@ -82,17 +85,21 @@ public:
   ObStoreCtx &store_ctx_;
   const ObDMLBaseParam &dml_param_;
   common::ObIAllocator &allocator_;
-  common::ObIAllocator &lob_allocator_;
   const blocksstable::ObDmlFlag dml_flag_;
   ObRelativeTable relative_table_;
   const share::schema::ColumnMap *col_map_;
   const ObColDescIArray *col_descs_;
   const common::ObIArray<uint64_t> *column_ids_;
-  ObStoreRow tbl_row_;
+  blocksstable::ObDatumRow datum_row_;
+  blocksstable::ObStoreCmpFuncs cmp_funcs_;
   bool is_old_row_valid_for_lob_;
+  bool is_need_check_old_row_;
+  bool is_udf_;
+  ObLobTabletDmlCtx lob_dml_ctx_;
 
 private:
   share::schema::ObSchemaGetterGuard schema_guard_;
+  bool is_need_row_datum_utils_;
   bool is_inited_;
 };
 } // namespace storage

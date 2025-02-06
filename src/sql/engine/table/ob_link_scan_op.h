@@ -46,12 +46,13 @@ public:
   virtual void reset();
   int init_tz_info(const common::ObTimeZoneInfo *tz_info);
   bool need_read() const { return OB_ISNULL(result_); }
-  int inner_execute_link_stmt(const char *link_stmt);
+  int inner_execute_link_stmt(const ObString &link_stmt);
   int get_next(const ObNewRow *&row);
   void reset_inner();
 private:
   virtual void reset_dblink() override;
   void reset_result();
+  void reset_oci_connection();
   int init_conn_snapshot(bool &new_snapshot);
   int free_snapshot();
   bool need_tx(const ObSQLSessionInfo *my_session) const;
@@ -63,7 +64,6 @@ private:
   bool iter_end_;
   common::ObArenaAllocator row_allocator_;
   int64_t iterated_rows_;
-  ObSQLSessionInfo *tm_session_;
   common::sqlclient::ObISQLConnection *tm_rm_connection_;
   ObReverseLink *reverse_link_;
   sql::DblinkGetConnType conn_type_;

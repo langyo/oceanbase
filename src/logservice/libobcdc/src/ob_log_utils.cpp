@@ -20,10 +20,8 @@
 #include <net/if.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
-#include <linux/sockios.h>
 #include <sys/ioctl.h>
 #include <arpa/inet.h>
-#include <stdlib.h>                                     // strtoll
 #include <openssl/md5.h>                                // MD5
 
 #include "lib/string/ob_string.h"                       // ObString
@@ -34,7 +32,6 @@
 #include "share/schema/ob_table_schema.h"               // ObTableSchema
 #include "share/schema/ob_column_schema.h"              // ObColumnSchemaV2
 #include "share/schema/ob_schema_struct.h"
-#include "share/ob_get_compat_mode.h"
 #include "rpc/obmysql/ob_mysql_global.h"                // MYSQL_TYPE_*
 #include "ob_log_config.h"
 #include "ob_log_schema_cache_info.h"                   // ColumnSchemaInfo
@@ -189,57 +186,44 @@ int get_local_ip(ObString &local_ip)
   return ret;
 }
 
-RecordType get_record_type(const ObDmlFlag &dml_flag)
+RecordType get_record_type(const ObDmlRowFlag &dml_flag)
 {
   RecordType record_type = EUNKNOWN;
 
   // Set record type
   // Note: The REPLACE type is not handled, it does not exist in Redo
-  switch (dml_flag) {
-    case ObDmlFlag::DF_INSERT:
-      record_type = EINSERT;
-      break;
-
-    case ObDmlFlag::DF_UPDATE:
-      record_type = EUPDATE;
-      break;
-
-    case ObDmlFlag::DF_DELETE:
-      record_type = EDELETE;
-      break;
-
-    default:
-      record_type = EUNKNOWN;
-      break;
+  // Note: must judge is_delete_insert first because PUT is also is_insert, but it's flag_type is DF_TYPE_INSERT_DELETE
+  if (OB_UNLIKELY(dml_flag.is_delete_insert())) {
+    record_type = EPUT;
+  } else if (dml_flag.is_insert()) {
+    record_type = EINSERT;
+  } else if (dml_flag.is_update()) {
+    record_type = EUPDATE;
+  } else if (dml_flag.is_delete()) {
+    record_type = EDELETE;
+  }  else {
+    record_type = EUNKNOWN;
   }
 
   return record_type;
 }
 
-const char *print_dml_flag(const blocksstable::ObDmlFlag &dml_flag)
+const char *print_dml_flag(const blocksstable::ObDmlRowFlag &dml_flag)
 {
   const char *str = "UNKNOWN";
 
-  switch (dml_flag) {
-    case ObDmlFlag::DF_INSERT:
-      str = "insert";
-      break;
-
-    case ObDmlFlag::DF_UPDATE:
-      str = "update";
-      break;
-
-    case ObDmlFlag::DF_DELETE:
-      str = "delete";
-      break;
-
-    case ObDmlFlag::DF_LOCK:
-      str = "lock";
-      break;
-
-    default:
-      str = "UNKNOWN";
-      break;
+  if (dml_flag.is_delete_insert()) {
+    str = "put";
+  } else if (dml_flag.is_insert()) {
+    str = "insert";
+  } else if (dml_flag.is_update()) {
+    str = "update";
+  } else if (dml_flag.is_delete()) {
+    str = "delete";
+  } else if (dml_flag.is_lock()) {
+    str = "lock";
+  } else {
+    str = "UNKNOWN";
   }
 
   return str;
@@ -310,6 +294,10 @@ const char *print_record_type(int type)
 
     case EDML:
       str = "EDML";
+      break;
+
+    case EPUT:
+      str = "EPUT";
       break;
 
     default:
@@ -496,6 +484,18 @@ const char *get_ctype_string(int ctype)
       sc_type = "MYSQL_TYPE_OB_RAW";
       break;
 
+    case oceanbase::obmysql::MYSQL_TYPE_ROARINGBITMAP:
+      sc_type = "MYSQL_TYPE_ROARINGBITMAP";
+      break;
+
+    case oceanbase::obmysql::MYSQL_TYPE_OB_VECTOR:
+      sc_type = "MYSQL_TYPE_OB_VECTOR";
+      break;
+
+    case oceanbase::obmysql::MYSQL_TYPE_OB_ARRAY:
+      sc_type = "MYSQL_TYPE_OB_ARRAY";
+      break;
+
     case oceanbase::obmysql::MYSQL_TYPE_NEWDECIMAL:
       sc_type = "MYSQL_TYPE_NEWDECIMAL";
       break;
@@ -567,7 +567,15 @@ const char *get_ctype_string(int ctype)
       sc_type = "MYSQL_TYPE_OB_UROWID";
       break;
 
-    case oceanbase::obmysql::MYSQL_TYPE_ORA_XML:
+    case drcmsg_field_types::DRCMSG_TYPE_ORA_BINARY_FLOAT:
+      sc_type = "MYSQL_TYPE_ORA_BINARY_FLOAT";
+      break;
+
+    case drcmsg_field_types::DRCMSG_TYPE_ORA_BINARY_DOUBLE:
+      sc_type = "MYSQL_TYPE_ORA_BINARY_DOUBLE";
+      break;
+
+    case drcmsg_field_types::DRCMSG_TYPE_ORA_XML:
       sc_type = "MYSQL_TYPE_ORA_XML";
       break;
 
@@ -599,6 +607,14 @@ bool is_lob_type(const int ctype)
   return bool_ret;
 }
 
+bool is_string_type(const int ctype)
+{
+  return (ctype == oceanbase::obmysql::MYSQL_TYPE_VAR_STRING ||
+          ctype == oceanbase::obmysql::MYSQL_TYPE_STRING ||
+          ctype == oceanbase::obmysql::MYSQL_TYPE_OB_NCHAR ||
+          ctype == oceanbase::obmysql::MYSQL_TYPE_OB_NVARCHAR2);
+}
+
 bool is_json_type(const int ctype)
 {
   return (oceanbase::obmysql::MYSQL_TYPE_JSON == ctype);
@@ -611,7 +627,18 @@ bool is_geometry_type(const int ctype)
 
 bool is_xml_type(const int ctype)
 {
-  return (ctype == oceanbase::obmysql::MYSQL_TYPE_ORA_XML);
+  return (ctype == drcmsg_field_types::DRCMSG_TYPE_ORA_XML);
+}
+
+bool is_roaringbitmap_type(const int ctype)
+{
+  return (ctype == oceanbase::obmysql::MYSQL_TYPE_ROARINGBITMAP);
+}
+
+bool is_collection_type(const int ctype)
+{
+  return (ctype == oceanbase::obmysql::MYSQL_TYPE_OB_ARRAY
+          || ctype == oceanbase::obmysql::MYSQL_TYPE_OB_VECTOR);
 }
 
 double get_delay_sec(const int64_t tstamp_ns)
@@ -1312,38 +1339,6 @@ bool is_backup_mode()
   return (TCONF.enable_backup_mode != 0);
 }
 
-char *lbt_oblog()
-{
-  int ret = OB_SUCCESS;
-  //As lbt used when print error log, can not print error log
-  //in this function and functions called.
-  static __thread void *addrs[100];
-  static __thread char buf[LBT_BUFFER_LENGTH];
-  int size = ob_backtrace(addrs, 100);
-  char **res = backtrace_symbols(addrs, 100);
-  int64_t pos = 0;
-
-  for (int idx = 0; OB_SUCC(ret) && idx < size; ++idx) {
-    char *res_idx = res[idx];
-    int tmp_ret = OB_SUCCESS;
-
-    if (OB_NOT_NULL(res_idx)) {
-      if (OB_TMP_FAIL(databuff_printf(buf, LBT_BUFFER_LENGTH, pos, "%s", res_idx))) {
-        if (OB_SIZE_OVERFLOW != ret) {
-          LOG_WARN("atabuff_printf fail when lbt, ignore", KR(tmp_ret), K(idx), K(size), K(buf), K(pos),
-              K(LBT_BUFFER_LENGTH));
-        }
-      }
-    }
-  }
-
-  if (OB_NOT_NULL(res)) {
-    free(res);
-  }
-
-  return buf;
-}
-
 int get_br_value(IBinlogRecord *br,
     ObArray<BRColElem> &new_values)
 {
@@ -1542,7 +1537,7 @@ int sort_and_unique_lsn_arr(ObLogLSNArray &lsn_arr)
   palf::LSN prev_lsn;
 
   // sort lsn_arr
-  std::sort(lsn_arr.begin(), lsn_arr.end(), CDCLSNComparator());
+  lib::ob_sort(lsn_arr.begin(), lsn_arr.end(), CDCLSNComparator());
   // get duplicate misslog lsn idx
   for(int64_t idx = 0; OB_SUCC(ret) && idx < lsn_arr.count(); idx++) {
     palf::LSN &cur_lsn = lsn_arr[idx];
@@ -1651,6 +1646,22 @@ int read_from_file(const char *file_path, char *buf, const int64_t buf_len)
   if (OB_NOT_NULL(fp)) {
     fclose(fp);
     fp = NULL;
+  }
+
+  return ret;
+}
+
+int convert_to_compat_mode(const common::ObCompatibilityMode &compatible_mode,
+    lib::Worker::CompatMode &compat_mode)
+{
+  int ret = OB_SUCCESS;
+  if (common::ObCompatibilityMode::MYSQL_MODE == compatible_mode) {
+    compat_mode = lib::Worker::CompatMode::MYSQL;
+  } else if (common::ObCompatibilityMode::ORACLE_MODE == compatible_mode) {
+    compat_mode = lib::Worker::CompatMode::ORACLE;
+  } else {
+    ret = OB_INVALID_DATA;
+    LOG_ERROR("invalid compatible_mode", KR(ret), K(compatible_mode));
   }
 
   return ret;

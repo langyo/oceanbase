@@ -11,10 +11,7 @@
  */
 
 #include "ob_kvcache_map.h"
-#include "lib/allocator/ob_mod_define.h"
-#include "lib/ob_running_mode.h"
-#include "share/config/ob_server_config.h"
-#include "common/ob_clock_generator.h"
+#include "storage/blocksstable/ob_micro_block_cache.h"
 
 namespace oceanbase
 {
@@ -26,6 +23,7 @@ namespace common
 ObKVCacheMap::ObKVCacheMap()
     : is_inited_(false),
       bucket_allocator_(ObMemAttr(OB_SERVER_TENANT_ID, "CACHE_MAP_BKT", ObCtxIds::UNEXPECTED_IN_500)),
+      bucket_start_pos_(0),
       bucket_num_(0),
       bucket_size_(0),
       buckets_(NULL),
@@ -129,6 +127,39 @@ void ObKVCacheMap::destroy()
   is_inited_ = false;
 }
 
+int ObKVCacheMap::get_batch_data_block_cache_key(
+  const int bucket_count,
+  ObIArray<blocksstable::ObMicroBlockCacheKey> &keys)
+{
+  int ret = OB_SUCCESS;
+  const int64_t start_pos = bucket_start_pos_;
+  const int64_t end_pos = MIN(bucket_start_pos_ + bucket_count, bucket_num_);
+
+  ObKVCacheHazardGuard hazard_guard(global_hazard_station_);
+  if (OB_FAIL(hazard_guard.get_ret())) {
+    COMMON_LOG(WARN, "Fail to acquire hazard version", K(ret));
+  } else {
+    for (int64_t i = start_pos; i < end_pos && OB_SUCC(ret); i++) {
+      Node *iter = get_bucket_node(i);
+      char *buf = nullptr;
+      while (OB_SUCC(ret) && nullptr != iter) {
+        if (iter->inst_->is_block_cache_ && store_->add_handle_ref(iter->mb_handle_, iter->seq_num_)) {
+          if (OB_FAIL(keys.push_back(*static_cast<const blocksstable::ObMicroBlockCacheKey *>(iter->key_)))) {
+            COMMON_LOG(WARN, "Fail to push back micro data cachekey", K(ret), K(keys.count()), KPC(iter));
+          }
+          store_->de_handle_ref(iter->mb_handle_);
+        }
+        iter = iter->next_;
+      }
+    }
+    if (OB_SUCC(ret)) {
+      bucket_start_pos_ = end_pos >= bucket_num_ ? 0 : end_pos;
+    }
+  }
+
+  return ret;
+}
+
 int ObKVCacheMap::put(
   ObKVCacheInst &inst,
   const ObIKVCacheKey &key,
@@ -211,11 +242,6 @@ int ObKVCacheMap::put(
           if (NULL == iter) {
             // put new node
             (void) ATOMIC_AAF(&inst.status_.kv_cnt_, 1);
-          } else {
-            // overwrite
-            (void) ATOMIC_SAF(&iter->mb_handle_->kv_cnt_, 1);
-            (void) ATOMIC_SAF(&iter->mb_handle_->get_cnt_, iter->get_cnt_);
-
           }
           (void) ATOMIC_AAF(&mb_handle->kv_cnt_, 1);
           (void) ATOMIC_AAF(&mb_handle->get_cnt_, 1);
@@ -273,8 +299,8 @@ int ObKVCacheMap::get(
       iter = bucket_ptr;
       bool is_equal = false;
       while (NULL != iter && OB_SUCC(ret)) {
-        if (store_->add_handle_ref(iter->mb_handle_, iter->seq_num_)) {
-          if (hash_code == iter->hash_code_) {
+        if (hash_code == iter->hash_code_) {
+          if (store_->add_handle_ref(iter->mb_handle_, iter->seq_num_)) {
             if (OB_FAIL(key.equal(*iter->key_, is_equal))) {
               COMMON_LOG(WARN, "Failed to check kvcache key equal", K(ret));
             } else if (is_equal) {
@@ -290,43 +316,37 @@ int ObKVCacheMap::get(
 
               break;
             }
+            store_->de_handle_ref(iter->mb_handle_);
           }
-          store_->de_handle_ref(iter->mb_handle_);
         }
         iter = iter->next_;
       }
 
+      int tmp_ret = OB_SUCCESS;
       if (OB_FAIL(ret)) {
       } else if (NULL == iter) {
         ret = OB_ENTRY_NOT_EXIST;
+      } else if (OB_UNLIKELY(mb_handle_kv_cnt < 0)) {
+        tmp_ret = OB_ERR_UNEXPECTED;
+        COMMON_LOG(ERROR, "unexpected kv cnt", K(tmp_ret), K(mb_handle_kv_cnt), KPC(iter->mb_handle_));
       } else {
         if (LRU == mb_policy && need_modify_cache(iter_get_cnt, mb_get_cnt, mb_handle_kv_cnt)) {
-          int tmp_ret = OB_SUCCESS;
           ObBucketWLockGuard guard(bucket_lock_, bucket_pos);
           if (OB_TMP_FAIL(guard.get_ret())) {
             COMMON_LOG(WARN, "Fail to write lock bucket, ", K(tmp_ret), K(bucket_pos));
           } else {
+            Node *curr = get_bucket_node(bucket_pos);
+            bucket_ptr = curr;
             prev = NULL;
-            iter = bucket_ptr;
-            bool is_equal = false;
-            while (NULL != iter && OB_LIKELY(OB_SUCCESS == tmp_ret)) {
-              if (store_->add_handle_ref(iter->mb_handle_, iter->seq_num_)) {
-                if (hash_code == iter->hash_code_) {
-                  if (OB_TMP_FAIL(key.equal(*iter->key_, is_equal))) {
-                    COMMON_LOG(WARN, "Failed to check kvcache key equal", K(tmp_ret));
-                  } else if (is_equal) {
-                    ObKVMemBlockHandle *old_handle = iter->mb_handle_;
-                    if (OB_TMP_FAIL(internal_data_move(hazard_guard, prev, iter, bucket_ptr))) {
-                      COMMON_LOG(WARN, "Fail to move node to LFU block, ", K(tmp_ret));
-                    }
-                    store_->de_handle_ref(old_handle);
-                    break;
-                  }
+            while (nullptr != curr) {
+              if (curr == iter) {
+                if (OB_TMP_FAIL(internal_data_move(hazard_guard, prev, iter, bucket_ptr))) {
+                  COMMON_LOG(WARN, "Fail to move node to LFU block, ", K(tmp_ret));
                 }
-                store_->de_handle_ref(iter->mb_handle_);
+                break;
               }
-              prev = iter;
-              iter = iter->next_;
+              prev = curr;
+              curr = curr->next_;
             }
           }
         }
@@ -369,7 +389,7 @@ int ObKVCacheMap::erase(const int64_t cache_id, const ObIKVCacheKey &key)
           if (iter->inst_->node_allocator_.is_fragment(iter)) {
             internal_map_replace(hazard_guard, prev, iter, bucket_ptr);
           }
-          if (hash_code == iter->hash_code_ && OB_SUCC(key.equal(*iter->key_, is_equal) && is_equal)) {
+          if (hash_code == iter->hash_code_ && OB_SUCC(key.equal(*iter->key_, is_equal)) && is_equal) {
             (void) ATOMIC_SAF(&iter->mb_handle_->kv_cnt_, 1);
             (void) ATOMIC_SAF(&iter->mb_handle_->get_cnt_, iter->get_cnt_);
             (void) ATOMIC_SAF(&iter->inst_->status_.kv_cnt_, 1);
@@ -678,17 +698,24 @@ int ObKVCacheMap::replace_fragment_node(int64_t &start_pos, int64_t &replace_nod
         if (OB_FAIL(guard.get_ret())) {
           COMMON_LOG(WARN, "Fail to write lock bucket", K(ret), K(i));
         } else {
+          const int64_t start = common::ObClockGenerator::getClock();
           Node *&bucket_ptr = get_bucket_node(i);
           prev = NULL;
           iter = bucket_ptr;
+          int64_t node_count = 0;
           while (NULL != iter) {
             if (iter->inst_->node_allocator_.is_fragment(iter)) {
               internal_map_replace(hazard_guard, prev, iter, bucket_ptr);
-              ++replace_node_count;
+              ++node_count;
             }
             prev = iter;
             iter = iter->next_;
+            if (common::ObClockGenerator::getClock() - start >= 1 * 1000 * 1000) {
+                  COMMON_LOG(INFO, "replace map node cost too much time", K(node_count), K(replace_node_count), K(replace_start_pos), K(i));
+              break;
+            }
           }
+          replace_node_count += node_count;
         }
       }
     }  // hazard version guard

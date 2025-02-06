@@ -12,18 +12,7 @@
 
 #define USING_LOG_PREFIX SQL_RESV
 #include "sql/resolver/dml/ob_merge_resolver.h"
-#include "share/ob_define.h"
-#include "share/schema/ob_schema_struct.h"
-#include "share/schema/ob_column_schema.h"
-#include "share/ob_autoincrement_param.h"
-#include "common/sql_mode/ob_sql_mode_utils.h"
-#include "sql/resolver/dml/ob_select_stmt.h"
 #include "sql/resolver/dml/ob_select_resolver.h"
-#include "sql/resolver/expr/ob_raw_expr_info_extractor.h"
-#include "sql/session/ob_sql_session_info.h"
-#include "sql/resolver/ob_resolver_utils.h"
-#include "sql/resolver/dml/ob_insert_stmt.h"
-#include "sql/resolver/dml/ob_default_value_utils.h"
 #include "sql/optimizer/ob_optimizer_util.h"
 namespace oceanbase
 {
@@ -93,6 +82,8 @@ int ObMergeResolver::resolve(const ParseNode &parse_tree)
     LOG_WARN("fail to formalize stmt", K(ret));
   } else if (OB_FAIL(check_stmt_validity())) {
     LOG_WARN("failed to check subquery validity", K(ret));
+  } else {
+    LOG_DEBUG("check merge table info", K(merge_stmt->get_merge_table_info()));
   }
 
   return ret;
@@ -228,10 +219,10 @@ int ObMergeResolver::resolve_target_relation(const ParseNode *target_node)
   } else if (OB_ISNULL(table_item)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("table_item is NULL", K(ret));
-  } else if (OB_FAIL(resolve_foreign_key_constraint(table_item))) {
-    LOG_WARN("failed to resolve foreign key constraint", K(ret), K(table_item->ref_id_));
   } else if (OB_FAIL(column_namespace_checker_.add_reference_table(table_item))) {
     LOG_WARN("add reference table to column namespace checker failed", K(ret));
+  } else if (OB_FAIL(check_need_fired_trigger(table_item))) {
+    LOG_WARN("check has need fired trigger failed");
   } else if (table_item->is_generated_table()) {
     ObSelectStmt *ref_stmt = NULL;
     if (OB_ISNULL(ref_stmt = table_item->ref_query_)) {
@@ -260,6 +251,19 @@ int ObMergeResolver::resolve_target_relation(const ParseNode *target_node)
   } else {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("get unexpected table item type", K(table_item->type_), K(ret));
+  }
+  const ObTableSchema *table_schema = NULL;
+  if (OB_SUCC(ret)) {
+    if (OB_FAIL(schema_checker_->get_table_schema(session_info_->get_effective_tenant_id(),
+                                                  table_item->get_base_table_item().ref_id_,
+                                                  table_schema,
+                                                  table_item->is_link_table()))) {
+      LOG_WARN("failed to get table schema", K(ret));
+    } else if (table_schema->is_oracle_tmp_table() && !params_.is_prepare_stage_) {
+        session_info_->set_has_temp_table_flag();
+        set_is_oracle_tmp_table(true);
+        set_oracle_tmp_table_type(table_schema->is_oracle_sess_tmp_table() ? 0 : 1);
+    }
   }
   if (OB_SUCC(ret)) {
     if (OB_FAIL(generate_insert_table_info(*table_item, merge_stmt->get_merge_table_info()))) {
@@ -352,15 +356,27 @@ int ObMergeResolver::resolve_table(const ParseNode &parse_tree, TableItem *&tabl
           ret = OB_INVALID_ARGUMENT;
           LOG_WARN("invalid argument", K(ret));
         }
+        ObStmtScope scope_backup = current_scope_;
+        current_scope_ = T_FROM_SCOPE;
+        DEFER(current_scope_ = scope_backup);
         OZ (resolve_function_table_item(*table_node, table_item));
         break;
       }
-      case T_JSON_TABLE_EXPRESSION: {
+      case T_JSON_TABLE_EXPRESSION:
+      case T_XML_TABLE_EXPRESSION: {
         if (OB_ISNULL(session_info_)) {
           ret = OB_INVALID_ARGUMENT;
           LOG_WARN("invalid argument", K(ret));
         }
         OZ (resolve_json_table_item(*table_node, table_item));
+        break;
+      }
+      case T_RB_ITERATE_EXPRESSION: {
+        OZ (resolve_rb_iterate_item(*table_node, table_item));
+        break;
+      }
+      case T_UNNEST_EXPRESSION: {
+        OZ (resolve_unnest_item(*table_node, table_item));
         break;
       }
       default: {
@@ -442,6 +458,10 @@ int ObMergeResolver::resolve_generate_table(const ParseNode &table_node,
   select_resolver.set_is_sub_stmt(true);
   select_resolver.set_parent_namespace_resolver(parent_namespace_resolver_);
   select_resolver.set_current_view_level(current_view_level_);
+  ObString alias_name;
+  if (alias_node != NULL) {
+    alias_name.assign_ptr((char *)(alias_node->str_value_), static_cast<int32_t>(alias_node->str_len_));
+  }
   if (OB_ISNULL(merge_stmt)
       || OB_ISNULL(allocator_)) {
     ret = OB_ERR_UNEXPECTED;
@@ -456,11 +476,9 @@ int ObMergeResolver::resolve_generate_table(const ParseNode &table_node,
   } else if (OB_UNLIKELY(NULL == (item = merge_stmt->create_table_item(*allocator_)))) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
     LOG_ERROR("create table item failed", K(ret));
+  } else if (alias_name.empty() && OB_FAIL(merge_stmt->generate_anonymous_view_name(*allocator_, alias_name))) {
+    LOG_WARN("failed to generate view name", K(ret));
   } else {
-    ObString alias_name;
-    if (alias_node != NULL) {
-      alias_name.assign_ptr((char *)(alias_node->str_value_), static_cast<int32_t>(alias_node->str_len_));
-    }
     item->ref_query_ = child_stmt;
     item->table_id_ = generate_table_id();
     item->table_name_ = alias_name;
@@ -504,6 +522,7 @@ int ObMergeResolver::resolve_insert_clause(const ParseNode *insert_node)
   ParseNode *columns_node = NULL;
   ParseNode *value_node = NULL;
   ParseNode *where_node = NULL;
+  ObArray<uint64_t> label_se_columns;
   if (OB_ISNULL(merge_stmt)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("merge stmt is NULL", K(ret));
@@ -523,8 +542,14 @@ int ObMergeResolver::resolve_insert_clause(const ParseNode *insert_node)
     } else if (OB_FAIL(check_insert_clause())) {
       LOG_WARN("failed to check insert columns", K(ret));
     } else if (FALSE_IT(resolve_clause_ = INSERT_VALUE_CLAUSE)) {
-    } else if (OB_FAIL(resolve_insert_values(value_node, merge_stmt->get_merge_table_info()))) {
+    } else if (OB_FAIL(get_label_se_columns(merge_stmt->get_merge_table_info(), label_se_columns))) {
+      LOG_WARN("failed to get label se columns", K(ret));
+    } else if (OB_FAIL(resolve_insert_values(value_node, merge_stmt->get_merge_table_info(), label_se_columns))) {
       LOG_WARN("fail to resolve values", K(ret));
+    } else if (OB_FAIL(add_column_for_oracle_temp_table(merge_stmt->get_merge_table_info().ref_table_id_,
+                                                        merge_stmt->get_merge_table_info().table_id_,
+                                                        merge_stmt))) {
+      LOG_WARN("failed to add column for oracle temp table", K(ret));
     } else if (OB_FAIL(generate_column_conv_function(merge_stmt->get_merge_table_info()))) {
       LOG_WARN("failed to generate column conv function", K(ret));
     } else if (OB_FAIL(replace_gen_col_dependent_col(merge_stmt->get_merge_table_info()))) {
@@ -654,7 +679,9 @@ int ObMergeResolver::find_value_desc(ObInsertTableInfo &table_info,
     column_ref = table_info.values_vector_.at(idx);
     if (T_QUESTIONMARK == column_ref->get_expr_type()) {
       OZ (column_ref->add_flag(IS_TABLE_ASSIGN));
+      ObObj val = column_ref->get_result_type().get_param();
       OX (column_ref->set_result_type(value_desc.at(idx)->get_result_type()));
+      OX (column_ref->set_param(val));
     }
   }
   if (OB_ENTRY_NOT_EXIST == ret) {
@@ -738,8 +765,9 @@ int ObMergeResolver::add_assignment(ObIArray<ObTableAssignment> &assigns,
         // skip
       } else if (other.column_expr_ == assign.column_expr_) {
         ret = OB_ERR_FIELD_SPECIFIED_TWICE;
+        ObCStringHelper helper;
         LOG_USER_ERROR(OB_ERR_FIELD_SPECIFIED_TWICE,
-                       to_cstring(assign.column_expr_->get_column_name()));
+                       helper.convert(assign.column_expr_->get_column_name()));
       }
     }
   }

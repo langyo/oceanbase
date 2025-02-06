@@ -23,16 +23,13 @@
 
 namespace oceanbase
 {
-
-namespace observer
+namespace transaction
 {
-struct ObGlobalContext;
+class ObXAService;
 }
-
 namespace obrpc
 {
 static const int64_t OB_XA_RPC_TIMEOUT = 5000000;
-
 class ObXAPrepareRPCRequest
 {
   OB_UNIS_VERSION(1);
@@ -456,11 +453,12 @@ private:
   DISALLOW_COPY_AND_ASSIGN(ObXATerminateP);
 };
 
+void ob_xa_rpc_cb_statistics(uint64_t tenant_id_, int64_t start_ts_);
 template <ObRpcPacketCode PC>
 class ObXARPCCB : public ObXARpcProxy::AsyncCB<PC>
 {
 public:
-  ObXARPCCB() : is_inited_(false), cond_(NULL) {}
+  ObXARPCCB() : is_inited_(false), cond_(NULL), start_ts_(-1), tenant_id_(OB_INVALID_TENANT_ID) {}
   ~ObXARPCCB() {}
   int init(transaction::ObTransCond *cond)
   {
@@ -470,6 +468,8 @@ public:
       TRANS_LOG(WARN, "ObXARPCCB init twice", KR(ret));
     } else {
       cond_ = cond;
+      start_ts_ = ObTimeUtility::current_time();
+      tenant_id_ = MTL_ID();
       is_inited_ = true;
     }
     return ret;
@@ -477,6 +477,8 @@ public:
   void reset()
   {
     cond_ = NULL;
+    start_ts_ = -1;
+    tenant_id_ = OB_INVALID_TENANT_ID;
     is_inited_ = false;
   }
   void set_args(const typename ObXARpcProxy::AsyncCB<PC>::Request &args)
@@ -490,6 +492,8 @@ public:
     if (NULL != buf) {
       newcb = new (buf) ObXARPCCB<PC>();
       newcb->cond_ = cond_;
+      newcb->start_ts_ = start_ts_;
+      newcb->tenant_id_ = tenant_id_;
       newcb->is_inited_ = true;
     }
     return newcb;
@@ -511,6 +515,7 @@ public:
         cond_->notify(result);
       }
     }
+    statistics();
     return OB_SUCCESS;
   }
   void on_timeout()
@@ -523,16 +528,24 @@ public:
     if (OB_NOT_NULL(cond_)) {
       cond_->notify(ret);
     }
+    statistics();
+  }
+  void statistics()
+  {
+    ob_xa_rpc_cb_statistics(tenant_id_, start_ts_);
   }
 private:
   bool is_inited_;
   transaction::ObTransCond *cond_;
+  int64_t start_ts_;
+  uint64_t tenant_id_;
 };
 
 class ObXACommitRPCCB : public ObXARpcProxy::AsyncCB<OB_XA_COMMIT>
 {
 public:
-  ObXACommitRPCCB() : is_inited_(false), cond_(NULL), has_tx_level_temp_table_(NULL) {}
+  ObXACommitRPCCB() : is_inited_(false), cond_(NULL), has_tx_level_temp_table_(NULL),
+                      start_ts_(-1), tenant_id_(OB_INVALID_TENANT_ID) {}
   ~ObXACommitRPCCB() {}
   int init(transaction::ObTransCond *cond, bool *has_tx_level_temp_table)
   {
@@ -543,6 +556,8 @@ public:
     } else {
       has_tx_level_temp_table_ = has_tx_level_temp_table;
       cond_ = cond;
+      start_ts_ = ObTimeUtility::current_time();
+      tenant_id_ = MTL_ID();
       is_inited_ = true;
     }
     return ret;
@@ -551,6 +566,8 @@ public:
   {
     has_tx_level_temp_table_ = NULL;
     cond_ = NULL;
+    start_ts_ = -1;
+    tenant_id_ = OB_INVALID_TENANT_ID;
     is_inited_ = false;
   }
   void set_args(const typename ObXARpcProxy::AsyncCB<OB_XA_COMMIT>::Request &args)
@@ -565,6 +582,8 @@ public:
       newcb = new (buf) ObXACommitRPCCB();
       newcb->has_tx_level_temp_table_ = has_tx_level_temp_table_;
       newcb->cond_ = cond_;
+      newcb->start_ts_ = start_ts_;
+      newcb->tenant_id_ = tenant_id_;
       newcb->is_inited_ = true;
     }
     return newcb;
@@ -589,6 +608,7 @@ public:
         cond_->notify(result.status_);
       }
     }
+    statistics();
     return OB_SUCCESS;
   }
   void on_timeout()
@@ -601,11 +621,15 @@ public:
     if (OB_NOT_NULL(cond_)) {
       cond_->notify(ret);
     }
+    statistics();
   }
+  void statistics();
 private:
   bool is_inited_;
   transaction::ObTransCond *cond_;
   bool *has_tx_level_temp_table_;
+  int64_t start_ts_;
+  uint64_t tenant_id_;
 };
 
 }//obrpc

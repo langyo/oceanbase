@@ -62,7 +62,7 @@ public:
     int64_t total_time = 0;
     const char* event_name = NULL;
     const ObString nls_format;
-    for (int64_t i = 0; i < this->next_idx_; ++i) {
+    for (int64_t i = 0; i < MIN(EVENT_COUNT, this->next_idx_); ++i) {
       const ObTraceEvent &ev = this->events_[i];
       event_name = NAME(ev.id_);
       if (prev_ts == 0) {
@@ -91,27 +91,31 @@ public:
     }
     return pos;
   }
-  void check_lock()
+  void check_lock() const
   {
     if (need_lock_) {
       (void)lock_.lock();
     }
   }
-  void check_unlock()
+  void check_unlock() const
   {
     if (need_lock_) {
       (void)lock_.unlock();
     }
   }
 private:
-  lib::ObMutex lock_;
+  mutable lib::ObMutex lock_;
   bool need_lock_;
 };
 
 // template <EVENT_COUNT, BUF_SIZE>
 // EVENT_COUNT is generally sufficient
 // After BUF_SIZE exceeds the defined value, the kv pair in REC_TRACE_EXT will not be printed
+#ifdef ENABLE_DEBUG_LOG
+typedef ObTraceEventRecorderBase<189, 2400> ObTraceEventRecorder;
+#else
 typedef ObTraceEventRecorderBase<189, 1200> ObTraceEventRecorder;
+#endif
 
 inline ObTraceEventRecorder *get_trace_recorder()
 {

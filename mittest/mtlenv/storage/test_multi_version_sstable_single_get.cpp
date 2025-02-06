@@ -1,3 +1,6 @@
+// owner: dengzhi.ldz
+// owner group: storage
+
 /**
  * Copyright (c) 2021 OceanBase
  * OceanBase CE is licensed under Mulan PubL v2.
@@ -10,15 +13,10 @@
  * See the Mulan PubL v2 for more details.
  */
 
-#include <gtest/gtest.h>
 #define private public
 #define protected public
-#include "storage/init_basic_struct.h"
 #include "storage/test_tablet_helper.h"
-#include "storage/mock_access_service.h"
-#include "storage/mock_ls_tablet_service.h"
 #include "storage/blocksstable/ob_multi_version_sstable_test.h"
-#include "share/scn.h"
 
 namespace oceanbase
 {
@@ -95,6 +93,7 @@ void TestMultiVersionSSTableSingleGet::prepare_query_param(
   iter_param_.vectorized_enabled_ = false;
   ASSERT_EQ(OB_SUCCESS,
             store_ctx_.init_for_read(ls_id,
+                                     iter_param_.tablet_id_,
                                      INT64_MAX, // query_expire_ts
                                      -1, // lock_timeout_us
                                      share::SCN::max_scn()));

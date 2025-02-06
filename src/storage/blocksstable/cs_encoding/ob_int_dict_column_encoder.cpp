@@ -13,12 +13,6 @@
 #define USING_LOG_PREFIX STORAGE
 
 #include "ob_int_dict_column_encoder.h"
-#include "ob_cs_encoding_util.h"
-#include "ob_string_stream_encoder.h"
-#include "ob_integer_stream_encoder.h"
-#include "ob_column_datum_iter.h"
-#include "storage/blocksstable/ob_imicro_block_writer.h"
-#include "lib/codec/ob_codecs.h"
 
 namespace oceanbase
 {
@@ -38,7 +32,7 @@ int ObIntDictColumnEncoder::init(
     LOG_WARN("init base column encoder failed", K(ret), K(ctx), K(column_index), K(row_count));
   } else {
     column_header_.type_ = type_;
-    dict_encoding_meta_.distinct_val_cnt_ = ctx.ht_->size();
+    dict_encoding_meta_.distinct_val_cnt_ = ctx.ht_->distinct_val_cnt();
     dict_encoding_meta_.ref_row_cnt_ = row_count_;
     if (ctx_->null_cnt_ > 0) {
       dict_encoding_meta_.set_has_null();
@@ -80,7 +74,8 @@ int ObIntDictColumnEncoder::build_integer_dict_encoder_ctx_()
       const int64_t int_min = static_cast<int64_t>(ctx_->integer_min_);
       const int64_t int_max = static_cast<int64_t>(ctx_->integer_max_);
       if (OB_FAIL(integer_dict_enc_ctx_.build_signed_stream_meta(int_min, int_max, is_replace_null,
-          null_replaced_value, precision_width_size_, is_force_raw_, dict_integer_range_))) {
+          null_replaced_value, precision_width_size_, is_force_raw_,
+          ctx_->encoding_ctx_->major_working_cluster_version_, dict_integer_range_))) {
         LOG_WARN("fail to build_signed_stream_meta", K(ret));
       }
     } else if (ObUIntSC == store_class_) {
@@ -88,7 +83,7 @@ int ObIntDictColumnEncoder::build_integer_dict_encoder_ctx_()
       const uint64_t uint_max = static_cast<uint64_t>(ctx_->integer_max_);
       if (OB_FAIL(integer_dict_enc_ctx_.build_unsigned_stream_meta(
           uint_min, uint_max, is_replace_null, null_replaced_value,
-          is_force_raw_, dict_integer_range_))) {
+          is_force_raw_, ctx_->encoding_ctx_->major_working_cluster_version_, dict_integer_range_))) {
         LOG_WARN("fail to build_unsigned_stream_meta", K(ret));
       }
     } else {
@@ -145,15 +140,15 @@ int ObIntDictColumnEncoder::sort_dict_()
     uint64_t min = 0;
     uint64_t max = 0;
     if (ObIntTC == tc || ObUIntTC == tc) {
-      min = ctx_->ht_->begin()->header_->datum_->get_uint64();
-      max = (ctx_->ht_->end() - 1)->header_->datum_->get_uint64();
+      min = ctx_->ht_->begin()->datum_.get_uint64();
+      max = (ctx_->ht_->end() - 1)->datum_.get_uint64();
     } else if (ObDecimalIntSC == store_class_) {
       if (precision_width_size_ == sizeof(uint32_t)) {
-        min = ctx_->ht_->begin()->header_->datum_->get_decimal_int32();
-        max = (ctx_->ht_->end() - 1)->header_->datum_->get_decimal_int32();
+        min = ctx_->ht_->begin()->datum_.get_decimal_int32();
+        max = (ctx_->ht_->end() - 1)->datum_.get_decimal_int32();
       } else {
-        min = ctx_->ht_->begin()->header_->datum_->get_decimal_int64();
-        max = (ctx_->ht_->end() - 1)->header_->datum_->get_decimal_int64();
+        min = ctx_->ht_->begin()->datum_.get_decimal_int64();
+        max = (ctx_->ht_->end() - 1)->datum_.get_decimal_int64();
       }
     }
     if (ObIntTC == tc || ObUIntTC == tc || ObDecimalIntSC == store_class_) {

@@ -13,47 +13,12 @@
 
 #include "ob_integer_stream_decoder.h"
 #include "ob_cs_decoding_util.h"
-#include "lib/wide_integer/ob_wide_integer.h"
 
 namespace oceanbase
 {
 namespace blocksstable
 {
 using namespace oceanbase::common;
-
-#define DECIMAL_DATUM_ASSIGN(datum, precision_width, value)                \
-  switch(precision_width) {                                                \
-    case ObIntegerStream::UintWidth::UW_4_BYTE : {                         \
-      *(int32_t*)datum.ptr_ = (int64_t)(value);                            \
-      datum.pack_ = sizeof(int32_t);                                       \
-      break;                                                               \
-    }                                                                      \
-    case ObIntegerStream::UintWidth::UW_8_BYTE : {                         \
-      *(int64_t*)datum.ptr_ = (int64_t)(value);                            \
-      datum.pack_ = sizeof(int64_t);                                       \
-      break;                                                               \
-    }                                                                      \
-    case ObIntegerStream::UintWidth::UW_16_BYTE : {                        \
-      *(int128_t*)datum.ptr_ = (int64_t)(value);                           \
-      datum.pack_ = sizeof(int128_t);                                      \
-      break;                                                               \
-    }                                                                      \
-    case ObIntegerStream::UintWidth::UW_32_BYTE : {                        \
-      *(int256_t*)datum.ptr_ = (int64_t)(value);                           \
-      datum.pack_ = sizeof(int256_t);                                      \
-      break;                                                               \
-    }                                                                      \
-    case ObIntegerStream::UintWidth::UW_64_BYTE : {                        \
-      *(int512_t*)datum.ptr_ = (int64_t)(value);                           \
-      datum.pack_ = sizeof(int512_t);                                      \
-      break;                                                               \
-    }                                                                      \
-    default : {                                                            \
-      ob_abort();                                                          \
-      break;                                                               \
-    }                                                                      \
-  }
-
 
 //=================================ConvertUintToDatum_T=====================================//
 ObMultiDimArray_T<ConvertUnitToDatumFunc,
@@ -74,7 +39,7 @@ struct ConvertUintToDatum_T
       const char *data,
       const ObIntegerStreamDecoderCtx &ctx,
       const char *ref_data,
-      const int64_t *row_ids,
+      const int32_t *row_ids,
       const int64_t row_cap,
       common::ObDatum *datums)
   {
@@ -97,7 +62,7 @@ struct ConvertUintToDatum_T<store_len_V,
       const char *data,
       const ObIntegerStreamDecoderCtx &ctx,
       const char *ref_data,
-      const int64_t *row_ids,
+      const int32_t *row_ids,
       const int64_t row_cap,
       common::ObDatum *datums)
   {
@@ -119,7 +84,7 @@ struct ConvertUintToDatum_T<store_len_V,
       } else {
         value = store_uint_arr[ref] + base;
         if (is_decimal_V) {
-          DECIMAL_DATUM_ASSIGN(datum, ctx.meta_.precision_width_tag(), value);
+          ObIntegerStreamDecoder::decimal_datum_assign(datum, ctx.meta_.precision_width_tag(), value, false);
         } else {
           *(DatumIntType*)(datum.ptr_) = value;
           // ignore flag_ in ObDatum, all flags not used in cs encoding
@@ -143,7 +108,7 @@ struct ConvertUintToDatum_T<store_len_V,
       const char *data,
       const ObIntegerStreamDecoderCtx &ctx,
       const char *ref_data,
-      const int64_t *row_ids,
+      const int32_t *row_ids,
       const int64_t row_cap,
       common::ObDatum *datums)
   {
@@ -159,7 +124,7 @@ struct ConvertUintToDatum_T<store_len_V,
       common::ObDatum &datum = datums[i];
       value = store_uint_arr[ref_arr[row_ids[i]]] + base;
       if (is_decimal_V) {
-        DECIMAL_DATUM_ASSIGN(datum, ctx.meta_.precision_width_tag(), value);
+        ObIntegerStreamDecoder::decimal_datum_assign(datum, ctx.meta_.precision_width_tag(), value, false);
       } else {
         *(DatumIntType*)(datum.ptr_) = value;
         // ignore flag_ in ObDatum, all flags not used in cs encoding
@@ -181,7 +146,7 @@ struct ConvertUintToDatum_T<store_len_V,
       const char *data,
       const ObIntegerStreamDecoderCtx &ctx,
       const char *ref_data,
-      const int64_t *row_ids,
+      const int32_t *row_ids,
       const int64_t row_cap,
       common::ObDatum *datums)
   {
@@ -200,7 +165,7 @@ struct ConvertUintToDatum_T<store_len_V,
       } else {
         value = store_uint_arr[datum.pack_] + base;
         if (is_decimal_V) {
-          DECIMAL_DATUM_ASSIGN(datum, ctx.meta_.precision_width_tag(), value);
+          ObIntegerStreamDecoder::decimal_datum_assign(datum, ctx.meta_.precision_width_tag(), value, false);
         } else {
           *(DatumIntType*)(datum.ptr_) = store_uint_arr[datum.pack_] + base;
           // ignore flag_ in ObDatum, all flags not used in cs encoding
@@ -224,7 +189,7 @@ struct ConvertUintToDatum_T<store_len_V,
       const char *data,
       const ObIntegerStreamDecoderCtx &ctx,
       const char *ref_data,
-      const int64_t *row_ids,
+      const int32_t *row_ids,
       const int64_t row_cap,
       common::ObDatum *datums)
   {
@@ -238,7 +203,7 @@ struct ConvertUintToDatum_T<store_len_V,
       common::ObDatum &datum = datums[i];
       value = store_uint_arr[datum.pack_] + base;
       if (is_decimal_V) {
-        DECIMAL_DATUM_ASSIGN(datum, ctx.meta_.precision_width_tag(), value);
+        ObIntegerStreamDecoder::decimal_datum_assign(datum, ctx.meta_.precision_width_tag(), value, false);
       } else {
         // row_id is stored int datum.pack_
         *(DatumIntType*)(datum.ptr_) = value;
@@ -261,7 +226,7 @@ struct ConvertUintToDatum_T<store_len_V,
       const char *data,
       const ObIntegerStreamDecoderCtx &ctx,
       const char *ref_data,
-      const int64_t *row_ids,
+      const int32_t *row_ids,
       const int64_t row_cap,
       common::ObDatum *datums)
   {
@@ -280,7 +245,7 @@ struct ConvertUintToDatum_T<store_len_V,
       } else {
         value = store_uint_arr[row_id] + base;
         if (is_decimal_V) {
-          DECIMAL_DATUM_ASSIGN(datum, ctx.meta_.precision_width_tag(), value);
+          ObIntegerStreamDecoder::decimal_datum_assign(datum, ctx.meta_.precision_width_tag(), value, false);
         } else {
           *(DatumIntType*)(datum.ptr_) = value;
           // ignore flag_ in ObDatum, all flags not used in cs encoding
@@ -303,7 +268,7 @@ struct ConvertUintToDatum_T<store_len_V,
       const char *data,
       const ObIntegerStreamDecoderCtx &ctx,
       const char *ref_data,
-      const int64_t *row_ids,
+      const int32_t *row_ids,
       const int64_t row_cap,
       common::ObDatum *datums)
   {
@@ -322,7 +287,7 @@ struct ConvertUintToDatum_T<store_len_V,
       if (value == base_col_ctx.null_replaced_value_) {
         datum.set_null();
       } else if (is_decimal_V) {
-        DECIMAL_DATUM_ASSIGN(datum, ctx.meta_.precision_width_tag(), value);
+        ObIntegerStreamDecoder::decimal_datum_assign(datum, ctx.meta_.precision_width_tag(), value, false);
       } else {
         *(DatumIntType*)(datum.ptr_) = value;
         // ignore flag_ in ObDatum, all flags not used in cs encoding
@@ -344,7 +309,7 @@ struct ConvertUintToDatum_T<store_len_V,
       const char *data,
       const ObIntegerStreamDecoderCtx &ctx,
       const char *ref_data,
-      const int64_t *row_ids,
+      const int32_t *row_ids,
       const int64_t row_cap,
       common::ObDatum *datums)
   {
@@ -357,7 +322,7 @@ struct ConvertUintToDatum_T<store_len_V,
       common::ObDatum &datum = datums[i];
       value = store_uint_arr[row_ids[i]] + base;
       if (is_decimal_V) {
-        DECIMAL_DATUM_ASSIGN(datum, ctx.meta_.precision_width_tag(), value);
+        ObIntegerStreamDecoder::decimal_datum_assign(datum, ctx.meta_.precision_width_tag(), value, false);
       } else {
         *(DatumIntType*)(datum.ptr_) = value;
         // ignore flag_ in ObDatum, all flags not used in cs encoding

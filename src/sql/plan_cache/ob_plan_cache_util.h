@@ -307,10 +307,12 @@ struct ObPCParamEqualInfo
   ObPCParamEqualInfo():use_abs_cmp_(false) {}
   inline bool operator==(const ObPCParamEqualInfo &other) const
   {
-    bool cmp_ret = first_param_idx_ == other.first_param_idx_ &&
-                   second_param_idx_ == other.second_param_idx_ &&
-                   use_abs_cmp_ == other.use_abs_cmp_;
-
+    bool cmp_ret = (first_param_idx_ == other.first_param_idx_ &&
+                    second_param_idx_ == other.second_param_idx_ &&
+                    use_abs_cmp_ == other.use_abs_cmp_) ||
+                   (second_param_idx_ == other.first_param_idx_ &&
+                    first_param_idx_ == other.second_param_idx_ &&
+                    use_abs_cmp_ == other.use_abs_cmp_);
     return cmp_ret;
   }
 };
@@ -559,6 +561,7 @@ struct ObPlanStat
   uint64_t  db_id_;
   common::ObString constructed_sql_;
   common::ObString sql_id_;
+  common::ObString format_sql_id_;
   ObEvolutionStat evolution_stat_; //baseline相关统计信息
   //******** for spm end ******
   // ***** for acs
@@ -618,6 +621,8 @@ struct ObPlanStat
   common::ObString outline_data_;
   common::ObString hints_info_;
   bool hints_all_worked_;
+  bool is_inner_;
+  bool is_use_auto_dop_;
 
 
   ObPlanStat()
@@ -660,6 +665,7 @@ struct ObPlanStat
       db_id_(common::OB_INVALID_ID),
       constructed_sql_(),
       sql_id_(),
+      format_sql_id_(),
       is_bind_sensitive_(false),
       is_bind_aware_(false),
       plan_sel_info_str_len_(0),
@@ -671,6 +677,10 @@ struct ObPlanStat
       is_expired_(false),
       enable_plan_expiration_(false),
       first_exec_row_count_(-1),
+      first_exec_usec_(0),
+      sample_times_(0),
+      sample_exec_row_count_(0),
+      sample_exec_usec_(0),
       sessid_(0),
       plan_tmp_tbl_name_str_len_(0),
       is_use_jit_(false),
@@ -689,7 +699,9 @@ struct ObPlanStat
       block_cache_miss_cnt_(0),
       pre_cal_expr_handler_(NULL),
       plan_hash_value_(0),
-      hints_all_worked_(true)
+      hints_all_worked_(true),
+      is_inner_(false),
+      is_use_auto_dop_(false)
 {
   exact_mode_sql_id_[0] = '\0';
 }
@@ -745,6 +757,10 @@ struct ObPlanStat
       is_expired_(false),
       enable_plan_expiration_(rhs.enable_plan_expiration_),
       first_exec_row_count_(rhs.first_exec_row_count_),
+      first_exec_usec_(rhs.first_exec_usec_),
+      sample_times_(rhs.sample_times_),
+      sample_exec_row_count_(rhs.sample_exec_row_count_),
+      sample_exec_usec_(rhs.sample_exec_usec_),
       sessid_(rhs.sessid_),
       plan_tmp_tbl_name_str_len_(rhs.plan_tmp_tbl_name_str_len_),
       is_use_jit_(rhs.is_use_jit_),
@@ -763,7 +779,9 @@ struct ObPlanStat
       block_cache_miss_cnt_(rhs.block_cache_miss_cnt_),
       pre_cal_expr_handler_(rhs.pre_cal_expr_handler_),
       plan_hash_value_(rhs.plan_hash_value_),
-      hints_all_worked_(rhs.hints_all_worked_)
+      hints_all_worked_(rhs.hints_all_worked_),
+      is_inner_(rhs.is_inner_),
+      is_use_auto_dop_(rhs.is_use_auto_dop_)
   {
     exact_mode_sql_id_[0] = '\0';
     MEMCPY(plan_sel_info_str_, rhs.plan_sel_info_str_, rhs.plan_sel_info_str_len_);
@@ -859,6 +877,11 @@ struct ObPlanStat
     }
   }
 
+  inline bool is_updated() const
+  {
+    return last_active_time_ != 0;
+  }
+
   /* XXX: support printing maxium 30 class members.
    * if you want to print more members, remove some first
    */
@@ -946,9 +969,19 @@ struct ObPhyLocationGetter
 {
 public:
   // used for getting plan
+  // In this interface, we first process the table locations that were marked select_leader, the tablet
+  // locations of them will be added to das_ctx directly, without the need to construct candi_table_locs.
+  // For the remaining table locations that are not marked select_leader, continue to use the previous
+  // logic where a candi_table_loc is generated for each table location. These candi_table_locs will be
+  // added to das_ctx by @build_candi_table_locs().
   static int get_phy_locations(const ObIArray<ObTableLocation> &table_locations,
                                const ObPlanCacheCtx &pc_ctx,
-                               ObIArray<ObCandiTableLoc> &phy_location_infos,
+                               ObIArray<ObCandiTableLoc> &phy_location_infos);
+
+  // used for matching plan
+  static int get_phy_locations(const ObIArray<ObTableLocation> &table_locations,
+                               const ObPlanCacheCtx &pc_ctx,
+                               ObIArray<ObCandiTableLoc> &candi_table_locs,
                                bool &need_check_on_same_server);
 
   // used for adding plan
@@ -959,6 +992,9 @@ public:
   static int build_table_locs(ObDASCtx &das_ctx,
                               const common::ObIArray<ObTableLocation> &table_locations,
                               const common::ObIArray<ObCandiTableLoc> &candi_table_locs);
+  static int build_candi_table_locs(ObDASCtx &das_ctx,
+                                    const common::ObIArray<ObTableLocation> &table_locations,
+                                    const common::ObIArray<ObCandiTableLoc> &candi_table_locs);
   static int build_related_tablet_info(const ObTableLocation &table_location,
                                        ObExecContext &exec_ctx,
                                        DASRelatedTabletMap *&related_map);
@@ -1004,7 +1040,19 @@ public:
     px_join_skew_minfreq_(30),
     min_cluster_version_(0),
     is_enable_px_fast_reclaim_(false),
-    enable_var_assign_use_das_(true),
+    enable_spf_batch_rescan_(false),
+    enable_distributed_das_scan_(false),
+    enable_das_batch_rescan_flag_(0),
+    enable_var_assign_use_das_(false),
+    enable_das_keep_order_(false),
+    enable_nlj_spf_use_rich_format_(false),
+    bloom_filter_ratio_(0),
+    enable_hyperscan_regexp_engine_(false),
+    realistic_runtime_bloom_filter_size_(false),
+    enable_parallel_das_dml_(false),
+    direct_load_allow_fallback_(false),
+    default_load_mode_(0),
+    hash_rollup_policy_(0),
     cluster_config_version_(-1),
     tenant_config_version_(-1),
     tenant_id_(0)
@@ -1046,7 +1094,19 @@ public:
   int8_t px_join_skew_minfreq_;
   uint64_t min_cluster_version_;
   bool is_enable_px_fast_reclaim_;
+  bool enable_spf_batch_rescan_;
+  bool enable_distributed_das_scan_;
+  int64_t enable_das_batch_rescan_flag_;
   bool enable_var_assign_use_das_;
+  bool enable_das_keep_order_;
+  bool enable_nlj_spf_use_rich_format_;
+  int bloom_filter_ratio_;
+  bool enable_hyperscan_regexp_engine_;
+  bool realistic_runtime_bloom_filter_size_;
+  bool enable_parallel_das_dml_;
+  bool direct_load_allow_fallback_;
+  int default_load_mode_;
+  int hash_rollup_policy_;
 
 private:
   // current cluster config version_

@@ -14,13 +14,8 @@
 
 #include "ob_inner_sql_result.h"
 
-#include "lib/mysqlclient/ob_mysql_result.h"
-#include "lib/hash/ob_hashmap.h"
-#include "lib/rc/context.h"
-#include "lib/signal/ob_signal_struct.h"
-#include "share/rc/ob_tenant_base.h"
-#include "observer/ob_req_time_service.h"
 #include "omt/ob_tenant.h"
+#include "observer/ob_inner_sql_connection.h"
 
 namespace oceanbase
 {
@@ -45,7 +40,7 @@ inline int ObInnerSQLResult::check_extend_value(const common::ObObj &obj)
   return ret;
 }
 
-ObInnerSQLResult::ObInnerSQLResult(ObSQLSessionInfo &session)
+ObInnerSQLResult::ObInnerSQLResult(ObSQLSessionInfo &session, bool is_inner_session)
     : column_map_created_(false), column_indexed_(false), column_map_(),
       mem_context_(nullptr),
       mem_context_destroy_guard_(mem_context_),
@@ -59,7 +54,8 @@ ObInnerSQLResult::ObInnerSQLResult(ObSQLSessionInfo &session)
       iter_end_(false),
       is_read_(true),
       has_tenant_resource_(true),
-      tenant_(nullptr)
+      tenant_(nullptr),
+      is_inner_session_(is_inner_session)
 
 {
   sql_ctx_.exec_type_ = InnerSql;
@@ -140,7 +136,7 @@ int ObInnerSQLResult::open()
     LOG_WARN("switch tenant failed", K(ret), K(session_.get_effective_tenant_id()));
   } else {
     lib::CompatModeGuard g(compat_mode_);
-    common::ObSqlInfoGuard si_guard(session_.get_current_query_string());
+    SQL_INFO_GUARD(session_.get_current_query_string(), session_.get_cur_sql_id());
     bool is_select = has_tenant_resource() ?
            ObStmt::is_select_stmt(result_set_->get_stmt_type())
            : ObStmt::is_select_stmt(remote_result_set_->get_stmt_type());
@@ -205,7 +201,7 @@ int ObInnerSQLResult::inner_close()
 {
   int ret = OB_SUCCESS;
   lib::CompatModeGuard g(compat_mode_);
-  common::ObSqlInfoGuard si_guard(session_.get_current_query_string());
+  SQL_INFO_GUARD(session_.get_current_query_string(), session_.get_cur_sql_id());
   LOG_DEBUG("compat_mode_", K(ret), K(compat_mode_), K(lbt()));
 
   MAKE_TENANT_SWITCH_SCOPE_GUARD(tenant_guard);
@@ -244,7 +240,7 @@ int ObInnerSQLResult::next()
   } else {
     row_ = NULL;
     lib::CompatModeGuard g(compat_mode_);
-    common::ObSqlInfoGuard si_guard(session_.get_current_query_string());
+    SQL_INFO_GUARD(session_.get_current_query_string(), session_.get_cur_sql_id());
     WITH_CONTEXT(mem_context_) {
       if (has_tenant_resource() && OB_FAIL(result_set_->get_next_row(row_))) {
         if (OB_ITER_END != ret) {

@@ -13,10 +13,6 @@
 #define USING_LOG_PREFIX SQL_ENG
 #include "sql/engine/expr/ob_expr_is_serving_tenant.h"
 #include "sql/engine/ob_exec_context.h"
-#include "sql/session/ob_sql_session_info.h"
-#include "share/ob_unit_getter.h"
-#include "share/ob_i_sql_expression.h"
-#include "share/config/ob_server_config.h"
 using namespace oceanbase::common;
 using namespace oceanbase::share;
 namespace oceanbase
@@ -70,8 +66,9 @@ int ObExprIsServingTenant::check_serving_tenant(
     } else if (OB_FAIL(ui_getter.get_tenant_servers(tenant_id, servers))) {
       LOG_WARN("fail to get servers of a tenant", K(ret));
     } else if (false == svr.set_ip_addr(ip, static_cast<int32_t>(port))) {
-      ret = OB_ERR_UNEXPECTED;
+      ret = OB_INVALID_ARGUMENT;
       LOG_WARN("fail to set ip addr", K(ret), K(ip), K(port));
+      LOG_USER_ERROR(OB_INVALID_ARGUMENT, "invalid ip or port");
     } else {
       bool found_server = false;
       for (int64_t i = 0; OB_SUCC(ret) && false == found_server && i < servers.count(); ++i) {

@@ -12,16 +12,7 @@
 
 #define USING_LOG_PREFIX STORAGE
 #include "ob_block_sstable_struct.h"
-#include "common/cell/ob_cell_writer.h"
-#include "common/log/ob_log_entry.h"
-#include "common/row/ob_row.h"
-#include "lib/utility/ob_serialization_helper.h"
-#include "lib/utility/serialization.h"
-#include "lib/utility/utility.h"
-#include "share/scn.h"
-#include "ob_block_manager.h"
-#include "ob_data_buffer.h"
-#include "share/config/ob_server_config.h"
+#include "observer/ob_server_struct.h"
 
 using namespace oceanbase;
 using namespace common;
@@ -514,8 +505,8 @@ ObMacroBlockMarkerStatus::ObMacroBlockMarkerStatus()
     sweep_cost_time_(0),
     start_time_(0),
     last_end_time_(0),
-    mark_finished_(false),
-    hold_info_()
+    hold_info_(),
+    mark_finished_(false)
 {
 }
 
@@ -561,8 +552,8 @@ void ObMacroBlockMarkerStatus::reuse()
   sweep_cost_time_ = 0;
   start_time_ = 0;
   last_end_time_ = 0;
-  mark_finished_ = false;
   hold_info_.reset();
+  mark_finished_ = false;
 }
 
 ObRecordHeaderV3::ObRecordHeaderV3()
@@ -798,19 +789,6 @@ int ObRecordHeaderV3::deserialize(const char *buf, int64_t buf_len, int64_t &pos
   }
   return ret;
 }
-
-ObDDLMacroBlockRedoInfo::ObDDLMacroBlockRedoInfo()
-  : table_key_(), data_buffer_(), block_type_(ObDDLMacroBlockType::DDL_MB_INVALID_TYPE), start_scn_(SCN::min_scn())
-{
-}
-
-bool ObDDLMacroBlockRedoInfo::is_valid() const
-{
-  return table_key_.is_valid() && data_buffer_.ptr() != nullptr && block_type_ != ObDDLMacroBlockType::DDL_MB_INVALID_TYPE
-         && logic_id_.is_valid() && start_scn_.is_valid_and_not_min();
-}
-
-OB_SERIALIZE_MEMBER(ObDDLMacroBlockRedoInfo, table_key_, data_buffer_, block_type_, logic_id_, start_scn_);
 
 constexpr uint8_t ObColClusterInfoMask::BYTES_TYPE_TO_LEN[];
 

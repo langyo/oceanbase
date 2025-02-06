@@ -28,9 +28,13 @@ namespace storage
 // only allow such classes to specialize template class ObTabletMemberWrapper:
 // ObTabletTableStore
 // ObTabletAutoincSeq
+// ObTabletBindingMdsUserData
 // forbidden classes: ObStorageSchema, ObMediumCompactionInfoList
 template <typename T,
-          typename U = typename std::enable_if<std::is_same<T, ObTabletTableStore>::value || std::is_same<T, share::ObTabletAutoincSeq>::value, T>::type>
+          typename U = typename std::enable_if<std::is_same<T, ObTabletTableStore>::value
+                                                   || std::is_same<T, share::ObTabletAutoincSeq>::value
+                                                   || std::is_same<T, ObTabletBindingMdsUserData>::value,
+                                               T>::type>
 class ObTabletMemberWrapper final
 {
 public:
@@ -110,19 +114,6 @@ inline int ObTabletMemberWrapper<ObTabletTableStore>::set_cache_handle(const ObS
     STORAGE_LOG(WARN, "get table store failed", K(ret));
   } else {
     ptr_ = table_store;
-  }
-  return ret;
-}
-
-template <>
-inline int ObTabletMemberWrapper<share::ObTabletAutoincSeq>::set_cache_handle(const ObStorageMetaValue &value)
-{
-  int ret = OB_SUCCESS;
-  const share::ObTabletAutoincSeq *autoinc_seq = nullptr;
-  if (OB_FAIL(value.get_autoinc_seq(autoinc_seq))) {
-    STORAGE_LOG(WARN, "get auto inc seq failed", K(ret));
-  } else {
-    ptr_ = autoinc_seq;
   }
   return ret;
 }

@@ -64,12 +64,14 @@ namespace common
 #define CM_GEOMETRY_TYPE_RESERVED3       (1ULL << 14)
 #define CM_GEOMETRY_TYPE_RESERVED4       (1ULL << 15)
 #define CM_GEOMETRY_TYPE_RESERVED5       (1ULL << 16)
-
-#define CM_CONST_TO_DECIMAL_INT_UP       (1ULL << 17)
+#define CM_SQL_TO_JSON_SCALAR            (1ULL << 17)
 #define CM_CONST_TO_DECIMAL_INT_DOWN     (1ULL << 18)
 #define CM_CONST_TO_DECIMAL_INT_EQ        (1ULL << 19)
 #define CM_BY_TRANSFORMER                (1ULL << 20)
-
+#define CM_CONST_TO_DECIMAL_INT_UP       (1ULL << 21)
+#define CM_FAST_COLUMN_CONV              (1ULL << 22)
+#define CM_ORA_SYS_VIEW_CAST             (1ULL << 23)
+#define CM_DEMOTE_CAST                   (1ULL << 24)
 // string->integer(int/uint)时默认进行round(round to nearest)，
 // 如果设置该标记，则会进行trunc(round to zero)
 // ceil(round to +inf)以及floor(round to -inf)暂时没有支持
@@ -123,6 +125,9 @@ typedef uint64_t ObCastMode;
 #define CM_IS_STRICT_JSON(mode)               ((CM_STRICT_JSON & (mode)) != 0)
 #define CM_IS_JSON_VALUE(mode)                CM_IS_ERROR_ON_SCALE_OVER(mode)
 #define CM_IS_TO_COLUMN_CS_LEVEL(mode)        ((CM_TO_COLUMN_CS_LEVEL & (mode)) != 0)
+// for json type cast
+#define CM_IS_SQL_AS_JSON_SCALAR(mode)        ((CM_SQL_TO_JSON_SCALAR & (mode)) != 0)
+#define CM_SET_SQL_AS_JSON_SCALAR(mode)       (CM_SQL_TO_JSON_SCALAR | (mode))
 // for geomerty type cast
 #define CM_IS_GEOMETRY_GEOMETRY(mode)             ((((mode) >> 12) & 0x1F) == 0)
 #define CM_IS_GEOMETRY_POINT(mode)                ((((mode) >> 12) & 0x1F) == 1)
@@ -140,6 +145,7 @@ typedef uint64_t ObCastMode;
 #define CM_SET_GEOMETRY_MULTILINESTRING(mode)     ((mode) &= 0xFFFE0FFF, (mode) |= (5 << 12))
 #define CM_SET_GEOMETRY_MULTIPOLYGON(mode)        ((mode) &= 0xFFFE0FFF, (mode) |= (6 << 12))
 #define CM_SET_GEOMETRY_GEOMETRYCOLLECTION(mode)  ((mode) &= 0xFFFE0FFF, (mode) |= (7 << 12))
+#define CM_IS_DEMOTE_CAST(mode)                   ((CM_DEMOTE_CAST & (mode)) != 0)
 
 #define CM_GET_CS_LEVEL(mode)                     (((mode) >> CM_CS_LEVEL_SHIFT) & CM_CS_LEVEL_MASK)
 #define CM_SET_CS_LEVEL(mode, level) \
@@ -152,6 +158,7 @@ typedef uint64_t ObCastMode;
    || (((mode)&CM_CONST_TO_DECIMAL_INT_EQ) != 0))
 #define CM_IS_BY_TRANSFORMER(mode) ((CM_BY_TRANSFORMER & (mode)) != 0)
 #define CM_SET_BY_TRANSFORMERN(mode)  (CM_BY_TRANSFORMER | (mode))
+#define CM_IS_ORA_SYS_VIEW_CAST(mode)            ((CM_ORA_SYS_VIEW_CAST & (mode)) != 0)
 
 struct ObObjCastParams
 {
@@ -169,7 +176,8 @@ struct ObObjCastParams
       res_accuracy_(NULL),
       dtc_params_(),
       format_number_with_limit_(true),
-      is_ignore_(false)
+      is_ignore_(false),
+      exec_ctx_(NULL)
   {
     set_compatible_cast_mode();
   }
@@ -188,7 +196,8 @@ struct ObObjCastParams
       res_accuracy_(res_accuracy),
       dtc_params_(),
       format_number_with_limit_(true),
-      is_ignore_(false)
+      is_ignore_(false),
+      exec_ctx_(NULL)
   {
     set_compatible_cast_mode();
     if (NULL != dtc_params) {
@@ -212,7 +221,8 @@ struct ObObjCastParams
       res_accuracy_(res_accuracy),
       dtc_params_(),
       format_number_with_limit_(true),
-      is_ignore_(false)
+      is_ignore_(false),
+      exec_ctx_(NULL)
   {
     set_compatible_cast_mode();
     if (NULL != dtc_params) {
@@ -247,6 +257,11 @@ struct ObObjCastParams
     return;
   }
 
+  void set_allow_invalid_dates_cast_mode()
+  {
+    cast_mode_ |= CM_ALLOW_INVALID_DATES;
+  }
+
   TO_STRING_KV(K(cur_time_),
                KP(cast_mode_),
                K(warning_),
@@ -268,6 +283,7 @@ struct ObObjCastParams
   ObDataTypeCastParams dtc_params_;
   bool format_number_with_limit_;
   bool is_ignore_;
+  sql::ObExecContext *exec_ctx_;
 };
 
 class ObExpectType
@@ -323,8 +339,7 @@ typedef int (*ObCastEnumOrSetFunc)(const ObExpectType &expect_type, ObObjCastPar
 bool cast_supported(const ObObjType orig_type, const ObCollationType orig_cs_type,
                     const ObObjType expect_type, const ObCollationType expect_cs_type);
 int ob_obj_to_ob_time_with_date(const ObObj& obj, const ObTimeZoneInfo* tz_info, ObTime& ob_time,
-                                const int64_t cur_ts_value, bool is_dayofmonth = false,
-                                const ObDateSqlMode date_sql_mode = 0);
+                                const int64_t cur_ts_value, const ObDateSqlMode date_sql_mode = 0);
 int ob_obj_to_ob_time_without_date(const ObObj &obj, const ObTimeZoneInfo *tz_info, ObTime &ob_time);
 
 
@@ -401,11 +416,7 @@ public:
                      const ObObj &in_obj, ObObj &out_obj);
   static int to_type(const ObObjType expect_type, ObCollationType expect_cs_type,
                      ObCastCtx &cast_ctx, const ObObj &in_obj, ObObj &out_obj);
-  static int get_zero_value(const ObObjType expect_type,
-                            ObCollationType expect_cs_type,
-                            int64_t data_len,
-                            ObIAllocator &alloc,
-                            ObObj &zero_obj);
+  static int get_zero_value(const ObObjType expect_type, ObCollationType expect_cs_type, ObObj &zero_obj);
   static int enumset_to_inner(const ObObjMeta &expect_meta,
                               const ObObj &in_obj, ObObj &out_obj,
                               common::ObIAllocator &allocator,

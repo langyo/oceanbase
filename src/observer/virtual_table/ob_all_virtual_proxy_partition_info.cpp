@@ -13,15 +13,7 @@
 #define USING_LOG_PREFIX SERVER
 
 #include "ob_all_virtual_proxy_partition_info.h"
-#include "sql/resolver/expr/ob_raw_expr_printer.h"
 #include "sql/resolver/expr/ob_raw_expr_util.h"
-#include "sql/parser/ob_parser_utils.h"
-#include "share/schema/ob_schema_getter_guard.h"
-#include "share/inner_table/ob_inner_table_schema_constants.h"
-#include "share/schema/ob_multi_version_schema_service.h"
-#include "lib/stat/ob_diagnose_info.h"
-#include "lib/json/ob_json_print_utils.h"
-#include "common/ob_smart_var.h"
 
 using namespace oceanbase::common;
 using namespace oceanbase::share;
@@ -719,7 +711,7 @@ int ObAllVirtualProxyPartitionInfo::build_check_str_to_raw_expr_(
           }
         }
         if (OB_FAIL(ret)) {
-        } else if (OB_FAIL(q_name.access_idents_.at(0).sys_func_expr_->check_param_num())) {
+        } else if (OB_FAIL(q_name.access_idents_.at(0).check_param_num())) {
           LOG_WARN("check param_num failed", KR(ret));
         } else if (OB_FAIL(sql::ObRawExprUtils::replace_ref_column(
                            check_expr, q_name.ref_expr_, sys_func))) {

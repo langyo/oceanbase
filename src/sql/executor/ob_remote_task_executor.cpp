@@ -12,14 +12,8 @@
 
 #define USING_LOG_PREFIX SQL_EXE
 
-#include "sql/session/ob_sql_session_info.h"
-#include "sql/engine/ob_physical_plan_ctx.h"
 #include "sql/engine/ob_exec_context.h"
-#include "sql/executor/ob_executor_rpc_impl.h"
 #include "sql/executor/ob_remote_task_executor.h"
-#include "sql/executor/ob_task.h"
-#include "sql/executor/ob_task_executor_ctx.h"
-#include "storage/tx/ob_trans_service.h"
 
 using namespace oceanbase::common;
 using namespace oceanbase::sql;
@@ -90,8 +84,10 @@ int ObRemoteTaskExecutor::execute(ObExecContext &query_ctx, ObJob *job, ObTaskIn
           task_info->set_state(OB_TASK_STATE_SKIPPED);
           LOG_WARN("fail to do task on the remote server, log user warning and skip it",
                    K(ret), K(task_info->get_task_location().get_server()), K(*job));
+          ObCStringHelper helper;
           LOG_USER_WARN(OB_ERR_TASK_SKIPPED,
-                        to_cstring(task_info->get_task_location().get_server()), common::ob_errpkt_errno(ret, lib::is_oracle_mode()));
+                        helper.convert(task_info->get_task_location().get_server()),
+                        common::ob_errpkt_errno(ret, lib::is_oracle_mode()));
           handler->set_result_code(OB_ERR_TASK_SKIPPED);
           ret = OB_SUCCESS;
         } else {
@@ -174,6 +170,7 @@ int ObRemoteTaskExecutor::build_task(ObExecContext &query_ctx,
       task.set_runner_server(task_info.get_task_location().get_server());
       task.set_ob_task_id(task_info.get_task_location().get_ob_task_id());
       task.set_serialize_param(&query_ctx, root_spec, phy_plan);
+      task.set_sql_string(ObSqlInfoGuard::get_tl_sql_info().sql_string_);
     }
   }
   return ret;
@@ -212,6 +209,7 @@ int ObRemoteTaskExecutor::handle_tx_after_rpc(ObScanner *scanner,
     }
     if (has_transfer_err || OB_FAIL(ret)) {
       if (exec_ctx.use_remote_sql()) {
+        // ignore ret
         LOG_WARN("remote execute use sql fail with transfer_error, tx will rollback", K(ret));
         session->get_trans_result().set_incomplete();
       } else {

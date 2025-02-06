@@ -11,19 +11,12 @@
  */
 #define USING_LOG_PREFIX SHARE
 #include <gtest/gtest.h>
-#include <iostream>
 #include <memory>
-#include <thread>
-#include <unordered_map>
 #include <mutex>
+#include <unordered_map>
 #define private public
 #include "test_xml_utils.h"
-#include "lib/xml/ob_xpath.h"
-#include "lib/oblog/ob_log.h"
-#include "lib/allocator/ob_mod_define.h"
-#include "lib/allocator/page_arena.h"
 #include "libxml2/libxml/xmlmemory.h"
-#include "lib/xml/ob_xml_util.h"
 #undef private
 
 namespace oceanbase {
@@ -2615,12 +2608,12 @@ TEST_F(TestXmlParser, test_cons_mem_usage)
 
   ObString emelent1= "emelent1";
   ObString emelent2= "emelent2";
-  element1->set_key(emelent1);
-  element2->set_key(emelent2);
+  element1->set_xml_key(emelent1);
+  element2->set_xml_key(emelent2);
 
   ObString atr1= "sttr1_name";
   ObString atr_value1= "sttr1_value";
-  attr1->set_key(atr1);
+  attr1->set_xml_key(atr1);
   attr1->set_value(atr_value1);
 
   element1->add_element(text1);

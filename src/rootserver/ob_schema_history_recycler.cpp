@@ -11,16 +11,9 @@
  */
 
 #define USING_LOG_PREFIX RS
-#include "share/ob_schema_status_proxy.h"
-#include "share/schema/ob_schema_mgr.h"
 #include "rootserver/ob_schema_history_recycler.h"
 #include "rootserver/ob_rs_async_rpc_proxy.h"
-#include "rootserver/ob_rs_event_history_table_operator.h"
-#include "share/ob_schema_status_proxy.h"
-#include "share/schema/ob_schema_utils.h"
-#include "storage/compaction/ob_tenant_freeze_info_mgr.h"
-#include "share/ob_common_rpc_proxy.h"
-#include "share/ob_freeze_info_proxy.h"
+#include "src/share/ob_freeze_info_proxy.h"
 #include "share/ob_global_merge_table_operator.h"
 #include "share/ob_zone_merge_info.h"
 #include "share/ob_all_server_tracer.h"
@@ -180,9 +173,6 @@ int ObSchemaHistoryRecycler::check_stop()
   int ret = OB_SUCCESS;
   if (OB_FAIL(check_inner_stat())) {
     LOG_WARN("fail to check inner stat", KR(ret));
-  } else if (GCTX.is_standby_cluster()) {
-    ret = OB_CANCELED;
-    LOG_WARN("schema history recycler should stopped", KR(ret));
   }
   return ret;
 }
@@ -269,10 +259,20 @@ int ObSchemaHistoryRecycler::try_recycle_schema_history()
     LOG_WARN("fail to check inner stat", KR(ret));
   } else if (OB_FAIL(schema_service_->get_tenant_ids(tenant_ids))) {
     LOG_WARN("fail to get schema_guard", KR(ret));
+  } else {
+    for (int64_t i = tenant_ids.count() - 1; OB_SUCC(ret) && i >= 0; i--) {
+      const uint64_t tenant_id = tenant_ids.at(i);
+      bool skip = true;
+      if (OB_FAIL(check_can_skip_tenant(tenant_id, skip))) {
+        LOG_WARN("fail to check tenant can skip", KR(ret), K(tenant_id));
+      } else if (skip && OB_FAIL(tenant_ids.remove(i))) {
+        LOG_WARN("fail to remove tenant_id", KR(ret), K(tenant_ids), K(i));
+      }
+    }
+  }
+  if (OB_FAIL(ret) || tenant_ids.count() <= 0 ) {
   } else if (OB_FAIL(calc_recycle_schema_versions(tenant_ids))) {
     LOG_WARN("fail to fetch recycle schema version", KR(ret));
-  } else if (GCTX.is_standby_cluster()) {
-    // standby cluster only calc recycle schema versions
   } else if (OB_FAIL(try_recycle_schema_history(tenant_ids))) {
     LOG_WARN("fail to recycle schema history", KR(ret));
   }
@@ -288,13 +288,8 @@ int ObSchemaHistoryRecycler::try_recycle_schema_history(
   } else {
     for (int64_t i = 0; OB_SUCC(ret) && i < tenant_ids.count(); i++) {
       const uint64_t tenant_id = tenant_ids.at(i);
-      bool skip = true;
       if (OB_FAIL(check_stop())) {
         LOG_WARN("schema history recycler is stopped", KR(ret));
-      } else if (OB_FAIL(check_can_skip_tenant(tenant_id, skip))) {
-        LOG_WARN("fail to check tenant can skip", KR(ret), K(tenant_id));
-      } else if (skip) {
-        // pass
       } else {
         int64_t recycle_schema_version = OB_INVALID_VERSION;
         if (OB_FAIL(recycle_schema_versions_.get_refactored(tenant_id, recycle_schema_version))) {
@@ -319,6 +314,7 @@ int ObSchemaHistoryRecycler::check_can_skip_tenant(
     bool &skip)
 {
   int ret = OB_SUCCESS;
+  bool is_primary = false;
   skip = false;
   if (!inited_) {
     ret = OB_NOT_INIT;
@@ -327,6 +323,10 @@ int ObSchemaHistoryRecycler::check_can_skip_tenant(
     // TODO: (yanmu.ztl)
     // Additional schema history of system tenant should be recycled:
     // 1. Other tenant's schema history(except tenant schema history and system table's schema history) generated before schema split.
+    skip = true;
+  } else if (OB_FAIL(ObShareUtil::table_check_if_tenant_role_is_primary(tenant_id, is_primary))) {
+    LOG_WARN("fail to execute table_check_if_tenant_role_is_primary", KR(ret), K(tenant_id));
+  } else if (!is_primary) {
     skip = true;
   } else {
     ObSchemaGetterGuard schema_guard;
@@ -375,46 +375,41 @@ int ObSchemaHistoryRecycler::get_recycle_schema_version_by_server(
     }
     ObArray<int> return_code_array;
     int tmp_ret = OB_SUCCESS; // always wait all
-    if (OB_SUCCESS != (tmp_ret = proxy_batch.wait_all(return_code_array))) {
-      LOG_WARN("wait batch result failed", K(tmp_ret), KR(ret));
+    if (OB_TMP_FAIL(proxy_batch.wait_all(return_code_array))) {
+      LOG_WARN("wait batch result failed", KR(tmp_ret), KR(ret));
       ret = OB_SUCC(ret) ? tmp_ret : ret;
-    }
-    if (OB_FAIL(ret)) {
-    } else if (return_code_array.count() != server_list.count()
-               || return_code_array.count() != proxy_batch.get_results().count()) {
-      ret = OB_ERR_UNEXPECTED;
-      LOG_WARN("cnt not match", KR(ret),
-               "return_cnt", return_code_array.count(),
-               "result_cnt", proxy_batch.get_results().count(),
-               "server_cnt", server_list.count());
-    }
-    for (int64_t i = 0; OB_SUCC(ret) && i < return_code_array.count(); i++) {
-      int res_ret = return_code_array.at(i);
-      const ObAddr &addr = proxy_batch.get_dests().at(i);
-      if (OB_SUCCESS != res_ret) {
-        ret = res_ret;
-        LOG_WARN("rpc execute failed", KR(ret), K(addr));
-      } else {
-        const obrpc::ObGetMinSSTableSchemaVersionRes *result = proxy_batch.get_results().at(i);
-        if (OB_ISNULL(result)) {
-          ret = OB_ERR_UNEXPECTED;
-          LOG_WARN("result is null", KR(ret));
-        } else if (result->ret_list_.count() != arg.tenant_id_arg_list_.count()) {
-          ret = OB_ERR_UNEXPECTED;
-          LOG_WARN("cnt not match", KR(ret),
-                   "tenant_cnt", arg.tenant_id_arg_list_.count(),
-                   "result_cnt", result->ret_list_.count());
+    } else if (OB_FAIL(ret)) {
+    } else if (OB_FAIL(proxy_batch.check_return_cnt(return_code_array.count()))) {
+      LOG_WARN("fail to check return cnt", KR(ret), "return_cnt", return_code_array.count());
+    } else {
+      for (int64_t i = 0; OB_SUCC(ret) && i < return_code_array.count(); i++) {
+        int res_ret = return_code_array.at(i);
+        const ObAddr &addr = proxy_batch.get_dests().at(i);
+        if (OB_SUCCESS != res_ret) {
+          ret = res_ret;
+          LOG_WARN("rpc execute failed", KR(ret), K(addr));
         } else {
-          for (int64_t j = 0; OB_SUCC(ret) && j < result->ret_list_.count(); j++) {
-            int64_t schema_version = result->ret_list_.at(j);
-            uint64_t tenant_id = arg.tenant_id_arg_list_.at(j);
-            if (FAILEDx(fill_recycle_schema_versions(
-                tenant_id, schema_version, recycle_schema_versions))) {
-              LOG_WARN("fail to fill recycle schema versions",
-                       KR(ret), K(tenant_id), K(schema_version));
+          const obrpc::ObGetMinSSTableSchemaVersionRes *result = proxy_batch.get_results().at(i);
+          if (OB_ISNULL(result)) {
+            ret = OB_ERR_UNEXPECTED;
+            LOG_WARN("result is null", KR(ret));
+          } else if (result->ret_list_.count() != arg.tenant_id_arg_list_.count()) {
+            ret = OB_ERR_UNEXPECTED;
+            LOG_WARN("cnt not match", KR(ret),
+                     "tenant_cnt", arg.tenant_id_arg_list_.count(),
+                     "result_cnt", result->ret_list_.count());
+          } else {
+            for (int64_t j = 0; OB_SUCC(ret) && j < result->ret_list_.count(); j++) {
+              int64_t schema_version = result->ret_list_.at(j);
+              uint64_t tenant_id = arg.tenant_id_arg_list_.at(j);
+              if (FAILEDx(fill_recycle_schema_versions(
+                  tenant_id, schema_version, recycle_schema_versions))) {
+                LOG_WARN("fail to fill recycle schema versions",
+                         KR(ret), K(tenant_id), K(schema_version));
+              }
+              LOG_INFO("[SCHEMA_RECYCLE] get recycle schema version from observer",
+                       KR(ret), K(addr), K(tenant_id), K(schema_version));
             }
-            LOG_INFO("[SCHEMA_RECYCLE] get recycle schema version from observer",
-                     KR(ret), K(addr), K(tenant_id), K(schema_version));
           }
         }
       }
@@ -484,7 +479,6 @@ int ObSchemaHistoryRecycler::get_recycle_schema_version_by_global_stat(
   if (OB_FAIL(check_inner_stat())) {
     LOG_WARN("fail to check inner stat", KR(ret));
   } else {
-    bool is_standby = GCTX.is_standby_cluster();
     if (OB_SUCC(ret)) {
       // step 1. calc by schema_history_expire_time
       int64_t conf_expire_time = GCONF.schema_history_expire_time;
@@ -498,13 +492,7 @@ int ObSchemaHistoryRecycler::get_recycle_schema_version_by_global_stat(
         const uint64_t tenant_id = tenant_ids.at(i);
         int64_t expire_schema_version = OB_INVALID_VERSION;
         ObRefreshSchemaStatus schema_status;
-        if (!is_standby) {
-          schema_status.tenant_id_ = tenant_id;  // use strong read
-        } else {
-          if (OB_FAIL(schema_status_proxy->get_refresh_schema_status(tenant_id, schema_status))) {
-            LOG_WARN("fail to get refresh schema status", KR(ret), K(tenant_id));
-          }
-        }
+        schema_status.tenant_id_ = tenant_id;  // use strong read
         if (FAILEDx(schema_service_->get_schema_version_by_timestamp(
                     schema_status, tenant_id, expire_time, expire_schema_version))) {
           LOG_WARN("fail to get schema version by timestamp",
@@ -801,6 +789,9 @@ int ObSchemaHistoryRecycler::try_recycle_schema_history(
     RECYCLE_FIRST_SCHEMA(RECYCLE_ONLY, tablet, OB_ALL_TABLET_TO_TABLE_HISTORY_TNAME, tablet_id);
     ret = OB_SUCCESS; // overwrite ret
 
+    RECYCLE_SECOND_SCHEMA(column_group, OB_ALL_COLUMN_GROUP_HISTORY_TNAME, table_id, column_group_id);
+    RECYCLE_SECOND_SCHEMA(column_group_mapping, OB_ALL_COLUMN_GROUP_MAPPING_HISTORY_TNAME, table_id, column_group_id);
+    ret = OB_SUCCESS; // overwrite ret
     // ----------------------------- database ----------------------------------------
     RECYCLE_FIRST_SCHEMA(RECYCLE_AND_COMPRESS, database, OB_ALL_DATABASE_HISTORY_TNAME,
                          database_id);
@@ -811,10 +802,12 @@ int ObSchemaHistoryRecycler::try_recycle_schema_history(
     // tablegroup's partition will be recycled as table's partition
     ret = OB_SUCCESS; // overwrite ret
 
-    // ----------------------------- user/role ---------------------------------------
+    // ----------------------------- user/role/proxy ---------------------------------------
     RECYCLE_FIRST_SCHEMA(RECYCLE_AND_COMPRESS, user, OB_ALL_USER_HISTORY_TNAME, user_id);
     // TODO: should be tested
     //RECYCLE_SECOND_SCHEMA(role_grantee, OB_ALL_TENANT_ROLE_GRANTEE_MAP_HISTORY_TNAME, grantee_id, role_id);
+    RECYCLE_SECOND_SCHEMA(proxy, OB_ALL_USER_PROXY_INFO_HISTORY_TNAME, client_user_id, proxy_user_id);
+    RECYCLE_THIRD_SCHEMA(proxy_role, OB_ALL_USER_PROXY_ROLE_INFO_HISTORY_TNAME, client_user_id, proxy_user_id, role_id);
     ret = OB_SUCCESS; // overwrite ret
 
     // ---------------------------- outline ------------------------------------------
@@ -922,6 +915,11 @@ int ObSchemaHistoryRecycler::try_recycle_schema_history(
                          rls_group_id);
     RECYCLE_FIRST_SCHEMA(RECYCLE_AND_COMPRESS, rls_context, OB_ALL_RLS_CONTEXT_HISTORY_TNAME,
                          rls_context_id);
+    ret = OB_SUCCESS; // overwrite ret
+
+    // --------------------------- column priv ---------------------------------------------------
+    RECYCLE_FIRST_SCHEMA(RECYCLE_AND_COMPRESS, column_priv, OB_ALL_COLUMN_PRIVILEGE_HISTORY_TNAME,
+                         priv_id);
     ret = OB_SUCCESS; // overwrite ret
 
 #undef RECYCLE_FIRST_SCHEMA

@@ -1,3 +1,6 @@
+// owner: handora.qc
+// owner group: transaction
+
 /**
  * Copyright (c) 2021 OceanBase
  * OceanBase CE is licensed under Mulan PubL v2.
@@ -11,15 +14,10 @@
  */
 
 #define USING_LOG_PREFIX STORAGE
-#include <gtest/gtest.h>
 #include "mtlenv/mock_tenant_module_env.h"
 #include "storage/mockcontainer/mock_ob_iterator.h"
-#include "storage/mockcontainer/mock_ob_end_trans_callback.h"
-#include "storage/init_basic_struct.h"
 #include "storage/test_tablet_helper.h"
-#include "share/schema/ob_table_dml_param.h"
 #include "storage/ob_dml_running_ctx.h"
-#include "storage/tx/ob_trans_part_ctx.h"
 
 namespace oceanbase
 {
@@ -99,12 +97,12 @@ public:
   {
     LOG_INFO("SetUpTestCase");
     ASSERT_EQ(OB_SUCCESS, omt::ObTenantConfigMgr::get_instance().add_tenant_config(MTL_ID()));
-    uint64_t version = cal_version(4, 2, 0, 0);
+    uint64_t version = cal_version(4, 3, 0, 0);
     ASSERT_EQ(OB_SUCCESS, ObClusterVersion::get_instance().init(version));
     ObClusterVersion::get_instance().tenant_config_mgr_ = &omt::ObTenantConfigMgr::get_instance();
 
     ASSERT_EQ(OB_SUCCESS, MockTenantModuleEnv::get_instance().init());
-    ObServerCheckpointSlogHandler::get_instance().is_started_ = true;
+    SERVER_STORAGE_META_SERVICE.is_started_ = true;
   }
   static void TearDownTestCase()
   {
@@ -117,7 +115,7 @@ public:
     ASSERT_TRUE(MockTenantModuleEnv::get_instance().is_inited());
   }
   void create_ls(uint64_t tenant_id, ObLSID &ls_id, ObLS *&ls);
-  void insert_rows(ObLSID &ls_id, ObTabletID &tablet_id, ObTxDesc &tx_desc, ObTxReadSnapshot snapshot, const char* in_str);
+  void insert_rows(ObLSID &ls_id, ObTabletID &tablet_id, ObTxDesc &tx_desc, ObTxReadSnapshot &snapshot, const char* in_str);
   void prepare_tx_desc(ObTxDesc *&tx_desc, ObTxReadSnapshot &snapshot);
 private:
   static share::schema::ObTableSchema table_schema_;
@@ -160,11 +158,11 @@ void TestTrans::create_ls(uint64_t tenant_id, ObLSID &ls_id, ObLS *&ls)
   }
 }
 
-void TestTrans::insert_rows(ObLSID &ls_id, ObTabletID &tablet_id, ObTxDesc &tx_desc, ObTxReadSnapshot snapshot, const char* ins_str)
+void TestTrans::insert_rows(ObLSID &ls_id, ObTabletID &tablet_id, ObTxDesc &tx_desc, ObTxReadSnapshot &snapshot, const char* ins_str)
 {
   int64_t affected_rows = 0;
-  ObMockNewRowIterator ins_iter;
-  ASSERT_EQ(OB_SUCCESS, ins_iter.from(ins_str));
+  ObMockDatumRowIterator ins_iter;
+  ASSERT_EQ(OB_SUCCESS, ins_iter.from_for_datum(ins_str));
 
   ObArenaAllocator allocator;
   share::schema::ObTableDMLParam table_dml_param(allocator);
@@ -173,15 +171,23 @@ void TestTrans::insert_rows(ObLSID &ls_id, ObTabletID &tablet_id, ObTxDesc &tx_d
   ObSEArray<uint64_t, 1> column_ids;
   column_ids.push_back(16); // pk
   ASSERT_EQ(OB_SUCCESS, table_dml_param.convert(&table_schema_, 1000, column_ids));
+  ObStoreCtxGuard store_ctx_guard;
   ObDMLBaseParam dml_param;
   dml_param.timeout_ = ObTimeUtility::current_time() + 100000000;
   dml_param.schema_version_ = 1000;
   dml_param.table_param_ = &table_dml_param;
-  dml_param.snapshot_ = snapshot;
+  ASSERT_EQ(OB_SUCCESS, dml_param.snapshot_.assign(snapshot));
+  dml_param.store_ctx_guard_ = &store_ctx_guard;
 
-  auto das = MTL(ObAccessService*);
+  auto as = MTL(ObAccessService*);
   LOG_INFO("storage access by dml");
-  ASSERT_EQ(OB_SUCCESS, das->insert_rows(ls_id,
+  ASSERT_EQ(OB_SUCCESS, as->get_write_store_ctx_guard(ls_id,
+                                                      dml_param.timeout_,
+                                                      tx_desc,
+                                                      snapshot,
+                                                      0,/*branch_id*/
+                                                      store_ctx_guard));
+  ASSERT_EQ(OB_SUCCESS, as->insert_rows(ls_id,
                                          tablet_id,
                                          tx_desc,
                                          dml_param,
@@ -215,7 +221,7 @@ void TestTrans::prepare_tx_desc(ObTxDesc *&tx_desc, ObTxReadSnapshot &snapshot)
 TEST_F(TestTrans, create_ls_and_tablet)
 {
   int ret = OB_SUCCESS;
-  ASSERT_EQ(OB_SUCCESS, ObCurTraceId::get_trace_id()->set("Y1-1111111111111111"));
+  ASSERT_EQ(OB_SUCCESS, ObCurTraceId::get_trace_id()->set("Y1-1111111111111111-0-0"));
   ObLSID ls_id(100);
   ObLS *ls = nullptr;
   uint64_t tenant_id = MTL_ID();
@@ -259,14 +265,18 @@ TEST_F(TestTrans, basic)
   ASSERT_EQ(OB_SUCCESS, MTL(ObLSService*)->get_ls(ls_id, ls_handle, ObLSGetMod::STORAGE_MOD));
   ObTabletHandle tablet_handle;
   ASSERT_EQ(OB_SUCCESS, ls_handle.get_ls()->get_tablet_svr()->get_tablet(tablet_id, tablet_handle, 0));
-  ObIMemtableMgr *mt_mgr = tablet_handle.get_obj()->get_memtable_mgr();
-  ASSERT_EQ(1, mt_mgr->get_memtable_count_());
+  ObProtectedMemtableMgrHandle *protected_handle = NULL;
+  ASSERT_EQ(OB_SUCCESS, tablet_handle.get_obj()->get_protected_memtable_mgr_handle(protected_handle));
+  ASSERT_EQ(1, protected_handle->memtable_mgr_handle_.get_memtable_mgr()->get_memtable_count_());
   ObTableHandleV2 mt_handle;
-  ASSERT_EQ(OB_SUCCESS, mt_mgr->get_active_memtable(mt_handle));
+  ASSERT_EQ(OB_SUCCESS, protected_handle->get_active_memtable(mt_handle));
   memtable::ObMemtable *mt;
   ASSERT_EQ(OB_SUCCESS, mt_handle.get_data_memtable(mt));
 
-  printf("mt size=%ld occ_size=%ld bree_item_count=%ld rec_scn=%s end_scn=%s\n", mt->get_size(), mt->get_occupied_size(), mt->get_btree_item_count(), to_cstring(mt->get_rec_scn()),to_cstring(mt->get_max_end_scn()));
+  ObCStringHelper helper;
+  printf("mt size=%ld occ_size=%ld bree_item_count=%ld rec_scn=%s end_scn=%s\n",
+      mt->get_size(), mt->get_occupied_size(), mt->get_btree_item_count(),
+      helper.convert(mt->get_rec_scn()),helper.convert(mt->get_max_end_scn()));
 
   /*
   ObStoreRow store_row;
@@ -305,12 +315,12 @@ TEST_F(TestTrans, basic)
   LOG_INFO("release transaction");
   tx_service->release_tx(*tx_desc);
 
-  //ASSERT_EQ(OB_SUCCESS, MTL(ObLSService*)->remove_ls(ls_id, false));
+  //ASSERT_EQ(OB_SUCCESS, MTL(ObLSService*)->remove_ls(ls_id));
 }
 
 TEST_F(TestTrans, dist_trans)
 {
-  ASSERT_EQ(OB_SUCCESS, ObCurTraceId::get_trace_id()->set("Y2-2222222222222222222222"));
+  ASSERT_EQ(OB_SUCCESS, ObCurTraceId::get_trace_id()->set("Y2-2222222222222222-0-0"));
   uint64_t tenant_id = MTL_ID();
   ObLSID ls_id(100);
   ObTabletID tablet_id(1001);
@@ -364,15 +374,172 @@ TEST_F(TestTrans, freeze)
   ASSERT_EQ(OB_SUCCESS, ls->logstream_freeze());
 }
 */
+TEST_F(TestTrans, transfer_block)
+{
+  int ret = OB_SUCCESS;
+  uint64_t tenant_id = MTL_ID();
+  ObLSID ls_id(100);
+  ObTabletID tablet_id(1001);
+
+  LOG_INFO("start transaction");
+  ObTxDesc *tx_desc = NULL;
+  ObTxReadSnapshot snapshot;
+  prepare_tx_desc(tx_desc, snapshot);
+  // prepare insert param
+  const char *ins_str =
+      "bigint    dml          \n"
+      "300        T_DML_INSERT \n";
+  insert_rows(ls_id, tablet_id, *tx_desc, snapshot, ins_str);
+
+  ObTransService *tx_service = MTL(ObTransService*);
+  ObPartTransCtx *part_ctx;
+  ASSERT_EQ(OB_SUCCESS, tx_service->tx_ctx_mgr_.get_tx_ctx(ls_id, tx_desc->tx_id_, false, part_ctx));
+  part_ctx->sub_state_.set_transfer_blocking();
+  ASSERT_EQ(OB_SUCCESS, tx_service->tx_ctx_mgr_.revert_tx_ctx(part_ctx));
+
+  std::thread th([part_ctx] () {
+    ::sleep(3);
+    part_ctx->sub_state_.clear_transfer_blocking();
+  });
+
+  LOG_INFO("commit transaction");
+  ASSERT_EQ(OB_SUCCESS, tx_service->commit_tx(*tx_desc, ObTimeUtility::current_time() + 100000000));
+
+  LOG_INFO("release transaction");
+  tx_service->release_tx(*tx_desc);
+
+  th.join();
+}
+
+TEST_F(TestTrans, transfer_block2)
+{
+  int ret = OB_SUCCESS;
+  uint64_t tenant_id = MTL_ID();
+  ObLSID ls_id(100);
+  ObTabletID tablet_id(1001);
+
+  LOG_INFO("start transaction");
+  ObTxDesc *tx_desc = NULL;
+  ObTxReadSnapshot snapshot;
+  prepare_tx_desc(tx_desc, snapshot);
+  // prepare insert param
+  const char *ins_str =
+      "bigint    dml          \n"
+      "400        T_DML_INSERT \n";
+  insert_rows(ls_id, tablet_id, *tx_desc, snapshot, ins_str);
+
+  ObTransService *tx_service = MTL(ObTransService*);
+  ObPartTransCtx *part_ctx;
+  ASSERT_EQ(OB_SUCCESS, tx_service->tx_ctx_mgr_.get_tx_ctx(ls_id, tx_desc->tx_id_, false, part_ctx));
+  bool is_blocked = false;
+  part_ctx->sub_state_.set_transfer_blocking();
+  ASSERT_EQ(OB_SUCCESS, tx_service->tx_ctx_mgr_.revert_tx_ctx(part_ctx));
+
+  std::thread th([part_ctx] () {
+    ::sleep(3);
+    part_ctx->sub_state_.clear_transfer_blocking();
+  });
+
+  LOG_INFO("rollback transaction");
+  ASSERT_EQ(OB_SUCCESS, tx_service->rollback_tx(*tx_desc));
+
+  LOG_INFO("release transaction");
+  tx_service->release_tx(*tx_desc);
+  th.join();
+}
+
+TEST_F(TestTrans, tablet_to_ls_cache)
+{
+  // 0. init
+  int ret = OB_SUCCESS;
+  uint64_t tenant_id = MTL_ID();
+  ObLSID ls_id_1(1201);
+  ObLSID ls_id_2(1202);
+  ObLS *ls1 = nullptr;
+  ObLS *ls2 = nullptr;
+  ObLSTxCtxMgr *ls_tx_ctx_mgr = NULL;
+  ObTransService *tx_service = MTL(ObTransService*);
+  ASSERT_EQ(true, tx_service->is_inited_);
+  ASSERT_EQ(true, tx_service->tablet_to_ls_cache_.is_inited_);
+  create_ls(tenant_id, ls_id_1, ls1);
+  create_ls(tenant_id, ls_id_2, ls2);
+  ASSERT_EQ(OB_SUCCESS, tx_service->tx_ctx_mgr_.get_ls_tx_ctx_mgr(ls_id_1, ls_tx_ctx_mgr));
+  int64_t base_ref = ls_tx_ctx_mgr->get_ref();
+  int64_t base_size = tx_service->tablet_to_ls_cache_.size();
+
+  // 1. insert tablet
+  const int TABLET_NUM = 10;
+  ObSEArray<ObTabletID, TABLET_NUM> tablet_ids;
+  ObSEArray<ObTabletID, TABLET_NUM> tablet_ids_2;
+  for (int i = 0; i < TABLET_NUM; i++) {
+    ObTabletID tablet_id(1300 + i);
+    ASSERT_EQ(OB_SUCCESS, tablet_ids.push_back(tablet_id));
+    ObTabletID tablet_id_2(1600 + i);
+    ASSERT_EQ(OB_SUCCESS, tablet_ids_2.push_back(tablet_id_2));
+  }
+  ASSERT_EQ(TABLET_NUM, tablet_ids.count());
+  ARRAY_FOREACH(tablet_ids, i) {
+    const ObTabletID &tablet_id = tablet_ids.at(i);
+    ASSERT_EQ(OB_SUCCESS, tx_service->create_tablet(tablet_id, i < TABLET_NUM/2 ? ls_id_1:ls_id_2));
+  }
+  ASSERT_EQ(TABLET_NUM + base_size, tx_service->tablet_to_ls_cache_.size());
+  ASSERT_EQ(TABLET_NUM/2 + base_ref, ls_tx_ctx_mgr->get_ref());
+
+  // repeated inserts will not fail, but cache entries count will not grow.
+  ARRAY_FOREACH(tablet_ids, i) {
+    const ObTabletID &tablet_id = tablet_ids.at(i);
+    ASSERT_EQ(OB_SUCCESS, tx_service->create_tablet(tablet_id, i < TABLET_NUM/2 ? ls_id_1:ls_id_2));
+  }
+  ASSERT_EQ(TABLET_NUM + base_size, tx_service->tablet_to_ls_cache_.size());
+  ASSERT_EQ(TABLET_NUM/2 + base_ref, ls_tx_ctx_mgr->get_ref());
+
+  // 2. check and get ls
+  ObLSID ls_id;
+  bool is_local = false;
+  ARRAY_FOREACH(tablet_ids, i) {
+    // tablet exist
+    const ObTabletID &tablet_id = tablet_ids.at(i);
+    ls_id.reset();
+    is_local = false;
+    ASSERT_EQ(OB_SUCCESS, tx_service->check_and_get_ls_info(tablet_id, ls_id, is_local));
+    ASSERT_EQ((i < TABLET_NUM/2 ? ls_id_1.id():ls_id_2.id()), ls_id.id());
+    ASSERT_EQ(true, is_local);
+    // tablet not exist
+    const ObTabletID &tablet_id_2 = tablet_ids_2.at(i);
+    ASSERT_EQ(OB_SUCCESS, tx_service->check_and_get_ls_info(tablet_id_2, ls_id, is_local));
+  }
+  ASSERT_EQ(TABLET_NUM + base_size, tx_service->tablet_to_ls_cache_.size());
+
+  // 3. remove tablet
+  ASSERT_EQ(OB_SUCCESS, MTL(ObLSService*)->remove_ls(ls_id_2));
+  ASSERT_EQ(TABLET_NUM/2, tx_service->tablet_to_ls_cache_.size());
+  for (int i = 0; i < TABLET_NUM/2; i++) {
+    const ObTabletID &tablet_id = tablet_ids.at(i);
+    ls_id.reset();
+    is_local = false;
+    ASSERT_EQ(OB_SUCCESS, tx_service->check_and_get_ls_info(tablet_id, ls_id, is_local));
+    ASSERT_EQ(ls_id_1, ls_id);
+    ASSERT_EQ(true, is_local);
+    tx_service->remove_tablet(tablet_id, ls_id);
+    ASSERT_EQ(OB_SUCCESS, tx_service->check_and_get_ls_info(tablet_id, ls_id, is_local));
+  }
+  ASSERT_EQ(0, tx_service->tablet_to_ls_cache_.size());
+  ASSERT_EQ(base_ref, ls_tx_ctx_mgr->get_ref());
+
+  // 4. clear
+  ASSERT_EQ(OB_SUCCESS, tx_service->tx_ctx_mgr_.revert_ls_tx_ctx_mgr(ls_tx_ctx_mgr));
+  ASSERT_EQ(OB_SUCCESS, MTL(ObLSService*)->remove_ls(ls_id_1));
+}
 
 TEST_F(TestTrans, remove_ls)
 {
   ObLSID ls_id(100);
   ObLSID ls_id2(101);
-  ASSERT_EQ(OB_SUCCESS, MTL(ObLSService*)->remove_ls(ls_id, false));
-  ASSERT_EQ(OB_SUCCESS, MTL(ObLSService*)->remove_ls(ls_id2, false));
+  ASSERT_EQ(OB_SUCCESS, MTL(ObLSService*)->remove_ls(ls_id));
+  ASSERT_EQ(OB_SUCCESS, MTL(ObLSService*)->remove_ls(ls_id2));
+  ObTransService *tx_service = MTL(ObTransService*);
+  ASSERT_EQ(0, tx_service->tablet_to_ls_cache_.size());
 }
-
 
 } // end oceanbase
 
@@ -380,7 +547,7 @@ int main(int argc, char **argv)
 {
   system("rm -rf test_trans.log*");
   OB_LOGGER.set_file_name("test_trans.log",true, false, "test_trans.log", "test_trans.log");
-  OB_LOGGER.set_log_level("INFO");
+  OB_LOGGER.set_log_level("DEBUG");
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
 }

@@ -163,7 +163,11 @@ public:
       bool with_mv,
       bool with_global_index = true,
       bool with_domain_index = true,
-      bool with_spatial_index = true);
+      bool with_spatial_index = true,
+      bool with_vector_index = true);
+  int get_table_mlog_schema(const uint64_t tenant_id,
+                            const uint64_t data_table_id,
+                            const ObTableSchema *&mlog_schema);
   int check_has_local_unique_index(
       const uint64_t tenant_id,
       const uint64_t table_id,
@@ -185,7 +189,8 @@ public:
 			const ObString &table_name,
 			const bool is_index,
 			const ObSimpleTableSchemaV2 *&simple_table_schema,
-      bool is_hidden = false);
+      const bool with_hidden_flag = false,
+      const bool is_built_in_index = false);
 	int get_table_schemas_in_tenant(const uint64_t tenant_id,
 			common::ObIArray<const ObSimpleTableSchemaV2 *> &table_schemas);
   int get_database_schemas_in_tenant(const uint64_t tenant_id,
@@ -282,25 +287,15 @@ public:
   int get_table_ids_in_tablegroup(const uint64_t tenant_id,
                                   const uint64_t tablegroup_id,
                                   common::ObIArray<uint64_t> &table_id_array);
-  int get_outline_infos_in_database(const uint64_t tenant_id,
-                                    const uint64_t database_id,
-                                    common::ObIArray<const ObOutlineInfo *> &outline_infos);
-  int get_trigger_infos_in_database(const uint64_t tenant_id,
-                                    const uint64_t database_id,
-                                    common::ObIArray<const ObTriggerInfo *> &tg_infos);
-  int get_synonym_infos_in_database(const uint64_t tenant_id,
-                                    const uint64_t database_id,
-                                    common::ObIArray<const ObSynonymInfo *> &synonym_infos);
-
-  int get_package_infos_in_database(const uint64_t tenant_id,
-                                    const uint64_t database_id,
-                                    common::ObIArray<const ObPackageInfo *> &package_infos);
-  int get_routine_infos_in_database(const uint64_t tenant_id,
-                                    const uint64_t database_id,
-                                    common::ObIArray<const ObRoutineInfo *> &routine_infos);
-  int get_udt_infos_in_database(const uint64_t tenant_id,
-                                const uint64_t database_id,
-                                common::ObIArray<const ObUDTTypeInfo *> &udt_infos);
+  int get_trigger_ids_in_database(const uint64_t tenant_id,
+                                  const uint64_t database_id,
+                                  common::ObIArray<uint64_t> &trigger_ids);
+  int get_routine_ids_in_database(const uint64_t tenant_id,
+                                  const uint64_t database_id,
+                                  common::ObIArray<uint64_t> &routine_ids);
+  int get_udt_ids_in_database(const uint64_t tenant_id,
+                              const uint64_t database_id,
+                              common::ObIArray<uint64_t> &udt_ids);
   int get_routine_info_in_udt(const uint64_t tenant_id,
                               const uint64_t udt_id,
                               const uint64_t subprogram_id,
@@ -315,9 +310,9 @@ public:
   int get_routine_infos_in_package(const uint64_t tenant_id,
                                    const uint64_t package_id,
                                    common::ObIArray<const ObRoutineInfo *> &routine_infos);
-  int get_sequence_infos_in_database(const uint64_t tenant_id,
-                                   const uint64_t database_id,
-                                   common::ObIArray<const ObSequenceSchema *> &sequence_infos);
+  int get_sequence_schemas_in_database(const uint64_t tenant_id,
+                                       const uint64_t database_id,
+                                       common::ObIArray<const ObSequenceSchema*> &sequence_schemas);
   int get_label_se_policy_infos_in_tenant(const uint64_t tenant_id,
                                           common::ObIArray<const ObLabelSePolicySchema *> &label_se_policy_infos);
   int get_label_se_component_infos_in_tenant(const uint64_t tenant_id,
@@ -361,13 +356,15 @@ public:
                    const common::ObString &table_name,
                    const bool is_index,
                    const CheckTableType check_type,  // if temporary table is visable
-                   uint64_t &table_id);
+                   uint64_t &table_id,
+                   const bool is_built_in_index = false);
   int get_table_id(uint64_t tenant_id,
                    const common::ObString &database_name,
                    const common::ObString &table_name,
                    const bool is_index,
                    const CheckTableType check_type,  // if temporary table is visable
-                   uint64_t &table_id);
+                   uint64_t &table_id,
+                   const bool is_built_in_index = false);
   int get_foreign_key_id(const uint64_t tenant_id,
                          const uint64_t database_id,
                          const common::ObString &foreign_key_name,
@@ -418,13 +415,15 @@ public:
                        const common::ObString &table_name,
                        const bool is_index,
                        const ObTableSchema *&table_schema,
-                       bool is_hidden = false);
+                       const bool with_hidden_flag = false,
+                       const bool is_built_in_index = false);
   int get_table_schema(const uint64_t tenant_id,
                        const common::ObString &database_name,
                        const common::ObString &table_name,
                        const bool is_index,
                        const ObTableSchema *&table_schema,
-                       bool is_hidden = false);
+                       const bool with_hidden_flag = false,
+                       const bool is_built_in_index = false);
   int get_index_schemas_with_data_table_id(const uint64_t tenant_id,
                                            const uint64_t data_table_id,
                                            ObIArray<const ObSimpleTableSchemaV2 *> &aux_schemas);
@@ -466,10 +465,12 @@ public:
                                 const uint64_t table_id,
                                 uint64_t *index_tid_array,
                                 int64_t &size,
-                                bool only_global = false);
+                                bool only_global = false,
+                                bool with_mlog = false);
 
   // for readonly
   int verify_read_only(const uint64_t tenant_id, const ObStmtNeedPrivs &stmt_need_privs);
+  int is_user_empty_passwd(const ObUserLoginInfo &login_info, bool &is_empty_passwd_account);
   int check_user_access(const ObUserLoginInfo &login_info,
                         ObSessionPrivInfo &s_priv,
                         SSL *ssl_st,
@@ -483,6 +484,11 @@ public:
                        const common::ObString &db,
                        const common::ObString &table,
                        bool &allow_show);
+  int check_routine_show(const ObSessionPrivInfo &session_priv,
+                         const common::ObString &db,
+                         const common::ObString &routine,
+                         bool &allow_show,
+                         int64_t routine_type);
 
   int check_ora_priv(const uint64_t tenant_id,
                      const uint64_t uid,
@@ -500,6 +506,18 @@ public:
                               const ObNeedPriv &table_need_priv);
   int check_single_table_priv_or(const ObSessionPrivInfo &session_priv,
                                  const ObNeedPriv &table_need_priv);
+
+  int check_priv_any_column_priv(const ObSessionPrivInfo &session_priv,
+                                 const common::ObString &db_name,
+                                 const common::ObString &table_name,
+                                 bool &pass);
+
+  int collect_all_priv_for_column(const ObSessionPrivInfo &session_priv,
+                                  const common::ObString &db_name,
+                                  const common::ObString &table_name,
+                                  const common::ObString &column_name,
+                                  ObPrivSet &column_priv_set);
+
   int get_session_priv_info(const uint64_t tenant_id,
                             const uint64_t user_id,
                             const ObString &database_name,
@@ -508,9 +526,34 @@ public:
                                     common::ObIArray<const ObUserInfo *> &user_infos);
   int get_db_priv_with_tenant_id(const uint64_t tenant_id,
                                  common::ObIArray<const ObDBPriv *> &db_privs);
+  int get_column_priv_in_table(const uint64_t tenant_id,
+                              const uint64_t user_id,
+                              const ObString &db,
+                              const ObString &table,
+                              ObIArray<const ObColumnPriv *> &column_privs);
+
+  int get_column_priv_in_table(const ObTablePrivSortKey &table_priv_key,
+                              ObIArray<const ObColumnPriv *> &column_privs);
+  int get_column_priv(const ObColumnPrivSortKey &column_priv_key,
+                          const ObColumnPriv *&column_priv);
+
+  int get_column_priv_id(const uint64_t tenant_id,
+                        const uint64_t user_id,
+                        const ObString &db,
+                        const ObString &table,
+                        const ObString &column,
+                        uint64_t &priv_id);
+  int get_column_priv_with_user_id(const uint64_t tenant_id,
+                                    const uint64_t user_id,
+                                    common::ObIArray<const ObColumnPriv*> &column_privs);
+  int get_column_priv_set(const ObColumnPrivSortKey &column_priv_key, ObPrivSet &priv_set);
   int get_db_priv_with_user_id(const uint64_t tenant_id,
                                const uint64_t user_id,
                                common::ObIArray<const ObDBPriv*> &db_privs);
+
+  int get_routine_priv_with_user_id(const uint64_t tenant_id,
+                                    const uint64_t user_id,
+                                    common::ObIArray<const ObRoutinePriv*> &routine_privs);
   int get_table_priv_with_tenant_id(const uint64_t tenant_id,
                                     common::ObIArray<const ObTablePriv *> &table_privs);
   int get_table_priv_with_user_id(const uint64_t tenant_id,
@@ -544,6 +587,7 @@ public:
   // for compatible
   int get_db_priv_set(const ObOriginalDBKey &db_priv_key, ObPrivSet &priv_set, bool is_pattern = false);
   int get_table_priv_set(const ObTablePrivSortKey &table_priv_key, ObPrivSet &priv_set);
+  int get_routine_priv_set(const ObRoutinePrivSortKey &routine_priv_key, ObPrivSet &priv_set);
   int get_obj_privs(
       const ObObjPrivSortKey &obj_priv_key,
       ObPackedObjPriv &obj_privs);
@@ -599,27 +643,33 @@ public:
   int check_outline_exist_with_name(const uint64_t tenant_id,
                                     const uint64_t database_id,
                                     const common::ObString &outline_name,
+                                    const bool is_format,
                                     uint64_t &outline_id,
                                     bool &exist);
   int check_outline_exist_with_sql(const uint64_t tenant_id,
                                    const uint64_t database_id,
                                    const common::ObString &paramlized_sql,
+                                   const bool is_format,
                                    bool &exist);
   int check_outline_exist_with_sql_id(const uint64_t tenant_id,
                                    const uint64_t database_id,
                                    const common::ObString &sql_id,
+                                   const bool is_format,
                                    bool &exist) ;
   int get_outline_info_with_name(const uint64_t tenant_id,
                                  const uint64_t database_id,
                                  const common::ObString &name,
+                                 const bool is_format,
                                  const ObOutlineInfo *&outline_info);
   int get_outline_info_with_name(const uint64_t tenant_id,
                                  const common::ObString &db_name,
                                  const common::ObString &outline_name,
+                                 const bool is_format,
                                  const ObOutlineInfo *&outline_info);
   int get_outline_info_with_signature(const uint64_t tenant_id,
                                       const uint64_t database_id,
                                       const common::ObString &signature,
+                                      const bool is_format,
                                       const ObOutlineInfo *&outline_info);
   //package
   int check_package_exist(uint64_t tenant_id, uint64_t database_id,
@@ -738,6 +788,7 @@ public:
   int get_outline_info_with_sql_id(const uint64_t tenant_id,
                                       const uint64_t database_id,
                                       const common::ObString &sql_id,
+                                      const bool is_format,
                                       const ObOutlineInfo *&outline_info) ;
   //about user define function
   int check_udf_exist_with_name(const uint64_t tenant_id,
@@ -789,9 +840,9 @@ public:
                                    const ObContextSchema *&context_schema);
 
   // mock_fk_parent_table begin
-  int get_mock_fk_parent_table_schemas_in_database(const uint64_t tenant_id,
-                                                   const uint64_t database_id,
-                                                   ObIArray<const ObMockFKParentTableSchema *> &schemas);
+  int get_mock_fk_parent_table_ids_in_database(const uint64_t tenant_id,
+                                               const uint64_t database_id,
+                                               ObIArray<uint64_t> &mock_fk_parent_table_ids);
   int get_simple_mock_fk_parent_table_schema(const uint64_t tenant_id,
                                              const uint64_t database_id,
                                              const common::ObString &name,
@@ -1007,13 +1058,10 @@ public:
   bool is_tenant_schema_guard() const { return common::OB_INVALID_TENANT_ID != tenant_id_; }
   uint64_t get_tenant_id() const { return tenant_id_; }
 
-  int get_tenant_mv_ids(const uint64_t tenant_id, common::ObArray<uint64_t> &mv_ids) const;
-
   SchemaGuardType get_schema_guard_type() const { return schema_guard_type_; }
 
-  bool is_standby_cluster() { return is_standby_cluster_; }
   bool restore_tenant_exist() { return restore_tenant_exist_; }
-  bool use_schema_status() { return is_standby_cluster() || restore_tenant_exist(); }
+  bool use_schema_status() { return restore_tenant_exist(); }
 
   int check_formal_guard() const;
   int is_lazy_mode(const uint64_t tenant_id, bool &is_lazy) const;
@@ -1040,6 +1088,10 @@ public:
       const uint64_t column_id,
       bool &is_key);
 
+  int get_range_part_high_bound(const ObTableSchema &table_schema,
+                                const common::ObTabletID &tablet_id,
+                                ObIAllocator &allocator,
+                                common::ObRowkey &high_bound);
   int deep_copy_index_name_map(common::ObIAllocator &allocator,
                                ObIndexNameMap &index_name_cache);
   #define GET_SIMPLE_SCHEMAS_IN_DATABASE_FUNC_DECLARE(SCHEMA, SCHEMA_TYPE)     \
@@ -1052,6 +1104,12 @@ public:
   GET_SIMPLE_SCHEMAS_IN_DATABASE_FUNC_DECLARE(package, ObSimplePackageSchema);
   GET_SIMPLE_SCHEMAS_IN_DATABASE_FUNC_DECLARE(routine, ObSimpleRoutineSchema);
   GET_SIMPLE_SCHEMAS_IN_DATABASE_FUNC_DECLARE(mock_fk_parent_table, ObSimpleMockFKParentTableSchema);
+
+  int check_routine_priv(const ObSessionPrivInfo &session_priv,
+                         const ObNeedPriv &routine_need_priv);
+
+  int check_routine_definer_existed(uint64_t tenant_id, const ObString &user_name, bool &existed);
+
 private:
   int check_ssl_access(const ObUserInfo &user_info,
                        SSL *ssl_st);
@@ -1059,13 +1117,14 @@ private:
 
   int check_db_priv(const ObSessionPrivInfo &session_priv,
                     const common::ObString &db,
-                    const ObPrivSet need_priv,
+                    const ObPrivSet need_priv_set,
                     ObPrivSet &user_db_priv_set);
   int check_db_priv(const ObSessionPrivInfo &session_priv,
                     const common::ObString &db,
-                    const ObPrivSet need_priv);
+                    const ObPrivSet need_priv_set);
   int check_user_priv(const ObSessionPrivInfo &session_priv,
-                      const ObPrivSet priv_set);
+                      const ObPrivSet priv_set,
+                      bool check_all = true);
   int verify_db_read_only(const uint64_t tenant_id,
                           const ObNeedPriv &need_priv);
   int verify_table_read_only(const uint64_t tenant_id,
@@ -1138,7 +1197,7 @@ private:
       const T *&schema,
       common::ObKVCacheHandle &handle);
 
-  int init(const bool is_standby_cluster);
+  int init();
   int fast_reset() {
     return is_inited_? reset(): common::OB_SUCCESS;
   }
@@ -1160,7 +1219,8 @@ private:
                         const uint64_t tenant_id,
                         const uint64_t user_id,
                         bool& pass);
-  int check_priv_table_or_(const ObNeedPriv &need_priv,
+  int check_priv_table_or_(const ObSessionPrivInfo &session_priv,
+                           const ObNeedPriv &need_priv,
                            const ObPrivMgr &priv_mgr,
                            const uint64_t tenant_id,
                            const uint64_t user_id,
@@ -1171,6 +1231,7 @@ private:
   int check_single_table_priv_for_update_(const ObSessionPrivInfo &session_priv,
                                           const ObNeedPriv &table_need_priv,
                                           const ObPrivMgr &priv_mgr);
+  int check_activate_all_role_var(uint64_t tenant_id, bool &activate_all_role);
 private:
   common::ObArenaAllocator local_allocator_;
   ObMultiVersionSchemaService *schema_service_;
@@ -1189,7 +1250,6 @@ private:
 
   ObSchemaMgrItem::Mod mod_;
   SchemaGuardType schema_guard_type_;
-  bool is_standby_cluster_;
   bool restore_tenant_exist_;
   bool is_inited_;
   int64_t pin_cache_size_;

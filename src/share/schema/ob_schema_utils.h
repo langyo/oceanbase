@@ -23,6 +23,7 @@
 #include "share/schema/ob_schema_struct.h"
 #include "share/system_variable/ob_sys_var_class_type.h"
 #include "common/sql_mode/ob_sql_mode.h"
+#include "share/config/ob_config.h"
 
 namespace oceanbase
 {
@@ -39,6 +40,7 @@ class ObTableSchema;
 class ObColumnSchemaV2;
 class ObServerSchemaService;
 struct SchemaKey;
+class AlterTableSchema;
 class ObSchemaUtils
 {
 public:
@@ -75,7 +77,29 @@ public:
   static bool is_invisible_column(uint64_t flag);
   static bool is_cte_generated_column(uint64_t flag);
   static bool is_default_expr_v2_column(uint64_t flag);
-  static bool is_fulltext_column(uint64_t flag);
+  static bool is_vec_index_column(const uint64_t flag);
+
+  static bool is_vec_ivf_center_id_column(const uint64_t flag);
+  static bool is_vec_ivf_center_vector_column(const uint64_t flag);
+  static bool is_vec_ivf_data_vector_column(const uint64_t flag);
+  static bool is_vec_ivf_meta_id_column(const uint64_t flag);
+  static bool is_vec_ivf_meta_vector_column(const uint64_t flag);
+  static bool is_vec_ivf_pq_center_id_column(const uint64_t flag);
+  static bool is_vec_ivf_pq_center_ids_column(const uint64_t flag);
+
+  static bool is_vec_hnsw_vid_column(const uint64_t flag);
+  static bool is_vec_hnsw_type_column(const uint64_t flag);
+  static bool is_vec_hnsw_vector_column(const uint64_t flag);
+  static bool is_vec_hnsw_scn_column(const uint64_t flag);
+  static bool is_vec_hnsw_key_column(const uint64_t flag);
+  static bool is_vec_hnsw_data_column(const uint64_t flag);
+  static bool is_fulltext_column(const uint64_t flag);
+  static bool is_doc_id_column(const uint64_t flag);
+  static bool is_word_segment_column(const uint64_t flag);
+  static bool is_word_count_column(const uint64_t flag);
+  static bool is_doc_length_column(const uint64_t flag);
+  static bool is_multivalue_generated_column(uint64_t flag);
+  static bool is_multivalue_generated_array_column(uint64_t flag);
   static bool is_spatial_generated_column(uint64_t flag);
   static bool is_generated_column(uint64_t flag) { return is_virtual_generated_column(flag) || is_stored_generated_column(flag); }
   static bool is_identity_column(uint64_t flag) { return is_always_identity_column(flag) || is_default_identity_column(flag) || is_default_on_null_identity_column(flag); }
@@ -115,11 +139,41 @@ public:
              share::schema::ObTableSchema &table);
   static int construct_inner_table_schemas(
              const uint64_t tenant_id,
-             common::ObIArray<share::schema::ObTableSchema> &tables);
+             common::ObSArray<share::schema::ObTableSchema> &tables,
+             common::ObIAllocator &allocator);
   static int add_sys_table_lob_aux_table(
              uint64_t tenant_id,
              uint64_t data_table_id,
              ObIArray<ObTableSchema> &table_schemas);
+  static int build_column_group(
+             const share::schema::ObTableSchema &table_schema,
+             const uint64_t tenant_id,
+             const share::schema::ObColumnGroupType &cg_type,
+             const common::ObString &cg_name,
+             const common::ObIArray<uint64_t> &column_ids,
+             const uint64_t cg_id,
+             share::schema::ObColumnGroupSchema &column_group);
+  static int build_all_column_group(
+             const share::schema::ObTableSchema &table_schema,
+             const uint64_t tenant_id,
+             const uint64_t column_group_id,
+             share::schema::ObColumnGroupSchema &column_group_schema);
+  static int build_single_column_group(
+             const share::schema::ObTableSchema &table_schema,
+             share::schema::ObColumnSchemaV2 *column_schema,
+             const uint64_t tenant_id,
+             const uint64_t column_group_id,
+             share::schema::ObColumnGroupSchema &column_group_schema);
+
+  static int build_add_each_column_group(const share::schema::ObTableSchema &table_schema,
+                                         share::schema::ObTableSchema &dst_table_schema);
+  static int alter_rowkey_column_group(share::schema::ObTableSchema &table_schema);
+  static int alter_default_column_group(share::schema::ObTableSchema &new_table_schema);
+
+  static int mock_default_cg(
+              const uint64_t tenant_id,
+              share::schema::ObTableSchema &new_table_schema);
+  static bool can_add_column_group(const ObTableSchema &table_schema);
 
   // Optimized method to batch get latest table schemas from cache or inner_table automatically.
   //
@@ -155,8 +209,42 @@ public:
 
   static int try_check_parallel_ddl_schema_in_sync(
              const ObTimeoutCtx &ctx,
+             sql::ObSQLSessionInfo *session,
              const uint64_t tenant_id,
-             const int64_t schema_version);
+             const int64_t schema_version,
+             const bool skip_consensus);
+
+  // Use to check if the column of sys table (exclude core table) does exist
+  // by querying __all_column when the column is not accessible.
+  // (attention: the func contains an inner sql)
+  //
+  // @param[in] tenant_id:  target tenant_id
+  // @param[in] table_id:   sys table_id (exclude core table)
+  // @param[in] column_name:   target column name
+  // @param[out] exist:  whether the column really exists
+  // @return: OB_SUCCESS if success
+  static int check_whether_column_exist(
+      const uint64_t tenant_id,
+      const ObObjectID &table_id,
+      const ObString &column_name,
+      bool &exist);
+
+  // Use to check if the sys table (exclude core table) does exist
+  // by querying __all_table when the table is not accessible.
+  //
+  // @param[in] sql_client: ObISQLClient
+  // @param[in] tenant_id:  target tenant_id
+  // @param[in] table_id:   sys table_id (exclude core table)
+  // @param[out] exist:  whether the table really exists
+  // @return: OB_SUCCESS if success
+  static int check_sys_table_exist_by_sql(
+      common::ObISQLClient &sql_client,
+      const uint64_t tenant_id,
+      const ObObjectID &table_id,
+      bool &exist);
+
+  static int is_drop_column_only(const schema::AlterTableSchema &alter_table_schema, bool &is_drop_col_only);
+
 private:
   static int get_tenant_variable(schema::ObSchemaGetterGuard &schema_guard,
                                  uint64_t tenant_id,
@@ -297,6 +385,35 @@ int64_t ObSchemaUtils::get_partition_array_convert_size(
   }
   return convert_size;
 }
+
+class ObParallelDDLControlMode final : public ObIConfigMode
+{
+public:
+  ObParallelDDLControlMode(): value_(0) {}
+  enum ObParallelDDLType {
+    TRUNCATE_TABLE = 0,
+    SET_COMMENT = 1,
+    CREATE_INDEX = 2,
+    CREATE_VIEW = 3,
+    DROP_TABLE = 4,
+    MAX_TYPE // can not > 32
+  };
+
+  static constexpr uint64_t MASK_SIZE = 2;
+  static constexpr uint64_t MASK = 0x03;
+  virtual int set_value(const ObConfigModeItem &mode_item) override;
+  uint64_t get_value() const { return value_; }
+  int set_parallel_ddl_mode(const ObParallelDDLType type, const uint8_t mode);
+  int is_parallel_ddl(const ObParallelDDLType type, bool &is_parallel);
+  static int is_parallel_ddl_enable(const ObParallelDDLType ddl_type, const uint64_t tenant_id, bool &is_parallel);
+  static int string_to_ddl_type(const ObString &ddl_string, ObParallelDDLType &ddl_type);
+  static int generate_parallel_ddl_control_config_for_create_tenant(ObSqlString &config_value);
+private:
+  bool check_mode_valid_(uint8_t mode) { return mode > MASK ? false : true; }
+  uint64_t value_;
+  DISALLOW_COPY_AND_ASSIGN(ObParallelDDLControlMode);
+};
+
 
 } // end schema
 } // end share

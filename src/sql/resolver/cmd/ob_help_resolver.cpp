@@ -11,15 +11,7 @@
  */
 
 #define USING_LOG_PREFIX SQL_RESV
-#include "lib/string/ob_sql_string.h"
-#include "lib/mysqlclient/ob_mysql_result.h"
-#include "lib/mysqlclient/ob_mysql_proxy.h"
-#include "share/inner_table/ob_inner_table_schema.h"
 #include "ob_help_resolver.h"
-#include "sql/resolver/ob_resolver.h"
-#include "sql/resolver/cmd/ob_help_stmt.h"
-#include "sql/session/ob_sql_session_info.h"
-#include "sql/resolver/expr/ob_raw_expr.h"
 
 using namespace oceanbase;
 using namespace sql;
@@ -197,7 +189,8 @@ int ObHelpResolver::search_topic(ObHelpStmt *help_stmt,
                 help_stmt->add_row(row);
               }
             }
-            if (OB_FAIL(GET_COL_IGNORE_NULL(result->get_varchar, "name", col1))) {
+            if (OB_FAIL(ret)) {
+            } else if (OB_FAIL(GET_COL_IGNORE_NULL(result->get_varchar, "name", col1))) {
               SQL_REWRITE_LOG(WARN, "fail to get name column", K(ret), K(col1));
             } else {
               cells[0].set_varchar(col1);

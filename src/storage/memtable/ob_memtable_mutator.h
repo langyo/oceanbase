@@ -41,7 +41,6 @@ class ObTabletID;
 namespace memtable
 {
 
-class ObLsmtMutatorRow;
 struct RedoDataNode;
 struct TableLockRedoDataNode;
 
@@ -104,6 +103,7 @@ enum class MutatorType
 {
   MUTATOR_ROW = 0,
   MUTATOR_TABLE_LOCK = 1,
+  MUTATOR_ROW_EXT_INFO = 2,
 };
 
 const char * get_mutator_type_str(MutatorType mutator_type);
@@ -276,41 +276,6 @@ public:
   int64_t create_schema_version_;
 };
 
-class ObLsmtMutatorRow : public memtable::ObMutator
-{
-public:
-  ObLsmtMutatorRow() {}
-  virtual ~ObLsmtMutatorRow(){};
-  // set the trans data
-  int set(  const uint64_t table_id,
-            const int64_t table_version,
-            const common::ObTabletID primary_row_id,
-            const blocksstable::ObDmlFlag dml_flag,
-            const obrpc::ObBatchCreateTabletArg * create_arg,
-            const obrpc::ObBatchRemoveTabletArg * remove_arg);
-  void reset();
-  // copy the data out of this object
-  int copy(uint64_t &table_id,
-           int64_t &table_version,
-           common::ObTabletID &primary_row_id,
-           blocksstable::ObDmlFlag &dml_flag,
-           obrpc::ObBatchCreateTabletArg &create_arg,
-           obrpc::ObBatchRemoveTabletArg &remove_arg) const;
-  // serialize this object to clog
-  int serialize(char *buf, const int64_t buf_len, int64_t &pos,
-                const bool is_big_row = false);
-  // serialize this object from clog
-  virtual int deserialize(const char *buf, const int64_t data_len, int64_t &pos,
-                          const bool is_big_row = false);
-  VIRTUAL_TO_STRING_KV(K(table_id_), K(table_version_), K(primary_row_id_),
-                       K(dml_flag_), K(create_arg_), K(remove_arg_));
-public:
-  common::ObTabletID primary_row_id_;         //record the primary row for the trans
-  blocksstable::ObDmlFlag dml_flag_;                //ObDmlFlag::DF_INSERT:DF_DELETE;
-  obrpc::ObBatchCreateTabletArg create_arg_;  //batch create args  
-  obrpc::ObBatchRemoveTabletArg remove_arg_;  //batch remove args
-};
-
 class ObMutatorWriter
 {
 public:
@@ -321,6 +286,12 @@ public:
   int append_table_lock_kv(
       const int64_t table_version,
       const TableLockRedoDataNode &redo);
+
+  int append_ext_info_log_kv(
+      const int64_t table_version,
+      const RedoDataNode &redo,
+      const bool is_big_row);
+
   int append_row_kv(
       const int64_t table_version,
       const RedoDataNode &redo,
@@ -370,9 +341,8 @@ public:
   const ObMutatorRowHeader &get_row_head();
   const ObMemtableMutatorRow &get_mutator_row();
   const ObMutatorTableLock &get_table_lock_row();
-  const ObLsmtMutatorRow &get_ls_mt_row();
-
-  TO_STRING_KV(K_(meta),K(buf_.get_position()),K(buf_.get_limit()));
+  transaction::ObTxSEQ get_row_seq_no() const { return row_seq_no_; }
+  TO_STRING_KV(K_(meta), K_(row_seq_no), K(buf_.get_position()),K(buf_.get_limit()));
 private:
 
 private:
@@ -381,7 +351,7 @@ private:
   ObMutatorRowHeader row_header_;
   ObMemtableMutatorRow row_;
   ObMutatorTableLock table_lock_;
-
+  transaction::ObTxSEQ row_seq_no_;
   DISALLOW_COPY_AND_ASSIGN(ObMemtableMutatorIterator);
 };
 }//namespace memtable

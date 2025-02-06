@@ -12,30 +12,11 @@
 
 #define USING_LOG_PREFIX  SQL_ENG
 
-#include "lib/string/ob_sql_string.h"
-#include "lib/mysqlclient/ob_mysql_proxy.h"
-#include "common/sql_mode/ob_sql_mode_utils.h"
-#include "observer/ob_server_struct.h"
 #include "observer/ob_sql_client_decorator.h"
-#include "share/ob_i_sql_expression.h"
-#include "share/ob_schema_status_proxy.h"
-#include "share/ob_common_rpc_proxy.h"
-#include "share/object/ob_obj_cast.h"
-#include "share/inner_table/ob_inner_table_schema.h"
-#include "share/schema/ob_schema_utils.h"
 #include "sql/engine/cmd/ob_variable_set_executor.h"
-#include "sql/engine/ob_exec_context.h"
-#include "sql/engine/ob_physical_plan.h"
-#include "sql/session/ob_sql_session_info.h"
-#include "sql/code_generator/ob_expr_generator_impl.h"
-#include "sql/code_generator/ob_column_index_provider.h"
-#include "sql/ob_sql_trans_control.h"
-#include "sql/ob_end_trans_callback.h"
-#include "sql/ob_select_stmt_printer.h"
-#include "lib/timezone/ob_oracle_format_models.h"
 #include "observer/ob_server.h"
 #include "sql/rewrite/ob_transform_pre_process.h"
-
+#include "sql/engine/cmd/ob_set_names_executor.h"
 using namespace oceanbase::common;
 using namespace oceanbase::share;
 using namespace oceanbase::share::schema;
@@ -73,6 +54,16 @@ ObVariableSetExecutor::~ObVariableSetExecutor()
 {
 }
 
+int ObVariableSetExecutor::do_set_names(ObExecContext &ctx, ObSetNamesStmt &stmt)
+{
+  int ret = OB_SUCCESS;
+  ObSetNamesExecutor executor;
+  if (OB_FAIL(executor.execute(ctx, stmt))) {
+    LOG_WARN("fail to set names", K(ret));
+  }
+  return ret;
+}
+
 int ObVariableSetExecutor::execute(ObExecContext &ctx, ObVariableSetStmt &stmt)
 {
   int ret = OB_SUCCESS;
@@ -104,7 +95,7 @@ int ObVariableSetExecutor::execute(ObExecContext &ctx, ObVariableSetStmt &stmt)
       if (OB_ISNULL(expr_ctx.exec_ctx_)) {
         ret = OB_ERR_UNEXPECTED;
         LOG_ERROR("expr_ctx.exec_ctx_ is NULL", K(ret));
-      } else if (password_ctx.init(stmt.get_actual_tenant_id())) {
+      } else if (OB_FAIL(password_ctx.init(stmt.get_actual_tenant_id()))) {
         LOG_WARN("fail to init password ctx", K(ret));
       } else {
         expr_ctx.exec_ctx_->set_sql_proxy(sql_proxy);
@@ -114,6 +105,10 @@ int ObVariableSetExecutor::execute(ObExecContext &ctx, ObVariableSetStmt &stmt)
         ObVariableSetStmt::VariableSetNode &node = tmp_node;
         if (OB_FAIL(stmt.get_variable_node(i, node))) {
           LOG_WARN("fail to get variable node", K(i), K(ret));
+        } else if (OB_NOT_NULL(node.set_names_stmt_)) {
+          if (OB_FAIL(do_set_names(ctx, *node.set_names_stmt_))) {
+            LOG_WARN("fail to set names", K(ret));
+          }
         } else {
           ObObj value_obj;
           ObBasicSysVar *sys_var = NULL;
@@ -312,25 +307,32 @@ int ObVariableSetExecutor::execute(ObExecContext &ctx, ObVariableSetStmt &stmt)
                 }
               }
 
-              if (OB_SUCC(ret) && set_var.set_scope_ == ObSetVar::SET_SCOPE_GLOBAL) {
-                if(set_var.var_name_ == OB_SV_TIME_ZONE) {
-                  if(OB_FAIL(global_variable_timezone_formalize(ctx, value_obj))) {
-                    LOG_WARN("failed to formalize global variables", K(ret));
+              if(OB_SUCC(ret) && OB_FAIL(is_support(set_var))) {
+                if(ret == OB_NOT_SUPPORTED) {
+                  ret = OB_SUCCESS;
+                  LOG_USER_WARN(OB_NOT_SUPPORTED, "This system variable now is mock");
+                }
+              } else {
+                if (OB_SUCC(ret) && set_var.set_scope_ == ObSetVar::SET_SCOPE_GLOBAL) {
+                  if(set_var.var_name_ == OB_SV_TIME_ZONE) {
+                    if(OB_FAIL(global_variable_timezone_formalize(ctx, value_obj))) {
+                      LOG_WARN("failed to formalize global variables", K(ret));
+                    }
+                  }
+                  if (OB_SUCC(ret) && OB_FAIL(update_global_variables(ctx, stmt, set_var, value_obj))) {
+                    LOG_WARN("failed to update global variables", K(ret));
+                  } else { }
+                }
+                if (OB_SUCC(ret) && set_var.set_scope_ == ObSetVar::SET_SCOPE_SESSION) {
+                  if (OB_FAIL(sys_var->session_update(ctx, set_var, value_obj))) {
+                    LOG_WARN("fail to update", K(ret), K(*sys_var), K(set_var), K(value_obj));
                   }
                 }
-                if (OB_SUCC(ret) && OB_FAIL(update_global_variables(ctx, stmt, set_var, value_obj))) {
-                  LOG_WARN("failed to update global variables", K(ret));
-                } else { }
-              }
-              if (OB_SUCC(ret) && set_var.set_scope_ == ObSetVar::SET_SCOPE_SESSION) {
-                if (OB_FAIL(sys_var->session_update(ctx, set_var, value_obj))) {
-                  LOG_WARN("fail to update", K(ret), K(*sys_var), K(set_var), K(value_obj));
-                }
-              }
-              //某些变量需要立即更新状态
-              if (OB_SUCC(ret)) {
-                if (OB_FAIL(sys_var->update(ctx, set_var, value_obj))) {
-                  LOG_WARN("update sys var state failed", K(ret), K(set_var));
+                //某些变量需要立即更新状态
+                if (OB_SUCC(ret)) {
+                  if (OB_FAIL(sys_var->update(ctx, set_var, value_obj))) {
+                    LOG_WARN("update sys var state failed", K(ret), K(set_var));
+                  }
                 }
               }
             }
@@ -451,7 +453,14 @@ int ObVariableSetExecutor::execute_subquery_expr(ObExecContext &ctx,
     ObObj tmp_value;
     SMART_VAR(ObISQLClient::ReadResult, res) {
       common::sqlclient::ObMySQLResult *result = NULL;
-      if (OB_FAIL(conn->execute_read(tenant_id, subquery_expr.ptr(), res))) {
+      bool need_check = false;
+      if (OB_FAIL(session_info->check_feature_enable(ObCompatFeatureType::MYSQL_SET_VAR_PRIV_ENHANCE, need_check))) {
+        LOG_WARN("failed to check feature enable", K(ret));
+      } else if (need_check) {
+        conn->set_check_priv(true);
+      }
+      if (OB_FAIL(ret)) {
+      } else if (OB_FAIL(conn->execute_read(tenant_id, subquery_expr.ptr(), res))) {
         LOG_WARN("failed to execute sql", K(ret), K(subquery_expr));
       } else if (OB_ISNULL(result = res.get_result())) {
         ret = OB_ERR_UNEXPECTED;
@@ -566,6 +575,9 @@ int ObVariableSetExecutor::update_global_variables(ObExecContext &ctx,
       } else if (OB_FAIL(sql::ObSQLUtils::is_charset_data_version_valid(common::ObCharset::charset_type_by_coll(static_cast<ObCollationType>(coll_int64)),
                                                                         session->get_effective_tenant_id()))) {
         LOG_WARN("failed to check charset data version valid", K(ret));
+      } else if (OB_FAIL(sql::ObSQLUtils::is_collation_data_version_valid(static_cast<ObCollationType>(coll_int64),
+                                                                          session->get_effective_tenant_id()))) {
+        LOG_WARN("failed to check collation data version valid", K(ret));
       } else if (FALSE_IT(coll_str = ObString::make_string(ObCharset::collation_name(static_cast<ObCollationType>(coll_int64))))) {
         //do nothing
       } else if (OB_FAIL(ObBasicSysVar::get_charset_var_and_val_by_collation(
@@ -591,6 +603,9 @@ int ObVariableSetExecutor::update_global_variables(ObExecContext &ctx,
       } else if (OB_FAIL(sql::ObSQLUtils::is_charset_data_version_valid(common::ObCharset::charset_type_by_coll(static_cast<ObCollationType>(coll_int64)),
                                                                         session->get_effective_tenant_id()))) {
         LOG_WARN("failed to check charset data version valid", K(ret));
+      } else if (OB_FAIL(sql::ObSQLUtils::is_collation_data_version_valid(static_cast<ObCollationType>(coll_int64),
+                                                                          session->get_effective_tenant_id()))) {
+        LOG_WARN("failed to check collation data version valid", K(ret));
       } else if (FALSE_IT(cs_str = ObString::make_string(ObCharset::charset_name(
                                    ObCharset::charset_type_by_coll(static_cast<ObCollationType>(coll_int64)))))) {
         //do nothing
@@ -690,6 +705,10 @@ int ObVariableSetExecutor::update_global_variables(ObExecContext &ctx,
     } else if (set_var.var_name_ ==  OB_SV_OPTIMIZER_FEATURES_ENABLE) {
       if (OB_FAIL(ObBasicSessionInfo::check_optimizer_features_enable_valid(val))) {
         LOG_WARN("fail check optimizer_features_enable valid", K(val), K(ret));
+      }
+    } else if (set_var.var_name_ ==  OB_SV_PRIVILEGE_FEATURES_ENABLE) {
+      if (OB_FAIL(ObBasicSessionInfo::check_optimizer_features_enable_valid(val))) {
+        LOG_WARN("fail check privilege_features_enable valid", K(val), K(ret));
       }
     }
 
@@ -804,22 +823,6 @@ int ObVariableSetExecutor::check_and_convert_sys_var(ObExecContext &ctx,
 {
   int ret = OB_SUCCESS;
   //OB_ASSERT(true == var_node.is_system_variable_);
-
-  // collation_connection的取值有限制，不能设置成utf16
-  if (OB_SUCC(ret)) {
-    if ((0 == set_var.var_name_.case_compare(OB_SV_CHARACTER_SET_CLIENT)
-        || 0 == set_var.var_name_.case_compare(OB_SV_CHARACTER_SET_CONNECTION)
-        || 0 == set_var.var_name_.case_compare(OB_SV_CHARACTER_SET_RESULTS)
-        || 0 == set_var.var_name_.case_compare(OB_SV_COLLATION_CONNECTION))
-        && (in_val.get_string().prefix_match_ci("utf16"))) {
-      ret = OB_ERR_WRONG_VALUE_FOR_VAR;
-      LOG_USER_ERROR(OB_ERR_WRONG_VALUE_FOR_VAR,
-                     set_var.var_name_.length(),
-                     set_var.var_name_.ptr(),
-                     in_val.get_string().length(),
-                     in_val.get_string().ptr());
-    }
-  }
 
   //check readonly
   if (is_set_stmt && sys_var.is_readonly()) {
@@ -982,7 +985,9 @@ int ObVariableSetExecutor::process_session_autocommit_hook(ObExecContext &exec_c
     } else if (OB_FAIL(val.get_int(autocommit))) {
       LOG_WARN("fail get commit val", K(val), K(ret));
     } else if (0 != autocommit && 1 != autocommit) {
-      const char *autocommit_str = to_cstring(autocommit);
+      char autocommit_str[32] = {'\0'};
+      int64_t pos = 0;
+      (void)databuff_printf(autocommit_str, sizeof(autocommit_str), pos, "%ld", autocommit);
       ret = OB_ERR_WRONG_VALUE_FOR_VAR;
       LOG_USER_ERROR(OB_ERR_WRONG_VALUE_FOR_VAR, (int)strlen(OB_SV_AUTOCOMMIT), OB_SV_AUTOCOMMIT,
                      (int)strlen(autocommit_str), autocommit_str);
@@ -1332,6 +1337,26 @@ int ObVariableSetExecutor::cascade_set_validate_password(ObExecContext &ctx,
   return ret;
 }
 
+int ObVariableSetExecutor::is_support(const share::ObSetVar &set_var)
+{
+  int ret = OB_SUCCESS;
+  ObSysVarClassType var_id = SYS_VAR_INVALID;
+ if(SYS_VAR_INVALID == (var_id = ObSysVarFactory::find_sys_var_id_by_name(set_var.var_name_))) {
+    ret = OB_ERR_SYS_VARIABLE_UNKNOWN;
+    LOG_WARN("unknown variable", K(set_var.var_name_), K(ret));
+  } else if ((SYS_VAR_DEBUG <= var_id && SYS_VAR_STORED_PROGRAM_CACHE >= var_id) ||
+             (SYS_VAR_INSERT_ID <= var_id && SYS_VAR_MAX_WRITE_LOCK_COUNT >= var_id) ||
+             (SYS_VAR_BIG_TABLES <= var_id && SYS_VAR_DELAYED_INSERT_LIMIT >= var_id) ||
+             (SYS_VAR_GTID_EXECUTED <= var_id && SYS_VAR_TRANSACTION_WRITE_SET_EXTRACTION >= var_id) ||
+             (SYS_VAR_INNODB_READ_ONLY <= var_id && SYS_VAR_SUPER_READ_ONLY >= var_id)) {
+    ret = OB_NOT_SUPPORTED;
+    LOG_WARN("This variable not support, just mock", K(set_var.var_name_), K(var_id), K(ret));
+  } else if (SYS_VAR_LOW_PRIORITY_UPDATES <= var_id && SYS_VAR_MAX_INSERT_DELAYED_THREADS >= var_id) {
+    ret = OB_NOT_SUPPORTED;
+    LOG_WARN("This variable not support, just mock", K(set_var.var_name_), K(var_id), K(ret));
+  }
+  return ret;
+}
 #undef DEFINE_CAST_CTX
 
 }/* ns sql*/

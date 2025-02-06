@@ -13,9 +13,7 @@
 #define USING_LOG_PREFIX  SQL_RESV
 
 #include "sql/resolver/ddl/ob_drop_index_resolver.h"
-#include "share/schema/ob_table_schema.h"
 #include "sql/resolver/ddl/ob_drop_index_stmt.h"
-#include "sql/session/ob_sql_session_info.h"
 namespace oceanbase
 {
 using namespace common;
@@ -167,12 +165,33 @@ int ObDropIndexResolver::resolve(const ParseNode &parse_tree)
             false /* not index table */,
             table_schema))) {
           if (OB_TABLE_NOT_EXIST == ret) {
-            LOG_USER_ERROR(OB_TABLE_NOT_EXIST, to_cstring(drop_index_stmt->get_database_name()), to_cstring(drop_index_stmt->get_table_name()));
+            ObCStringHelper helper;
+            LOG_USER_ERROR(OB_TABLE_NOT_EXIST, helper.convert(drop_index_stmt->get_database_name()),
+                helper.convert(drop_index_stmt->get_table_name()));
           }
           LOG_WARN("fail to get table schema", K(ret));
         } else if (OB_ISNULL(table_schema)) {
           ret = OB_ERR_UNEXPECTED;
           LOG_WARN("table schema is NULL", K(ret));
+        } else if (table_schema->is_materialized_view()) {
+          const uint64_t tenant_id = session_info_->get_effective_tenant_id();
+          const uint64_t mv_container_table_id = table_schema->get_data_table_id();
+          const ObTableSchema *mv_container_table_schema = nullptr;
+          ObString mv_container_table_name;
+          if (OB_FAIL(get_mv_container_table(tenant_id,
+                                             mv_container_table_id,
+                                             mv_container_table_schema,
+                                             mv_container_table_name))) {
+            LOG_WARN("fail to get mv container table", KR(ret), K(tenant_id), K(mv_container_table_id));
+            if (OB_TABLE_NOT_EXIST == ret) {
+              ret = OB_ERR_UNEXPECTED; // rewrite errno
+            }
+          } else {
+            drop_index_stmt->set_table_name(mv_container_table_name);
+            table_schema = mv_container_table_schema;
+          }
+        }
+        if (OB_FAIL(ret)) {
         } else if (table_schema->is_parent_table() || table_schema->is_child_table()) {
           const ObTableSchema *index_table_schema = NULL;
           ObString index_table_name;

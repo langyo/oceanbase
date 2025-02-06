@@ -31,7 +31,7 @@ class PalfFSCb
 {
 public:
   // end_lsn返回的是最后一条已确认日志的下一位置
-  virtual int update_end_lsn(int64_t id, const LSN &end_lsn, const int64_t proposal_id) = 0;
+  virtual int update_end_lsn(int64_t id, const LSN &end_lsn, const share::SCN &end_scn, const int64_t proposal_id) = 0;
 };
 
 class PalfRoleChangeCb
@@ -46,6 +46,7 @@ class PalfRebuildCb
 public:
   // lsn 表示触发rebuild时源端的基线lsn位点
   virtual int on_rebuild(const int64_t id, const LSN &lsn) = 0;
+  virtual bool is_rebuilding(const int64_t id) const = 0;
 };
 
 class PalfLocationCacheCb
@@ -54,6 +55,8 @@ public:
   virtual int get_leader(const int64_t id, common::ObAddr &leader) = 0;
   virtual int nonblock_get_leader(const int64_t id, common::ObAddr &leader) = 0;
   virtual int nonblock_renew_leader(const int64_t id) = 0;
+  virtual int nonblock_get_leader(const uint64_t tenant_id, int64_t id, common::ObAddr &leader) = 0;
+  virtual int nonblock_renew_leader(const uint64_t tenant_id, int64_t id) = 0;
 };
 
 class PalfMonitorCb
@@ -107,6 +110,13 @@ public:
                                        const common::ObRole &curr_role,
                                        const palf::ObReplicaState &curr_state,
                                        const char *extra_info = NULL) = 0;
+  virtual int record_parent_child_change_event(const int64_t palf_id,
+                                               const bool is_register, /* true: register; false; retire; */
+                                               const bool is_parent,   /* true: parent; false: child; */
+                                               const common::ObAddr &server,
+                                               const common::ObRegion &region,
+                                               const int64_t register_time_us,
+                                               const char *extra_info = NULL) = 0;
 
   // performance statistic
   virtual int add_log_write_stat(const int64_t palf_id, const int64_t log_write_size) = 0;
@@ -124,6 +134,22 @@ public:
                                             const int64_t ls_id,
                                             const bool is_create,
                                             const char *extra_info) = 0;
+};
+
+class PalfLocalityInfoCb
+{
+public:
+  virtual int get_server_region(const common::ObAddr &server, common::ObRegion &region) const = 0;
+};
+
+class PalfReconfigCheckerCb
+{
+public:
+  virtual int check_can_add_member(const ObAddr &server,
+                                   const int64_t timeout_us) = 0;
+  virtual int check_can_change_memberlist(const ObMemberList &new_member_list,
+                                          const int64_t paxos_replica_num,
+                                          const int64_t timeout_us) = 0;
 };
 
 } // end namespace palf

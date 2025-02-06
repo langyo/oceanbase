@@ -12,15 +12,8 @@
 
 #define USING_LOG_PREFIX SQL_ENG
 
-#include "sql/engine/expr/ob_expr_least.h"
+#include "ob_expr_least.h"
 #include "sql/engine/expr/ob_expr_greatest.h"
-#include "sql/engine/expr/ob_expr_operator.h"
-#include "sql/engine/expr/ob_expr_less_than.h"
-//#include "sql/engine/expr/ob_expr_promotion_util.h"
-#include "sql/engine/expr/ob_expr_result_type_util.h"
-#include "sql/session/ob_sql_session_info.h"
-#include "lib/oblog/ob_log.h"
-#include "share/object/ob_obj_cast.h"
 #include "sql/engine/expr/ob_datum_cast.h"
 
 namespace oceanbase
@@ -71,18 +64,30 @@ int ObExprLeastGreatest::calc_result_typeN_oracle(ObExprResType &type,
     ObExprResType &first_type = types[0];
     type = first_type;
     ObObjTypeClass first_type_class = first_type.get_type_class();
-    /**
-     * number类型和其它类型行为不一致，单独处理
-     */
-    if (ObIntTC == first_type_class
-        || ObUIntTC == first_type_class
-        || ObNumberTC == first_type_class
-        || ObDecimalIntTC == first_type_class) {
-      type.set_type(ObNumberType);
-      type.set_calc_type(ObNumberType);
-      // scale和precision信息设置为unknown，兼容oracle的number行为
-      type.set_scale(ORA_NUMBER_SCALE_UNKNOWN_YET);
-      type.set_precision(PRECISION_UNKNOWN_YET);
+    if (ob_is_numeric_tc(first_type_class)) {
+      ObObjType highest_numeric_type = ObNumberType;
+      for (int64_t i = 0; i < param_num; ++i) {
+        if (ob_is_float_tc(types[i].get_type())) {
+          highest_numeric_type = ObFloatType;
+        } else if (ob_is_double_tc(types[i].get_type())) {
+          // binary double in oracle is the highest numeric type
+          highest_numeric_type = ObDoubleType;
+          break;
+        }
+      }
+      /**
+      * number类型和其它类型行为不一致，单独处理
+      */
+      if (ObNumberType == highest_numeric_type) {
+        type.set_type(ObNumberType);
+        type.set_calc_type(ObNumberType);
+        // scale和precision信息设置为unknown，兼容oracle的number行为
+        type.set_scale(ORA_NUMBER_SCALE_UNKNOWN_YET);
+        type.set_precision(PRECISION_UNKNOWN_YET);
+      } else {
+        type.set_type(highest_numeric_type);
+        type.set_calc_type(highest_numeric_type);
+      }
     } else if (ObLongTextType == type.get_type()) {
       ret = OB_ERR_INVALID_TYPE_FOR_OP;
       LOG_WARN("lob type parameter not expected", K(ret));
@@ -159,7 +164,12 @@ int ObExprLeastGreatest::calc_result_typeN_oracle(ObExprResType &type,
             item_length = OB_MAX_TIMESTAMP_TZ_LENGTH;
             break;
           }
-          case ObUserDefinedSQLTC: {
+          case ObUserDefinedSQLTC:
+          case ObGeometryTC: {
+            item_length = types[i].get_length();
+            break;
+          }
+          case ObCollectionSQLTC: {
             item_length = types[i].get_length();
             break;
           }
@@ -194,6 +204,10 @@ int ObExprLeastGreatest::calc_result_typeN_oracle(ObExprResType &type,
     }
   }
 
+  if (OB_SUCC(ret) && ob_is_geometry(type.get_type())) {
+    ret = OB_ERR_COMPARE_VARRAY_LOB_ATTR;
+    LOG_WARN("Incorrect cmp type with geometry arguments", K(ret));
+  }
 //老执行引擎在类型推导时不为参数设置calc_type, 在执行期再对参数进行cast。
 //新执行引擎需要在类型推导阶段为参数设置好calc_type, 在执行期不再显式执行cast。
   if (OB_SUCC(ret)
@@ -235,36 +249,30 @@ int ObExprLeastGreatest::calc_result_typeN_mysql(ObExprResType &type,
         all_integer = false;
       }
     }
-    const ObLengthSemantics default_length_semantics = (OB_NOT_NULL(type_ctx.get_session())
-                      ? type_ctx.get_session()->get_actual_nls_length_semantics() : LS_BYTE);
     bool enable_decimalint = false;
-    if (OB_FAIL(ObSQLUtils::check_enable_decimalint(session, enable_decimalint))) {
-      LOG_WARN("fail to check_enable_decimalint", K(ret), K(session->get_effective_tenant_id()));
-    } else if (OB_FAIL(calc_result_meta_for_comparison(
-                         type, types, param_num,
-                         type_ctx.get_coll_type(),
-                         default_length_semantics,
-                         enable_decimalint))) {
+    if (OB_FAIL(calc_result_meta_for_comparison(type, types, param_num, type_ctx, enable_decimalint))) {
       LOG_WARN("calc result meta for comparison failed");
     }
-    // can't cast origin parameters.
-    for (int64_t i = 0; i < param_num; i++) {
-      types[i].set_calc_meta(types[i].get_obj_meta());
-    }
-    if (all_integer && type.is_integer_type()) {
-      type.set_calc_type(ObNullType);
-    } else if (all_integer && ob_is_number_or_decimal_int_tc(type.get_type())) {
-      // the args type is integer and result type is number/decimal, there are unsigned bigint in
-      // args, set expr meta here.
-      type.set_accuracy(common::ObAccuracy::DDL_DEFAULT_ACCURACY2[0/*is_oracle*/][ObUInt64Type]);
-    } else {
+    if (OB_SUCC(ret)) {
+      // can't cast origin parameters.
       for (int64_t i = 0; i < param_num; i++) {
-        if (ob_is_enum_or_set_type(types[i].get_type())) {
-          types[i].set_calc_type(type.get_calc_type());
+        types[i].set_calc_meta(types[i].get_obj_meta());
+      }
+      if (all_integer && type.is_integer_type()) {
+        type.set_calc_type(ObNullType);
+      } else if (all_integer && ob_is_number_or_decimal_int_tc(type.get_type())) {
+        // the args type is integer and result type is number/decimal, there are unsigned bigint in
+        // args, set expr meta here.
+        type.set_accuracy(common::ObAccuracy::DDL_DEFAULT_ACCURACY2[0/*is_oracle*/][ObUInt64Type]);
+      } else {
+        for (int64_t i = 0; i < param_num; i++) {
+          if (ob_is_enum_or_set_type(types[i].get_type())) {
+            types[i].set_calc_type(type.get_calc_type());
+          }
         }
       }
+      LOG_DEBUG("least calc_result_typeN", K(type), K(type.get_calc_accuracy()));
     }
-    LOG_DEBUG("least calc_result_typeN", K(type), K(type.get_calc_accuracy()));
   }
   return ret;
 }
@@ -273,7 +281,6 @@ int ObExprLeastGreatest::cg_expr(ObExprCGCtx &op_cg_ctx,
                                  const ObRawExpr &raw_expr,
                                  ObExpr &rt_expr) const
 {
-  UNUSED(raw_expr);
   int ret = OB_SUCCESS;
   const uint32_t param_num = rt_expr.arg_cnt_;
   bool is_oracle_mode = lib::is_oracle_mode();
@@ -317,16 +324,21 @@ int ObExprLeastGreatest::cg_expr(ObExprCGCtx &op_cg_ctx,
       ObCastMode cm = CM_NONE;
       if (!is_oracle_mode && !cmp_meta.is_null()) {
         DatumCastExtraInfo *info = OB_NEWx(DatumCastExtraInfo, op_cg_ctx.allocator_, *(op_cg_ctx.allocator_), type_);
+        ObSQLMode sql_mode = op_cg_ctx.session_->get_sql_mode();
         if (OB_ISNULL(info)) {
           ret = OB_ALLOCATE_MEMORY_FAILED;
           LOG_WARN("alloc memory failed", K(ret));
-        } else if (OB_FAIL(ObSQLUtils::get_default_cast_mode(is_explicit_cast, result_flag,
-                                                             op_cg_ctx.session_, cm))) {
-          LOG_WARN("get default cast mode failed", K(ret));
+        } else if (OB_FAIL(ObSQLUtils::merge_solidified_var_into_sql_mode(&raw_expr.get_local_session_var(),
+                                                                          sql_mode))) {
+          LOG_WARN("try get local sql mode failed", K(ret));
         } else if (CS_TYPE_INVALID == cmp_meta.get_collation_type()) {
           ret = OB_ERR_UNEXPECTED;
           LOG_WARN("compare cs type is invalid", K(ret), K(cmp_meta));
         } else {
+          ObSQLUtils::get_default_cast_mode(is_explicit_cast, result_flag,
+                                            op_cg_ctx.session_->get_stmt_type(),
+                                            op_cg_ctx.session_->is_ignore_stmt(),
+                                            sql_mode, cm);
           info->cmp_meta_.type_ = cmp_meta.get_type();
           info->cmp_meta_.cs_type_ = cmp_meta.get_collation_type();
           info->cmp_meta_.scale_ = cmp_meta.get_scale();
@@ -547,12 +559,23 @@ int ObExprLeastGreatest::calc_oracle(const ObExpr &expr, ObEvalCtx &ctx,
       }
     }
     ObDatum *res_datum = nullptr;
-    if (OB_FAIL(expr.args_[res_idx]->eval(ctx, res_datum))) {
+    if (OB_FAIL(ret)) {
+    } else if (OB_FAIL(expr.args_[res_idx]->eval(ctx, res_datum))) {
       LOG_WARN("eval param value failed", K(ret), K(res_idx));
     } else {
       ObDatum &dst_datum = static_cast<ObDatum &>(expr_datum);
       dst_datum = *res_datum;
     }
+  }
+  return ret;
+}
+
+DEF_SET_LOCAL_SESSION_VARS(ObExprLeastGreatest, raw_expr) {
+  int ret = OB_SUCCESS;
+  if (is_mysql_mode()) {
+    SET_LOCAL_SYSVAR_CAPACITY(2);
+    EXPR_ADD_LOCAL_SYSVAR(share::SYS_VAR_SQL_MODE);
+    EXPR_ADD_LOCAL_SYSVAR(share::SYS_VAR_COLLATION_CONNECTION);
   }
   return ret;
 }
@@ -576,7 +599,6 @@ int ObExprLeast::calc_least(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &expr_da
   }
   return ret;
 }
-
 
 }
 }

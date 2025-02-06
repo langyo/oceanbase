@@ -13,11 +13,8 @@
 #define USING_LOG_PREFIX SHARE
 
 #include "ob_balance_job_table_operator.h"
-#include "lib/mysqlclient/ob_isql_client.h"//ObISQLClient
-#include "lib/mysqlclient/ob_mysql_result.h"//MySQLResult
-#include "lib/mysqlclient/ob_mysql_proxy.h"//MySQLResult
 #include "lib/mysqlclient/ob_mysql_transaction.h"//ObMySQLTrans
-#include "share/inner_table/ob_inner_table_schema.h"//ALL_BALANCE_JOB_TNAME
+#include "src/share/inner_table/ob_inner_table_schema_constants.h"
 #include "share/ob_dml_sql_splicer.h"//ObDMLSqlSplicer
 
 using namespace oceanbase;
@@ -32,7 +29,7 @@ static const char* BALANCE_JOB_STATUS_ARRAY[] =
 };
 static const char *BALANCE_JOB_TYPE[] =
 {
-  "LS_BALANCE", "PARTITION_BALANCE",
+  "LS_BALANCE", "PARTITION_BALANCE", "TRANSFER_PARTITION"
 };
 
 const char* ObBalanceJobStatus::to_str() const

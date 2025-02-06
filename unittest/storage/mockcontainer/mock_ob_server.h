@@ -19,7 +19,6 @@
 #include "share/ob_rs_mgr.h"
 #include "share/ob_srv_rpc_proxy.h"
 #include "storage/blocksstable/ob_block_sstable_struct.h"
-#include "storage/ob_partition_component_factory.h"
 #include "storage/tx/ob_gts_rpc.h"
 #include "sql/session/ob_sql_session_mgr.h"
 #include "observer/ob_srv_network_frame.h"
@@ -82,7 +81,7 @@ class MockObServer
 public:
   MockObServer(const ObServerOptions &opts)
       : is_inited_(false),
-      schema_service_(nullptr), gctx_(), net_frame_(gctx_),
+      schema_service_(nullptr), gctx_(GCTX), net_frame_(gctx_),
       ob_service_(gctx_),
       session_mgr_(),
       warm_up_start_time_(0),
@@ -105,12 +104,11 @@ public:
 protected:
   bool is_inited_;
 protected:
-  ObPartitionComponentFactory partition_cfy_;
   //MockObSchemaService schema_service_;
   ObRestoreSchema restore_schema_;
   MockSchemaService *schema_service_;
   share::ObRsMgr rs_mgr_;
-  ObGlobalContext gctx_;
+  ObGlobalContext &gctx_;
   ObSrvNetworkFrame net_frame_;
   obrpc::ObBatchRpc batch_rpc_;
   obrpc::ObSrvRpcProxy srv_rpc_proxy_;

@@ -58,6 +58,15 @@ private:
   static int do_parse_skip_tablet_result_(sqlclient::ObMySQLResult &result, ObBackupSkipTabletAttr &backup_set_desc);
 };
 
+class ObBackupMViewOperator {
+public:
+  static int get_all_major_compaction_mview_dep_tablet_list(common::ObMySQLProxy &proxy,
+                                                            const uint64_t tenant_id,
+                                                            const share::SCN &snapshot,
+                                                            common::ObIArray<common::ObTabletID> &tablet_list,
+                                                            common::ObIArray<share::SCN> &tablet_mview_dep_scn_list);
+};
+
 class ObBackupSetFileOperator : public ObBackupBaseTableOperator
 {
 public:
@@ -157,7 +166,7 @@ public:
   static int delete_build_index_task(common::ObISQLClient &proxy, const ObBackupLSTaskAttr &build_index_attr);
   static int move_ls_to_his(common::ObISQLClient &proxy, const uint64_t tenant_id, const int64_t job_id);
   static int delete_ls_task_without_sys(common::ObISQLClient &proxy, const uint64_t tenant_id, const int64_t task_id);
-  static int update_stats_(common::ObISQLClient &proxy, const int64_t task_id, const uint64_t tenant_id,
+  static int update_stats(common::ObISQLClient &proxy, const int64_t task_id, const uint64_t tenant_id,
       const ObLSID &ls_id, const ObBackupStats &stats);
   static int update_max_tablet_checkpoint_scn(common::ObISQLClient &proxy, const int64_t task_id, const uint64_t tenant_id,
       const ObLSID &ls_id, const SCN &max_tablet_checkpoint_scn);

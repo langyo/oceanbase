@@ -45,7 +45,11 @@ bool FetchCtxMapHBFunc::operator()(const logservice::TenantLSID &tls_id, LSFetch
   if (NULL == ctx) {
     // ctx is invalid, not processed
   } else if (OB_FAIL(ctx->get_dispatch_progress(progress, dispatch_info))) {
-    LOG_ERROR("get_dispatch_progress fail", KR(ret), K(tls_id), KPC(ctx));
+    if (OB_LS_NOT_EXIST != ret) {
+      LOG_ERROR("get_dispatch_progress fail", KR(ret), K(tls_id), KPC(ctx));
+    } else {
+      ret = OB_SUCCESS;
+    }
   }
   // The progress returned by the fetch log context must be valid, and its progress value must be a valid value, underlined by the fetch log progress
   else if (OB_UNLIKELY(OB_INVALID_TIMESTAMP == progress)) {
@@ -87,8 +91,9 @@ bool FetchCtxMapHBFunc::operator()(const logservice::TenantLSID &tls_id, LSFetch
     ls_count_++;
 
     if (print_ls_heartbeat_info_) {
+      ObCStringHelper helper;
       _LOG_INFO("[STAT] [FETCHER] [HEARTBEAT] TLS=%s PROGRESS=%ld DISPATCH_LOG_LSN=%lu "
-          "DATA_PROGRESS=%ld DDL_PROGRESS=%ld DDL_DISPATCH_LOG_LSN=%lu", to_cstring(tls_id),
+          "DATA_PROGRESS=%ld DDL_PROGRESS=%ld DDL_DISPATCH_LOG_LSN=%lu", helper.convert(tls_id),
           progress, last_dispatch_log_lsn.val_, data_progress_, ddl_progress_, ddl_last_dispatch_log_lsn_.val_);
     }
   }

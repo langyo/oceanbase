@@ -26,7 +26,7 @@ namespace blocksstable
 class ObMicroBlockBareIterator
 {
 public:
-  ObMicroBlockBareIterator();
+  ObMicroBlockBareIterator(const uint64_t tenant_id = MTL_ID());
   virtual ~ObMicroBlockBareIterator();
   void reset();
   void reuse();
@@ -50,6 +50,11 @@ public:
   int set_end_iter_idx(const bool is_start);
   int get_curr_start_row_offset(int64_t &row_offset);
   int get_next_micro_block_data(ObMicroBlockData &micro_block);
+  int get_next_micro_block_data_and_offset(ObMicroBlockData &micro_block, int64_t &offset);
+  int get_next_micro_block_desc(ObMicroBlockDesc &micro_block_desc,
+                                const ObDataStoreDesc &data_store_desc,
+                                ObIAllocator &allocator,
+                                const bool need_check_sum);
   int get_next_micro_block_desc(
       ObMicroBlockDesc &micro_block_desc,
       ObMicroIndexInfo &micro_index_info,
@@ -96,9 +101,8 @@ private:
 class ObMacroBlockRowBareIterator
 {
 public:
-  ObMacroBlockRowBareIterator(common::ObIAllocator &allocator);
+  ObMacroBlockRowBareIterator(common::ObIAllocator &allocator, const uint64_t tenant_id = MTL_ID());
   virtual ~ObMacroBlockRowBareIterator();
-
   void reset();
   int open(
       const char *macro_block_buf,

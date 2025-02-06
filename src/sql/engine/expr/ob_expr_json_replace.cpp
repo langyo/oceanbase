@@ -66,7 +66,8 @@ int ObExprJsonReplace::eval_json_replace(const ObExpr &expr, ObEvalCtx &ctx, ObD
   ObIJsonBase *json_doc = NULL;
   bool is_null_result = false;
   ObEvalCtx::TempAllocGuard tmp_alloc_g(ctx);
-  common::ObArenaAllocator &temp_allocator = tmp_alloc_g.get_allocator();
+  uint64_t tenant_id = ObMultiModeExprHelper::get_tenant_id(ctx.exec_ctx_.get_my_session());
+  MultimodeAlloctor temp_allocator(tmp_alloc_g.get_allocator(), expr.type_, tenant_id, ret);
   if (expr.datum_meta_.cs_type_ != CS_TYPE_UTF8MB4_BIN) {
     ret = OB_ERR_INVALID_JSON_CHARSET;
     LOG_WARN("invalid out put charset", K(ret), K(expr.datum_meta_.cs_type_));
@@ -83,12 +84,12 @@ int ObExprJsonReplace::eval_json_replace(const ObExpr &expr, ObEvalCtx &ctx, ObD
   }
   
   for (int64_t i = 1; OB_SUCC(ret) && !is_null_result && i < expr.arg_cnt_; i+=2) {
-    ObJsonBaseVector hit;
+    ObJsonSeekResult hit;
     ObDatum *path_data = NULL;
     if (expr.args_[i]->datum_meta_.type_ == ObNullType) {
       is_null_result = true;
       break;
-    } else if (OB_FAIL(expr.args_[i]->eval(ctx, path_data))) {
+    } else if (OB_FAIL(temp_allocator.eval_arg(expr.args_[i], ctx, path_data))) {
       LOG_WARN("eval json path datum failed", K(ret));
     } else {
       ObString path_val = path_data->get_string();
@@ -107,14 +108,17 @@ int ObExprJsonReplace::eval_json_replace(const ObExpr &expr, ObEvalCtx &ctx, ObD
 
     if (OB_SUCC(ret) && !is_null_result) {
       ObIJsonBase *json_val = NULL;
-      if (OB_FAIL(ObJsonExprHelper::get_json_val(expr, ctx, &temp_allocator,
+      if (OB_FAIL(temp_allocator.add_baseline_size(expr.args_[i+1], ctx))) {
+        LOG_WARN("failed to add baselien size", K(ret), K(i + 1));
+      } else if (OB_FAIL(ObJsonExprHelper::get_json_val(expr, ctx, &temp_allocator,
                                                  i+1, json_val))) {
         LOG_WARN("get_json_val failed", K(ret));
       }
 
       // replace 
       int32_t hits = hit.size();
-      if (hits == 0) {
+      if(OB_FAIL(ret)) {
+      } else if (hits == 0) {
         // do nothing
       } else if (hits != 1) {
         ret = OB_ERR_UNEXPECTED;
@@ -132,13 +136,11 @@ int ObExprJsonReplace::eval_json_replace(const ObExpr &expr, ObEvalCtx &ctx, ObD
     LOG_WARN("Json parse and seek failed", K(ret));
   } else if (is_null_result) {
     res.set_null();
-  } else {
-    ObString str;
-    if (OB_FAIL(json_doc->get_raw_binary(str, &temp_allocator))) {
-      LOG_WARN("json_replace result to binary failed", K(ret));
-    } else if (OB_FAIL(ObJsonExprHelper::pack_json_str_res(expr, ctx, res, str))) {
-      LOG_WARN("fail to pack json result", K(ret));
-    }
+  } else if (OB_FAIL(ObJsonExprHelper::pack_json_res(expr, ctx, temp_allocator, json_doc, res))) {
+    LOG_WARN("pack fail", K(ret));
+  }
+  if (OB_NOT_NULL(json_doc)) {
+    json_doc->reset();
   }
   return ret;
 }
@@ -147,10 +149,13 @@ int ObExprJsonReplace::cg_expr(ObExprCGCtx &expr_cg_ctx,
                                const ObRawExpr &raw_expr,
                                ObExpr &rt_expr) const
 {
-  UNUSED(expr_cg_ctx);
-  UNUSED(raw_expr);
-  rt_expr.eval_func_ = eval_json_replace;
-  return OB_SUCCESS;
+  INIT_SUCC(ret);
+  if (OB_FAIL(ObJsonExprHelper::init_json_expr_extra_info(expr_cg_ctx.allocator_, raw_expr, type_, rt_expr))) {
+    LOG_WARN("init_json_expr_extra_info fail", K(ret));
+  } else {
+    rt_expr.eval_func_ = eval_json_replace;
+  }
+  return ret;
 }
 
 }

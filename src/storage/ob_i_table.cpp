@@ -11,16 +11,11 @@
  */
 
 #define USING_LOG_PREFIX STORAGE
-#include "storage/ob_i_table.h"
-#include "share/ob_force_print_log.h"
-#include "storage/blocksstable/ob_sstable.h"
-#include "storage/blocksstable/ob_storage_cache_suite.h"
-#include "storage/memtable/ob_memtable.h"
+#include "ob_i_table.h"
 #include "storage/meta_mem/ob_tenant_meta_mem_mgr.h"
 #include "storage/tablelock/ob_lock_memtable.h"
 #include "storage/tx_table/ob_tx_ctx_memtable.h"
-#include "storage/tx_table/ob_tx_data_memtable.h"
-#include "share/scheduler/ob_tenant_dag_scheduler.h"
+#include "storage/ddl/ob_tablet_ddl_kv.h"
 
 using namespace oceanbase;
 using namespace oceanbase::blocksstable;
@@ -54,7 +49,7 @@ const char* ObITable::table_type_name_[] =
   "TX_DATA_MEMTABLE",
   "TX_CTX_MEMTABLE",
   "LOCK_MEMTABLE",
-  "",
+  "DIRECT_LOAD_MEMTABLE",
   "",
   "",
   "",
@@ -69,7 +64,16 @@ const char* ObITable::table_type_name_[] =
   "DDL_MEM",
   "COL_ORIENTED",
   "NORMAL_COL_GROUP",
-  "ROWKEY_COL_GROUP"
+  "ROWKEY_COL_GROUP",
+  "COL_ORIENTED_META",
+  "DDL_MERGE_CO",
+  "DDL_MERGE_CG",
+  "DDL_MEM_CO",
+  "DDL_MEM_CG",
+  "DDL_MEM_MINI_SSTABLE",
+  "MDS_MINI",
+  "MDS_MINOR",
+  "MICRO_MINI_SSTABLE"
 };
 
 uint64_t ObITable::TableKey::hash() const
@@ -203,8 +207,6 @@ bool ObTableHandleV2::is_valid() const
   if (nullptr == table_) {
   } else if (ObITable::is_memtable(table_type_)) {
     bret = (nullptr != t3m_) ^ (nullptr != allocator_);
-  } else if (ObITable::is_ddl_mem_sstable(table_type_)) {
-    bret = nullptr != t3m_;
   } else {
     // all other sstables
     bret = (meta_handle_.is_valid() ^ (nullptr != allocator_)) || lifetime_guaranteed_by_tablet_;
@@ -276,7 +278,7 @@ int ObTableHandleV2::get_sstable(const blocksstable::ObSSTable *&sstable) const
   return ret;
 }
 
-int ObTableHandleV2::get_memtable(memtable::ObIMemtable *&memtable)
+int ObTableHandleV2::get_memtable(ObIMemtable *&memtable)
 {
   int ret = OB_SUCCESS;
   memtable = nullptr;
@@ -288,12 +290,12 @@ int ObTableHandleV2::get_memtable(memtable::ObIMemtable *&memtable)
      ret = OB_ENTRY_NOT_EXIST;
      STORAGE_LOG(WARN, "not memtable", K(ret), K(table_->get_key()));
   } else {
-    memtable = static_cast<memtable::ObIMemtable*>(table_);
+    memtable = static_cast<ObIMemtable*>(table_);
   }
   return ret;
 }
 
-int ObTableHandleV2::get_memtable(const memtable::ObIMemtable *&memtable) const
+int ObTableHandleV2::get_memtable(const ObIMemtable *&memtable) const
 {
   int ret = OB_SUCCESS;
   memtable = nullptr;
@@ -305,7 +307,39 @@ int ObTableHandleV2::get_memtable(const memtable::ObIMemtable *&memtable) const
      ret = OB_ENTRY_NOT_EXIST;
      STORAGE_LOG(WARN, "not memtable", K(ret), K(table_->get_key()));
   } else {
-    memtable = static_cast<memtable::ObIMemtable*>(table_);
+    memtable = static_cast<ObIMemtable*>(table_);
+  }
+  return ret;
+}
+
+int ObTableHandleV2::get_tablet_memtable(ObITabletMemtable *&memtable)
+{
+  int ret = OB_SUCCESS;
+  memtable = NULL;
+  if (OB_ISNULL(table_)) {
+    ret = OB_NOT_INIT;
+    STORAGE_LOG(WARN, "not inited", K(ret));
+  } else if (!table_->is_tablet_memtable()) {
+    ret = OB_ERR_UNEXPECTED;
+    STORAGE_LOG(WARN, "not tablet memtable", K(ret), K(table_->get_key()));
+  } else {
+    memtable = static_cast<ObITabletMemtable *>(table_);
+  }
+  return ret;
+}
+
+int ObTableHandleV2::get_tablet_memtable(const ObITabletMemtable *&memtable) const
+{
+  int ret = OB_SUCCESS;
+  memtable = NULL;
+  if (OB_ISNULL(table_)) {
+    ret = OB_NOT_INIT;
+    STORAGE_LOG(WARN, "not inited", K(ret));
+   } else if (!table_->is_tablet_memtable()) {
+     ret = OB_ERR_UNEXPECTED;
+     STORAGE_LOG(WARN, "not data memtable", K(ret), K(table_->get_key()));
+  } else {
+    memtable = static_cast<ObITabletMemtable *>(table_);
   }
   return ret;
 }
@@ -446,6 +480,40 @@ int ObTableHandleV2::get_lock_memtable(const ObLockMemtable *&memtable) const
   return ret;
 }
 
+int ObTableHandleV2::get_direct_load_memtable(ObDDLKV *&memtable)
+{
+  int ret = OB_SUCCESS;
+  memtable = nullptr;
+
+  if (OB_ISNULL(table_)) {
+    ret = OB_NOT_INIT;
+    STORAGE_LOG(WARN, "not inited", K(ret));
+  } else if (!table_->is_direct_load_memtable()) {
+    ret = OB_ENTRY_NOT_EXIST;
+    STORAGE_LOG(WARN, "not direct load memtable", K(ret), K(table_->get_key()));
+  } else {
+    memtable = static_cast<ObDDLKV*>(table_);
+  }
+  return ret;
+}
+
+int ObTableHandleV2::get_direct_load_memtable(const ObDDLKV *&memtable) const
+{
+  int ret = OB_SUCCESS;
+  memtable = nullptr;
+
+  if (OB_ISNULL(table_)) {
+    ret = OB_NOT_INIT;
+    STORAGE_LOG(WARN, "not inited", K(ret));
+  } else if (!table_->is_direct_load_memtable()) {
+    ret = OB_ENTRY_NOT_EXIST;
+    STORAGE_LOG(WARN, "not direct load memtable", K(ret), K(table_->get_key()));
+  } else {
+    memtable = static_cast<ObDDLKV*>(table_);
+  }
+  return ret;
+}
+
 ObTableHandleV2::ObTableHandleV2(const ObTableHandleV2 &other)
   : table_(nullptr),
     t3m_(nullptr),
@@ -495,7 +563,7 @@ int ObTableHandleV2::set_table(
       OB_UNLIKELY(!ObITable::is_table_type_valid(table_type))) {
     ret = OB_INVALID_ARGUMENT;
     STORAGE_LOG(WARN, "invalid argument", K(ret), KP(table), KP(t3m), K(table_type));
-  } else if (OB_UNLIKELY(ObITable::is_sstable(table_type) && !ObITable::is_ddl_mem_sstable(table_type))) {
+  } else if (OB_UNLIKELY(ObITable::is_sstable(table_type))) {
     ret = OB_INVALID_ARGUMENT;
     STORAGE_LOG(ERROR, "sstable should not use this interface", K(ret), KP(table), K(table_type));
   } else {
@@ -738,13 +806,13 @@ int ObTablesHandleArray::get_tables(common::ObIArray<ObITable *> &tables) const
   return ret;
 }
 
-int ObTablesHandleArray::get_first_memtable(memtable::ObIMemtable *&memtable) const
+int ObTablesHandleArray::get_first_memtable(ObIMemtable *&memtable) const
 {
   int ret = OB_SUCCESS;
   memtable = nullptr;
   for (int64_t i = 0; OB_SUCC(ret) && i < handles_array_.count(); ++i) {
     if (handles_array_.at(i).get_table()->is_memtable()) {
-      memtable = static_cast<memtable::ObIMemtable*>(handles_array_.at(i).table_);
+      memtable = static_cast<ObIMemtable*>(handles_array_.at(i).table_);
       break;
     }
   }
@@ -758,11 +826,69 @@ int ObTablesHandleArray::get_all_minor_sstables(common::ObIArray<ObITable *> &ta
 {
   int ret = OB_SUCCESS;
   tables.reset();
+  if (OB_FAIL(get_sstable_with_type_(ObITable::is_minor_sstable, tables))) {
+    STORAGE_LOG(WARN, "failed to get minor sstable", K(ret));
+  }
+  return ret;
+}
+
+int ObTablesHandleArray::get_all_ddl_sstables(common::ObIArray<ObITable *> &tables) const
+{
+  int ret = OB_SUCCESS;
+  tables.reset();
+  if (OB_FAIL(get_sstable_with_type_(ObITable::is_ddl_sstable, tables))) {
+    STORAGE_LOG(WARN, "failed to get ddl sstable", K(ret));
+  }
+  return ret;
+}
+
+int ObTablesHandleArray::get_all_mds_sstables(common::ObIArray<ObITable *> &tables) const
+{
+  int ret = OB_SUCCESS;
+  tables.reset();
+  if (OB_FAIL(get_sstable_with_type_(ObITable::is_mds_sstable, tables))) {
+    STORAGE_LOG(WARN, "failed to get mds sstable", K(ret));
+  }
+  return ret;
+}
+
+int ObTablesHandleArray::get_sstable_with_type_(
+    IS_RIGH_SSTABLE_TYPE_FUNC is_right_sstable_type,
+    common::ObIArray<ObITable *> &tables) const
+{
+  int ret = OB_SUCCESS;
+  tables.reset();
+  for (int64_t i = 0; OB_SUCC(ret) && i < handles_array_.count(); ++i) {
+    ObITable *table = handles_array_.at(i).table_;
+    if (!is_right_sstable_type(table->get_key().table_type_)) {
+      //do nothing
+    } else if (OB_FAIL(tables.push_back(table))) {
+      STORAGE_LOG(WARN, "failed to add sstable", K(ret), K(i));
+    }
+  }
+  return ret;
+}
+
+int ObTablesHandleArray::get_all_remote_major_sstables(common::ObIArray<ObITable *> &tables) const
+{
+  int ret = OB_SUCCESS;
+  tables.reset();
 
   for (int64_t i = 0; OB_SUCC(ret) && i < handles_array_.count(); ++i) {
     ObITable *table = handles_array_.at(i).table_;
-    if (table->is_minor_sstable() && OB_FAIL(tables.push_back(table))) {
-      STORAGE_LOG(WARN, "failed to add minor sstable", K(ret), K(i));
+    ObSSTable *sstable = static_cast<ObSSTable *>(table);
+    ObSSTableMetaHandle sst_meta_hdl;
+    if (OB_ISNULL(table)) {
+      ret = OB_ERR_UNEXPECTED;
+      STORAGE_LOG(WARN, "unexpected null table pointer", K(ret), K(i), K_(handles_array));
+    } else if (!table->is_major_sstable()) {
+      // do nothing
+    } else if (OB_FAIL(sstable->get_meta(sst_meta_hdl))) {
+      STORAGE_LOG(WARN, "failed to get sstable meta handle", K(ret), K(i));
+    } else if (!sst_meta_hdl.get_sstable_meta().get_table_backup_flag().has_backup()) {
+      // do nothing
+    } else if (OB_FAIL(tables.push_back(table))) {
+      STORAGE_LOG(WARN, "failed to add remote major sstable", K(ret), K(i));
     }
   }
   return ret;
@@ -782,8 +908,7 @@ int ObTablesHandleArray::check_continues(const share::ObScnRange *scn_range) con
     if (OB_ISNULL(table = handles_array_.at(i).get_table())) {
       ret = OB_ERR_SYS;
       LOG_WARN("table is NULL", KPC(table));
-    } else if (table->is_major_sstable() || table->is_meta_major_sstable()) {
-      base_end_scn = table->is_meta_major_sstable() ? table->get_end_scn() : SCN::min_scn();
+    } else if (table->is_major_sstable()) {
       i++;
     }
     // 2:check minor sstable
@@ -792,7 +917,7 @@ int ObTablesHandleArray::check_continues(const share::ObScnRange *scn_range) con
       if (OB_ISNULL(table)) {
         ret = OB_ERR_SYS;
         LOG_WARN("table is NULL", KPC(table));
-      } else if (table->is_major_sstable() || table->is_meta_major_sstable()) {
+      } else if (table->is_major_sstable()) {
         ret = OB_ERR_SYS;
         LOG_WARN("major sstable or meta merge should be first", K(ret), K(i), K(table));
       } else if (OB_ISNULL(last_table)) { // first table

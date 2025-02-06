@@ -13,12 +13,7 @@
 #define USING_LOG_PREFIX SQL_ENG
 
 #include "ob_expr_to_base64.h"
-#include "sql/session/ob_sql_session_info.h"
 #include "sql/engine/ob_exec_context.h"
-#include "sql/engine/expr/ob_expr_util.h"
-#include "lib/encode/ob_base64_encode.h"
-#include "lib/oblog/ob_log.h"
-#include "objit/common/ob_item_type.h"
 
 using namespace oceanbase::common;
 namespace oceanbase
@@ -74,7 +69,7 @@ int ObExprToBase64::calc_result_type1(ObExprResType &type,
 
   str.set_calc_type(ObVarcharType);
   str.set_calc_collation_type(
-    str.is_string_type() ? str.get_collation_type() : CS_TYPE_UTF8MB4_BIN);
+    (str.is_string_type() || str.is_enum_or_set()) ? str.get_collation_type() : CS_TYPE_UTF8MB4_BIN);
 
   int64_t mbmaxlen = 0;
   int64_t max_result_length = 0;
@@ -82,21 +77,19 @@ int ObExprToBase64::calc_result_type1(ObExprResType &type,
     LOG_WARN("fail to get mbmaxlen", K(str.get_collation_type()), K(ret));
   } else {
     max_result_length = (base64_needed_encoded_length(str.get_length()) - 1) * mbmaxlen;
-    if (max_result_length > OB_MAX_BLOB_WIDTH) {
-      max_result_length = OB_MAX_BLOB_WIDTH;
-    }
+    max_result_length = MIN(MAX(0, max_result_length), OB_MAX_BLOB_WIDTH);
     int64_t max_l = max_result_length / mbmaxlen;
     int64_t max_deduce_length = max_l * mbmaxlen;
     if (max_deduce_length < OB_MAX_MYSQL_VARCHAR_LENGTH) {
       type.set_varchar();
       type.set_length(max_deduce_length);
-      type.set_collation_type(get_default_collation_type(type.get_type(), *type_ctx.get_session()));
+      type.set_collation_type(get_default_collation_type(type.get_type(), type_ctx));
     } else {
       type.set_blob();
       // TODO : Fixme the blob type do not need to set_length.
       // Maybe need wait ObDDLResolver::check_text_length fix the judge of length.
       type.set_length(max_deduce_length);
-      type.set_collation_type(get_default_collation_type(type.get_type(), *type_ctx.get_session()));
+      type.set_collation_type(get_default_collation_type(type.get_type(), type_ctx));
     }
     type.set_collation_level(CS_LEVEL_COERCIBLE);
   }
@@ -211,6 +204,15 @@ int ObExprToBase64::cg_expr(ObExprCGCtx &expr_cg_ctx,
     rt_expr.eval_func_ = ObExprToBase64::eval_to_base64;
     rt_expr.eval_batch_func_ = ObExprToBase64::eval_to_base64_batch;
     return ret;
+}
+
+DEF_SET_LOCAL_SESSION_VARS(ObExprToBase64, raw_expr) {
+  int ret = OB_SUCCESS;
+  if (lib::is_mysql_mode()) {
+    SET_LOCAL_SYSVAR_CAPACITY(1);
+    EXPR_ADD_LOCAL_SYSVAR(SYS_VAR_COLLATION_CONNECTION);
+  }
+  return ret;
 }
 
 }//namespace sql

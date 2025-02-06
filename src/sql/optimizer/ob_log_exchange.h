@@ -15,6 +15,7 @@
 #include "lib/allocator/page_arena.h"
 #include "sql/optimizer/ob_logical_operator.h"
 #include "sql/engine/px/ob_px_basic_info.h"
+
 namespace oceanbase
 {
 namespace sql
@@ -55,11 +56,13 @@ public:
       px_batch_op_id_(OB_INVALID_ID),
       px_batch_op_type_(log_op_def::LOG_OP_INVALID),
       partition_id_expr_(NULL),
+      ddl_slice_id_expr_(NULL),
       random_expr_(NULL),
       need_null_aware_shuffle_(false),
       is_old_unblock_mode_(true),
       sample_type_(NOT_INIT_SAMPLE_TYPE),
-      in_server_cnt_(0)
+      in_server_cnt_(0),
+      px_info_(NULL)
   {
     repartition_table_id_ = 0;
   }
@@ -98,7 +101,8 @@ public:
   const common::ObIArray<ObRawExpr *> &get_repart_func_exprs() const {return repartition_func_exprs_;}
   const common::ObIArray<ObExchangeInfo::HashExpr> &get_hash_dist_exprs() const {return hash_dist_exprs_;}
   const common::ObIArray<common::ObObj> *get_popular_values() const {return &popular_values_;}
-  const ObRawExpr *get_calc_part_id_expr() { return calc_part_id_expr_; }
+  const ObRawExpr *get_calc_part_id_expr() const { return calc_part_id_expr_; }
+  ObRawExpr *get_calc_part_id_expr() { return calc_part_id_expr_; }
   ObRepartitionType get_repartition_type() const {return repartition_type_;}
   int64_t get_repartition_ref_table_id() const {return repartition_ref_table_id_;}
   int64_t get_repartition_table_id() const {return repartition_table_id_;}
@@ -166,6 +170,8 @@ public:
   bool is_old_unblock_mode() { return is_old_unblock_mode_; }
   void set_partition_id_expr(ObOpPseudoColumnRawExpr *expr) { partition_id_expr_ = expr; }
   ObOpPseudoColumnRawExpr *get_partition_id_expr() { return partition_id_expr_; }
+  void set_ddl_slice_id_expr(ObRawExpr *expr) { ddl_slice_id_expr_ = expr; }
+  ObRawExpr *get_ddl_slice_id_expr() { return ddl_slice_id_expr_; }
   bool need_null_aware_shuffle() const { return need_null_aware_shuffle_; }
   void set_need_null_aware_shuffle(const bool need_null_aware_shuffle)
                     { need_null_aware_shuffle_ = need_null_aware_shuffle; }
@@ -187,6 +193,11 @@ public:
                             const ObIArray<ObRawExpr *> &keys);
   inline void set_in_server_cnt(int64_t in_server_cnt) {  in_server_cnt_ = in_server_cnt;  }
   inline int64_t get_in_server_cnt() {  return in_server_cnt_;  }
+  bool support_rich_format_vectorize() const;
+  virtual int open_px_resource_analyze(OPEN_PX_RESOURCE_ANALYZE_DECLARE_ARG) override;
+  virtual int close_px_resource_analyze(CLOSE_PX_RESOURCE_ANALYZE_DECLARE_ARG) override;
+  void set_px_info(ObPxResourceAnalyzer::PxInfo *px_info) { px_info_ = px_info; }
+  ObPxResourceAnalyzer::PxInfo *get_px_info() { return px_info_; }
 private:
   int prepare_px_pruning_param(ObLogicalOperator *op, int64_t &count,
       common::ObIArray<const ObDMLStmt *> &stmts, common::ObIArray<int64_t> &drop_expr_idxs);
@@ -204,6 +215,7 @@ private:
   int check_expr_is_need(const ObRawExpr *expr,
       const common::ObIArray<int64_t> &drop_expr_idxs,
       bool &is_need);
+  virtual int check_use_child_ordering(bool &used, int64_t &inherit_child_ordering_index)override;
 private:
   virtual int inner_replace_op_exprs(ObRawExprReplacer &replacer) override;
 
@@ -249,6 +261,7 @@ private:
   int64_t px_batch_op_id_;
   log_op_def::ObLogOpType px_batch_op_type_;
   ObOpPseudoColumnRawExpr *partition_id_expr_;
+  ObRawExpr *ddl_slice_id_expr_;
 
   // produce random number, added in %sort_keys_ of range distribution to splitting big range.
   ObRawExpr *random_expr_;
@@ -263,6 +276,7 @@ private:
   ObPxSampleType sample_type_;
   // -end pkey range/range
   int64_t in_server_cnt_; // for producer, need use exchange in server cnt to compute cost
+  ObPxResourceAnalyzer::PxInfo *px_info_;
   DISALLOW_COPY_AND_ASSIGN(ObLogExchange);
 };
 } // end of namespace sql

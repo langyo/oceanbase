@@ -64,6 +64,7 @@ struct PCVSchemaObj
   bool is_tmp_table_;
   bool is_explicit_db_name_;
   common::ObIAllocator *inner_alloc_;
+  bool is_mv_container_table_;
 
   PCVSchemaObj():
   tenant_id_(common::OB_INVALID_ID),
@@ -74,7 +75,8 @@ struct PCVSchemaObj
   table_type_(share::schema::MAX_TABLE_TYPE),
   is_tmp_table_(false),
   is_explicit_db_name_(false),
-  inner_alloc_(nullptr) {}
+  inner_alloc_(nullptr),
+  is_mv_container_table_(false) {}
 
   explicit PCVSchemaObj(ObIAllocator *alloc):
     tenant_id_(common::OB_INVALID_ID),
@@ -85,7 +87,8 @@ struct PCVSchemaObj
     table_type_(share::schema::MAX_TABLE_TYPE),
     is_tmp_table_(false),
     is_explicit_db_name_(false),
-    inner_alloc_(alloc) {}
+    inner_alloc_(alloc),
+    is_mv_container_table_(false) {}
 
   int init(const share::schema::ObTableSchema *schema);
   int init_with_synonym(const ObSimpleSynonymSchema *schema);
@@ -134,7 +137,8 @@ struct PCVSchemaObj
                K_(table_type),
                K_(table_name),
                K_(is_tmp_table),
-               K_(is_explicit_db_name));
+               K_(is_explicit_db_name),
+               K_(is_mv_container_table));
 };
 
 class ObPlanCacheValue :public common::ObDLinkBase<ObPlanCacheValue>
@@ -166,6 +170,7 @@ public:
                              const ObBitSet<> &neg_param_index,
                              const ObBitSet<> &not_param_index,
                              const ObBitSet<> &must_be_positive_idx,
+                             const ObBitSet<> &formalize_prec_idx,
                              ObIArray<ObPCParam *> &raw_params,
                              ParamStore *obj_params);
 
@@ -179,6 +184,7 @@ public:
                                          const ObBitSet<> &neg_param_index_,
                                          const ObBitSet<> &not_param_index,
                                          const ObBitSet<> &must_be_positive_idx,
+                                         const ObBitSet<> &formalize_prec_idx,
                                          ParamStore &param_store);
 
   static int resolve_insert_multi_values_param(ObPlanCacheCtx &pc_ctx,
@@ -187,6 +193,7 @@ public:
                                                const ObBitSet<> &neg_param_index_,
                                                const ObBitSet<> &not_param_index,
                                                const ObBitSet<> &must_be_positive_idx,
+                                               const ObBitSet<> &formalize_prec_idx,
                                                int64_t params_num,
                                                ParamStore &param_store);
 
@@ -333,8 +340,10 @@ private:
                              share::schema::ObSchemaGetterGuard *schema_guard);
 
   int check_dep_schema_version(const common::ObIArray<PCVSchemaObj> &schema_array,
-                               const common::ObIArray<PCVSchemaObj *> &pcv_schema_objs,
                                bool &is_old_version);
+
+  int remove_mv_schema(const common::ObIArray<PCVSchemaObj> &schema_array,
+                       common::ObIArray<PCVSchemaObj*> &stored_schema_objs);
 
   int match_dep_schema(const ObPlanCacheCtx &pc_ctx,
                        const common::ObIArray<PCVSchemaObj> &schema_array,
@@ -379,6 +388,7 @@ private:
   //*************************
   //not param回填后的sql序列化结果, 主要是用于outline 的signature
   common::ObString outline_signature_;
+  common::ObString outline_format_signature_;
   common::ObString constructed_sql_;
   ObPCVSet *pcv_set_;
   common::ObIAllocator *pc_alloc_;
@@ -394,6 +404,7 @@ private:
   ObOutlineState outline_state_;
   share::schema::ObOutlineParamsWrapper outline_params_wrapper_;
   char sql_id_[OB_MAX_SQL_ID_LENGTH + 1];
+  char format_sql_id_[OB_MAX_SQL_ID_LENGTH + 1];
 
   // session id for temporary table
   uint64_t sessid_;
@@ -401,9 +412,6 @@ private:
   uint64_t sess_create_time_;
   // wether this pcv's plans contains sys table (oracle mode)
   bool contain_sys_name_table_;
-#ifdef OB_BUILD_SPM
-  bool is_spm_closed_;
-#endif
 
   bool need_param_;
   //at present, if a SQL is in nested sql, it is forced to use DAS plan
@@ -446,6 +454,9 @@ private:
    */
   TplSqlConstCons tpl_sql_const_cons_;
   //***********  end user-defined rules **************
+  bool enable_rich_vector_format_;
+  common::ObBitSet<> formalize_prec_idx_;
+  int64_t switchover_epoch_;
 
   DISALLOW_COPY_AND_ASSIGN(ObPlanCacheValue);
 };

@@ -103,7 +103,8 @@ public:
                 }
               }
             }
-            ob_usleep(static_cast<uint32_t>(500_ms));
+            ob_usleep(static_cast<uint32_t>(500_ms), true/*is_idle_sleep*/);
+
           } else {
             OCCAM_LOG(INFO, "thread hung detect thread is stopped");
             break;
@@ -266,7 +267,7 @@ public:
       if (n >= buffer_size) {
         snprintf(&strbuffer[buffer_size - 6], 6, "..., ");
       }
-      ::oceanbase::common::OB_PRINT(log_mod_, OB_LOG_LEVEL_DIRECT_NO_ERRCODE(WARN), OB_SUCCESS, strbuffer, LOG_KVS(K(*this)));
+      OB_MOD_LOG_RET(log_mod_, WARN, OB_SUCCESS, strbuffer, KPC(this));
     }
   }
   void reuse()
@@ -282,6 +283,15 @@ public:
     }
     total_cost += common::ObTimeUtility::current_time() - last_click_ts_;
     return total_cost > warn_threshold_;
+  }
+  int64_t get_total_time() const
+  {
+    int64_t total_cost = 0;
+    for (int64_t idx = 0; idx < idx_; ++idx) {
+      total_cost += click_poinsts_[idx];
+    }
+    total_cost += common::ObTimeUtility::fast_current_time() - last_click_ts_;
+    return total_cost;
   }
   bool click(const uint16_t line)
   {
@@ -395,7 +405,7 @@ public:
       if (n >= buffer_size) {
         snprintf(&strbuffer[buffer_size - 6], 6, "..., ");
       }
-      ::oceanbase::common::OB_PRINT(log_mod_, OB_LOG_LEVEL_DIRECT_NO_ERRCODE(WARN), OB_SUCCESS, strbuffer, LOG_KVS(K(*this)));
+      OB_MOD_LOG_RET(log_mod_, WARN, OB_SUCCESS, strbuffer, KPC(this));
     }
   }
   bool is_timeout()

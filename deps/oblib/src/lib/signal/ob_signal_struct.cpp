@@ -15,7 +15,6 @@
 #include "lib/signal/ob_signal_struct.h"
 #include <new>
 #include "lib/atomic/ob_atomic.h"
-#include "lib/charset/ob_mysql_global.h"
 #include "lib/coro/co_var.h"
 #include "lib/utility/ob_defer.h"
 
@@ -26,6 +25,8 @@ namespace common
 const int MP_SIG = SIGURG;
 const int SIG_STACK_SIZE = 16L<<10;
 uint64_t g_rlimit_core = 0;
+
+thread_local ObSqlInfo ObSqlInfoGuard::tl_sql_info;
 
 DTraceId DTraceId::gen_trace_id()
 {

@@ -11,11 +11,6 @@
  */
 
 #include <gtest/gtest.h>
-#include <stdint.h>
-#include "lib/ob_define.h"
-    #include "lib/timezone/ob_timezone_util.h"
-#include "lib/timezone/ob_time_convert.h"
-#include "lib/timezone/ob_time_format.h"
 #include "lib/timezone/ob_timezone_info.h"
 
 using namespace oceanbase;
@@ -2215,7 +2210,7 @@ TEST(ObTimeConvertTest, date_adjust)
     memset(&ob_time, 0, sizeof(ob_time)); \
     ob_time.mode_ = mode; \
     if (DT_TYPE_DATE & mode) { \
-      EXPECT_EQ(OB_SUCCESS, ObTimeConverter::int_to_ob_time_with_date(int_val, ob_time, false, 0)); \
+      EXPECT_EQ(OB_SUCCESS, ObTimeConverter::int_to_ob_time_with_date(int_val, ob_time, 0)); \
     } else { \
       EXPECT_EQ(OB_SUCCESS, ObTimeConverter::int_to_ob_time_without_date(int_val, ob_time)); \
     } \
@@ -2227,7 +2222,7 @@ TEST(ObTimeConvertTest, date_adjust)
     memset(&ob_time, 0, sizeof(ob_time)); \
     ob_time.mode_ = mode; \
     if (DT_TYPE_DATE & mode) { \
-      EXPECT_NE(OB_SUCCESS, ObTimeConverter::int_to_ob_time_with_date(int_val, ob_time, false, 0)); \
+      EXPECT_NE(OB_SUCCESS, ObTimeConverter::int_to_ob_time_with_date(int_val, ob_time, 0)); \
     } else { \
       EXPECT_NE(OB_SUCCESS, ObTimeConverter::int_to_ob_time_without_date(int_val, ob_time)); \
     } \
@@ -2396,7 +2391,7 @@ TEST(ObTimeConvertTest, str_to_ob_time)
   STR_TO_OB_TIME_FAIL("2015-05-30 24:12:13.1415", DT_TYPE_DATETIME);
   STR_TO_OB_TIME_FAIL("2015-05-30 11:60:13.1415", DT_TYPE_DATETIME);
   STR_TO_OB_TIME_FAIL("2015-05-30 11:12:60.1415", DT_TYPE_DATETIME);
-  STR_TO_OB_TIME_SUCC("2015-12-31 23:59:59.9999999", DT_TYPE_DATETIME, 2015, 12, 31, 23, 59, 59, 1000000);
+  STR_TO_OB_TIME_SUCC("2015-12-31 23:59:59.9999999", DT_TYPE_DATETIME, 2016, 1, 1, 00, 00, 00, 000000);
   STR_TO_OB_TIME_FAIL("10", DT_TYPE_DATETIME);
   STR_TO_OB_TIME_FAIL("101", DT_TYPE_DATETIME);
   STR_TO_OB_TIME_FAIL("1011", DT_TYPE_DATETIME);
@@ -2596,7 +2591,7 @@ TEST(ObTimeConvertTest, str_to_ob_time)
   STR_TO_OB_TIME_FAIL("2015-05-30 24:12:13.1415", DT_TYPE_DATE);
   STR_TO_OB_TIME_FAIL("2015-05-30 11:60:13.1415", DT_TYPE_DATE);
   STR_TO_OB_TIME_FAIL("2015-05-30 11:12:60.1415", DT_TYPE_DATE);
-  STR_TO_OB_TIME_SUCC("2015-12-31 23:59:59.9999999", DT_TYPE_DATE, 2015, 12, 31, -1, -1, -1, -1);
+  STR_TO_OB_TIME_SUCC("2015-12-31 23:59:59.9999999", DT_TYPE_DATE, 2016, 1, 1, -1, -1, -1, -1);
   STR_TO_OB_TIME_FAIL("10", DT_TYPE_DATE);
   STR_TO_OB_TIME_FAIL("101", DT_TYPE_DATE);
   STR_TO_OB_TIME_FAIL("1011", DT_TYPE_DATE);
@@ -2796,7 +2791,7 @@ TEST(ObTimeConvertTest, str_to_ob_time)
   STR_TO_OB_TIME_FAIL("2015-05-30 24:12:13.1415", DT_TYPE_TIME);
   STR_TO_OB_TIME_FAIL("2015-05-30 11:60:13.1415", DT_TYPE_TIME);
   STR_TO_OB_TIME_FAIL("2015-05-30 11:12:60.1415", DT_TYPE_TIME);
-  STR_TO_OB_TIME_SUCC("2015-12-31 23:59:59.9999999", DT_TYPE_TIME, -1, -1, -1, 23, 59, 59, 1000000);
+  STR_TO_OB_TIME_SUCC("2015-12-31 23:59:59.9999999", DT_TYPE_TIME, -1, -1, -1, 0, 0, 0, 000000);
   STR_TO_OB_TIME_SUCC("10", DT_TYPE_TIME, -1, -1, -1, 0, 0, 10, 0);
   STR_TO_OB_TIME_SUCC("101", DT_TYPE_TIME, -1, -1, -1, 0, 1, 1, 0);
   STR_TO_OB_TIME_SUCC("1011", DT_TYPE_TIME, -1, -1, -1, 0, 10, 11, 0);

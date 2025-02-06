@@ -13,8 +13,6 @@
 #define USING_LOG_PREFIX SQL_RESV
 
 #include "sql/resolver/ddl/ob_create_table_stmt.h"
-#include "common/object/ob_obj_type.h"
-#include "share/schema/ob_column_schema.h"
 
 using namespace oceanbase::sql;
 using namespace oceanbase::common;
@@ -31,7 +29,8 @@ ObCreateTableStmt::ObCreateTableStmt(ObIAllocator *name_pool)
       is_view_stmt_(false),
       view_need_privs_(),
       sub_select_stmt_(NULL),
-      view_define_(NULL)
+      view_define_(NULL),
+      insert_mode_(0)
 {
 }
 
@@ -41,7 +40,8 @@ ObCreateTableStmt::ObCreateTableStmt()
       is_view_stmt_(false),
       view_need_privs_(),
       sub_select_stmt_(NULL),
-      view_define_(NULL)
+      view_define_(NULL),
+      insert_mode_(0)
 {
 }
 

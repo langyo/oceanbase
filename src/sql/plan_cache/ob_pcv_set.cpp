@@ -12,13 +12,6 @@
 
 #define USING_LOG_PREFIX SQL_PC
 #include "sql/plan_cache/ob_pcv_set.h"
-#include "sql/ob_sql_context.h"
-#include "sql/plan_cache/ob_pc_ref_handle.h"
-#include "share/schema/ob_table_schema.h"
-#include "share/ob_cluster_version.h"
-#include "share/config/ob_server_config.h"
-#include "lib/container/ob_bit_set.h"
-#include "lib/charset/ob_charset.h"
 
 using namespace oceanbase::common;
 using namespace oceanbase::share::schema;
@@ -32,9 +25,6 @@ int ObPCVSet::init(ObILibCacheCtx &ctx, const ObILibCacheObject *obj)
 {
   int ret = OB_SUCCESS;
   ObSQLSessionInfo* sess;
-#ifdef OB_BUILD_SPM
-  bool is_spm_on = false;
-#endif
   ObPlanCacheCtx &pc_ctx = static_cast<ObPlanCacheCtx&>(ctx);
   const ObPlanCacheObject *cache_obj = static_cast<const ObPlanCacheObject*>(obj);
   if (is_inited_) {
@@ -46,12 +36,6 @@ int ObPCVSet::init(ObILibCacheCtx &ctx, const ObILibCacheObject *obj)
   } else if (NULL == (sess = pc_ctx.sql_ctx_.session_info_)) {
     ret = OB_ERR_UNEXPECTED;
     SQL_PC_LOG(WARN, "session info is null", K(ret));
-#ifdef OB_BUILD_SPM
-  } else if (OB_FAIL(sess->get_use_plan_baseline(is_spm_on))) {
-    LOG_WARN("fail to get spm config");
-  } else if (FALSE_IT(is_spm_closed_ = (!is_spm_on))) {
-    // do nothing
-#endif
   } else if (NULL == (pc_alloc_ = lib_cache_->get_pc_allocator())) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid plan cache allocator", K_(pc_alloc), K(ret));
@@ -119,9 +103,6 @@ int ObPCVSet::inner_get_cache_obj(ObILibCacheCtx &ctx,
 {
   UNUSED(key);
   int ret = OB_SUCCESS;
-#ifdef OB_BUILD_SPM
-  bool is_spm_on = false;
-#endif
   ObPlanCacheObject *plan = NULL;
   ObPlanCacheCtx &pc_ctx = static_cast<ObPlanCacheCtx&>(ctx);
   if (PC_PS_MODE == pc_ctx.mode_ || PC_PL_MODE == pc_ctx.mode_) {
@@ -140,7 +121,7 @@ int ObPCVSet::inner_get_cache_obj(ObILibCacheCtx &ctx,
     }
   }
   if (pc_ctx.exec_ctx_.get_min_cluster_version() != GET_MIN_CLUSTER_VERSION()) {
-    LOG_TRACE("Lob Debug, using remote min cluster version",
+    LOG_DEBUG("Lob Debug, using remote min cluster version",
              K(pc_ctx.exec_ctx_.get_min_cluster_version()),
              K(GET_MIN_CLUSTER_VERSION()));
   }
@@ -162,13 +143,6 @@ int ObPCVSet::inner_get_cache_obj(ObILibCacheCtx &ctx,
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("unexpected null schema guard",
              K(ret), K(pc_ctx.sql_ctx_.schema_guard_), K(pc_ctx.sql_ctx_.session_info_));
-#ifdef OB_BUILD_SPM
-  } else if (OB_FAIL(pc_ctx.sql_ctx_.session_info_->get_use_plan_baseline(is_spm_on))) {
-    LOG_WARN("failed to get spm status", K(ret));
-  } else if (is_spm_closed_ != (!is_spm_on)) {
-    // spm param is altered
-    ret = OB_OLD_SCHEMA_VERSION;
-#endif
   } else {
     ObSEArray<PCVSchemaObj, 4> schema_array;
     //plan cache匹配临时表应该始终使用用户创建的session才能保证语义的正确性
@@ -181,7 +155,7 @@ int ObPCVSet::inner_get_cache_obj(ObILibCacheCtx &ctx,
     bool need_check_schema = true;
     DLIST_FOREACH(pcv, pcv_list_) {
       bool is_same = false;
-      LOG_TRACE("get plan, pcv", K(pcv));
+      LOG_DEBUG("get plan, pcv", K(pcv));
       if (OB_FAIL(pcv->get_all_dep_schema(pc_ctx,
                                           pc_ctx.sql_ctx_.session_info_->get_database_id(),
                                           new_tenant_schema_version,
@@ -247,7 +221,7 @@ int ObPCVSet::inner_add_cache_obj(ObILibCacheCtx &ctx,
              K(pc_ctx.sql_ctx_.session_info_));
   } else if (get_plan_num() >= MAX_PCV_SET_PLAN_NUM) {
     static const int64_t PRINT_PLAN_EXCEEDS_LOG_INTERVAL = 20 * 1000 * 1000; // 20s
-    ret = OB_ERR_UNEXPECTED;
+    ret = OB_REACH_MEMORY_LIMIT;
     if (REACH_TIME_INTERVAL(PRINT_PLAN_EXCEEDS_LOG_INTERVAL)) {
       LOG_INFO("number of plans in a single pcv_set reach limit", K(ret), K(get_plan_num()), K(pc_ctx));
     }

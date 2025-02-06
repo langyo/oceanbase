@@ -11,26 +11,13 @@
  */
 
 #include <gtest/gtest.h>
-#include "lib/file/file_directory_utils.h"
-#include "lib/list/ob_dlist.h"
-#include "lib/ob_abort.h"
-#include "lib/ob_define.h"
-#include "lib/ob_errno.h"
-#include "lib/oblog/ob_log.h"
-#include "lib/time/ob_time_utility.h"
-#include "lib/utility/ob_utility.h"
-#include "logservice/palf/log_block_pool_interface.h"
-#include "logservice/palf/log_define.h"
-#include "share/ob_errno.h"
 #include <thread>
-#include <functional>
 
 #define private public
 #include "logservice/ob_server_log_block_mgr.h"
 #undef private
 
 #include <gtest/gtest.h>
-#include <regex>
 
 namespace oceanbase
 {
@@ -390,9 +377,11 @@ TEST_F(TestServerLogBlockMgr, dirty_ls_dir_and_log_pool_file)
   system("mkdir clog_disk/clog/log_pool/1.tmp");
   log_block_mgr_.destroy();
   bool result = false;
-  EXPECT_EQ(OB_SUCCESS, log_block_mgr_.init(log_pool_base_path_));
+  EXPECT_EQ(OB_ERR_UNEXPECTED, log_block_mgr_.init(log_pool_base_path_));
   EXPECT_EQ(OB_SUCCESS, FileDirectoryUtils::is_exists("clog_disk/clog/tenant_1/1/meta/10000.tmp",result));
   EXPECT_EQ(false, result);
+  system("rm -rf clog_disk/clog/tenant_0111");
+  EXPECT_EQ(OB_SUCCESS, log_block_mgr_.init(log_pool_base_path_));
 }
 
 TEST_F(TestServerLogBlockMgr, resize_failed_and_restar)

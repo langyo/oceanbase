@@ -19,6 +19,14 @@
 
 namespace oceanbase
 {
+namespace obrpc
+{
+class ObGAISNextSequenceValRpcResult;
+}
+namespace share
+{
+class ObGAISNextSequenceValReq;
+}
 namespace sql
 {
 class ObSequenceSpec : public ObOpSpec
@@ -47,7 +55,11 @@ public:
 class ObSequenceExecutor {
   public:
     ObSequenceExecutor()
-    :dblink_id_(OB_INVALID_ID) {}
+      : dblink_id_(OB_INVALID_ID)
+    {
+      seq_schemas_.set_attr(SET_IGNORE_MEM_VERSION("SeqSchema"));
+      seq_ids_.set_attr(SET_IGNORE_MEM_VERSION("SeqId"));
+    }
     ~ObSequenceExecutor() { destroy(); }
     virtual int init(ObExecContext &ctx)=0;
     virtual void reset() { seq_ids_.reset(); seq_schemas_.reset();}
@@ -72,6 +84,8 @@ class ObLocalSequenceExecutor : public ObSequenceExecutor {
     virtual void reset() override;
     virtual void destroy() override;
     virtual int get_nextval(ObExecContext &ctx) override;
+    int handle_gais_request(const share::ObGAISNextSequenceValReq &request,
+                                  obrpc::ObGAISNextSequenceValRpcResult &result);
   private:
     // sequence 暴露给用户层的是一个 cache
     // cache 底层负责做 sequence 的缓存更新以及全局的协调

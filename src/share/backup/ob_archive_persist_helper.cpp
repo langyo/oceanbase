@@ -11,14 +11,8 @@
  */
 
 #define USING_LOG_PREFIX SHARE
-#include "lib/utility/utility.h"      // ob_atoll
 #include "share/backup/ob_archive_persist_helper.h"
-#include "share/inner_table/ob_inner_table_schema.h"
-#include "share/schema/ob_schema_utils.h"
 #include "share/ob_tenant_info_proxy.h"
-#include "lib/string/ob_sql_string.h"
-#include "lib/oblog/ob_log_module.h"
-#include "common/ob_smart_var.h"
 
 using namespace oceanbase;
 using namespace common;
@@ -169,7 +163,7 @@ int ObArchivePersistHelper::lock_archive_dest(
   int ret = OB_SUCCESS;
   ObBackupPathString path;
   if (OB_FAIL(get_archive_dest(trans, true /* need_lock */, dest_no, path))) {
-    if (OB_ENTRY_NOT_EXIST) {
+    if (OB_ENTRY_NOT_EXIST == ret) {
       ret = OB_SUCCESS;
       is_exist = false;
     } else {
@@ -528,6 +522,42 @@ int ObArchivePersistHelper::get_round_by_dest_id(common::ObISQLClient &proxy, co
   return ret;
 }
 
+int ObArchivePersistHelper::get_round_stopping_ts(
+    common::ObISQLClient &proxy, const int64_t dest_no, int64_t &ts) const
+{
+  int ret = OB_SUCCESS;
+  ObSqlString sql;
+  if (IS_NOT_INIT) {
+    ret = OB_NOT_INIT;
+    LOG_WARN("tenant archive table operator not init", K(ret));
+  } else if (OB_FAIL(sql.append_fmt("select time_to_usec(gmt_modified) as stopping_ts from %s where tenant_id=%ld and dest_no=%ld and status='STOPPING'",
+                     OB_ALL_LOG_ARCHIVE_PROGRESS_TNAME,
+                     tenant_id_,
+                     dest_no))) {
+    LOG_WARN("failed to append fmt", K(ret));
+  } else {
+    HEAP_VAR(ObMySQLProxy::ReadResult, res) {
+      ObMySQLResult *result = NULL;
+      if (OB_FAIL(proxy.read(res, get_exec_tenant_id(), sql.ptr()))) {
+        LOG_WARN("failed to exec sql", K(ret), K(sql));
+      } else if (OB_ISNULL(result = res.get_result())) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("result is null", K(ret), K(sql));
+      } else if (OB_FAIL(result->next())) {
+        if (OB_ITER_END == ret) {
+          ret = OB_ENTRY_NOT_EXIST;
+        } else {
+          LOG_WARN("failed to get next", K(ret));
+        }
+      } else {
+        EXTRACT_INT_FIELD_MYSQL(*result, "stopping_ts", ts, int64_t);
+      }
+    }
+  }
+
+  return ret;
+}
+
 int ObArchivePersistHelper::del_round(common::ObISQLClient &proxy, const int64_t dest_no) const
 {
   int ret = OB_SUCCESS;
@@ -566,21 +596,18 @@ int ObArchivePersistHelper::start_new_round(common::ObISQLClient &proxy, const O
   return ret;
 }
 
-int ObArchivePersistHelper::stop_round(common::ObISQLClient &proxy, const ObTenantArchiveRoundAttr &round) const
+int ObArchivePersistHelper::stop_round(common::ObISQLClient &proxy, const ObTenantArchiveRoundAttr &old_round,
+    const ObTenantArchiveRoundAttr &new_round) const
 {
   int ret = OB_SUCCESS;
-  int64_t affected_rows = 0;
-  ObInnerTableOperator round_table_operator;
   if (IS_NOT_INIT) {
     ret = OB_NOT_INIT;
     LOG_WARN("ObArchivePersistHelper not init", K(ret));
-  } else if (!round.state_.is_stop()) {
+  } else if (!new_round.state_.is_stop()) {
     ret = OB_INVALID_ARGUMENT;
-    LOG_WARN("invalid round state", K(ret), K(round));
-  } else if (OB_FAIL(round_table_operator.init(OB_ALL_LOG_ARCHIVE_PROGRESS_TNAME, *this))) {
-    LOG_WARN("failed to init round progress table", K(ret));
-  } else if (OB_FAIL(round_table_operator.update_row(proxy, round, affected_rows))) {
-    LOG_WARN("failed to stop round", K(ret), K(round));
+    LOG_WARN("invalid round state", K(ret), K(new_round));
+  } else if (OB_FAIL(switch_round_state_to(proxy, old_round, new_round))) {
+    LOG_WARN("failed to stop round", K(ret), K(old_round), K(new_round));
   }
 
   return ret;
@@ -599,7 +626,13 @@ int ObArchivePersistHelper::switch_round_state_to(common::ObISQLClient &proxy, c
     LOG_WARN("ObArchivePersistHelper not init", K(ret));
   } else if (OB_FAIL(round_table_operator.init(OB_ALL_LOG_ARCHIVE_PROGRESS_TNAME, *this))) {
     LOG_WARN("failed to init round progress table", K(ret));
-  } else if (OB_FAIL(predicates.assign_fmt("%s='%s'", OB_STR_STATUS, round.state_.to_status_str()))) {
+  } else if (OB_FAIL(predicates.assign_fmt("%s = '%s' and %s = %ld and %s = %lu",
+                                           OB_STR_STATUS,
+                                           round.state_.to_status_str(),
+                                           OB_STR_ROUND_ID,
+                                           round.round_id_,
+                                           OB_STR_CHECKPOINT_SCN,
+                                           round.checkpoint_scn_.get_val_for_inner_table_field()))) {
     LOG_WARN("failed to assign predicates", K(ret), K(round));
   } else if (OB_FAIL(assignments.assign_fmt("%s='%s'", OB_STR_STATUS, new_state.to_status_str()))) {
     LOG_WARN("failed to assign assignments", K(ret), K(new_state));
@@ -623,7 +656,13 @@ int ObArchivePersistHelper::switch_round_state_to(common::ObISQLClient &proxy, c
     LOG_WARN("ObArchivePersistHelper not init", K(ret));
   } else if (OB_FAIL(round_table_operator.init(OB_ALL_LOG_ARCHIVE_PROGRESS_TNAME, *this))) {
     LOG_WARN("failed to init round progress table", K(ret));
-  } else if (OB_FAIL(condition.assign_fmt("%s='%s'", OB_STR_STATUS, old_round.state_.to_status_str()))) {
+  } else if (OB_FAIL(condition.assign_fmt("%s = '%s' and %s = %ld and %s = %lu",
+                                          OB_STR_STATUS,
+                                          old_round.state_.to_status_str(),
+                                          OB_STR_ROUND_ID,
+                                          old_round.round_id_,
+                                          OB_STR_CHECKPOINT_SCN,
+                                          old_round.checkpoint_scn_.get_val_for_inner_table_field()))) {
     LOG_WARN("failed to assign condition", K(ret), K(old_round));
   } else if (OB_FAIL(new_round.build_assignments(assignments))) {
     LOG_WARN("failed to build assignments", K(ret), K(new_round));

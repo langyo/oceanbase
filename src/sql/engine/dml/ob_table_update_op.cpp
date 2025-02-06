@@ -13,11 +13,7 @@
 #define USING_LOG_PREFIX SQL_ENG
 
 #include "ob_table_update_op.h"
-#include "share/system_variable/ob_system_variable.h"
 #include "sql/engine/dml/ob_dml_service.h"
-#include "sql/engine/dml/ob_trigger_handler.h"
-#include "sql/engine/expr/ob_expr_calc_partition_id.h"
-#include "sql/engine/dml/ob_fk_checker.h"
 
 namespace oceanbase
 {
@@ -381,7 +377,10 @@ OB_INLINE int ObTableUpdateOp::update_row_to_das()
     } //end for global index ctdef loop
     if (OB_SUCC(ret)) {
       int64_t update_rows = rtdefs.at(0).is_row_changed_ ? 1 : 0;
-      if (OB_FAIL(merge_implict_cursor(0, update_rows, 0, 1))) {
+      ObSQLSessionInfo *session = GET_MY_SESSION(ctx_);
+      bool client_found_rows = session->get_capability().cap_flags_.OB_CLIENT_FOUND_ROWS;
+      int64_t affected_rows = client_found_rows ? 1 /*found_rows*/ : update_rows;
+      if (OB_FAIL(merge_implict_cursor(affected_rows, 1 /*found_rows*/, 1 /*match_rows*/, update_rows /*duplicated_rows*/))) {
         LOG_WARN("merge implict cursor failed", K(ret));
       }
     }
@@ -432,10 +431,13 @@ int ObTableUpdateOp::check_update_affected_row()
         ret = OB_ERR_DEFENSIVE_CHECK;
         ObString func_name = ObString::make_string("check_update_affected_row");
         LOG_USER_ERROR(OB_ERR_DEFENSIVE_CHECK, func_name.length(), func_name.ptr());
-        LOG_DBA_ERROR(OB_ERR_DEFENSIVE_CHECK, "msg", "Fatal Error!!! data table update affected row is not match with index table",
+        LOG_ERROR_RET(OB_ERR_DEFENSIVE_CHECK, "Fatal Error!!! data table update affected row is not match with index table",
                   K(ret), K(primary_write_rows), K(index_write_rows),
                   KPC(primary_upd_ctdef), K(primary_upd_rtdef),
                   KPC(index_upd_ctdef), K(index_upd_rtdef));
+        LOG_DBA_ERROR_V2(OB_SQL_UPDATE_AFFECTED_ROW_FAIL, ret, "Attention!!!", "data table update affected row is not match with index table"
+                  ", primary_write_rows is: ", primary_write_rows,
+                  ", index_write_rows: ", index_write_rows);
       }
     }
     if (OB_SUCC(ret) && !primary_upd_ctdef->dupd_ctdef_.is_ignore_) {
@@ -443,9 +445,12 @@ int ObTableUpdateOp::check_update_affected_row()
         ret = OB_ERR_DEFENSIVE_CHECK;
         ObString func_name = ObString::make_string("check_update_affected_row");
         LOG_USER_ERROR(OB_ERR_DEFENSIVE_CHECK, func_name.length(), func_name.ptr());
-        LOG_DBA_ERROR(OB_ERR_DEFENSIVE_CHECK, "msg", "Fatal Error!!! data table update affected row is not match with found rows",
+        LOG_ERROR_RET(OB_ERR_DEFENSIVE_CHECK, "Fatal Error!!! data table update affected row is not match with found rows",
                   K(ret), K(primary_write_rows), K(primary_upd_rtdef.found_rows_),
                   KPC(primary_upd_ctdef), K(primary_upd_rtdef));
+        LOG_DBA_ERROR_V2(OB_SQL_UPDATE_AFFECTED_ROW_FAIL, ret, "Attention!!!", "data table update affected row is not match with found rows",
+                  ", primary_write_rows is: ", primary_write_rows,
+                  ", primary_found_rows is: ", primary_upd_rtdef.found_rows_);
       }
     }
   }

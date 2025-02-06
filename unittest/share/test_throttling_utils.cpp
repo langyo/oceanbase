@@ -12,12 +12,7 @@
 
 #define USING_LOG_PREFIX SHARE
 #include <gtest/gtest.h>
-#include <random>
-#include <string>
-#include <pthread.h>
 
-#include "lib/ob_define.h"
-#include "lib/utility/ob_print_utils.h" // Print*
 #include "logservice/palf/log_define.h"
 #include "share/ob_throttling_utils.h"
 
@@ -160,7 +155,7 @@ TEST_F(TestThrottlingUtils, test_calc_decay_factor)
   ASSERT_EQ(OB_INVALID_ARGUMENT,  ObThrottlingUtils::calc_decay_factor(available_size, duration_us, chunk_size, decay_factor));
   duration_us = 1800 * 1000 * 1000L;
   ASSERT_EQ(OB_INVALID_ARGUMENT,  ObThrottlingUtils::calc_decay_factor(available_size, duration_us, chunk_size, decay_factor));
-  chunk_size = palf::MAX_LOG_BUFFER_SIZE;
+  chunk_size = 2 * 1024 * 1024 + 24 * 1024;
   ASSERT_EQ(OB_SUCCESS,  ObThrottlingUtils::calc_decay_factor(available_size, duration_us, chunk_size, decay_factor));
   //0.10934
   LOG_INFO("calc_decay_factor", K(chunk_size), K(duration_us), K(available_size), K(decay_factor));

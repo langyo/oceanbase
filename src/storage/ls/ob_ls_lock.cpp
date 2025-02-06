@@ -12,10 +12,8 @@
 
 #define USING_LOG_PREFIX STORAGE
 
-#include "ob_ls_lock.h"
 
-#include "lib/stat/ob_latch_define.h"
-#include "lib/utility/utility.h"
+#include "ob_ls_lock.h"
 #include "storage/ls/ob_ls.h"
 
 namespace oceanbase
@@ -245,6 +243,36 @@ ObLSLockWithPendingReplayGuard::~ObLSLockWithPendingReplayGuard()
              "cost_us", end_ts - start_ts_, K(ls_id_), K(lbt()));
   }
   start_ts_ = INT64_MAX;
+}
+
+// ================== ls state guard =====================
+ObLSStateGuard::ObLSStateGuard(ObLS *ls)
+  : ls_(ls),
+    begin_state_seq_(-1)
+{
+  if (OB_NOT_NULL(ls_)) {
+    begin_state_seq_ = ls_->get_state_seq();
+  }
+}
+
+ObLSStateGuard::~ObLSStateGuard()
+{
+  ls_ = nullptr;
+  begin_state_seq_ = -1;
+}
+
+int ObLSStateGuard::check()
+{
+  int ret = OB_SUCCESS;
+  int64_t curr_seq = -1;
+  if (OB_ISNULL(ls_)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (FALSE_IT(curr_seq = ls_->get_state_seq())) {
+  } else if (begin_state_seq_ != curr_seq) {
+    ret = OB_STATE_NOT_MATCH;
+    STORAGE_LOG(WARN, "sequence not match", KR(ret), KPC(ls_));
+  }
+  return ret;
 }
 
 } // storage

@@ -12,8 +12,6 @@
 
 #include "lib/allocator/ob_concurrent_fifo_allocator.h"
 #include "lib/ob_running_mode.h"
-#include "lib/utility/utility.h"
-#include "lib/cpu/ob_cpu_topology.h"
 
 namespace oceanbase
 {
@@ -48,20 +46,26 @@ int ObConcurrentFIFOAllocator::init(const int64_t total_limit,
 }
 
 int ObConcurrentFIFOAllocator::init(const int64_t page_size,
-                                    const lib::ObLabel &label,
-                                    const uint64_t tenant_id,
+                                    const lib::ObMemAttr &attr,
                                     const int64_t total_limit)
 {
   int ret = OB_SUCCESS;
   const int64_t cache_page_count = lib::is_mini_mode() ? 0 : get_cpu_count() * STORAGE_SIZE_TIMES;
   if (OB_FAIL(inner_allocator_.init(page_size,
-                                    label,
-                                    tenant_id,
+                                    attr,
                                     cache_page_count,
                                     total_limit))) {
     LIB_LOG(WARN, "failed to init inner allocator", K(ret));
   }
   return ret;
+}
+
+int ObConcurrentFIFOAllocator::init(const int64_t page_size,
+                                    const lib::ObLabel &label,
+                                    const uint64_t tenant_id,
+                                    const int64_t total_limit)
+{
+  return init(page_size, ObMemAttr(tenant_id, label), total_limit);
 }
 
 int ObConcurrentFIFOAllocator::set_hold_limit(int64_t hold_limit)
@@ -78,6 +82,11 @@ void ObConcurrentFIFOAllocator::set_total_limit(int64_t total_limit)
 void ObConcurrentFIFOAllocator::destroy()
 {
   inner_allocator_.destroy();
+}
+
+void ObConcurrentFIFOAllocator::purge()
+{
+  inner_allocator_.purge();
 }
 
 void ObConcurrentFIFOAllocator::set_label(const lib::ObLabel &label)

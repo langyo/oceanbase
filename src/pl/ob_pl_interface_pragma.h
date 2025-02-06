@@ -58,13 +58,27 @@
 #include "pl/sys_package/ob_dbms_rls.h"
 #include "pl/sys_package/ob_json_object_type.h"
 #include "pl/sys_package/ob_json_element_type.h"
-#endif
-#include "pl/sys_package/ob_pl_dbms_resource_manager.h"
-#ifdef OB_BUILD_ORACLE_XML
+#include "pl/sys_package/ob_sdo_geometry.h"
+#include "pl/sys_package/ob_dbms_mview.h"
+#include "pl/sys_package/ob_dbms_mview_stats.h"
+#include "pl/sys_package/ob_json_array_type.h"
 #include "pl/sys_package/ob_xml_type.h"
+#include "pl/sys_package/ob_sdo_geom.h"
+#include "pl/sys_package/ob_dbms_profiler.h"
+#include "pl/sys_package/ob_utl_tcp.h"
+#include "pl/sys_package/ob_utl_smtp.h"
 #endif
+#include "pl/sys_package/ob_dbms_xplan.h"
+#include "pl/sys_package/ob_pl_dbms_resource_manager.h"
 #include "pl/sys_package/ob_dbms_session.h"
+#include "pl/sys_package/ob_dbms_space.h"
 #include "pl/sys_package/ob_dbms_workload_repository.h"
+#include "pl/sys_package/ob_dbms_mview_mysql.h"
+#include "pl/sys_package/ob_dbms_mview_stats_mysql.h"
+#include "pl/sys_package/ob_pl_dbms_trusted_certificate_manager.h"
+#include "pl/sys_package/ob_dbms_limit_calculator_mysql.h"
+#include "pl/sys_package/ob_dbms_external_table.h"
+#include "pl/sys_package/ob_dbms_vector_mysql.h"
 
 #ifdef INTERFACE_DEF
   INTERFACE_DEF(INTERFACE_START, "TEST", (ObPLInterfaceImpl::call))
@@ -106,9 +120,8 @@
   // dbms_lock
   INTERFACE_DEF(INTERFACE_LOCK_SLEEP_LOCK, "SLEEP_LOCK", (PlPackageLock::sleep))
   INTERFACE_DEF(INTERFACE_LOCK_ALLOCATE_UNIQUE, "ALLOCATE_UNIQUE_LOCK", (PlPackageLock::allocate_unique_lock))
-  // INTERFACE_DEF(INTERFACE_LOCK_ALLOCATE_UNIQUE_AUTONOMOUS, "ALLOCATE_UNIQUE_LOCK_AUTONOMOUS", (PlPackageLock::allocate_unique_lock_autonomous))
   // INTERFACE_DEF(INTERFACE_LOCK_CONVERT, "CONVERT_LOCK", (PlPackageLock::convert))
-  // INTERFACE_DEF(INTERFACE_LOCK_RELEASE, "RELEASE_LOCK", (PlPackageLock::release))
+  INTERFACE_DEF(INTERFACE_LOCK_RELEASE, "RELEASE_LOCK", (PlPackageLock::release_lock))
   INTERFACE_DEF(INTERFACE_LOCK_REQUEST, "REQUEST_LOCK", (PlPackageLock::request_lock))
   // end dbms_lock
 
@@ -281,6 +294,7 @@
   INTERFACE_DEF(INTERFACE_GET_TIME, "GET_TIME", (DbmsUtilityHelper::get_time))
   INTERFACE_DEF(INTERFACE_INVALIDATE, "INVALIDATE", (DbmsUtilityHelper::invalidate))
   INTERFACE_DEF(INTERFACE_VALIDATE, "VALIDATE", (DbmsUtilityHelper::validate))
+  INTERFACE_DEF(INTERFACE_PSDANAM, "PSDANAM", (DbmsUtilityHelper::psdanam))
   // end dbms_utility
 
 #endif
@@ -338,9 +352,14 @@
   INTERFACE_DEF(INTERFACE_DBMS_STATS_SET_INDEX_STATS, "SET_INDEX_STATS", (ObDbmsStats::set_index_stats))
   INTERFACE_DEF(INTERFACE_DBMS_STATS_EXPORT_INDEX_STATS, "EXPORT_INDEX_STATS", (ObDbmsStats::export_index_stats))
   INTERFACE_DEF(INTERFACE_DBMS_STATS_IMPORT_INDEX_STATS, "IMPORT_INDEX_STATS", (ObDbmsStats::import_index_stats))
+  INTERFACE_DEF(INTERFACE_DBMS_STATS_COPY_TABLE_STATS, "COPY_TABLE_STATS", (ObDbmsStats::copy_table_stats))
+  INTERFACE_DEF(INTERFACE_DBMS_STATS_CNACEL_GATHER_STATS, "CANCEL_GATHER_STATS", (ObDbmsStats::cancel_gather_stats))
+  INTERFACE_DEF(INTERFACE_DBMS_STATS_GATHER_SYSTEM_STATS, "GATHER_SYSTEM_STATS", (ObDbmsStats::gather_system_stats))
+  INTERFACE_DEF(INTERFACE_DBMS_STATS_DELETE_SYSTEM_STATS, "DELETE_SYSTEM_STATS", (ObDbmsStats::delete_system_stats))
+  INTERFACE_DEF(INTERFACE_DBMS_STATS_SET_SYSTEM_STATS, "SET_SYSTEM_STATS", (ObDbmsStats::set_system_stats))
+  INTERFACE_DEF(INTERFACE_DBMS_STATS_ASYNC_GATHER_STATS_JOB_PROC, "ASYNC_GATHER_STATS_JOB_PROC", (ObDbmsStats::async_gather_stats_job_proc))
   //end of dbms_stat
 
-#ifdef OB_BUILD_ORACLE_PL
   //start of dbms xplan
   INTERFACE_DEF(INTERFACE_DBMS_XPLAN_ENABLE_OPT_TRACE, "ENABLE_OPT_TRACE", (ObDbmsXplan::enable_opt_trace))
   INTERFACE_DEF(INTERFACE_DBMS_XPLAN_DISABLE_OPT_TRACE, "DISABLE_OPT_TRACE", (ObDbmsXplan::disable_opt_trace))
@@ -350,6 +369,8 @@
   INTERFACE_DEF(INTERFACE_DBMS_XPLAN_DISPLAY_SQL_PLAN_BASELINE, "DISPLAY_SQL_PLAN_BASELINE", (ObDbmsXplan::display_sql_plan_baseline))
   INTERFACE_DEF(INTERFACE_DBMS_XPLAN_DISPLAY_ACTIVE_SESSION_PLAN, "DISPLAY_ACTIVE_SESSION_PLAN", (ObDbmsXplan::display_active_session_plan))
   //end of dbms xplan
+
+#ifdef OB_BUILD_ORACLE_PL
 
   // start of oracle label security
   // sysdba
@@ -444,11 +465,27 @@
 #undef PREFIX
   //end of anydata
 
-#ifdef OB_BUILD_ORACLE_XML
+  //start of sdo_geometry
+  INTERFACE_DEF(INTERFACE_SDO_GEOMETRY_GET_WKB, "SDO_GEOMETRY_GET_WKB", (ObSdoGeometry::get_wkb))
+  INTERFACE_DEF(INTERFACE_SDO_GEOMETRY_GET_WKT, "SDO_GEOMETRY_GET_WKT", (ObSdoGeometry::get_wkt))
+  INTERFACE_DEF(INTERFACE_SDO_GEOMETRY_GET_GTYPE, "SDO_GEOMETRY_GET_GTYPE", (ObSdoGeometry::get_gtype))
+  INTERFACE_DEF(INTERFACE_SDO_GEOMETRY_GET_DIMS, "SDO_GEOMETRY_GET_DIMS", (ObSdoGeometry::get_dims))
+  INTERFACE_DEF(INTERFACE_SDO_GEOMETRY_ST_COORDDIM, "SDO_GEOMETRY_ST_COORDDIM", (ObSdoGeometry::st_coorddim))
+  INTERFACE_DEF(INTERFACE_SDO_GEOMETRY_ST_ISVALID, "SDO_GEOMETRY_ST_ISVALID", (ObSdoGeometry::st_isvalid))
+  INTERFACE_DEF(INTERFACE_SDO_GEOMETRY_CONSTRUCTOR, "SDO_GEOMETRY_CONSTRUCTOR", (ObSdoGeometry::constructor))
+  INTERFACE_DEF(INTERFACE_SDO_GEOMETRY_GET_GEOJSON, "SDO_GEOMETRY_GET_GEOJSON", (ObSdoGeometry::get_geojson))
+  //end of sdo_geometry
+
+  //start of sdo_geom
+  INTERFACE_DEF(INTERFACE_SDO_GEOM_DISTANCE, "SDO_GEOM_DISTANCE", (ObSdoGeom::sdo_distance))
+  //end of sdo_geom
+
   //start of xmltype
   INTERFACE_DEF(INTERFACE_XML_TYPE_TRANSFORM, "XML_TYPE_TRANSFORM", (ObXmlType::transform))
   INTERFACE_DEF(INTERFACE_XML_TYPE_GETCLOBVAL, "XML_TYPE_GETCLOBVAL", (ObXmlType::getclobval))
   INTERFACE_DEF(INTERFACE_XML_TYPE_GETSTRINGVAL, "XML_TYPE_GETSTRINGVAL", (ObXmlType::getstringval))
+  INTERFACE_DEF(INTERFACE_XML_TYPE_EXISTSNODE, "XML_TYPE_EXISTSNODE", (ObXmlType::existsnode))
+  INTERFACE_DEF(INTERFACE_XML_TYPE_EXTRACT, "XML_TYPE_EXTRACT", (ObXmlType::extract))
   INTERFACE_DEF(INTERFACE_XML_TYPE_CREATEXML, "XML_TYPE_CREATEXML", (ObXmlType::createxml))
   INTERFACE_DEF(INTERFACE_XML_TYPE_CONSTRUCTOR, "XML_TYPE_CONSTRUCTOR", (ObXmlType::constructor))
   //end of xmltype
@@ -456,7 +493,6 @@
   //start of dbms_xmlgen
   INTERFACE_DEF(INTERFACE_DBMS_XMLGEN_CONVERT, "DBMS_XMLGEN_CONVERT", (ObDbmsXmlGen::convert))
   //end of dbms_xmlgen
-#endif
 
   //start of dbms_crypto
   INTERFACE_DEF(INTERFACE_DBMS_CRYPTO_ENCRYPT, "DBMS_CRYPTO_ENCRYPT", (ObDbmsCrypto::encrypt))
@@ -510,10 +546,10 @@
 #define DEFINE_DBMS_SCHEDULER_MYSQL_INTERFACE(symbol, func) \
   INTERFACE_DEF(INTERFACE_##symbol, #symbol, (func))
 
-  DEFINE_DBMS_SCHEDULER_MYSQL_INTERFACE(DBMS_SCHEDULER_MYSQL_CREATE_JOB, ObDBMSSchedulerMysql::create_job)
   DEFINE_DBMS_SCHEDULER_MYSQL_INTERFACE(DBMS_SCHEDULER_MYSQL_DISABLE, ObDBMSSchedulerMysql::disable)
   DEFINE_DBMS_SCHEDULER_MYSQL_INTERFACE(DBMS_SCHEDULER_MYSQL_ENABLE, ObDBMSSchedulerMysql::enable)
   DEFINE_DBMS_SCHEDULER_MYSQL_INTERFACE(DBMS_SCHEDULER_MYSQL_SET_ATTRIBUTE, ObDBMSSchedulerMysql::set_attribute)
+  DEFINE_DBMS_SCHEDULER_MYSQL_INTERFACE(DBMS_SCHEDULER_MYSQL_GET_AND_INCREASE_JOB_ID, ObDBMSSchedulerMysql::get_and_increase_job_id)
 
 #undef DEFINE_DBMS_SCHEDULER_MYSQL_INTERFACE
   //end of dbms_scheduler_mysql
@@ -537,7 +573,22 @@
   INTERFACE_DEF(INTERFACE_UTL_FILE_FIS_OPEN, "UTL_FILE_FIS_OPEN", (ObPLUtlFile::fis_open))
   //end of utl_file
 
+  //start of utl_tcp
+  INTERFACE_DEF(INTERFACE_UTL_TCP_OPEN_CONNECTION, "UTL_TCP_OPEN_CONNECTION", (ObPLUtlTcp::open_connection))
+  INTERFACE_DEF(INTERFACE_UTL_TCP_CLOSE_CONNECTION, "UTL_TCP_CLOSE_CONNECTION", (ObPLUtlTcp::close_connection))
+  INTERFACE_DEF(INTERFACE_UTL_TCP_CLOSE_ALL_CONNECTIONS, "UTL_TCP_CLOSE_ALL_CONNECTIONS", (ObPLUtlTcp::close_all_connections))
+  INTERFACE_DEF(INTERFACE_UTL_TCP_WRITE_LINE, "UTL_TCP_WRITE_LINE", (ObPLUtlTcp::write_line))
+  INTERFACE_DEF(INTERFACE_UTL_TCP_WRITE_TEXT, "UTL_TCP_WRITE_TEXT", (ObPLUtlTcp::write_text))
+  INTERFACE_DEF(INTERFACE_UTL_TCP_WRITE_RAW, "UTL_TCP_WRITE_RAW", (ObPLUtlTcp::write_raw))
+  INTERFACE_DEF(INTERFACE_UTL_TCP_READ_LINE, "UTL_TCP_READ_LINE", (ObPLUtlTcp::read_line))
+  INTERFACE_DEF(INTERFACE_UTL_TCP_READ_TEXT, "UTL_TCP_READ_TEXT", (ObPLUtlTcp::read_text))
+
+  //start of utl_smtp
+  INTERFACE_DEF(INTERFACE_UTL_SMTP_RAISE, "UTL_SMTP_RAISE", (ObPLUtlSmtp::raise))
+  INTERFACE_DEF(INTERFACE_UTL_SMTP_ESCAPE_DOT, "UTL_SMTP_ESCAPE_DOT", (ObPLUtlSmtp::escape_dot))
+
   //start of dbms_sys_error
+  // begin (to maintain compatibility during upgrading from 4.2.5.0 to 4.2.5.1)
   INTERFACE_DEF(INTERFACE_SYS_ERROR_KKXERE0, "KKXERE0", (ObDBMSSysError::ere0))
   INTERFACE_DEF(INTERFACE_SYS_ERROR_KKXERE1, "KKXERE1", (ObDBMSSysError::ere1))
   INTERFACE_DEF(INTERFACE_SYS_ERROR_KKXERE2, "KKXERE2", (ObDBMSSysError::ere2))
@@ -547,12 +598,27 @@
   INTERFACE_DEF(INTERFACE_SYS_ERROR_KKXERE6, "KKXERE6", (ObDBMSSysError::ere6))
   INTERFACE_DEF(INTERFACE_SYS_ERROR_KKXERE7, "KKXERE7", (ObDBMSSysError::ere7))
   INTERFACE_DEF(INTERFACE_SYS_ERROR_KKXERE8, "KKXERE8", (ObDBMSSysError::ere8))
+  // end
+  INTERFACE_DEF(INTERFACE_SYS_ERROR0_IMPL, "SYS_ERR0_IMPL", (ObDBMSSysError::ere0))
+  INTERFACE_DEF(INTERFACE_SYS_ERROR1_IMPL, "SYS_ERR1_IMPL", (ObDBMSSysError::ere1))
+  INTERFACE_DEF(INTERFACE_SYS_ERROR2_IMPL, "SYS_ERR2_IMPL", (ObDBMSSysError::ere2))
+  INTERFACE_DEF(INTERFACE_SYS_ERROR3_IMPL, "SYS_ERR3_IMPL", (ObDBMSSysError::ere3))
+  INTERFACE_DEF(INTERFACE_SYS_ERROR4_IMPL, "SYS_ERR4_IMPL", (ObDBMSSysError::ere4))
+  INTERFACE_DEF(INTERFACE_SYS_ERROR5_IMPL, "SYS_ERR5_IMPL", (ObDBMSSysError::ere5))
+  INTERFACE_DEF(INTERFACE_SYS_ERROR6_IMPL, "SYS_ERR6_IMPL", (ObDBMSSysError::ere6))
+  INTERFACE_DEF(INTERFACE_SYS_ERROR7_IMPL, "SYS_ERR7_IMPL", (ObDBMSSysError::ere7))
+  INTERFACE_DEF(INTERFACE_SYS_ERROR8_IMPL, "SYS_ERR8_IMPL", (ObDBMSSysError::ere8))
   //end of dbms_sys_error
 
   // start of dbms_preprocessor
+  // begin (to maintain compatibility during upgrading from 4.2.5.0 to 4.2.5.1)
   INTERFACE_DEF(INTERFACE_PREPROCESSOR_KKXCCG1, "KKXCCG1", (ObDBMSPreprocessor::kkxccg1))
   INTERFACE_DEF(INTERFACE_PREPROCESSOR_KKXCCG2, "KKXCCG2", (ObDBMSPreprocessor::kkxccg2))
   INTERFACE_DEF(INTERFACE_PREPROCESSOR_KKXCCG3, "KKXCCG3", (ObDBMSPreprocessor::kkxccg3))
+  // end
+  INTERFACE_DEF(INTERFACE_PREPROCESSOR_GET_PP_SOURCE_I1, "GET_PP_SOURCE_I1", (ObDBMSPreprocessor::kkxccg1))
+  INTERFACE_DEF(INTERFACE_PREPROCESSOR_GET_PP_SOURCE_I2, "GET_PP_SOURCE_I2", (ObDBMSPreprocessor::kkxccg2))
+  INTERFACE_DEF(INTERFACE_PREPROCESSOR_GET_PP_SOURCE_I3, "GET_PP_SOURCE_I3", (ObDBMSPreprocessor::kkxccg3))
   // end of dbms_preprocessor
 #endif
 
@@ -563,8 +629,14 @@
   INTERFACE_DEF(INTERFACE_DBMS_SPM_CANCEL_EVOLVE_TASK, "CANCEL_EVOLVE_TASK", (ObDBMSSpm::cancel_evolve_task))
   INTERFACE_DEF(INTERFACE_DBMS_SPM_CONFIGURE, "CONFIGURE", (ObDBMSSpm::configure))
   INTERFACE_DEF(INTERFACE_DBMS_SPM_DROP_SQL_PLAN_BASELINE, "DROP_SQL_PLAN_BASELINE", (ObDBMSSpm::drop_baseline))
+  INTERFACE_DEF(INTERFACE_DBMS_SPM_BATCH_DROP_SQL_PLAN_BASELINE, "BATCH_DROP_SQL_PLAN_BASELINE", (ObDBMSSpm::batch_drop_baseline))
   INTERFACE_DEF(INTERFACE_DBMS_SPM_LOAD_PLANS_FROM_CURSOR_CACHE, "LOAD_PLANS_FROM_CURSOR_CACHE", (ObDBMSSpm::load_plans_from_cursor_cache))
+  INTERFACE_DEF(INTERFACE_DBMS_SPM_BATCH_LOAD_PLANS_FROM_CURSOR_CACHE, "BATCH_LOAD_PLANS_FROM_CURSOR_CACHE", (ObDBMSSpm::batch_load_plans_from_cursor_cache))
   INTERFACE_DEF(INTERFACE_DBMS_SPM_AUTO_PURGE_SQL_PLAN_BASELINE, "AUTO_PURGE_SQL_PLAN_BASELINE", (ObDBMSSpm::auto_purge_sql_plan_baseline))
+  INTERFACE_DEF(INTERFACE_DBMS_SPM_UNPACK_STGTAB_BASELINE, "UNPACK_STGTAB_BASELINE", (ObDBMSSpm::unpack_table_baseline))
+  INTERFACE_DEF(INTERFACE_DBMS_SPM_PACK_CSV_BASELINE, "PACK_CSV_BASELINE", (ObDBMSSpm::pack_csv_baseline))
+  INTERFACE_DEF(INTERFACE_DBMS_SPM_UNPACK_CSV_BASELINE, "UNPACK_CSV_BASELINE", (ObDBMSSpm::unpack_csv_baseline))
+  INTERFACE_DEF(INTERFACE_DBMS_SPM_HANDLE_SPM_STATS_JOB_PROC, "HANDLE_SPM_STATS_JOB_PROC", (ObDBMSSpm::handle_spm_stats_job_proc))
   // end of dbms_spm
 #endif
 
@@ -588,6 +660,10 @@
   INTERFACE_DEF(INTERFACE_DBMS_SESSION_SET_IDENTIFIER, "SET_IDENTIFIER", (ObDBMSSession::set_identifier))
   INTERFACE_DEF(INTERFACE_DBMS_SESSION_RESET_PACKAGE, "RESET_PACKAGE", (ObDBMSSession::reset_package))
   // end of dbms_session
+
+  // start of dbms_space
+  INTERFACE_DEF(INTERFACE_DBMS_SPACE_CREATE_INDEX_COST, "CREATE_INDEX_COST", (ObDbmsSpace::create_index_cost))
+  // end of dbms_space
 
 #ifdef OB_BUILD_ORACLE_PL
   // start of dbms_rls
@@ -662,7 +738,61 @@
   INTERFACE_DEF(INTERFACE_JSON_OBJECT_RENAME_KEY, "JSON_OBJECT_RENAME_KEY", (ObPlJsonObject::rename_key))
   INTERFACE_DEF(INTERFACE_JSON_OBJECT_CLONE, "JSON_OBJECT_CLONE", (ObPlJsonObject::clone))
   // end of json_object_t
+
+  // start of json_array_t
+  INTERFACE_DEF(INTERFACE_JSON_ARRAY_ON_ERROR, "JSON_ARRAY_ON_ERROR", (ObPlJsonArray::set_on_error))
+  INTERFACE_DEF(INTERFACE_JSON_ARRAY_PARSE, "JSON_ARRAY_PARSE", (ObPlJsonArray::parse))
+  INTERFACE_DEF(INTERFACE_JSON_ARRAY_GET, "JSON_ARRAY_GET", (ObPlJsonArray::get))
+  INTERFACE_DEF(INTERFACE_JSON_ARRAY_GET_TYPE, "JSON_ARRAY_GET_TYPE", (ObPlJsonArray::get_type))
+  INTERFACE_DEF(INTERFACE_JSON_ARRAY_CONSTRUCTOR, "JSON_ARRAY_CONSTRUCTOR", (ObPlJsonArray::constructor))
+  INTERFACE_DEF(INTERFACE_JSON_ARRAY_CLONE, "JSON_ARRAY_CLONE", (ObPlJsonArray::clone))
+  // end of json_array_t
 #endif
+
+#ifdef OB_BUILD_ORACLE_PL
+  // start of dbms_mview
+#define DEFINE_DBMS_MVIEW_INTERFACE(symbol, func) \
+  INTERFACE_DEF(INTERFACE_##symbol, #symbol, (func))
+
+  DEFINE_DBMS_MVIEW_INTERFACE(DBMS_MVIEW_PURGE_LOG, ObDBMSMView::purge_log)
+  DEFINE_DBMS_MVIEW_INTERFACE(DBMS_MVIEW_REFRESH, ObDBMSMView::refresh)
+
+#undef DEFINE_DBMS_MVIEW_INTERFACE
+  // end of dbms_mview
+
+  // start of dbms_mview_stats
+#define DEFINE_DBMS_MVIEW_STATS_INTERFACE(symbol, func) \
+  INTERFACE_DEF(INTERFACE_##symbol, #symbol, (func))
+
+  DEFINE_DBMS_MVIEW_STATS_INTERFACE(DBMS_MVIEW_STATS_SET_SYS_DEFAULT, ObDBMSMViewStats::set_system_default)
+  DEFINE_DBMS_MVIEW_STATS_INTERFACE(DBMS_MVIEW_STATS_SET_MVREF_STATS_PARAMS, ObDBMSMViewStats::set_mvref_stats_params)
+  DEFINE_DBMS_MVIEW_STATS_INTERFACE(DBMS_MVIEW_STATS_PURGE_REFRESH_STATS, ObDBMSMViewStats::purge_refresh_stats)
+
+#undef DEFINE_DBMS_MVIEW_STATS_INTERFACE
+  // end of dbms_mview_stats
+#endif
+
+  // start of dbms_mview_mysql
+#define DEFINE_DBMS_MVIEW_MYSQL_INTERFACE(symbol, func) \
+  INTERFACE_DEF(INTERFACE_##symbol, #symbol, (func))
+
+  DEFINE_DBMS_MVIEW_MYSQL_INTERFACE(DBMS_MVIEW_MYSQL_PURGE_LOG, ObDBMSMViewMysql::purge_log)
+  DEFINE_DBMS_MVIEW_MYSQL_INTERFACE(DBMS_MVIEW_MYSQL_REFRESH, ObDBMSMViewMysql::refresh)
+
+#undef DEFINE_DBMS_MVIEW_MYSQL_INTERFACE
+  // end of dbms_mview_mysql
+
+  // start of dbms_mview_stats_mysql
+#define DEFINE_DBMS_MVIEW_STATS_MYSQL_INTERFACE(symbol, func) \
+  INTERFACE_DEF(INTERFACE_##symbol, #symbol, (func))
+
+  DEFINE_DBMS_MVIEW_STATS_MYSQL_INTERFACE(DBMS_MVIEW_STATS_MYSQL_SET_SYS_DEFAULT, ObDBMSMViewStatsMysql::set_system_default)
+  DEFINE_DBMS_MVIEW_STATS_MYSQL_INTERFACE(DBMS_MVIEW_STATS_MYSQL_SET_MVREF_STATS_PARAMS, ObDBMSMViewStatsMysql::set_mvref_stats_params)
+  DEFINE_DBMS_MVIEW_STATS_MYSQL_INTERFACE(DBMS_MVIEW_STATS_MYSQL_PURGE_REFRESH_STATS, ObDBMSMViewStatsMysql::purge_refresh_stats)
+
+#undef DEFINE_DBMS_MVIEW_STATS_MYSQL_INTERFACE
+  // end of dbms_mview_stats_mysql
+
   // start of dbms_udr
   INTERFACE_DEF(INTERFACE_DBMS_UDR_CREATE_RULE, "CREATE_RULE", (ObDBMSUserDefineRule::create_rule))
   INTERFACE_DEF(INTERFACE_DBMS_UDR_REMOVE_RULE, "REMOVE_RULE", (ObDBMSUserDefineRule::remove_rule))
@@ -676,7 +806,48 @@
   INTERFACE_DEF(INTERFACE_DBMS_WR_MODIFY_SNAPSHOT_SETTINGS, "WR_MODIFY_SNAPSHOT_SETTINGS", (ObDbmsWorkloadRepository::modify_snapshot_settings))
   INTERFACE_DEF(INTERFACE_DBMS_GENERATE_ASH_REPORT_TEXT, "GENERATE_ASH_REPORT_TEXT", (ObDbmsWorkloadRepository::generate_ash_report_text))
   // end of dbms_workload_repository
+
+#ifdef OB_BUILD_ORACLE_PL
+  // start of dbms_profiler
+  INTERFACE_DEF(INTERFACE_DBMS_PROFILER_CHECK_VERSION, "DBMS_PROFILER_CHECK_VERSION", (ObDBMSProfiler::check_version))
+  INTERFACE_DEF(INTERFACE_DBMS_PROFILER_START, "DBMS_PROFILER_START_PROFILER", (ObDBMSProfiler::start_profiler))
+  INTERFACE_DEF(INTERFACE_DBMS_PROFILER_STOP, "DBMS_PROFILER_STOP_PROFILER", (ObDBMSProfiler::stop_profiler))
+  INTERFACE_DEF(INTERFACE_DBMS_PROFILER_CHANGE_STATE, "DBMS_PROFILER_CHANGE_STATE", (ObDBMSProfiler::change_state))
+  INTERFACE_DEF(INTERFACE_DBMS_PROFILER_FLUSH_DATA, "DBMS_PROFILER_FLUSH_DATA", (ObDBMSProfiler::flush_data))
+  INTERFACE_DEF(INTERFACE_DBMS_PROFILER_INIT_OBJECTS, "DBMS_PROFILER_INIT_OBJECTS", (ObDBMSProfiler::init_objects))
+  INTERFACE_DEF(INTERFACE_DBMS_PROFILER_DROP_OBJECTS, "DBMS_PROFILER_DROP_OBJECTS", (ObDBMSProfiler::drop_objects))
+  // end of dbms_profiler
+#endif // OB_BUILD_ORACLE_PL
+
+    // start of dbms_vector_mysql
+#define DEFINE_DBMS_VECTOR_MYSQL_INTERFACE(symbol, func) \
+  INTERFACE_DEF(INTERFACE_##symbol, #symbol, (func))
+
+  DEFINE_DBMS_VECTOR_MYSQL_INTERFACE(DBMS_VECTOR_MYSQL_REFRESH_INDEX, ObDBMSVectorMySql::refresh_index)
+  DEFINE_DBMS_VECTOR_MYSQL_INTERFACE(DBMS_VECTOR_MYSQL_REBUILD_INDEX, ObDBMSVectorMySql::rebuild_index)
+  DEFINE_DBMS_VECTOR_MYSQL_INTERFACE(DBMS_VECTOR_MYSQL_REFRESH_INDEX_INNER, ObDBMSVectorMySql::refresh_index_inner)
+  DEFINE_DBMS_VECTOR_MYSQL_INTERFACE(DBMS_VECTOR_MYSQL_REBUILD_INDEX_INNER, ObDBMSVectorMySql::rebuild_index_inner)
+
+#undef DEFINE_DBMS_VECTOR_MYSQL_INTERFACE
+  // end of dbms_vector_mysql
+
   /****************************************************************************/
+
+  // start of dbms_trusted_certificate_manager
+  INTERFACE_DEF(INTERFACE_DBMS_ADD_TRUSTED_CERTIFICATE, "ADD_TRUSTED_CERTIFICATE", (ObPlDBMSTrustedCertificateManager::add_trusted_certificate))
+  INTERFACE_DEF(INTERFACE_DBMS_DELETE_TRUSTED_CERTIFICATE, "DELETE_TRUSTED_CERTIFICATE", (ObPlDBMSTrustedCertificateManager::delete_trusted_certificate))
+  INTERFACE_DEF(INTERFACE_DBMS_UPDATE_TRUSTED_CERTIFICATE, "UPDATE_TRUSTED_CERTIFICATE", (ObPlDBMSTrustedCertificateManager::update_trusted_certificate))
+  // end of end of dbms_workload_repository
+
+  // start of dbms_ob_limit_calculator
+  INTERFACE_DEF(INTERFACE_DBMS_OB_LIMIT_CALCULATOR_PHY_RES_CALCULATE_BY_LOGIC_RES, "PHY_RES_CALCULATE_BY_LOGIC_RES", (ObDBMSLimitCalculator::phy_res_calculate_by_logic_res))
+  INTERFACE_DEF(INTERFACE_DBMS_OB_LIMIT_CALCULATOR_PHY_RES_CALCULATE_BY_UNIT, "PHY_RES_CALCULATE_BY_UNIT", (ObDBMSLimitCalculator::phy_res_calculate_by_unit))
+  INTERFACE_DEF(INTERFACE_DBMS_OB_LIMIT_CALCULATOR_PHY_RES_CALCULATE_BY_STADNBY_TENANT, "PHY_RES_CALCULATE_BY_STANDBY_TENANT", (ObDBMSLimitCalculator::phy_res_calculate_by_standby_tenant))
+  // end of dbms_ob_limit_calculator
+
+  // start of dbms_external_table
+  INTERFACE_DEF(INTERFACE_DBMS_EXTERNAL_TABLE_AUTO_REFRESH_EXTERNAL_TABLE, "AUTO_REFRESH_EXTERNAL_TABLE", (ObDBMSExternalTable::auto_refresh_external_table))
+  //end of dbms_external_table
 
   INTERFACE_DEF(INTERFACE_END, "INVALID", (nullptr))
 #endif

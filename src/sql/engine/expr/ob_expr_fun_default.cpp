@@ -9,10 +9,11 @@
  * MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
  * See the Mulan PubL v2 for more details.
  */
+#define USING_LOG_PREFIX SQL_ENG
 
 #include "sql/engine/expr/ob_expr_fun_default.h"
 #include "sql/engine/expr/ob_expr_column_conv.h"
-#include "sql/resolver/expr/ob_raw_expr_util.h"
+#include "src/sql/resolver/expr/ob_raw_expr.h"
 using namespace oceanbase::common;
 
 namespace oceanbase

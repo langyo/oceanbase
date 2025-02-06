@@ -10,32 +10,21 @@
  * See the Mulan PubL v2 for more details.
  */
 
-#include "block_set.h"
 
-#include <sys/mman.h>
-#include "lib/allocator/ob_tc_malloc.h"
-#include "lib/ob_define.h"
+#include "block_set.h"
 #include "lib/alloc/ob_tenant_ctx_allocator.h"
-#include "lib/alloc/ob_malloc_callback.h"
 
 using namespace oceanbase;
 using namespace oceanbase::lib;
 
-void BlockSet::Lock::lock()
-{
-  int64_t tid = common::get_itid() + 1;
-  while (!ATOMIC_BCAS(&tid_, 0, tid)) {
-    sched_yield();
-  }
-}
-
 BlockSet::BlockSet()
-    : mutex_(common::ObLatchIds::ALLOC_BLOCK_LOCK), clist_(NULL),
+    : tallocator_(NULL),
+      locker_(NULL),
+      chunk_mgr_(NULL),
+      clist_(NULL),
       avail_bm_(BLOCKS_PER_CHUNK+1, avail_bm_buf_),
-      total_hold_(0), total_payload_(0), total_used_(0), tallocator_(NULL),
-      chunk_free_list_(false/*with_mutex*/), locker_(nullptr)
+      total_hold_(0), total_payload_(0), total_used_(0)
 {
-  chunk_free_list_.set_max_chunk_cache_size(0);
 }
 
 BlockSet::~BlockSet()
@@ -56,17 +45,6 @@ void BlockSet::reset()
   //MEMSET(block_list_, 0, sizeof(block_list_));
   clist_ = nullptr;
   avail_bm_.clear();
-  LockGuard lock(cache_shared_lock_);
-  for (AChunk *chunk = nullptr; (chunk = chunk_free_list_.pop()) != nullptr;) {
-    uint64_t payload = 0;
-    UNUSED(ATOMIC_FAA(&total_hold_, -chunk->hold(&payload)));
-    UNUSED(ATOMIC_FAA(&total_payload_, -payload));
-    if (chunk->washed_size_ != 0) {
-      tallocator_->update_wash_stat(-1, -chunk->washed_blks_, -chunk->washed_size_);
-    }
-    tallocator_->free_chunk(chunk, attr_);
-  }
-  cache_shared_lock_.reset();
 }
 
 void BlockSet::set_tenant_ctx_allocator(ObTenantCtxAllocator &allocator)
@@ -106,16 +84,12 @@ ABlock *BlockSet::alloc_block(const uint64_t size, const ObMemAttr &attr)
   }
 
   if (OB_NOT_NULL(block)) {
+    AChunk *chunk = block->chunk();
+    chunk->using_cnt_++;
     block->alloc_bytes_ = size;
     uint64_t payload = 0;
     block->hold(&payload);
     UNUSED(ATOMIC_FAA(&total_used_, payload));
-    if (OB_NOT_NULL(malloc_callback)) {
-      (*malloc_callback)(attr, size);
-      for (auto *p = malloc_callback->next(); p != malloc_callback; p = p->next()) {
-        (*p)(attr, size);
-      }
-    }
   }
 
   return block;
@@ -132,15 +106,10 @@ void BlockSet::free_block(ABlock *const block)
     UNUSED(ATOMIC_FAA(&total_used_, -payload));
     AChunk *chunk = block->chunk();
     abort_unless(chunk->is_valid());
+    chunk->using_cnt_--;
     if (!!block->is_large_) {
       free_chunk(chunk);
     } else {
-      if (OB_NOT_NULL(malloc_callback)) {
-        (*malloc_callback)(attr_, -block->alloc_bytes_);
-        for (auto *p = malloc_callback->next(); p != malloc_callback; p = p->next()) {
-          (*p)(attr_, -block->alloc_bytes_);
-        }
-      }
       ABlock *prev_block = NULL;
       ABlock *next_block = NULL;
 
@@ -152,7 +121,6 @@ void BlockSet::free_block(ABlock *const block)
           take_off_free_block(prev_block, offset - prev_offset, chunk);
           block->clear_magic_code();
           chunk->unmark_blk_offset_bit(offset);
-          chunk->unmark_unused_blk_offset_bit(prev_offset);
         }
       }
 
@@ -163,7 +131,6 @@ void BlockSet::free_block(ABlock *const block)
           take_off_free_block(next_block, chunk->blk_nblocks(next_block), chunk);
           next_block->clear_magic_code();
           chunk->unmark_blk_offset_bit(next_offset);
-          chunk->unmark_unused_blk_offset_bit(next_offset);
         }
       }
 
@@ -173,8 +140,7 @@ void BlockSet::free_block(ABlock *const block)
       if (head != NULL) {
         head->in_use_ = false;
         // copy a temp
-        chunk->mark_unused_blk_offset_bit(chunk->blk_offset(head));
-        if (chunk->is_all_blks_unused()) {
+        if (0 == chunk->using_cnt_) {
           if (0 != chunk->washed_size_) {
             int offset = 0;
             do {
@@ -205,7 +171,6 @@ void BlockSet::add_free_block(ABlock *block, int nblocks, AChunk *chunk)
   abort_unless(NULL != block && !block->in_use_ && !block->is_washed_);
   int offset = chunk->blk_offset(block);
   chunk->mark_blk_offset_bit(offset);
-  chunk->mark_unused_blk_offset_bit(offset);
 
 #if MEMCHK_LEVEL >= 1
   int expect_nblocks = chunk->blk_nblocks(block);
@@ -247,10 +212,7 @@ ABlock* BlockSet::get_free_block(const int cls, const ObMemAttr &attr)
   // put back into another block list if need be.
   if (NULL != block && ffs > cls) {
     AChunk *chunk = block->chunk();
-    // contruct a new block at right position
-    int offset = chunk->blk_offset(block);
-    ABlock *next_block = new (chunk->offset2blk(offset + cls)) ABlock();
-
+    ABlock *next_block = new (block + cls) ABlock();
     add_free_block(next_block, ffs - cls, chunk);
   }
 
@@ -258,11 +220,6 @@ ABlock* BlockSet::get_free_block(const int cls, const ObMemAttr &attr)
     if (add_chunk(attr)) {
       block = get_free_block(cls, attr);
     }
-  }
-
-  if (NULL != block) {
-    AChunk *chunk = block->chunk();
-    chunk->unmark_unused_blk_offset_bit(chunk->blk_offset(block));
   }
 
   return block;
@@ -293,17 +250,11 @@ AChunk *BlockSet::alloc_chunk(const uint64_t size, const ObMemAttr &attr)
   AChunk *chunk = NULL;
   if (OB_NOT_NULL(tallocator_)) {
     const uint64_t all_size = AChunkMgr::aligned(size);
-    if (INTACT_ACHUNK_SIZE == all_size && chunk_free_list_.count() > 0) {
-      LockGuard lock(cache_shared_lock_);
-      chunk = chunk_free_list_.pop();
-    }
-    if (nullptr == chunk) {
-      chunk = tallocator_->alloc_chunk(static_cast<int64_t>(size), attr);
-      if (chunk != nullptr) {
-        uint64_t payload = 0;
-        UNUSED(ATOMIC_FAA(&total_hold_, chunk->hold(&payload)));
-        UNUSED(ATOMIC_FAA(&total_payload_, payload));
-      }
+    chunk = chunk_mgr_->alloc_chunk(static_cast<int64_t>(size), attr);
+    if (chunk != nullptr) {
+      uint64_t payload = 0;
+      UNUSED(ATOMIC_FAA(&total_hold_, chunk->hold(&payload)));
+      UNUSED(ATOMIC_FAA(&total_payload_, payload));
     }
     if (NULL != chunk) {
       if (NULL != clist_) {
@@ -338,7 +289,7 @@ void BlockSet::free_chunk(AChunk *const chunk)
   abort_unless(NULL != chunk->next_);
   abort_unless(NULL != chunk->prev_);
   abort_unless(NULL != clist_);
-  abort_unless(chunk->is_all_blks_unused());
+  abort_unless(0 == chunk->using_cnt_);
   if (chunk == clist_) {
     clist_ = clist_->next_;
   }
@@ -351,20 +302,13 @@ void BlockSet::free_chunk(AChunk *const chunk)
   }
   uint64_t payload = 0;
   const uint64_t hold = chunk->hold(&payload);
-  bool freed = false;
-  if (INTACT_ACHUNK_SIZE == hold) {
-    LockGuard lock(cache_shared_lock_);
-    freed = chunk_free_list_.push(chunk);
-  }
-  if (!freed) {
-    if (OB_NOT_NULL(tallocator_)) {
-      UNUSED(ATOMIC_FAA(&total_hold_, -hold));
-      UNUSED(ATOMIC_FAA(&total_payload_, -payload));
-      if (chunk->washed_size_ != 0) {
-        tallocator_->update_wash_stat(-1, -chunk->washed_blks_, -chunk->washed_size_);
-      }
-      tallocator_->free_chunk(chunk, attr_);
+  if (OB_NOT_NULL(tallocator_)) {
+    UNUSED(ATOMIC_FAA(&total_hold_, -hold));
+    UNUSED(ATOMIC_FAA(&total_payload_, -payload));
+    if (chunk->washed_size_ != 0) {
+      tallocator_->update_wash_stat(-1, -chunk->washed_blks_, -chunk->washed_size_);
     }
+    chunk_mgr_->free_chunk(chunk, attr_);
   }
 }
 

@@ -22,17 +22,19 @@ namespace oceanbase
 namespace storage
 {
 
-int build_test_schema(share::schema::ObTableSchema &table_schema, uint64_t table_id)
+int __attribute__((weak))  build_test_schema(share::schema::ObTableSchema &table_schema, uint64_t table_id, const char* table_name)
 {
   int ret = OB_SUCCESS;
   ObColumnSchemaV2 column;
   table_schema.reset();
-  table_schema.set_table_name("test_merge");
+  table_schema.set_table_name(table_name);
   table_schema.set_tenant_id(1);
   table_schema.set_tablegroup_id(1);
   table_schema.set_database_id(1);
   table_schema.set_table_id(table_id);
   table_schema.set_schema_version(1000);
+  // by the way, test the stability of micro_index_clustered
+  table_schema.set_micro_index_clustered(false);
 
   column.set_table_id(table_id);
   column.set_column_id(16);
@@ -47,7 +49,12 @@ int build_test_schema(share::schema::ObTableSchema &table_schema, uint64_t table
   return ret;
 }
 
-int gen_create_ls_arg(const int64_t tenant_id,
+int __attribute__((weak))  build_test_schema(share::schema::ObTableSchema &table_schema, uint64_t table_id)
+{
+  return build_test_schema(table_schema, table_id, "test_merge");
+}
+
+int __attribute__((weak)) gen_create_ls_arg(const int64_t tenant_id,
     const share::ObLSID &ls_id,
     obrpc::ObCreateLSArg &arg)
 {
@@ -59,15 +66,16 @@ int gen_create_ls_arg(const int64_t tenant_id,
   arg.reset();
   lib::Worker::CompatMode compat_mode = lib::Worker::CompatMode::MYSQL;
   palf::PalfBaseInfo palf_base_info;
+  ObMajorMVMergeInfo major_merge_info;
   if (OB_FAIL(tenant_info.init(tenant_id, share::PRIMARY_TENANT_ROLE))) {
     STORAGE_LOG(WARN, "failed to init tenant info", KR(ret), K(tenant_id));
-  } else if (OB_FAIL(arg.init(tenant_id, ls_id, replica_type, property, tenant_info, create_scn, compat_mode, false, palf_base_info))) {
-   STORAGE_LOG(WARN, "failed to init arg", KR(ret), K(tenant_id), K(ls_id), K(tenant_info), K(create_scn), K(compat_mode), K(palf_base_info));
+  } else if (OB_FAIL(arg.init(tenant_id, ls_id, replica_type, property, tenant_info, create_scn, compat_mode, false, palf_base_info, major_merge_info))) {
+   STORAGE_LOG(WARN, "failed to init arg", KR(ret), K(tenant_id), K(ls_id), K(tenant_info), K(create_scn), K(compat_mode), K(palf_base_info), K(major_merge_info));
   }
   return ret;
 }
 
-int gen_create_tablet_arg(const int64_t tenant_id,
+int __attribute__((weak)) gen_create_tablet_arg(const int64_t tenant_id,
     const share::ObLSID &ls_id,
     const ObTabletID &tablet_id,
     obrpc::ObBatchCreateTabletArg &arg,
@@ -78,6 +86,7 @@ int gen_create_tablet_arg(const int64_t tenant_id,
   obrpc::ObCreateTabletInfo tablet_info;
   ObArray<common::ObTabletID> index_tablet_ids;
   ObArray<int64_t> index_tablet_schema_idxs;
+  ObArray<int64_t> create_commit_versions;
   uint64_t table_id = 12345;
   arg.reset();
   share::schema::ObTableSchema table_schema_obj;
@@ -106,7 +115,9 @@ int gen_create_tablet_arg(const int64_t tenant_id,
           tablet_id,
           index_tablet_schema_idxs,
           lib::Worker::CompatMode::MYSQL,
-          false))) {
+          false,
+          create_commit_versions,
+          false /*has_cs_replica*/))) {
     STORAGE_LOG(WARN, "failed to init tablet info", KR(ret), K(index_tablet_ids),
         K(tablet_id), K(index_tablet_schema_idxs));
   } else if (OB_FAIL(arg.init_create_tablet(ls_id, share::SCN::min_scn(), false/*need_check_tablet_cnt*/))) {

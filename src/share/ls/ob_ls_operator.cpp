@@ -13,31 +13,14 @@
 #define USING_LOG_PREFIX SHARE
 
 #include "ob_ls_operator.h"
-#include "share/ob_errno.h"
-#include "share/ob_share_util.h"
-#include "share/config/ob_server_config.h"
-#include "share/inner_table/ob_inner_table_schema.h"
-#include "lib/time/ob_time_utility.h"
-#include "lib/mysqlclient/ob_mysql_transaction.h"
-#include "lib/string/ob_sql_string.h"
-#include "lib/string/ob_fixed_length_string.h"//ObFixedLengthString
-#include "common/ob_timeout_ctx.h"
-#include "lib/utility/ob_unify_serialize.h" //OB_SERIALIZE_MEMBER
-#include "observer/ob_inner_sql_connection.h"//ObInnerSQLConnection
-#include "observer/ob_inner_sql_connection_pool.h"//ObInnerSQLConnectionPool
-#include "share/rc/ob_tenant_base.h"//MTL_WITH_CHECK_TENANT
-#include "storage/tx/ob_trans_define.h"//MonotonicTs
-#include "storage/tx/ob_ts_mgr.h"//GET_GTS
+#include "rootserver/tenant_snapshot/ob_tenant_snapshot_util.h" //ObTenantSnapshotUtil
 #include "storage/tx/ob_trans_service.h"
 #include "storage/tablelock/ob_lock_utils.h" // ObLSObjLockUtil
-#include "share/ob_max_id_fetcher.h"//ObMaxIdFetcher
-#include "share/ob_global_stat_proxy.h"//get gc
-#include "logservice/palf/log_define.h"//SCN
-#include "share/scn.h"//SCN
-#include "share/ls/ob_ls_status_operator.h"
+#include "rootserver/mview/ob_replica_safe_check_task.h" //ObReplicaSafeCheckTask
 
 using namespace oceanbase;
 using namespace oceanbase::common;
+using namespace oceanbase::rootserver;
 namespace oceanbase
 {
 using namespace transaction;
@@ -299,6 +282,7 @@ int ObLSAttrOperator::operator_ls_in_trans_(
     ObMySQLTransaction &trans)
 {
   int ret = OB_SUCCESS;
+  ObConflictCaseWithClone case_to_check(ObConflictCaseWithClone::MODIFY_LS);
   if (OB_UNLIKELY(!ls_attr.is_valid()
                    || sql.empty()
                    || !trans.is_started())) {
@@ -320,6 +304,8 @@ int ObLSAttrOperator::operator_ls_in_trans_(
        only update ls table on normal switchover status */
     } else if (OB_FAIL(get_ls_attr(SYS_LS, for_update, trans, sys_ls_attr))) {
       LOG_WARN("failed to load sys ls status", KR(ret));
+    } else if (OB_FAIL(ObTenantSnapshotUtil::check_tenant_not_in_cloning_procedure(tenant_id_, case_to_check))) {
+      LOG_WARN("fail to check whether tenant is cloning", KR(ret), K_(tenant_id), K(case_to_check));
     } else if (OB_FAIL(ObAllTenantInfoProxy::load_tenant_info(tenant_id_, proxy_, false /* for_update */, tenant_info))) {
       LOG_WARN("failed to load tenant info", KR(ret), K_(tenant_id));
     } else if (working_sw_status != tenant_info.get_switchover_status()) {
@@ -490,9 +476,11 @@ int ObLSAttrOperator::process_sub_trans_(const ObLSAttr &ls_attr, ObMySQLTransac
       } else if (OB_UNLIKELY(pos > length)) {
         ret = OB_SIZE_OVERFLOW;
         LOG_WARN("serialize error", KR(ret), K(pos), K(length));
-      } else if (OB_FAIL(txs->register_mds_into_tx(
-                     *trans_desc, SYS_LS,
-                     transaction::ObTxDataSourceType::LS_TABLE, buf, length))) {
+      } else if (OB_FAIL(txs->register_mds_into_tx(*trans_desc,
+                                                   SYS_LS,
+                                                   transaction::ObTxDataSourceType::LS_TABLE,
+                                                   buf,
+                                                   length))) {
         LOG_WARN("failed to register tx data", KR(ret), KPC(trans_desc), K(expire_ts));
       }
       LOG_INFO("process sub trans", KR(ret), K(ls_attr));
@@ -518,6 +506,9 @@ int ObLSAttrOperator::update_ls_status(const ObLSID &id,
       LOG_WARN("failed to start transaction", KR(ret), K(tenant_id_));
     } else if (OB_FAIL(update_ls_status_in_trans(id, old_status, new_status, working_sw_status, trans))) {
       LOG_WARN("failed to update ls status in trans", KR(ret), K(id), K(old_status), K(new_status));
+    } else if ((OB_LS_CREATING == old_status && OB_LS_NORMAL == new_status)
+               && OB_FAIL(ObReplicaSafeCheckTask::create_ls_with_tenant_mv_merge_scn(tenant_id_, id, trans))) {
+      LOG_WARN("failed to udpate ls when get tenant mv merge scn", KR(ret), K(id), K(tenant_id_));
     }
     if (trans.is_started()) {
       int tmp_ret = OB_SUCCESS;
@@ -842,12 +833,18 @@ int ObLSAttrOperator::alter_ls_group_in_trans(const ObLSAttr &ls_info,
 {
   int ret = OB_SUCCESS;
   ObSqlString sql;
+  ObLSAttr lock_ls_attr;
+  ObConflictCaseWithClone case_to_check(ObConflictCaseWithClone::MODIFY_LS);
   if (OB_UNLIKELY(!ls_info.is_valid()
                   || OB_INVALID_ID == new_ls_group_id
                   || !trans.is_started())) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid_argument", KR(ret), K(ls_info),
              K(new_ls_group_id), "trans_started", trans.is_started());
+  } else if (OB_FAIL(get_ls_attr(ls_info.get_ls_id(), true/*for_update*/, trans, lock_ls_attr))) {
+    LOG_WARN("failed to lock ls status for clone conflict check", KR(ret), K(ls_info));
+  } else if (OB_FAIL(ObTenantSnapshotUtil::check_tenant_not_in_cloning_procedure(tenant_id_, case_to_check))) {
+    LOG_WARN("fail to check whether tenant is cloning", KR(ret), K_(tenant_id), K(case_to_check));
   } else if (OB_FAIL(sql.assign_fmt(
           "UPDATE %s set ls_group_id = %lu where ls_id = %ld and ls_group_id = %lu",
           OB_ALL_LS_TNAME, new_ls_group_id, ls_info.get_ls_id().id(), ls_info.get_ls_group_id()))) {
@@ -875,6 +872,8 @@ int ObLSAttrOperator::update_ls_flag_in_trans(const ObLSID &id,
   ObSqlString sql;
   ObLSFlagStr old_flag_str;
   ObLSFlagStr new_flag_str;
+  ObLSAttr lock_ls_attr;
+  ObConflictCaseWithClone case_to_check(ObConflictCaseWithClone::MODIFY_LS);
 
   if (OB_UNLIKELY(!id.is_valid()
                   || !new_flag.is_valid()
@@ -889,6 +888,10 @@ int ObLSAttrOperator::update_ls_flag_in_trans(const ObLSID &id,
       id,
       EXCLUSIVE))) {
     LOG_WARN("lock ls in trans failed", KR(ret), K_(tenant_id), K(id));
+  } else if (OB_FAIL(get_ls_attr(id, true/*for_update*/, trans, lock_ls_attr))) {
+    LOG_WARN("failed to lock ls status for clone conflict check", KR(ret), K(id));
+  } else if (OB_FAIL(ObTenantSnapshotUtil::check_tenant_not_in_cloning_procedure(tenant_id_, case_to_check))) {
+    LOG_WARN("fail to check whether tenant is cloning", KR(ret), K_(tenant_id), K(case_to_check));
   } else {
     DEBUG_SYNC(AFTER_LOCK_LS_AND_BEFORE_CHANGE_LS_FLAG);
     if (OB_FAIL(new_flag.flag_to_str(new_flag_str))) {
@@ -963,17 +966,50 @@ int ObLSAttrOperator::get_all_ls_by_order(const bool lock_sys_ls,
     bool only_existing_ls)
 {
   int ret = OB_SUCCESS;
+
   ls_operation_array.reset();
   ObMySQLTransaction trans;
-  ObLSAttr sys_ls_attr;
-
   if (OB_UNLIKELY(!is_valid())) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("operation is not valid", KR(ret), "operation", *this);
   } else if (OB_FAIL(trans.start(proxy_, tenant_id_))) {
     LOG_WARN("failed to start transaction", KR(ret), K_(tenant_id));
-    /* to get accurate LS list need lock SYS_LS */
+  } else if (OB_FAIL(get_all_ls_by_order_in_trans(lock_sys_ls,
+                                                  ls_operation_array,
+                                                  trans,
+                                                  only_existing_ls))) {
+    LOG_WARN("failed get all ls in trans", KR(ret), K_(tenant_id));
+  }
+
+  if (trans.is_started()) {
+    int tmp_ret = OB_SUCCESS;
+    if (OB_SUCCESS != (tmp_ret = trans.end(OB_SUCC(ret)))) {
+        LOG_WARN("failed to end trans", KR(ret), KR(tmp_ret));
+        ret = OB_SUCC(ret) ? tmp_ret : ret;
+      }
+  }
+
+
+  return ret;
+}
+
+int ObLSAttrOperator::get_all_ls_by_order_in_trans(const bool lock_sys_ls,
+                                                   ObLSAttrIArray &ls_operation_array,
+                                                   common::ObMySQLTransaction &trans,
+                                                   bool only_existing_ls)
+{
+  int ret = OB_SUCCESS;
+  ls_operation_array.reset();
+  ObLSAttr sys_ls_attr;
+
+  if (OB_UNLIKELY(!is_valid())) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("operation is not valid", KR(ret), "operation", *this);
+  } else if (!trans.is_started()) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_WARN("transaction is not started", KR(ret));
   } else if (lock_sys_ls && OB_FAIL(get_ls_attr(SYS_LS, true /* for_update */, trans, sys_ls_attr))) {
+  /* to get accurate LS list need lock SYS_LS */
     LOG_WARN("failed to load sys ls status", KR(ret));
   } else {
     ObSqlString sql;
@@ -986,16 +1022,8 @@ int ObLSAttrOperator::get_all_ls_by_order(const bool lock_sys_ls,
         LOG_WARN("failed to append", KR(ret), K(sql));
       }
     }
-    if (FAILEDx(exec_read(tenant_id_, sql, *proxy_, this, ls_operation_array))) {
+    if (FAILEDx(exec_read(tenant_id_, sql, trans, this, ls_operation_array))) {
       LOG_WARN("failed to construct ls attr", KR(ret), K(sql));
-    }
-  }
-
-  if (trans.is_started()) {
-    int tmp_ret = OB_SUCCESS;
-    if (OB_SUCCESS != (tmp_ret = trans.end(OB_SUCC(ret)))) {
-      LOG_WARN("failed to end trans", KR(ret), KR(tmp_ret));
-      ret = OB_SUCC(ret) ? tmp_ret : ret;
     }
   }
 

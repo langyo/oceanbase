@@ -23,15 +23,18 @@
 #include "storage/blocksstable/ob_block_sstable_struct.h"
 #include "storage/blocksstable/ob_macro_block_checker.h"
 #include "storage/blocksstable/ob_super_block_buffer_holder.h"
+#include "storage/blocksstable/ob_storage_object_handle.h"
 #include "storage/ob_super_block_struct.h"
+#include "storage/tablet/ob_tablet_block_aggregated_info.h"
 
 namespace oceanbase
 {
 
 namespace storage
 {
-class ObTenantCheckpointSlogHandler;
+class ObTenantStorageMetaService;
 class ObTabletHandle;
+struct ObTabletBlockInfo;
 }
 
 namespace blocksstable
@@ -39,6 +42,7 @@ namespace blocksstable
 
 class ObMacroBlockHandle;
 struct ObMacroBlocksWriteCtx;
+class ObObjectManager;
 
 class ObSuperBlockPreadChecker : public common::ObIODPreadChecker
 {
@@ -93,14 +97,23 @@ struct ObMacroBlockWriteInfo final
 {
 public:
   ObMacroBlockWriteInfo()
-    : buffer_(NULL), offset_(0), size_(0), io_timeout_ms_(DEFAULT_IO_WAIT_TIME_MS), io_desc_(), io_callback_(NULL)
+    : buffer_(NULL), offset_(0), size_(0), io_timeout_ms_(DEFAULT_IO_WAIT_TIME_MS), io_desc_(), io_callback_(NULL),
+      device_handle_(NULL), has_backup_device_handle_(false)
   {}
   ~ObMacroBlockWriteInfo() = default;
   OB_INLINE bool is_valid() const
   {
-    return io_desc_.is_valid() && NULL != buffer_ && offset_ >= 0 && size_ > 0 && io_timeout_ms_ > 0;
+    bool bret = false;
+    bret = io_desc_.is_valid() && NULL != buffer_ && offset_ >= 0 && size_ > 0 && io_timeout_ms_ > 0;
+    if (has_backup_device_handle_) {
+      bret = bret && OB_NOT_NULL(device_handle_);
+    } else {
+      bret = bret && OB_ISNULL(device_handle_);
+    }
+    return bret;
   }
-  TO_STRING_KV(KP_(buffer), K_(offset), K_(size), K_(io_timeout_ms), K_(io_desc), KP_(io_callback));
+  int fill_io_info_for_backup(const blocksstable::MacroBlockId &macro_id, ObIOInfo &io_info) const;
+  TO_STRING_KV(KP_(buffer), K_(offset), K_(size), K_(io_timeout_ms), K_(io_desc), KP_(io_callback), KP_(device_handle), K_(has_backup_device_handle));
 public:
   const char *buffer_;
   int64_t offset_;
@@ -108,6 +121,8 @@ public:
   int64_t io_timeout_ms_;
   common::ObIOFlag io_desc_;
   common::ObIOCallback *io_callback_;
+  ObIODevice *device_handle_;
+  bool has_backup_device_handle_;
 };
 
 struct ObMacroBlockReadInfo final
@@ -135,14 +150,15 @@ public:
   char *buf_;
 };
 
-class ObMacroBlockSeqGenerator final
+
+class ObMacroBlockRewriteSeqGenerator final
 {
 public:
   // start to give an alarm when remaining 10T size to rewrite.
   static const int64_t BLOCK_SEQUENCE_WARNING_LINE = MacroBlockId::MAX_WRITE_SEQ - 5000000;
 public:
-  ObMacroBlockSeqGenerator();
-  ~ObMacroBlockSeqGenerator();
+  ObMacroBlockRewriteSeqGenerator();
+  ~ObMacroBlockRewriteSeqGenerator();
   void reset();
 
   // thread safe
@@ -165,13 +181,12 @@ public:
   ObBlockManager();
   virtual ~ObBlockManager();
 
-  int init(
-      common::ObIODevice *io_device,
-      const int64_t block_size);
-  int start(const int64_t reserved_size);
+  int init(common::ObIODevice *io_device, const int64_t block_size);
+  int start(const int64_t reserved_size, bool &need_format);
   void stop();
   void wait();
   void destroy();
+  int alloc_object(ObStorageObjectHandle &object_handle);
 
   // block interfaces
   int alloc_block(
@@ -189,20 +204,13 @@ public:
       const ObMacroBlockReadInfo &read_info,
       ObMacroBlockHandle &macro_handle);
 
-  int read_super_block(storage::ObServerSuperBlock &super_block);
-  int write_super_block(const storage::ObServerSuperBlock &super_block);
-  OB_INLINE const storage::ObServerSuperBlock &get_server_super_block() const
-  {
-    return super_block_;
-  }
-  int update_super_block(const common::ObLogCursor &replay_start_point,
-                         const blocksstable::MacroBlockId &tenant_meta_entry);
+  int read_super_block(storage::ObServerSuperBlock &super_block, ObSuperBlockBufferHolder &buf_holder);
+  int write_super_block(const storage::ObServerSuperBlock &super_block, ObSuperBlockBufferHolder &buf_holder);
 
-  int64_t get_macro_block_size() const;
-  int64_t get_total_macro_block_count() const;
   int64_t get_free_macro_block_count() const;
   int64_t get_used_macro_block_count() const;
   int64_t get_max_macro_block_count(int64_t reserved_size) const;
+  int64_t get_total_block_size() const;
   int get_all_macro_ids(ObArray<MacroBlockId> &ids_array);
 
   int check_macro_block_free(const MacroBlockId &macro_id, bool &is_free) const;
@@ -216,7 +224,8 @@ public:
   int resize_file(
       const int64_t new_data_file_size,
       const int64_t new_data_file_disk_percentage,
-      const int64_t reserved_size);
+      const int64_t reserved_size,
+      storage::ObServerSuperBlock &super_block);
 
   // reference count interfaces
   int inc_ref(const MacroBlockId &macro_id);
@@ -298,9 +307,11 @@ private:
   {
   public:
     GetPendingFreeBlockFunctor(
+        const int64_t max_free_blk_cnt,
         MacroBlkIdMap &blk_map,
         int64_t &hold_count)
       : ret_code_(common::OB_SUCCESS),
+        max_free_blk_cnt_(max_free_blk_cnt),
         blk_map_(blk_map),
         hold_count_(hold_count)
     {}
@@ -311,29 +322,32 @@ private:
 
   private:
     int ret_code_;
+    int64_t max_free_blk_cnt_;
     MacroBlkIdMap &blk_map_;
     int64_t &hold_count_;
   };
 
-  class CopyBlockToArrayFunctor final
+  class DoBlockSweepFunctor final
   {
   public:
-    CopyBlockToArrayFunctor(common::ObIArray<MacroBlockId> &block_ids)
+    DoBlockSweepFunctor(ObBlockManager& block_manager)
       : ret_code_(common::OB_SUCCESS),
-        block_ids_(block_ids)
+        block_manager_(block_manager)
     {}
-    ~CopyBlockToArrayFunctor() = default;
+    ~DoBlockSweepFunctor() = default;
 
     bool operator()(const MacroBlockId &macro_id, const bool can_free);
     int get_ret_code() const { return ret_code_; }
 
   private:
     int ret_code_;
-    common::ObIArray<MacroBlockId> &block_ids_;
+    ObBlockManager& block_manager_;
   };
 
 private:
-  int get_macro_block_info(const MacroBlockId &macro_id, ObMacroBlockInfo &macro_block_info) const;
+  int get_macro_block_info(const MacroBlockId &macro_id,
+                           ObMacroBlockInfo &macro_block_info,
+                           ObMacroBlockHandle &macro_block_handle);
   bool is_bad_block(const MacroBlockId &macro_block_id);
   int mark_macro_blocks(
       MacroBlkIdMap &mark_info,
@@ -345,6 +359,16 @@ private:
       common::hash::ObHashSet<MacroBlockId, common::hash::NoPthreadDefendMode> &macro_id_set,
       ObMacroBlockMarkerStatus &tmp_status);
   int mark_tenant_blocks(
+      MacroBlkIdMap &mark_info,
+      common::hash::ObHashSet<MacroBlockId, common::hash::NoPthreadDefendMode> &macro_id_set,
+      ObMacroBlockMarkerStatus &tmp_status);
+  int mark_tablet_block(
+      MacroBlkIdMap &mark_info,
+      storage::ObTabletHandle &handle,
+      common::hash::ObHashSet<MacroBlockId, common::hash::NoPthreadDefendMode> &macro_id_set,
+      ObMacroBlockMarkerStatus &tmp_status);
+  int do_mark_tablet_block(
+      const ObTabletBlockInfo &block_info,
       MacroBlkIdMap &mark_info,
       common::hash::ObHashSet<MacroBlockId, common::hash::NoPthreadDefendMode> &macro_id_set,
       ObMacroBlockMarkerStatus &tmp_status);
@@ -366,7 +390,7 @@ private:
   int mark_tenant_ckpt_blocks(
       MacroBlkIdMap &mark_info,
       common::hash::ObHashSet<MacroBlockId, common::hash::NoPthreadDefendMode> &macro_id_set,
-      storage::ObTenantCheckpointSlogHandler &hdl,
+      storage::ObTenantStorageMetaService &meta_service,
       ObMacroBlockMarkerStatus &tmp_status);
   int mark_tmp_file_blocks(
       MacroBlkIdMap &mark_info,
@@ -376,8 +400,8 @@ private:
       MacroBlkIdMap &mark_info,
       common::hash::ObHashSet<MacroBlockId, common::hash::NoPthreadDefendMode> &macro_id_set,
       ObMacroBlockMarkerStatus &tmp_status);
-  bool continue_mark();
   int do_sweep(MacroBlkIdMap &mark_info);
+  int sweep_one_block(const MacroBlockId& macro_id);
 
   int update_mark_info(
       const common::ObIArray<MacroBlockId> &macro_block_list,
@@ -435,7 +459,7 @@ private:
     void reset();
 
   private:
-    int check_block(const MacroBlockId &macro_id);
+    int check_block(ObMacroBlockHandle &macro_block_handle);
     void inspect_bad_block();
 
   private:
@@ -445,6 +469,7 @@ private:
 
     ObBlockManager &blk_mgr_;
     int64_t last_macro_idx_;
+    int64_t last_check_time_;
   private:
     DISALLOW_COPY_AND_ASSIGN(InspectBadBlockTask);
   };
@@ -452,13 +477,10 @@ private:
 private:
   friend class InspectBadBlockTask;
 
-  common::SpinRWLock lock_;
   ObBucketLock bucket_lock_;
   BlockMap block_map_;
 
   ObIOFd super_block_fd_;
-  storage::ObServerSuperBlock super_block_; // read only memory cache
-  ObSuperBlockBufferHolder super_block_buf_holder_;
   int64_t default_block_size_;
   ObMacroBlockMarkerStatus marker_status_;
   common::SpinRWLock marker_lock_;
@@ -474,9 +496,11 @@ private:
   common::ObArray<ObBadBlockInfo> bad_block_infos_;
 
   common::ObIODevice *io_device_;
-  ObMacroBlockSeqGenerator blk_seq_generator_;
+  ObMacroBlockRewriteSeqGenerator blk_seq_generator_;
   int64_t alloc_num_;
-  lib::ObMutex resize_file_lock_;
+
+  // for resource_isolation
+  uint64_t group_id_;
 
   bool is_inited_;
   bool is_started_;

@@ -11,21 +11,11 @@
  */
 
 #include "ob_multi_data_source.h"
-#include "lib/ob_abort.h"
-#include "lib/ob_errno.h"
-#include "ob_trans_define.h"
-#include "share/ob_errno.h"
-#include "storage/ddl/ob_ddl_clog.h"
 #include "storage/tx/ob_trans_part_ctx.h"
-#include "storage/memtable/ob_memtable_context.h"
-#include "storage/tablelock/ob_table_lock_common.h"
-#include "storage/tablet/ob_tablet_binding_helper.h"
-#include "share/ls/ob_ls_operator.h"
-#include "storage/multi_data_source/runtime_utility/mds_factory.h"
 #define NEED_MDS_REGISTER_DEFINE
 #include "storage/multi_data_source/compile_utility/mds_register.h"
 #undef NEED_MDS_REGISTER_DEFINE
-#include "share/ob_standby_upgrade.h"  // ObStandbyUpgrade
+#include "share/allocator/ob_shared_memory_allocator_mgr.h"
 
 namespace oceanbase
 {
@@ -37,73 +27,6 @@ using namespace transaction::tablelock;
 
 namespace transaction
 {
-
-//#####################################################
-// ObTxBufferNode
-//#####################################################
-
-OB_SERIALIZE_MEMBER(ObTxBufferNode, type_, data_, register_no_);
-
-int ObTxBufferNode::init(const ObTxDataSourceType type,
-                         const ObString &data,
-                         const share::SCN &base_scn,
-                         mds::BufferCtx *ctx)
-{
-  int ret = OB_SUCCESS;
-  if (OB_UNLIKELY(type <= ObTxDataSourceType::UNKNOWN || type >= ObTxDataSourceType::MAX_TYPE)) {
-    ret = OB_INVALID_ARGUMENT;
-    TRANS_LOG(WARN, "invalid argument", KR(ret), K(type));
-  } else {
-    reset();
-    type_ = type;
-    data_ = data;
-    mds_base_scn_ = base_scn;
-    buffer_ctx_node_.set_ctx(ctx);
-  }
-  return ret;
-}
-
-int ObTxBufferNode::set_mds_register_no(const uint64_t register_no)
-{
-  int ret = OB_SUCCESS;
-  if (register_no <= 0 || !is_valid()) {
-    ret = OB_INVALID_ARGUMENT;
-    TRANS_LOG(WARN, "invalid argument", K(ret), K(register_no), KPC(this));
-  } else if (register_no_ > 0) {
-    ret = OB_ERR_UNEXPECTED;
-    TRANS_LOG(WARN, "invalid register no", K(ret), K(register_no), KPC(this));
-  } else {
-    register_no_ = register_no;
-    // TRANS_LOG(INFO, "set register no in mds node", K(ret), KPC(this));
-  }
-
-  return ret;
-}
-
-void ObTxBufferNode::replace_data(const common::ObString &data)
-{
-  if (nullptr != data_.ptr()) {
-    ob_free(data_.ptr());
-    data_.assign_ptr(nullptr, 0);
-  }
-
-  data_ = data;
-  has_submitted_ = false;
-  has_synced_ = false;
-}
-
-bool ObTxBufferNode::operator==(const ObTxBufferNode &buffer_node) const
-{
-  bool is_same = false;
-
-  if (has_submitted_ == buffer_node.has_submitted_ && has_synced_ == buffer_node.has_synced_
-      && mds_base_scn_ == buffer_node.mds_base_scn_ && type_ == buffer_node.type_
-      && data_ == buffer_node.data_) {
-    is_same = true;
-  }
-
-  return is_same;
-}
 
 //#####################################################
 // ObMulSourceTxDataNotifier
@@ -158,6 +81,8 @@ int ObMulSourceTxDataNotifier::notify(const ObTxBufferNodeArray &array,
 {
   int ret = OB_SUCCESS;
   ObMemtableCtx *mt_ctx = nullptr;
+  const char *can_not_do_tx_end_reason = nullptr;
+  bool can_do_tx_end = true;
   ObMulSourceDataNotifyArg tmp_notify_arg = arg;
   if (OB_ISNULL(part_ctx)) {
     ret = OB_INVALID_ARGUMENT;
@@ -220,6 +145,12 @@ int ObMulSourceTxDataNotifier::notify(const ObTxBufferNodeArray &array,
         }
         }
       } else {
+        mds::TLOCAL_MDS_INFO.notify_type_ = notify_type;
+        mds::BufferCtx &buffer_ctx = *const_cast<mds::BufferCtx*>(node.get_buffer_ctx_node().get_ctx());
+        if (arg.is_incomplete_replay_) {
+          // pass incomplete replay arg
+          buffer_ctx.set_incomplete_replay(arg.is_incomplete_replay_);
+        }
         switch (node.type_) {
           #define NEED_GENERATE_MDS_FRAME_CODE_FOR_TRANSACTION
           #define _GENERATE_MDS_FRAME_CODE_FOR_TRANSACTION_(HELPER_CLASS, BUFFER_CTX_TYPE, ID, ENUM_NAME) \
@@ -227,49 +158,77 @@ int ObMulSourceTxDataNotifier::notify(const ObTxBufferNodeArray &array,
             switch (notify_type) {\
               case NotifyType::REGISTER_SUCC:\
               {\
+                if (std::is_base_of<mds::MdsCtx, BUFFER_CTX_TYPE>::value ||\
+                    std::is_same<mds::MdsCtx, BUFFER_CTX_TYPE>::value) {\
+                  static_cast<mds::MdsCtx&>(buffer_ctx).set_seq_no(node.get_seq_no());\
+                }\
                 if (!arg.for_replay_) {\
-                  if (OB_FAIL(HELPER_CLASS::on_register(buf, len, *const_cast<mds::BufferCtx*>(node.get_buffer_ctx_node().get_ctx())))) {\
+                  if (OB_FAIL(HELPER_CLASS::on_register(buf, len, buffer_ctx))) {\
                     MDS_LOG(WARN, "call user helper on_register failed", KR(ret));\
                   } else {\
-                    MDS_LOG(TRACE, "call user helper on_register success", K(node));\
+                    MDS_LOG(INFO, "buffer ctx on_register", K(node), KP(&buffer_ctx), K(buffer_ctx));\
                   }\
                 } else {\
-                  if (OB_FAIL(HELPER_CLASS::on_replay(buf, len, arg.scn_, *const_cast<mds::BufferCtx*>(node.get_buffer_ctx_node().get_ctx())))) {\
+                  if (OB_FAIL(HELPER_CLASS::on_replay(buf, len, arg.scn_, buffer_ctx))) {\
                     MDS_LOG(WARN, "call user helper on_replay failed", KR(ret));\
                   } else {\
-                    MDS_LOG(TRACE, "call user helper on_replay success", K(node));\
+                    MDS_LOG(INFO, "buffer ctx on_replay", K(node), KP(&buffer_ctx), K(buffer_ctx));\
                   }\
                 }\
               }\
               break;\
               case NotifyType::ON_REDO:\
-              node.get_buffer_ctx_node().on_redo(arg.scn_);\
+              MDS_LOG(INFO, "buffer ctx on_redo", K(node), KP(&buffer_ctx), K(buffer_ctx));\
+              buffer_ctx.on_redo(arg.scn_);\
               break;\
               case NotifyType::TX_END:\
-              node.get_buffer_ctx_node().before_prepare();\
+              if (node.type_ == ObTxDataSourceType::TEST1 ||\
+                  node.type_ == ObTxDataSourceType::START_TRANSFER_IN ||\
+                  node.type_ == ObTxDataSourceType::TRANSFER_IN_ABORTED ||\
+                  node.type_ == ObTxDataSourceType::FINISH_TRANSFER_IN) {\
+                can_do_tx_end = common::meta::MdsCheckCanDoTxEndWrapper<HELPER_CLASS>::\
+                                check_can_do_tx_end(arg.willing_to_commit_,\
+                                                    arg.for_replay_,\
+                                                    arg.scn_,\
+                                                    buf,\
+                                                    len,\
+                                                    *const_cast<mds::BufferCtx*>(node.get_buffer_ctx_node().get_ctx()),\
+                                                    can_not_do_tx_end_reason);\
+              }\
+              if (!can_do_tx_end) {\
+                ret = OB_EAGAIN;\
+                MDS_ASSERT(OB_NOT_NULL(can_not_do_tx_end_reason));\
+                MDS_LOG(INFO, "check can do tx end return false", KR(ret), K(node), K(can_not_do_tx_end_reason));\
+              } else {\
+                MDS_LOG(INFO, "buffer ctx before_prepare", K(node), KP(&buffer_ctx), K(buffer_ctx));\
+                buffer_ctx.before_prepare();\
+              }\
               break;\
               case NotifyType::ON_PREPARE:\
-              node.get_buffer_ctx_node().on_prepare(arg.trans_version_);\
+              MDS_LOG(INFO, "buffer ctx on_prepare", K(node), KP(&buffer_ctx), K(buffer_ctx));\
+              buffer_ctx.on_prepare(arg.trans_version_);\
               break;\
               case NotifyType::ON_COMMIT:\
+              MDS_LOG(INFO, "buffer ctx on_commit", K(node), KP(&buffer_ctx), K(buffer_ctx));\
               if (OB_FAIL(common::meta::MdsCommitForOldMdsWrapper<HELPER_CLASS>::\
-                                        on_commit_for_old_mds(buf,\
-                                                              len,\
-                                                              tmp_notify_arg))) {\
+                          on_commit_for_old_mds(buf,\
+                                                len,\
+                                                tmp_notify_arg))) {\
                 MDS_LOG(WARN, "fail to on_commit_for_old_mds", KR(ret));\
               } else if (arg.for_replay_ && !common::meta::MdsCheckCanReplayWrapper<HELPER_CLASS>::\
-                                     check_can_replay_commit(buf,\
-                                                             len,\
-                                                             arg.scn_,\
-                                                             *const_cast<mds::BufferCtx*>(node.get_buffer_ctx_node().get_ctx()))) {\
+                                            check_can_replay_commit(buf,\
+                                                                    len,\
+                                                                    arg.scn_,\
+                                                                    buffer_ctx)) {\
                 ret = OB_EAGAIN;\
                 MDS_LOG(INFO, "check can replay commit return false", KR(ret), K(node));\
               } else {\
-                node.get_buffer_ctx_node().on_commit(arg.trans_version_, arg.scn_);\
+                buffer_ctx.on_commit(arg.trans_version_, arg.scn_);\
               }\
               break;\
               case NotifyType::ON_ABORT:\
-              node.get_buffer_ctx_node().on_abort(arg.scn_);\
+              MDS_LOG(INFO, "buffer ctx on_abort", K(node), KP(&buffer_ctx), K(buffer_ctx));\
+              buffer_ctx.on_abort(arg.scn_);\
               break;\
               default:\
               ob_abort();\
@@ -281,6 +240,7 @@ int ObMulSourceTxDataNotifier::notify(const ObTxBufferNodeArray &array,
           default:
             ob_abort();
         }
+        mds::TLOCAL_MDS_INFO.reset();
       }
       if (OB_FAIL(ret)) {
         TRANS_LOG(WARN, "notify data source failed", KR(ret), K(node));
@@ -290,7 +250,7 @@ int ObMulSourceTxDataNotifier::notify(const ObTxBufferNodeArray &array,
         TRANS_LOG(INFO, "notify one data source with too much time", K(ret), K(notify_type), K(i), K(node),
                   K(arg), K(notify_time.get_diff()));
       }
-      
+
       total_time += notify_time.get_diff();
     }
   }
@@ -427,19 +387,7 @@ int ObMulSourceTxDataNotifier::notify_ddl_barrier(const NotifyType type,
                                                   const ObMulSourceDataNotifyArg &arg)
 {
   int ret = OB_SUCCESS;
-  int64_t pos = 0;
-  ObDDLBarrierLog log;
-  if (OB_FAIL(log.deserialize(buf, len, pos))) {
-    TRANS_LOG(WARN, "failed to deserialize buf", K(ret));
-  } else if (OB_UNLIKELY(!log.is_valid())) {
-    ret = OB_ERR_UNEXPECTED;
-    TRANS_LOG(ERROR, "invalid ddl barrier log", K(ret), K(type), K(arg));
-  } else {
-    TRANS_LOG(INFO, "notify ddl barrier", K(type), K(arg), K(log));
-  }
-
   ob_abort_log_cb_notify_(type, ret, arg.for_replay_);
-
   return ret;
 }
 
@@ -447,7 +395,11 @@ int ObMulSourceTxDataNotifier::notify_ddl_barrier(const NotifyType type,
 // ObMulSourceTxDataDump
 //#####################################################
 const char *
-ObMulSourceTxDataDump::dump_buf(ObTxDataSourceType source_type, const char *buf, const int64_t len)
+ObMulSourceTxDataDump::dump_buf(
+    ObTxDataSourceType source_type,
+    const char *buf,
+    const int64_t len,
+    ObCStringHelper &helper)
 {
   int ret = OB_SUCCESS;
   const char *dump_str = "Unkown Multi Data Source";
@@ -466,7 +418,7 @@ ObMulSourceTxDataDump::dump_buf(ObTxDataSourceType source_type, const char *buf,
         ret = OB_ERR_UNEXPECTED;
         TRANS_LOG(WARN, "deserialize error", KR(ret), K(pos), K(len));
       } else {
-        dump_str = to_cstring(lock_op);
+        dump_str = helper.convert(lock_op);
       }
       break;
     }
@@ -478,7 +430,7 @@ ObMulSourceTxDataDump::dump_buf(ObTxDataSourceType source_type, const char *buf,
         ret = OB_ERR_UNEXPECTED;
         TRANS_LOG(WARN, "deserialize error", KR(ret), K(pos), K(len));
       } else {
-        dump_str = to_cstring(ls_attr);
+        dump_str = helper.convert(ls_attr);
       }
       break;
     }
@@ -490,7 +442,7 @@ ObMulSourceTxDataDump::dump_buf(ObTxDataSourceType source_type, const char *buf,
         ret = OB_ERR_UNEXPECTED;
         TRANS_LOG(WARN, "deserialize error", KR(ret), K(pos), K(len));
       } else {
-        dump_str = to_cstring(create_arg);
+        dump_str = helper.convert(create_arg);
       }
       break;
     }
@@ -502,7 +454,7 @@ ObMulSourceTxDataDump::dump_buf(ObTxDataSourceType source_type, const char *buf,
         ret = OB_ERR_UNEXPECTED;
         TRANS_LOG(WARN, "deserialize error", KR(ret), K(pos), K(len));
       } else {
-        dump_str = to_cstring(remove_arg);
+        dump_str = helper.convert(remove_arg);
       }
       break;
     }
@@ -514,12 +466,24 @@ ObMulSourceTxDataDump::dump_buf(ObTxDataSourceType source_type, const char *buf,
         ret = OB_ERR_UNEXPECTED;
         TRANS_LOG(WARN, "deserialize error", KR(ret), K(pos), K(len));
       } else {
-        dump_str = to_cstring(log);
+        dump_str = helper.convert(log);
       }
       break;
     }
     case ObTxDataSourceType::UNBIND_TABLET_NEW_MDS: {
       ObBatchUnbindTabletArg modify_arg;
+      if (OB_FAIL(modify_arg.deserialize(buf, len, pos))) {
+        TRANS_LOG(WARN, "failed to deserialize arg", K(ret));
+      } else if (pos > len) {
+        ret = OB_ERR_UNEXPECTED;
+        TRANS_LOG(WARN, "deserialize error", KR(ret), K(pos), K(len));
+      } else {
+        dump_str = helper.convert(modify_arg);
+      }
+      break;
+    }
+    case ObTxDataSourceType::UNBIND_LOB_TABLET: {
+      ObBatchUnbindLobTabletArg modify_arg;
       if (OB_FAIL(modify_arg.deserialize(buf, len, pos))) {
         TRANS_LOG(WARN, "failed to deserialize arg", K(ret));
       } else if (pos > len) {
@@ -569,8 +533,7 @@ int ObMDSInnerSQLStr::set(const char *msd_buf,
                           const ObRegisterMdsFlag &register_flag)
 {
   int ret = OB_SUCCESS;
-  if (OB_ISNULL(msd_buf) || 0 == msd_buf_len || ObTxDataSourceType::UNKNOWN == type
-      || !ls_id.is_valid()) {
+  if (OB_ISNULL(msd_buf) || 0 == msd_buf_len || ObTxDataSourceType::UNKNOWN == type || !ls_id.is_valid()) {
     ret = OB_INVALID_ARGUMENT;
     TRANS_LOG(WARN, "invalid arguments", K(ret), KP(msd_buf), K(msd_buf_len), K(type), K(ls_id));
   } else if (!mds_str_.empty()) {

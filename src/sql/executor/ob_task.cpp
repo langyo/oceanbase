@@ -12,15 +12,8 @@
 
 #define USING_LOG_PREFIX SQL_EXE
 
-#include "lib/utility/serialization.h"
-#include "sql/executor/ob_task.h"
-#include "sql/executor/ob_job.h"
-#include "sql/engine/ob_physical_plan.h"
-#include "sql/engine/ob_exec_context.h"
-#include "sql/engine/ob_des_exec_context.h"
+#include "ob_task.h"
 #include "sql/engine/px/ob_px_util.h"
-#include "lib/utility/ob_tracepoint.h"
-#include "lib/json/ob_yson.h"
 
 using namespace oceanbase::common;
 
@@ -41,6 +34,7 @@ ObTask::ObTask()
       location_idx_(OB_INVALID_INDEX),
       max_sql_no_(-1)
 {
+  sql_string_[0] = '\0';
 }
 
 ObTask::~ObTask()
@@ -92,6 +86,7 @@ OB_DEF_SERIALIZE(ObTask)
   }
   LST_DO_CODE(OB_UNIS_ENCODE, ranges_);
   LST_DO_CODE(OB_UNIS_ENCODE, max_sql_no_);
+  OB_UNIS_ENCODE(ObString(sql_string_));
   return ret;
 }
 
@@ -153,6 +148,11 @@ OB_DEF_DESERIALIZE(ObTask)
     }
   }
   LST_DO_CODE(OB_UNIS_DECODE, max_sql_no_);
+  ObString sql_string;
+  OB_UNIS_DECODE(sql_string);
+  if(OB_SUCC(ret)) {
+    set_sql_string(sql_string);
+  }
   return ret;
 }
 
@@ -184,6 +184,7 @@ OB_DEF_SERIALIZE_SIZE(ObTask)
     LST_DO_CODE(OB_UNIS_ADD_LEN, ranges_);
   }
   LST_DO_CODE(OB_UNIS_ADD_LEN, max_sql_no_);
+  OB_UNIS_ADD_LEN(ObString(sql_string_));
   return len;
 }
 
@@ -299,15 +300,21 @@ OB_DEF_SERIALIZE(ObRemoteTask)
   int ret = OB_SUCCESS;
   int64_t tenant_id = OB_INVALID_ID;
   ParamStore *ps_params = nullptr;
+  ParamStore empty_param_store;
   //for serialize ObObjParam' param_meta_
   int64_t param_meta_count = 0;
   if (OB_ISNULL(remote_sql_info_)
       || OB_ISNULL(session_info_)
-      || OB_ISNULL(ps_params = remote_sql_info_->ps_params_)) {
+      || OB_ISNULL(remote_sql_info_->ps_params_)) {
     ret = OB_NOT_INIT;
     LOG_WARN("remote task not init", K(ret), K_(remote_sql_info), K_(session_info), K(ps_params));
   } else {
     tenant_id = session_info_->get_effective_tenant_id();
+    if (!remote_sql_info_->use_ps_) {
+      ps_params = &empty_param_store;
+    } else {
+      ps_params = remote_sql_info_->ps_params_;
+    }
     param_meta_count = ps_params->count();
   }
   LST_DO_CODE(OB_UNIS_ENCODE,
@@ -340,13 +347,19 @@ OB_DEF_SERIALIZE_SIZE(ObRemoteTask)
 {
   int64_t len = 0;
   ParamStore *ps_params = nullptr;
+  ParamStore empty_param_store;
   int64_t param_meta_count = 0;
   if (OB_ISNULL(remote_sql_info_)
       || OB_ISNULL(session_info_)
-      || OB_ISNULL(ps_params = remote_sql_info_->ps_params_)) {
+      || OB_ISNULL(remote_sql_info_->ps_params_)) {
     LOG_WARN_RET(OB_NOT_INIT, "remote task not init", K_(remote_sql_info), K_(session_info), K(ps_params));
   } else {
     int64_t tenant_id = session_info_->get_effective_tenant_id();
+    if (!remote_sql_info_->use_ps_) {
+      ps_params = &empty_param_store;
+    } else {
+      ps_params = remote_sql_info_->ps_params_;
+    }
     LST_DO_CODE(OB_UNIS_ADD_LEN,
                 tenant_schema_version_,
                 sys_schema_version_,
@@ -408,33 +421,54 @@ OB_DEF_DESERIALIZE(ObRemoteTask)
       ObSQLSessionInfo::LockGuard query_guard(session_info_->get_query_lock());
       ObSQLSessionInfo::LockGuard data_guard(session_info_->get_thread_data_lock());
       OB_UNIS_DECODE(*session_info_);
+      if (OB_FAIL(ret)) {
+      } else if (OB_FAIL(session_info_->set_session_state(QUERY_ACTIVE))) {
+        LOG_WARN("set session state failed", K(ret));
+      } else if (OB_FAIL(session_info_->store_query_string(
+          ObString::make_string("REMOTE PLAN SCHEDULING")))) {
+        LOG_WARN("store query string failed", K(ret));
+      } else {
+        session_info_->set_mysql_cmd(obmysql::COM_QUERY);
+      }
       OB_UNIS_DECODE(remote_sql_info_->is_batched_stmt_);
+      if (OB_SUCC(ret)) {
+        if (OB_FAIL(session_info_->set_session_active(
+            ObString::make_string("REMOTE/DISTRIBUTE SQL EXECUTING"),
+            obmysql::COM_QUERY))) {
+          LOG_WARN("set remote session active failed", K(ret));
+        }
+        EVENT_INC(ACTIVE_SESSIONS);
+      }
     }
     dependency_tables_.set_allocator(&(exec_ctx_->get_allocator()));
     OB_UNIS_DECODE(dependency_tables_);
     OB_UNIS_DECODE(snapshot_);
-    exec_ctx_->get_das_ctx().set_snapshot(snapshot_);
-    //DESERIALIZE param_meta_count if 0, (1) params->count() ==0 (2) old version -> new version
-    //for (2) just set obj.meta as param_meta
-    OB_UNIS_DECODE(param_meta_count);
-    if (OB_SUCC(ret)) {
-      if (param_meta_count > 0) {
-        for (int64_t i = 0; OB_SUCC(ret) && i < param_meta_count; ++i) {
-          OB_UNIS_DECODE(tmp_meta);
-          ps_params->at(i).set_param_meta(tmp_meta);
-        }
-        for (int64_t i = 0; OB_SUCC(ret) && i < param_meta_count; ++i) {
-          OB_UNIS_DECODE(tmp_flag);
-          ps_params->at(i).set_param_flag(tmp_flag);
-        }
-      } else {
-        for (int64_t i = 0; OB_SUCC(ret) && i < ps_params->count(); ++i) {
-          ps_params->at(i).set_param_meta();
+    if (OB_FAIL(ret)) {
+    } else if (OB_FAIL(exec_ctx_->get_das_ctx().set_snapshot(snapshot_))) {
+      LOG_WARN("fail to set snapshot", K(ret));
+    } else {
+      //DESERIALIZE param_meta_count if 0, (1) params->count() ==0 (2) old version -> new version
+      //for (2) just set obj.meta as param_meta
+      OB_UNIS_DECODE(param_meta_count);
+      if (OB_SUCC(ret)) {
+        if (param_meta_count > 0) {
+          for (int64_t i = 0; OB_SUCC(ret) && i < param_meta_count; ++i) {
+            OB_UNIS_DECODE(tmp_meta);
+            ps_params->at(i).set_param_meta(tmp_meta);
+          }
+          for (int64_t i = 0; OB_SUCC(ret) && i < param_meta_count; ++i) {
+            OB_UNIS_DECODE(tmp_flag);
+            ps_params->at(i).set_param_flag(tmp_flag);
+          }
+        } else {
+          for (int64_t i = 0; OB_SUCC(ret) && i < ps_params->count(); ++i) {
+            ps_params->at(i).set_param_meta();
+          }
         }
       }
+      OB_UNIS_DECODE(remote_sql_info_->is_original_ps_mode_);
+      OB_UNIS_DECODE(remote_sql_info_->sql_from_pl_);
     }
-    OB_UNIS_DECODE(remote_sql_info_->is_original_ps_mode_);
-    OB_UNIS_DECODE(remote_sql_info_->sql_from_pl_);
   }
   return ret;
 }

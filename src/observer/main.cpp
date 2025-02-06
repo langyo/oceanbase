@@ -25,7 +25,6 @@
 #include "lib/utility/ob_defer.h"
 #include "objit/ob_llvm_symbolizer.h"
 #include "observer/ob_server.h"
-#include "observer/ob_server_struct.h"
 #include "observer/ob_server_utils.h"
 #include "share/config/ob_server_config.h"
 #include "share/ob_tenant_mgr.h"
@@ -398,7 +397,7 @@ static int check_uid_before_start(const char *dir_path)
   return ret;
 }
 
-static void print_all_thread(const char* desc)
+void print_all_thread(const char* desc, uint64_t tenant_id)
 {
   MPRINT("============= [%s] begin to show unstopped thread =============", desc);
   DIR *dir = opendir("/proc/self/task");
@@ -415,13 +414,22 @@ static void print_all_thread(const char* desc)
         if (file == NULL) {
           MPRINT("fail to print thread tid: %s", tid);
         } else {
-          char name[256];
-          fgets(name, 256, file);
-          size_t len = strlen(name);
-          if (len > 0 && name[len - 1] == '\n') {
-            name[len - 1] = '\0';
+          char thread_name[256];
+          if (fgets(thread_name, sizeof(thread_name), file) != nullptr) {
+            size_t len = strlen(thread_name);
+            if (len > 0 && thread_name[len - 1] == '\n') {
+              thread_name[len - 1] = '\0';
+            }
+            if (!is_server_tenant(tenant_id)) {
+              char tenant_id_str[20];
+              snprintf(tenant_id_str, sizeof(tenant_id_str), "T%lu_", tenant_id);
+              if (0 == strncmp(thread_name, tenant_id_str, strlen(tenant_id_str))) {
+                MPRINT("[CHECK_KILL_GRACEFULLY][T%lu][%s] detect unstopped thread, tid: %s, name: %s", tenant_id, desc, tid, thread_name);
+              }
+            } else {
+              MPRINT("[CHECK_KILL_GRACEFULLY][%s] detect unstopped thread, tid: %s, name: %s", desc, tid, thread_name);
+            }
           }
-          MPRINT("[%s] detect unstopped thread, tid: %s, name: %s", desc, tid, name);
           fclose(file);
         }
       }
@@ -431,8 +439,11 @@ static void print_all_thread(const char* desc)
   MPRINT("============= [%s] finish to show unstopped thread =============", desc);
 }
 
-int main(int argc, char *argv[])
+int inner_main(int argc, char *argv[])
 {
+  // temporarily unlimited memory before init config
+  set_memory_limit(INT_MAX64);
+
 #ifdef ENABLE_SANITY
   backtrace_symbolize_func = oceanbase::common::backtrace_symbolize;
 #endif
@@ -479,10 +490,12 @@ int main(int argc, char *argv[])
   char              PID_DIR[]                 = "run";
   char              CONF_DIR[]                = "etc";
   char              AUDIT_DIR[]               = "audit";
+  char              ALERT_DIR[]               = "log/alert";
   const char *const LOG_FILE_NAME             = "log/observer.log";
   const char *const RS_LOG_FILE_NAME          = "log/rootservice.log";
   const char *const ELECT_ASYNC_LOG_FILE_NAME = "log/election.log";
   const char *const TRACE_LOG_FILE_NAME       = "log/trace.log";
+  const char *const ALERT_LOG_FILE_NAME       = "log/alert/alert.log";
   const char *const PID_FILE_NAME             = "run/observer.pid";
   int               ret                       = OB_SUCCESS;
 
@@ -497,7 +510,8 @@ int main(int argc, char *argv[])
   int64_t pos = 0;
 
   print_args(argc, argv);
-
+  // no diagnostic info attach to main thread.
+  ObDisableDiagnoseGuard disable_guard;
   setlocale(LC_ALL, "");
   // Set character classification type to C to avoid printf large string too
   // slow.
@@ -508,7 +522,7 @@ int main(int argc, char *argv[])
   opts.log_level_ = OB_LOG_LEVEL_WARN;
   parse_opts(argc, argv, opts);
 
-  if (OB_FAIL(check_uid_before_start(CONF_DIR))) {
+  if (OB_SUCC(ret) && OB_FAIL(check_uid_before_start(CONF_DIR))) {
     MPRINT("Fail check_uid_before_start, please use the initial user to start observer!");
   } else if (OB_FAIL(FileDirectoryUtils::create_full_path(PID_DIR))) {
     MPRINT("create pid dir fail: ./run/");
@@ -518,6 +532,8 @@ int main(int argc, char *argv[])
     MPRINT("create log dir fail: ./etc/");
   } else if (OB_FAIL(FileDirectoryUtils::create_full_path(AUDIT_DIR))) {
     MPRINT("create log dir fail: ./audit/");
+  } else if (OB_FAIL(FileDirectoryUtils::create_full_path(ALERT_DIR))) {
+    MPRINT("create log dir fail: ./log/alert");
   } else if (OB_FAIL(ObSecurityAuditUtils::get_audit_file_name(audit_file,
       ObPLogFileStruct::MAX_LOG_FILE_NAME_SIZE,
       pos))) {
@@ -525,6 +541,7 @@ int main(int argc, char *argv[])
     MPRINT("failed to init crypto malloc");
   } else if (!opts.nodaemon_ && OB_FAIL(start_daemon(PID_FILE_NAME))) {
   } else {
+    ObCurTraceId::get_trace_id()->set("Y0-0000000000000001-0-0");
     CURLcode curl_code = curl_global_init(CURL_GLOBAL_ALL);
     OB_ASSERT(CURLE_OK == curl_code);
 
@@ -533,7 +550,8 @@ int main(int argc, char *argv[])
     OB_LOGGER.set_log_level(opts.log_level_);
     OB_LOGGER.set_max_file_size(LOG_FILE_SIZE);
     OB_LOGGER.set_new_file_info(syslog_file_info);
-    OB_LOGGER.set_file_name(LOG_FILE_NAME, false, true, RS_LOG_FILE_NAME, ELECT_ASYNC_LOG_FILE_NAME, TRACE_LOG_FILE_NAME, audit_file);
+    OB_LOGGER.set_file_name(LOG_FILE_NAME, false, true, RS_LOG_FILE_NAME, ELECT_ASYNC_LOG_FILE_NAME,
+                            TRACE_LOG_FILE_NAME, audit_file, ALERT_LOG_FILE_NAME);
     ObPLogWriterCfg log_cfg;
     // if (OB_SUCCESS != (ret = ASYNC_LOG_INIT(ELECT_ASYNC_LOG_FILE_NAME, opts.log_level_, true))) {
     //   LOG_ERROR("election async log init error.", K(ret));
@@ -545,6 +563,7 @@ int main(int argc, char *argv[])
              "election file", ELECT_ASYNC_LOG_FILE_NAME,
              "trace file", TRACE_LOG_FILE_NAME,
              K(audit_file),
+             "alert file", ALERT_LOG_FILE_NAME,
              "max_log_file_size", LOG_FILE_SIZE,
              "enable_async_log", OB_LOGGER.enable_async_log());
     if (0 == memory_used) {
@@ -581,12 +600,14 @@ int main(int argc, char *argv[])
       ATOMIC_STORE(&palf::election::INIT_TS, palf::election::get_monotonic_ts());
       if (OB_FAIL(observer.init(opts, log_cfg))) {
         LOG_ERROR("observer init fail", K(ret));
+        raise(SIGKILL); // force stop when fail
       } else if (OB_FAIL(observer.start())) {
         LOG_ERROR("observer start fail", K(ret));
+        raise(SIGKILL); // force stop when fail
       } else if (OB_FAIL(observer.wait())) {
         LOG_ERROR("observer wait fail", K(ret));
       }
-      print_all_thread("BEFORE_DESTROY");
+      print_all_thread("BEFORE_DESTROY", OB_SERVER_TENANT_ID);
       observer.destroy();
     }
     curl_global_cleanup();
@@ -594,6 +615,28 @@ int main(int argc, char *argv[])
   }
 
   LOG_INFO("observer exits", "observer_version", PACKAGE_STRING);
-  print_all_thread("AFTER_DESTROY");
+  print_all_thread("AFTER_DESTROY", OB_SERVER_TENANT_ID);
+  return ret;
+}
+
+int main(int argc, char *argv[])
+{
+  int ret = OB_SUCCESS;
+  size_t stack_size = 16<<20;
+  struct rlimit limit;
+  if (0 == getrlimit(RLIMIT_STACK, &limit)) {
+    if (RLIM_INFINITY != limit.rlim_cur) {
+      stack_size = limit.rlim_cur;
+    }
+  }
+  void *stack_addr = ::mmap(nullptr, stack_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (MAP_FAILED == stack_addr) {
+    ret = OB_ERR_UNEXPECTED;
+  } else {
+    ret = CALL_WITH_NEW_STACK(inner_main(argc, argv), stack_addr, stack_size);
+    if (-1 == ::munmap(stack_addr, stack_size)) {
+      ret = OB_ERR_UNEXPECTED;
+    }
+  }
   return ret;
 }

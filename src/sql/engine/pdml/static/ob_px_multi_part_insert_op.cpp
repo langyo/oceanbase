@@ -12,10 +12,7 @@
 
 #define USING_LOG_PREFIX SQL_ENG
 #include "ob_px_multi_part_insert_op.h"
-#include "storage/access/ob_dml_param.h"
-#include "storage/tx_storage/ob_access_service.h"
 #include "sql/engine/dml/ob_dml_service.h"
-#include "sql/engine/cmd/ob_table_direct_insert_service.h"
 
 using namespace oceanbase::common;
 using namespace oceanbase::sql;
@@ -46,20 +43,12 @@ int ObPxMultiPartInsertOp::inner_open()
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("table or row desc is invalid", K(ret), K(MY_SPEC.row_desc_));
   } else if (OB_FAIL(data_driver_.init(get_spec(), ctx_.get_allocator(), ins_rtdef_, this, this,
-                                       nullptr, MY_SPEC.ins_ctdef_.is_heap_table_))) {
+                                       MY_SPEC.ins_ctdef_.is_heap_table_))) {
     LOG_WARN("failed to init data driver", K(ret));
-  }
-  if (OB_SUCC(ret)) {
-    const ObPhysicalPlan *plan = GET_PHY_PLAN_CTX(ctx_)->get_phy_plan();
-    if (ObTableDirectInsertService::is_direct_insert(*plan)) {
-      int64_t task_id = ctx_.get_px_task_id() + 1;
-      if (OB_FAIL(ObTableDirectInsertService::open_task(plan->get_append_table_id(), task_id, table_ctx_))) {
-        LOG_WARN("failed to open table direct insert task", KR(ret),
-            K(plan->get_append_table_id()), K(task_id));
-      } else {
-        ins_rtdef_.das_rtdef_.direct_insert_task_id_ = task_id;
-      }
-    }
+  } else if (OB_UNLIKELY(GET_PHY_PLAN_CTX(ctx_)->get_is_direct_insert_plan())) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("direct-insert plan should not use pdml op",
+        KR(ret), K(GET_PHY_PLAN_CTX(ctx_)->get_is_direct_insert_plan()));
   }
   LOG_TRACE("pdml static insert op", K(ret), K_(MY_SPEC.row_desc), K_(MY_SPEC.ins_ctdef));
   return ret;
@@ -105,18 +94,6 @@ int ObPxMultiPartInsertOp::inner_close()
 {
   int ret = OB_SUCCESS;
   int tmp_ret = OB_SUCCESS;
-  const ObPhysicalPlan *plan = GET_PHY_PLAN_CTX(ctx_)->get_phy_plan();
-  if (ObTableDirectInsertService::is_direct_insert(*plan)) {
-    int64_t task_id = ctx_.get_px_task_id() + 1;
-    int error_code = (static_cast<const ObPxMultiPartInsertOpInput *>(input_))->get_error_code();
-    if (OB_TMP_FAIL(ObTableDirectInsertService::close_task(plan->get_append_table_id(),
-                                                           task_id,
-                                                           table_ctx_,
-                                                           error_code))) {
-      LOG_WARN("failed to close table direct insert task", KR(tmp_ret),
-          K(plan->get_append_table_id()), K(task_id), K(error_code));
-    }
-  }
   if (OB_FAIL(ObTableModifyOp::inner_close())) {
     LOG_WARN("failed to inner close table modify", K(ret));
   } else {
@@ -126,28 +103,11 @@ int ObPxMultiPartInsertOp::inner_close()
   return ret;
 }
 
-int ObPxMultiPartInsertOp::process_row()
-{
-  int ret = OB_SUCCESS;
-  bool is_filtered = false;
-  OZ (ObDMLService::check_row_null(MY_SPEC.ins_ctdef_.new_row_,
-                                   eval_ctx_,
-                                   ins_rtdef_.cur_row_num_,
-                                   MY_SPEC.ins_ctdef_.column_infos_,
-                                   MY_SPEC.ins_ctdef_.das_ctdef_,
-                                   MY_SPEC.ins_ctdef_.is_single_value_,
-                                   *this));
-  OZ(ObDMLService::filter_row_for_view_check(MY_SPEC.ins_ctdef_.view_check_exprs_, eval_ctx_, is_filtered));
-  OV(!is_filtered, OB_ERR_CHECK_OPTION_VIOLATED);
-  OZ(ObDMLService::filter_row_for_check_cst(MY_SPEC.ins_ctdef_.check_cst_exprs_, eval_ctx_, is_filtered));
-  OV(!is_filtered, OB_ERR_CHECK_CONSTRAINT_VIOLATED);
-  return ret;
-}
-
 //////////// pdml data interface implementation: reader & writer ////////////
 int ObPxMultiPartInsertOp::read_row(ObExecContext &ctx,
                                     const ObExprPtrIArray *&row,
-                                    common::ObTabletID &tablet_id)
+                                    common::ObTabletID &tablet_id,
+                                    bool &is_skipped)
 {
   int ret = OB_SUCCESS;
   UNUSED(ctx);
@@ -160,34 +120,36 @@ int ObPxMultiPartInsertOp::read_row(ObExecContext &ctx,
       LOG_WARN("fail get next row from child", K(ret));
     }
   } else {
+    op_monitor_info_.otherstat_2_value_++;
     // 每一次从child节点获得新的数据都需要进行清除计算标记
     clear_evaluated_flag();
-    // 通过partition id expr获得对应行对应的分区
-    const int64_t part_id_idx = MY_SPEC.row_desc_.get_part_id_index();
-    // 返回的值是child的output exprs
-    row = &child_->get_spec().output_;
-    if (NO_PARTITION_ID_FLAG == part_id_idx) {
-      ObDASTableLoc *table_loc = ins_rtdef_.das_rtdef_.table_loc_;
-      if (OB_ISNULL(table_loc) || table_loc->get_tablet_locs().size() != 1) {
-        ret = OB_ERR_UNEXPECTED;
-        LOG_WARN("insert table location is invalid", K(ret), KPC(table_loc));
-      } else {
-        tablet_id = table_loc->get_first_tablet_loc()->tablet_id_;
+    if (OB_FAIL(ObDMLService::process_insert_row(MY_SPEC.ins_ctdef_, ins_rtdef_, *this, is_skipped))) {
+      LOG_WARN("process insert row failed", K(ret));
+    } else if (!is_skipped) {
+      // 通过partition id expr获得对应行对应的分区
+      const int64_t part_id_idx = MY_SPEC.row_desc_.get_part_id_index();
+      // 返回的值是child的output exprs
+      row = &child_->get_spec().output_;
+      if (NO_PARTITION_ID_FLAG == part_id_idx) {
+        ObDASTableLoc *table_loc = ins_rtdef_.das_rtdef_.table_loc_;
+        if (OB_ISNULL(table_loc) || table_loc->get_tablet_locs().size() != 1) {
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("insert table location is invalid", K(ret), KPC(table_loc));
+        } else {
+          tablet_id = table_loc->get_first_tablet_loc()->tablet_id_;
+        }
+      } else if (child_->get_spec().output_.count() > part_id_idx) {
+        ObExpr *expr = child_->get_spec().output_.at(part_id_idx);
+        ObDatum &expr_datum = expr->locate_expr_datum(get_eval_ctx());
+        tablet_id = expr_datum.get_int();
+        LOG_DEBUG("get the part id", K(ret), K(expr_datum));
       }
-    } else if (child_->get_spec().output_.count() > part_id_idx) {
-      ObExpr *expr = child_->get_spec().output_.at(part_id_idx);
-      ObDatum &expr_datum = expr->locate_expr_datum(get_eval_ctx());
-      tablet_id = expr_datum.get_int();
-      LOG_DEBUG("get the part id", K(ret), K(expr_datum));
-    }
-  }
-  if (!MY_SPEC.is_pdml_index_maintain_ && OB_SUCC(ret)) {
-    if (OB_FAIL(process_row())) {
-      LOG_WARN("fail process row", K(ret));
+    } else {
+      op_monitor_info_.otherstat_4_value_++;
     }
   }
   if (OB_SUCC(ret)) {
-    LOG_TRACE("read row from pdml cache", "read_row", ROWEXPR2STR(eval_ctx_, *row), K(tablet_id));
+    LOG_TRACE("read row from pdml cache", "read_row", ROWEXPR2STR(eval_ctx_, *row), K(tablet_id), K(is_skipped));
   }
   return ret;
 }
@@ -219,12 +181,16 @@ int ObPxMultiPartInsertOp::write_rows(ObExecContext &ctx,
         LOG_WARN("insert row to das failed", K(ret));
       } else if (OB_FAIL(discharge_das_write_buffer())) {
         LOG_WARN("failed to submit all dml task when the buffer of das op is full", K(ret));
+      } else {
+        op_monitor_info_.otherstat_3_value_++;
       }
     }
 
     if (OB_ITER_END == ret) {
       if (OB_FAIL(submit_all_dml_task())) {
         LOG_WARN("do insert rows post process failed", K(ret));
+      } else {
+        op_monitor_info_.otherstat_6_value_ += ins_rtdef_.das_rtdef_.affected_rows_;
       }
     }
     if (!(MY_SPEC.is_pdml_index_maintain_)) {
@@ -232,7 +198,9 @@ int ObPxMultiPartInsertOp::write_rows(ObExecContext &ctx,
       plan_ctx->add_affected_rows(ins_rtdef_.das_rtdef_.affected_rows_);
     }
     LOG_TRACE("pdml insert ok", K(MY_SPEC.is_pdml_index_maintain_),
-              K(ins_rtdef_.das_rtdef_.affected_rows_));
+              K(ins_rtdef_.das_rtdef_.affected_rows_), K(op_monitor_info_.otherstat_1_value_),
+              K(op_monitor_info_.otherstat_2_value_), K(op_monitor_info_.otherstat_3_value_),
+              K(op_monitor_info_.otherstat_4_value_), K(op_monitor_info_.otherstat_6_value_));
     ins_rtdef_.das_rtdef_.affected_rows_ = 0;
   }
   return ret;

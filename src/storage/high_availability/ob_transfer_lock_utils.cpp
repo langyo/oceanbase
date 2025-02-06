@@ -13,17 +13,11 @@
 #define USING_LOG_PREFIX STORAGE
 
 #include "ob_transfer_lock_utils.h"
-#include "ob_transfer_lock_info_operator.h"
-#include "storage/tx_storage/ob_ls_handle.h"
 #include "storage/tx_storage/ob_ls_service.h"
-#include "share/ob_max_id_fetcher.h"
 #include "storage/ob_common_id_utils.h"
-#include "share/ob_common_id.h"
 #include "observer/ob_server_event_history_table_operator.h"
 #include "storage/high_availability/ob_storage_ha_utils.h"
-#include "storage/ob_storage_rpc.h"
 #include "observer/ob_srv_network_frame.h"
-#include "share/ob_tenant_info_proxy.h"
 
 using namespace oceanbase::share;
 using namespace oceanbase::common;
@@ -45,7 +39,7 @@ static int get_ls_handle(const uint64_t tenant_id, const share::ObLSID &ls_id, s
   } else if (OB_ISNULL(ls_service = MTL_WITH_CHECK_TENANT(ObLSService *, tenant_id))) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("log stream service is NULL", K(ret), K(tenant_id));
-  } else if (OB_FAIL(ls_service->get_ls(ls_id, ls_handle, ObLSGetMod::STORAGE_MOD))) {
+  } else if (OB_FAIL(ls_service->get_ls(ls_id, ls_handle, ObLSGetMod::HA_MOD))) {
     LOG_WARN("failed to get log stream", K(ret), K(tenant_id), K(ls_id));
   }
   return ret;
@@ -60,7 +54,7 @@ int ObMemberListLockUtils::batch_lock_ls_member_list(const uint64_t tenant_id, c
   if (OB_FAIL(sorted_ls_list.assign(lock_ls_list))) {
     LOG_WARN("failed to assign ls list", K(ret));
   } else {
-    std::sort(sorted_ls_list.begin(), sorted_ls_list.end());
+    lib::ob_sort(sorted_ls_list.begin(), sorted_ls_list.end());
     for (int64_t i = 0; OB_SUCC(ret) && i < sorted_ls_list.count(); ++i) {
       const share::ObLSID &ls_id = sorted_ls_list.at(i);
       if (OB_FAIL(lock_ls_member_list(tenant_id, ls_id, task_id, member_list, status, group_id, sql_proxy))) {

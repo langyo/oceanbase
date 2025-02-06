@@ -15,10 +15,7 @@
 #include "storage/ob_relative_table.h"
 
 #include "share/ob_unique_index_row_transformer.h"
-#include "share/schema/ob_multi_version_schema_service.h"
 #include "share/schema/ob_table_dml_param.h"
-#include "share/rc/ob_tenant_base.h"
-#include "storage/access/ob_dml_param.h"
 
 namespace oceanbase
 {
@@ -75,6 +72,11 @@ uint64_t ObRelativeTable::get_table_id() const
 const ObTabletID& ObRelativeTable::get_tablet_id() const
 {
   return tablet_id_;
+}
+
+const ObTabletHandle* ObRelativeTable::get_tablet_handle() const
+{
+  return tablet_iter_.get_tablet_handle_ptr();
 }
 
 int64_t ObRelativeTable::get_schema_version() const
@@ -448,6 +450,11 @@ bool ObRelativeTable::is_storage_index_table() const
   return schema_param_->is_storage_index_table();
 }
 
+bool ObRelativeTable::is_index_local_storage() const
+{
+  return schema_param_->is_index_local_storage();
+}
+
 bool ObRelativeTable::can_read_index() const
 {
   return schema_param_->can_read_index();
@@ -471,6 +478,16 @@ bool ObRelativeTable::is_lob_meta_table() const
 bool ObRelativeTable::is_spatial_index() const
 {
   return schema_param_->is_spatial_index();
+}
+
+bool ObRelativeTable::is_fts_index() const
+{
+  return schema_param_->is_fts_index();
+}
+
+bool ObRelativeTable::is_vector_index() const
+{
+  return schema_param_->is_vector_index();
 }
 
 int ObRelativeTable::check_rowkey_in_column_ids(
@@ -526,9 +543,10 @@ int ObRelativeTable::build_index_row(
     LOG_WARN("relative table is not storage index table", K(ret), K(*this));
   } else if (table_row.is_invalid() || !col_map.is_inited() || index_row.is_invalid()) {
     ret = OB_INVALID_ARGUMENT;
+    ObCStringHelper helper;
     LOG_WARN("table_row can not be empty",
-                "table_row", to_cstring(table_row),
-                "index_row", to_cstring(index_row));
+                "table_row", helper.convert(table_row),
+                "index_row", helper.convert(index_row));
   } else {
     share::schema::ObColDesc col_desc;
     null_idx_val = false;
@@ -615,7 +633,7 @@ int ObRelativeTable::set_index_value(
 {
   int ret = OB_SUCCESS;
   int32_t idx = -1;
-  uint64_t id = col_desc.col_id_ > OB_MIN_SHADOW_COLUMN_ID ?
+  uint64_t id = is_shadow_column(col_desc.col_id_) ?
                 col_desc.col_id_ - OB_MIN_SHADOW_COLUMN_ID :
                 col_desc.col_id_;
   if (table_row.is_invalid() || !col_map.is_inited() || rowkey_size <= 0) {
@@ -628,8 +646,9 @@ int ObRelativeTable::set_index_value(
                   "column_id", id, "index", idx);
     } else if (idx >= table_row.count_) {
       ret = OB_ENTRY_NOT_EXIST;
+      ObCStringHelper helper;
       LOG_WARN("can not get row value",
-                  "table_row", to_cstring(table_row), "column_id", id, "index", idx);
+                  "table_row", helper.convert(table_row), "column_id", id, "index", idx);
     } else {
       *(index_row.cells_ + index_row.count_++) = table_row.cells_[idx];
     }

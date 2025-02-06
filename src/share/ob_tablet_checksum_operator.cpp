@@ -13,17 +13,6 @@
 #define USING_LOG_PREFIX SHARE
 
 #include "share/ob_tablet_checksum_operator.h"
-#include "share/config/ob_server_config.h"
-#include "share/inner_table/ob_inner_table_schema_constants.h"
-#include "share/tablet/ob_tablet_to_ls_operator.h"
-#include "share/ob_freeze_info_proxy.h"
-#include "lib/mysqlclient/ob_isql_client.h"
-#include "lib/mysqlclient/ob_mysql_result.h"
-#include "lib/mysqlclient/ob_mysql_proxy.h"
-#include "lib/string/ob_sql_string.h"
-#include "common/ob_smart_var.h"
-#include "common/ob_timeout_ctx.h"
-#include "lib/mysqlclient/ob_mysql_transaction.h"
 
 namespace oceanbase
 {
@@ -355,7 +344,6 @@ int ObTabletChecksumOperator::construct_load_sql_str_(
       compaction_scn.get_val_for_inner_table_field()))) {
     LOG_WARN("fail to assign sql", KR(ret), K(tenant_id));
   } else {
-    ObSqlString order_by_sql;
     for (int64_t idx = start_idx; OB_SUCC(ret) && (idx < end_idx); ++idx) {
       const ObTabletLSPair &pair = pairs.at(idx);
       if (OB_UNLIKELY(!pair.is_valid())) {
@@ -367,30 +355,11 @@ int ObTabletChecksumOperator::construct_load_sql_str_(
           pair.get_ls_id().id(),
           ((idx == end_idx - 1) ? ")" : ", ")))) {
         LOG_WARN("fail to assign sql", KR(ret), K(tenant_id), K(pair));
-      } else if (OB_FAIL(order_by_sql.append_fmt(
-          ",%ld",
-          pair.get_tablet_id().id()))) {
-        SHARE_LOG(WARN, "fail to assign sql", KR(ret), K(tenant_id), K(pair));
       }
     }
-    if (FAILEDx(sql.append_fmt(" ORDER BY FIELD(tablet_id%s)", order_by_sql.string().ptr()))) {
+    if (FAILEDx(sql.append_fmt(" ORDER BY tablet_id"))) {
       SHARE_LOG(WARN, "fail to assign sql string", KR(ret), K(tenant_id), K(compaction_scn), K(pairs_cnt));
     }
-  }
-  return ret;
-}
-
-int ObTabletChecksumOperator::insert_tablet_checksum_item(
-    ObISQLClient &sql_client,
-    const uint64_t tenant_id,
-    const ObTabletChecksumItem &item)
-{
-  int ret = OB_SUCCESS;
-  ObArray<ObTabletChecksumItem> items;
-  if (OB_FAIL(items.push_back(item))) {
-    LOG_WARN("fail to add item into array", KR(ret), K(item));
-  } else if (OB_FAIL(insert_tablet_checksum_items(sql_client, tenant_id, items))) {
-    LOG_WARN("fail to insert tablet checksum items", KR(ret), K(item));
   }
   return ret;
 }
@@ -692,7 +661,7 @@ int ObTabletChecksumOperator::is_first_tablet_in_sys_ls_exist(
         int64_t cnt = 0;
         EXTRACT_INT_FIELD_MYSQL(*result, "cnt", cnt, int64_t);
         if (OB_SUCC(ret)) {
-          if (1 == cnt) {
+          if (cnt >= 1) {
             is_exist = true;
           } else if (0 == cnt) {
             is_exist = false;

@@ -13,17 +13,11 @@
 #include <gtest/gtest.h>
 #define private public
 #define protected public
-#include <cstdlib>
-#include <ctime>
 #include "../unittest/storage/blocksstable/ob_data_file_prepare.h"
 #include "../unittest/storage/blocksstable/ob_row_generate.h"
-#include "observer/table_load/ob_table_load_partition_location.h"
-#include "share/ob_simple_mem_limit_getter.h"
-#include "share/table/ob_table_load_define.h"
-#include "storage/blocksstable/ob_tmp_file.h"
 #include "storage/direct_load/ob_direct_load_sstable_scanner.h"
 #include "storage/direct_load/ob_direct_load_sstable_compactor.h"
-#include "storage/ob_i_store.h"
+#include "mtlenv/mock_tenant_module_env.h"
 
 namespace oceanbase
 {
@@ -50,11 +44,39 @@ public:
   static const int64_t SNAPSHOT_VERSION = 2;
 
 public:
-  TestDataBlockWriter() : TestDataFilePrepare(&getter, "TestDataBlockWriter", 8 * 1024 * 1024, 2048){};
+  TestDataBlockWriter() : TestDataFilePrepare(&getter, "TestDataBlockWriter", 2 * 1024 * 1024, 2048){};
   virtual void SetUp();
   virtual void TearDown();
+  static void SetUpTestCase()
+  {
+    ASSERT_EQ(OB_SUCCESS, ObTimerService::get_instance().start());
+  }
+  static void TearDownTestCase()
+  {
+    ObTimerService::get_instance().stop();
+    ObTimerService::get_instance().wait();
+    ObTimerService::get_instance().destroy();
+  }
   void check_row(const ObDatumRow *next_row, const ObDatumRow *curr_row);
   void test_alloc(char *&ptr, const int64_t size);
+  int init_tenant_mgr()
+  {
+    int ret = OB_SUCCESS;
+    ObAddr self;
+    obrpc::ObSrvRpcProxy rpc_proxy;
+    obrpc::ObCommonRpcProxy rs_rpc_proxy;
+    share::ObRsMgr rs_mgr;
+    self.set_ip_addr("127.0.0.1", 8086);
+    rpc::frame::ObReqTransport req_transport(NULL, NULL);
+    const int64_t ulmt = 128LL << 30;
+    const int64_t llmt = 128LL << 30;
+    ret = getter.add_tenant(OB_SYS_TENANT_ID, ulmt, llmt);
+    EXPECT_EQ(OB_SUCCESS, ret);
+    ret = getter.add_tenant(OB_SERVER_TENANT_ID, ulmt, llmt);
+    EXPECT_EQ(OB_SUCCESS, ret);
+    lib::set_memory_limit(128LL << 32);
+    return ret;
+  }
 
 private:
   void prepare_schema();
@@ -124,7 +146,6 @@ void TestDataBlockWriter::prepare_schema()
     column.set_collation_type(ObCollationType::CS_TYPE_UTF8MB4_GENERAL_CI);
     ASSERT_EQ(OB_SUCCESS, table_schema_.add_column(column));
   }
-  ObTmpFileManager::get_instance().destroy();
 }
 
 void TestDataBlockWriter::SetUp()
@@ -145,10 +166,9 @@ void TestDataBlockWriter::SetUp()
   table_data_desc_.extra_buf_size_ = (2LL << 20);
   table_data_desc_.compressor_type_ = ObCompressorType::NONE_COMPRESSOR;
   table_data_desc_.is_heap_table_ = false;
-  table_data_desc_.mem_chunk_size_ = (64LL << 20);
   table_data_desc_.max_mem_chunk_count_ = 128;
   table_data_desc_.merge_count_per_round_ = 64;
-  table_data_desc_.heap_table_mem_chunk_size_ = (64LL << 20);
+  table_data_desc_.session_count_ = 2;
   file_mgr_ = OB_NEWx(ObDirectLoadTmpFileManager, (&allocator_));
   ASSERT_TRUE(nullptr != file_mgr_);
   ret = file_mgr_->init(table_schema_.get_tenant_id());
@@ -166,20 +186,48 @@ void TestDataBlockWriter::SetUp()
   }
   // set observer memory limit
   CHUNK_MGR.set_limit(8L * 1024L * 1024L * 1024L);
-  ret = ObTmpFileManager::get_instance().init();
-  ASSERT_EQ(OB_SUCCESS, ret);
+  EXPECT_EQ(OB_SUCCESS, init_tenant_mgr());
+  ASSERT_EQ(OB_SUCCESS, common::ObClockGenerator::init());
+  ASSERT_EQ(OB_SUCCESS, tmp_file::ObTmpBlockCache::get_instance().init("tmp_block_cache", 1));
+  ASSERT_EQ(OB_SUCCESS, tmp_file::ObTmpPageCache::get_instance().init("sn_tmp_page_cache", 1));
 
-  static ObTenantBase tenant_ctx(1);
+
+  static ObTenantBase tenant_ctx(OB_SYS_TENANT_ID);
   ObTenantEnv::set_tenant(&tenant_ctx);
   ObTenantIOManager *io_service = nullptr;
+  EXPECT_EQ(OB_SUCCESS, ObTenantIOManager::mtl_new(io_service));
   EXPECT_EQ(OB_SUCCESS, ObTenantIOManager::mtl_init(io_service));
+  EXPECT_EQ(OB_SUCCESS, io_service->start());
+  tenant_ctx.set(io_service);
+
+  ObTimerService *timer_service = nullptr;
+  EXPECT_EQ(OB_SUCCESS, ObTimerService::mtl_new(timer_service));
+  EXPECT_EQ(OB_SUCCESS, ObTimerService::mtl_start(timer_service));
+  tenant_ctx.set(timer_service);
+
+  tmp_file::ObTenantTmpFileManager *tf_mgr = nullptr;
+  EXPECT_EQ(OB_SUCCESS, mtl_new_default(tf_mgr));
+  EXPECT_EQ(OB_SUCCESS, tmp_file::ObTenantTmpFileManager::mtl_init(tf_mgr));
+  tf_mgr->get_sn_file_manager().page_cache_controller_.write_buffer_pool_.default_wbp_memory_limit_ = 40*1024*1024;
+  EXPECT_EQ(OB_SUCCESS, tf_mgr->start());
+  tenant_ctx.set(tf_mgr);
+
+  ObTenantEnv::set_tenant(&tenant_ctx);
+  SERVER_STORAGE_META_SERVICE.is_started_ = true;
 }
 
 void TestDataBlockWriter::TearDown()
 {
   file_mgr_->~ObDirectLoadTmpFileManager();
-  ObTmpFileManager::get_instance().destroy();
+  tmp_file::ObTmpBlockCache::get_instance().destroy();
+  tmp_file::ObTmpPageCache::get_instance().destroy();
+  common::ObClockGenerator::destroy();
   ObKVGlobalCache::get_instance().destroy();
+  ObTimerService *timer_service = MTL(ObTimerService *);
+  ASSERT_NE(nullptr, timer_service);
+  timer_service->stop();
+  timer_service->wait();
+  timer_service->destroy();
   TestDataFilePrepare::TearDown();
 }
 

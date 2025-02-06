@@ -14,17 +14,7 @@
 
 #include "ob_weak_read_service.h"
 
-#include "share/rc/ob_context.h"                             // WITH_CONTEXT
-#include "share/rc/ob_tenant_base.h"                         // MTL
-#include "share/config/ob_server_config.h"                   // ObServerConfig
-#include "lib/container/ob_array.h"                          // ObArray
-#include "lib/thread/ob_thread_name.h"
-#include "observer/omt/ob_multi_tenant.h"                    // TenantIdList
-#include "ob_weak_read_util.h"                               //ObWeakReadUtil
-#include "storage/tx_storage/ob_ls_map.h"
-#include "storage/tx_storage/ob_ls_service.h"
 #include "storage/tx/ob_ts_mgr.h"
-#include "logservice/ob_log_service.h"
 
 namespace oceanbase
 {
@@ -96,8 +86,8 @@ int ObWeakReadService::get_server_version(const uint64_t tenant_id, SCN &version
 
   if (OB_SUCC(ret) && !version.is_valid()) {
     int old_ret = ret;
-    ret = OB_ERR_UNEXPECTED;
-    LOG_ERROR("get server version succ, but version is not valid snapshot version", K(ret), K(old_ret),
+    ret = OB_REPLICA_NOT_READABLE;
+    LOG_WARN("get server version succ, but version is not valid snapshot version", K(ret), K(old_ret),
         K(tenant_id), K(version));
   }
   LOG_DEBUG("[WRS] get_server_version", K(ret), K(tenant_id), K(version));

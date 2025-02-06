@@ -9,10 +9,10 @@
  * MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
  * See the Mulan PubL v2 for more details.
  */
+#define USING_LOG_PREFIX SHARE
 
-#include "share/detect/ob_detect_callback.h"
-#include "share/detect/ob_detect_manager.h"
-#include "sql/dtl/ob_dtl_basic_channel.h"
+#include "ob_detect_callback.h"
+#include "src/share/detect/ob_detect_rpc_proxy.h"
 #include "sql/engine/px/p2p_datahub/ob_p2p_dh_mgr.h"
 #include "sql/dtl/ob_dtl_rpc_channel.h"
 
@@ -259,18 +259,35 @@ int ObSqcDetectCB::do_callback()
 int ObSingleDfoDetectCB::do_callback()
 {
   int ret = OB_SUCCESS;
-  ret = MTL(sql::dtl::ObDTLIntermResultManager*)->erase_interm_result_info(key_, false);
-  ret = ret == OB_HASH_NOT_EXIST ? OB_SUCCESS : ret;
-  LIB_LOG(WARN, "[DM] single dfo erase_interm_result_info", K(ret), K(key_), K_(trace_id));
+  int clean_ret = OB_E(EventTable::EN_ENABLE_CLEAN_INTERM_RES) OB_SUCCESS;
+  if (OB_SUCC(clean_ret)) {
+    dtl::ObDTLIntermResultManager *interm_res_manager = MTL(dtl::ObDTLIntermResultManager*);
+    if (OB_ISNULL(interm_res_manager)) {
+      // ignore ret
+      LIB_LOG(WARN, "[DM] single dfo erase_interm_result_info, but interm_res_manager is null",
+                    K(ret), K(key_), K_(trace_id));
+    } else {
+      ret = interm_res_manager->erase_interm_result_info(key_, false);
+      ret = ret == OB_HASH_NOT_EXIST ? OB_SUCCESS : ret;
+      LIB_LOG(WARN, "[DM] single dfo erase_interm_result_info", K(ret), K(key_), K_(trace_id));
+    }
+  }
   return ret;
 }
 
 int ObTempTableDetectCB::do_callback()
 {
   int ret = OB_SUCCESS;
-  ret = MTL(sql::dtl::ObDTLIntermResultManager*)->erase_interm_result_info(key_, false);
-  ret = ret == OB_HASH_NOT_EXIST ? OB_SUCCESS : ret;
-  LIB_LOG(WARN, "[DM] temp table erase_interm_result_info", K(ret), K(key_), K_(trace_id));
+  dtl::ObDTLIntermResultManager *interm_res_manager = MTL(dtl::ObDTLIntermResultManager*);
+  if (OB_ISNULL(interm_res_manager)) {
+    // ignore ret
+    LIB_LOG(WARN, "[DM] temp table erase_interm_result_info, but interm_res_manager is null",
+                  K(ret), K(key_), K_(trace_id));
+  } else {
+    ret = interm_res_manager->erase_interm_result_info(key_, false);
+    ret = ret == OB_HASH_NOT_EXIST ? OB_SUCCESS : ret;
+    LIB_LOG(WARN, "[DM] temp table erase_interm_result_info", K(ret), K(key_), K_(trace_id));
+  }
   return ret;
 }
 

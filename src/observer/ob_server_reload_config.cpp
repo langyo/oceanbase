@@ -13,24 +13,20 @@
 #define USING_LOG_PREFIX SERVER
 
 #include "ob_server_reload_config.h"
-#include "lib/alloc/alloc_func.h"
-#include "lib/alloc/ob_malloc_allocator.h"
 #include "lib/alloc/ob_malloc_sample_struct.h"
-#include "lib/allocator/ob_tc_malloc.h"
 #include "lib/allocator/ob_mem_leak_checker.h"
-#include "share/scheduler/ob_tenant_dag_scheduler.h"
-#include "rpc/obrpc/ob_rpc_handler.h"
-#include "share/ob_cluster_version.h"
-#include "share/ob_task_define.h"
 #include "share/ob_resource_limit.h"
-#include "rootserver/ob_root_service.h"
-#include "observer/ob_server_struct.h"
 #include "observer/ob_server.h"
 #include "observer/ob_server_utils.h"
-#include "observer/ob_service.h"
-#include "storage/tx_storage/ob_tenant_freezer.h"
+#include "share/allocator/ob_shared_memory_allocator_mgr.h"
 #include "storage/compaction/ob_tenant_tablet_scheduler.h"
-#include "storage/slog/ob_storage_logger_manager.h"
+#include "storage/meta_store/ob_server_storage_meta_service.h"
+#include "share/ash/ob_active_sess_hist_list.h"
+#ifdef OB_BUILD_SHARED_STORAGE
+#include "storage/compaction/ob_tenant_ls_merge_scheduler.h"
+#include "share/compaction/ob_shared_storage_compaction_util.h"
+#include "storage/shared_storage/ob_disk_space_manager.h"
+#endif
 
 using namespace oceanbase::lib;
 using namespace oceanbase::common;
@@ -87,64 +83,62 @@ ObServerReloadConfig::~ObServerReloadConfig()
 
 int ObServerReloadConfig::operator()()
 {
-  int ret = OB_SUCCESS;
-  int real_ret = ret;
+  int tmp_ret = OB_SUCCESS;
+  int ret = tmp_ret;
   const bool is_arbitration_mode = OBSERVER.is_arbitration_mode();
 
   if (!gctx_.is_inited()) {
-    real_ret = ret = OB_INNER_STAT_ERROR;
-    LOG_WARN("gctx not init", "gctx inited", gctx_.is_inited(), K(ret));
+    ret = tmp_ret = OB_INNER_STAT_ERROR;
+    LOG_WARN("gctx not init", "gctx inited", gctx_.is_inited(), K(tmp_ret));
   } else {
-    if (OB_FAIL(ObReloadConfig::operator()())) {
-      real_ret = ret;
-      LOG_WARN("ObReloadConfig operator() failed", K(ret));
+    if (OB_TMP_FAIL(ObReloadConfig::operator()())) {
+      LOG_WARN("ObReloadConfig operator() failed", K(tmp_ret));
     }
-    if (OB_FAIL(gctx_.root_service_->reload_config())) {
-      real_ret = ret;
-      LOG_WARN("root_service_ reload_config failed", K(ret));
+    if (OB_TMP_FAIL(gctx_.root_service_->reload_config())) {
+      LOG_WARN("root_service_ reload_config failed", K(tmp_ret));
     }
-    if (OB_FAIL(gctx_.location_service_->reload_config())) {
-      real_ret = ret;
-      LOG_WARN("location service reload config failed", KR(ret));
+    if (OB_TMP_FAIL(gctx_.location_service_->reload_config())) {
+      LOG_WARN("location service reload config failed", KR(tmp_ret));
     }
-    if (OB_FAIL(ObClusterVersion::get_instance().reload_config())) {
-      real_ret = ret;
-      LOG_WARN("cluster version reload config failed", K(ret));
+    if (OB_TMP_FAIL(ObClusterVersion::get_instance().reload_config())) {
+      LOG_WARN("cluster version reload config failed", K(tmp_ret));
     }
 
-    if (OB_FAIL(OBSERVER.reload_config())) {
-      real_ret = ret;
-      LOG_WARN("reload configuration for ob service fail", K(ret));
+    if (OB_TMP_FAIL(OBSERVER.reload_config())) {
+      LOG_WARN("reload configuration for ob service fail", K(tmp_ret));
     }
-    if (OB_FAIL(OBSERVER.get_net_frame().reload_config())) {
-      real_ret = ret;
-      LOG_WARN("reload configuration for net frame fail", K(ret));
+    if (OB_TMP_FAIL(OBSERVER.get_net_frame().reload_config())) {
+      LOG_WARN("reload configuration for net frame fail", K(tmp_ret));
     }
-    if (OB_FAIL(OBSERVER.get_net_frame().reload_ssl_config())) {
-      real_ret = ret;
-      LOG_WARN("reload ssl config for net frame fail", K(ret));
+    if (OB_TMP_FAIL(OBSERVER.get_net_frame().reload_ssl_config())) {
+      LOG_WARN("reload ssl config for net frame fail", K(tmp_ret));
     }
-    if (OB_FAIL(OBSERVER.get_rl_mgr().reload_config())) {
-      real_ret = ret;
-      LOG_WARN("reload config for ratelimit manager fail", K(ret));
+    if (OB_TMP_FAIL(OBSERVER.get_rl_mgr().reload_config())) {
+      LOG_WARN("reload config for ratelimit manager fail", K(tmp_ret));
     }
-    if (OB_FAIL(ObTdeEncryptEngineLoader::get_instance().reload_config())) {
-      real_ret = ret;
-      LOG_WARN("reload config for tde encrypt engine fail", K(ret));
+    if (OB_TMP_FAIL(ObTdeEncryptEngineLoader::get_instance().reload_config())) {
+      LOG_WARN("reload config for tde encrypt engine fail", K(tmp_ret));
     }
-    if (OB_FAIL(ObSrvNetworkFrame::reload_rpc_auth_method())) {
-      real_ret = ret;
-      LOG_WARN("reload config for rpc auth method fail", K(ret));
+    if (OB_TMP_FAIL(ObSrvNetworkFrame::reload_rpc_auth_method())) {
+      LOG_WARN("reload config for rpc auth method fail", K(tmp_ret));
+    }
+    if (OB_TMP_FAIL(ObActiveSessHistList::get_instance().resize_ash_size())) {
+      LOG_WARN("failed to change ash size", K(tmp_ret));
     }
   }
   {
+#ifdef OB_BUILD_SHARED_STORAGE
+    if (GCTX.is_shared_storage_mode()) {
+      OB_SERVER_DISK_SPACE_MGR.reload_config(GCONF);
+    }
+#endif
+    enable_malloc_v2(GCONF._enable_malloc_v2);
     GMEMCONF.reload_config(GCONF);
     const int64_t limit_memory = GMEMCONF.get_server_memory_limit();
     OB_LOGGER.set_info_as_wdiag(GET_MIN_CLUSTER_VERSION() < CLUSTER_VERSION_4_1_0_0);
     // reload log config again after get MIN_CLUSTER_VERSION
-    if (OB_FAIL(ObReloadConfig::operator()())) {
-      real_ret = ret;
-      LOG_WARN("ObReloadConfig operator() failed", K(ret));
+    if (OB_TMP_FAIL(ObReloadConfig::operator()())) {
+      LOG_WARN("ObReloadConfig operator() failed", K(tmp_ret));
     }
     const int64_t reserved_memory = GCONF.cache_wash_threshold;
     const int64_t reserved_urgent_memory = GCONF.memory_reserved;
@@ -159,6 +153,7 @@ int ObServerReloadConfig::operator()()
 #endif
     ObMallocSampleLimiter::set_interval(GCONF._max_malloc_sample_interval,
                                      GCONF._min_malloc_sample_interval);
+    enable_memleak_light_backtrace(GCONF._enable_memleak_light_backtrace);
     if (!is_arbitration_mode) {
       ObIOConfig io_config;
       int64_t cpu_cnt = GCONF.cpu_count;
@@ -166,20 +161,21 @@ int ObServerReloadConfig::operator()()
         cpu_cnt = common::get_cpu_num();
       }
       io_config.disk_io_thread_count_ = GCONF.disk_io_thread_count;
+      io_config.sync_io_thread_count_ = GCONF.sync_io_thread_count;
       // In the 2.x version, reuse the sys_bkgd_io_timeout configuration item to indicate the data disk io timeout time
       // After version 3.1, use the data_storage_io_timeout configuration item.
       io_config.data_storage_io_timeout_ms_ = GCONF._data_storage_io_timeout / 1000L;
       io_config.data_storage_warning_tolerance_time_ = GCONF.data_storage_warning_tolerance_time;
       io_config.data_storage_error_tolerance_time_ = GCONF.data_storage_error_tolerance_time;
       if (!is_arbitration_mode
-          && OB_FAIL(ObIOManager::get_instance().set_io_config(io_config))) {
-        real_ret = ret;
-        LOG_WARN("reload io manager config fail, ", K(ret));
+          && OB_TMP_FAIL(ObIOManager::get_instance().set_io_config(io_config))) {
+        LOG_WARN("reload io manager config fail, ", K(tmp_ret));
       }
 
       (void)reload_diagnose_info_config(GCONF.enable_perf_event);
       (void)reload_trace_log_config(GCONF.enable_record_trace_log);
 
+      reload_tenant_freezer_config_();
       reload_tenant_scheduler_config_();
     }
   }
@@ -191,21 +187,15 @@ int ObServerReloadConfig::operator()()
         reserve);
   }
 
-
-
   int64_t cache_size = GCONF.memory_chunk_cache_size;
-  if (0 == cache_size) {
+  bool use_large_chunk_cache = 1 != cache_size;
+  if (0 == cache_size || 1 == cache_size) {
     cache_size = GMEMCONF.get_server_memory_limit();
     if (cache_size >= (32L<<30)) {
       cache_size -= (4L<<30);
     }
   }
-  int64_t large_cache_size = GCONF._memory_large_chunk_cache_size;
-  if (0 == large_cache_size) {
-    large_cache_size = lib::AChunkMgr::DEFAULT_LARGE_CHUNK_CACHE_SIZE;
-  }
-  lib::AChunkMgr::instance().set_max_chunk_cache_size(cache_size);
-  lib::AChunkMgr::instance().set_max_large_chunk_cache_size(large_cache_size);
+  lib::AChunkMgr::instance().set_max_chunk_cache_size(cache_size, use_large_chunk_cache);
 
   if (!is_arbitration_mode) {
     // Refresh cluster_id, cluster_name_hash for non arbitration mode
@@ -307,11 +297,10 @@ int ObServerReloadConfig::operator()()
     if (OB_TMP_FAIL(ObServerUtils::get_data_disk_info_in_config(data_disk_size,
                                                                 data_disk_percentage))) {
       LOG_ERROR("cal_all_part_disk_size failed", KR(tmp_ret));
-    } else if (OB_TMP_FAIL(SLOGGERMGR.get_reserved_size(reserved_size))) {
+    } else if (OB_TMP_FAIL(SERVER_STORAGE_META_SERVICE.get_reserved_size(reserved_size))) {
       LOG_WARN("fail to get reserved size", KR(tmp_ret), K(reserved_size));
-    } else if (OB_TMP_FAIL(OB_SERVER_BLOCK_MGR.resize_file(data_disk_size,
-                                                           data_disk_percentage,
-                                                           reserved_size))) {
+    } else if (OB_TMP_FAIL(OB_STORAGE_OBJECT_MGR.resize_local_device(
+        data_disk_size, data_disk_percentage, reserved_size))) {
       LOG_WARN("fail to resize file", KR(tmp_ret),
           K(data_disk_size), K(data_disk_percentage), K(reserved_size));
     }
@@ -328,7 +317,11 @@ int ObServerReloadConfig::operator()()
   {
     ObMallocAllocator::get_instance()->force_malloc_for_absent_tenant_ = GCONF._force_malloc_for_absent_tenant;
   }
-  return real_ret;
+
+  {
+    ObSigFaststack::get_instance().set_min_interval(GCONF._faststack_min_interval.get_value());
+  }
+  return ret;
 }
 
 void ObServerReloadConfig::reload_tenant_scheduler_config_()
@@ -340,10 +333,38 @@ void ObServerReloadConfig::reload_tenant_scheduler_config_()
     LOG_WARN("omt should not be null", K(ret));
   } else {
     auto f = [] () {
-      (void)MTL(ObTenantDagScheduler *)->reload_config();
-      (void)MTL(compaction::ObTenantTabletScheduler *)->reload_tenant_config();
+      (void) MTL(ObTenantDagScheduler *)->reload_config();
+      (void) MTL(compaction::ObTenantTabletScheduler *)->reload_tenant_config();
+#ifdef OB_BUILD_SHARED_STORAGE
+    if (GCTX.is_shared_storage_mode()) {
+      (void) MTL(compaction::ObTenantLSMergeScheduler *)->reload_tenant_config();
+    }
+#endif
+
       return OB_SUCCESS;
     };
+    omt->operate_in_each_tenant(f);
+  }
+}
+
+int ObServerReloadConfig::ObReloadTenantFreezerConfOp::operator()()
+{
+  int ret = OB_SUCCESS;
+  // NOTICE: tenant freezer should update before ObSharedMemAllocMgr.
+  MTL(ObTenantFreezer *)->reload_config();
+  MTL(ObSharedMemAllocMgr*)->update_throttle_config();
+  return ret;
+}
+
+void ObServerReloadConfig::reload_tenant_freezer_config_()
+{
+  int ret = OB_SUCCESS;
+  omt::ObMultiTenant *omt = GCTX.omt_;
+  if (OB_ISNULL(omt)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("omt should not be null", K(ret));
+  } else {
+    ObReloadTenantFreezerConfOp f;
     omt->operate_in_each_tenant(f);
   }
 }

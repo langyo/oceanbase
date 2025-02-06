@@ -12,22 +12,10 @@
 
 #define USING_LOG_PREFIX SQL_PC
 #include "ob_plan_cache_value.h"
-#include "share/schema/ob_schema_getter_guard.h"
-#include "share/schema/ob_schema_struct.h"
-#include "share/stat/ob_opt_stat_manager.h"
-#include "sql/parser/parse_malloc.h"
 #include "sql/resolver/ob_resolver_utils.h"
-#include "sql/ob_sql_context.h"
-#include "sql/executor/ob_task_executor_ctx.h"
-#include "sql/engine/ob_exec_context.h"
 #include "sql/plan_cache/ob_pcv_set.h"
-#include "sql/plan_cache/ob_plan_cache.h"
-#include "sql/plan_cache/ob_plan_set.h"
-#include "sql/session/ob_sql_session_info.h"
 #include "sql/udr/ob_udr_mgr.h"
 #include "sql/udr/ob_udr_utils.h"
-#include "share/ob_duplicate_scope_define.h"
-#include "pl/ob_pl_stmt.h"
 #include "share/resource_manager/ob_resource_manager.h"
 #include "sql/plan_cache/ob_values_table_compression.h"
 
@@ -55,6 +43,7 @@ int PCVSchemaObj::init(const ObTableSchema *schema)
     schema_type_ = TABLE_SCHEMA;
     table_type_ = schema->get_table_type();
     is_tmp_table_ = schema->is_tmp_table();
+    is_mv_container_table_ = schema->mv_container_table();
     // copy table name
     char *buf = nullptr;
     const ObString &tname = schema->get_table_name_str();
@@ -69,7 +58,8 @@ int PCVSchemaObj::init(const ObTableSchema *schema)
   return ret;
 }
 
-int PCVSchemaObj::init_with_synonym(const ObSimpleSynonymSchema *schema) {
+int PCVSchemaObj::init_with_synonym(const ObSimpleSynonymSchema *schema)
+{
   int ret = OB_SUCCESS;
   if (OB_ISNULL(schema) || OB_ISNULL(inner_alloc_)) {
     ret = OB_INVALID_ARGUMENT;
@@ -171,23 +161,24 @@ ObPlanCacheValue::ObPlanCacheValue()
     sessid_(OB_INVALID_ID),
     sess_create_time_(0),
     contain_sys_name_table_(false),
-#ifdef OB_BUILD_SPM
-    is_spm_closed_(false),
-#endif
     need_param_(true),
     is_nested_sql_(false),
     is_batch_execute_(false),
     has_dynamic_values_table_(false),
     stored_schema_objs_(pc_alloc_),
-    stmt_type_(stmt::T_MAX)
+    stmt_type_(stmt::T_MAX),
+    enable_rich_vector_format_(false),
+    switchover_epoch_(OB_INVALID_VERSION)
 {
   MEMSET(sql_id_, 0, sizeof(sql_id_));
+  MEMSET(format_sql_id_, 0, sizeof(format_sql_id_));
   not_param_index_.set_attr(ObMemAttr(MTL_ID(), "NotParamIdex"));
   neg_param_index_.set_attr(ObMemAttr(MTL_ID(), "NegParamIdex"));
   must_be_positive_idx_.set_attr(ObMemAttr(MTL_ID(), "MustBePosiIdx"));
   not_param_info_.set_attr(ObMemAttr(MTL_ID(), "NotParamInfo"));
   not_param_var_.set_attr(ObMemAttr(MTL_ID(), "NotParamVar"));
   param_charset_type_.set_attr(ObMemAttr(MTL_ID(), "ParamCharsType"));
+  formalize_prec_idx_.set_attr(ObMemAttr(MTL_ID(), "FMTIntPrecIdx"));
 }
 
 int ObPlanCacheValue::assign_udr_infos(ObPlanCacheCtx &pc_ctx)
@@ -200,7 +191,7 @@ int ObPlanCacheValue::assign_udr_infos(ObPlanCacheCtx &pc_ctx)
   } else {
     for (int64_t i = 0; OB_SUCC(ret) && i < tpl_sql_const_cons_.count(); ++i) {
       NotParamInfoList &not_param_list = tpl_sql_const_cons_.at(i);
-      std::sort(not_param_list.begin(), not_param_list.end(),
+      lib::ob_sort(not_param_list.begin(), not_param_list.end(),
               [](NotParamInfo &l, NotParamInfo &r) { return (l.idx_  < r.idx_); });
       for (int64_t j = 0; OB_SUCC(ret) && j < not_param_list.count(); ++j) {
         if (OB_FAIL(ob_write_string(*pc_alloc_,
@@ -237,8 +228,10 @@ int ObPlanCacheValue::init(ObPCVSet *pcv_set, const ObILibCacheObject *cache_obj
   } else if (FALSE_IT(mem_attr = pcv_set->get_plan_cache()->get_mem_attr())) {
       // do nothing
   } else if (OB_ISNULL(pc_alloc_ = pcv_set->get_allocator())) {
+    ret = OB_ERR_UNEXPECTED;
     LOG_WARN("invalid argument", K(pcv_set->get_allocator()));
   } else if (OB_ISNULL(pc_malloc_ = pcv_set->get_pc_allocator())) {
+    ret = OB_ERR_UNEXPECTED;
     LOG_WARN("invalid argument", K(pcv_set->get_pc_allocator()));
   } else if (OB_FAIL(outline_params_wrapper_.set_allocator(pc_alloc_, mem_attr))) {
     LOG_WARN("fail to set outline param wrapper allocator", K(ret));
@@ -256,21 +249,21 @@ int ObPlanCacheValue::init(ObPCVSet *pcv_set, const ObILibCacheObject *cache_obj
   }
 
   if (OB_SUCC(ret)) {
+    switchover_epoch_ = MTL_GET_SWITCHOVER_EPOCH();
     pcv_set_ = pcv_set;
     //use_global_location_cache_ = !cache_obj->is_contain_virtual_table();
     outline_state_ = plan->get_outline_state();
     sys_schema_version_ = plan->get_sys_schema_version();
     tenant_schema_version_ = plan->get_tenant_schema_version();
     sql_traits_ = pc_ctx.sql_traits_;
-#ifdef OB_BUILD_SPM
-    is_spm_closed_ = pcv_set->get_spm_closed();
-#endif
+    enable_rich_vector_format_ = static_cast<const ObPhysicalPlan *>(plan)->get_use_rich_format();
     stmt_type_ = plan->get_stmt_type();
     need_param_ = plan->need_param();
     is_nested_sql_ = ObSQLUtils::is_nested_sql(&pc_ctx.exec_ctx_);
     is_batch_execute_ = pc_ctx.sql_ctx_.is_batch_params_execute();
     has_dynamic_values_table_ = pc_ctx.exec_ctx_.has_dynamic_values_table();
     MEMCPY(sql_id_, pc_ctx.sql_ctx_.sql_id_, sizeof(pc_ctx.sql_ctx_.sql_id_));
+    MEMCPY(format_sql_id_, pc_ctx.sql_ctx_.format_sql_id_, sizeof(pc_ctx.sql_ctx_.format_sql_id_));
     if (OB_FAIL(not_param_index_.add_members2(pc_ctx.not_param_index_))) {
       LOG_WARN("fail to add not param index members", K(ret));
     } else if (OB_FAIL(neg_param_index_.add_members2(pc_ctx.neg_param_index_))) {
@@ -278,6 +271,8 @@ int ObPlanCacheValue::init(ObPCVSet *pcv_set, const ObILibCacheObject *cache_obj
     } else if (OB_FAIL(param_charset_type_.assign(pc_ctx.param_charset_type_))) {
       LOG_WARN("fail to assign param charset type", K(ret));
     } else if (OB_FAIL(must_be_positive_idx_.add_members2(pc_ctx.must_be_positive_index_))) {
+      LOG_WARN("failed to add bitset members", K(ret));
+    } else if (OB_FAIL(formalize_prec_idx_.add_members2(pc_ctx.formalize_prec_index_))) {
       LOG_WARN("failed to add bitset members", K(ret));
     } else if (OB_FAIL(set_stored_schema_objs(plan->get_dependency_table(),
                                               pc_ctx.sql_ctx_.schema_guard_))) {
@@ -309,31 +304,43 @@ int ObPlanCacheValue::init(ObPCVSet *pcv_set, const ObILibCacheObject *cache_obj
           }
         } //for end
         if (OB_SUCC(ret)) {
-          std::sort(not_param_info_.begin(), not_param_info_.end(),
+          lib::ob_sort(not_param_info_.begin(), not_param_info_.end(),
               [](NotParamInfo &l, NotParamInfo &r) { return (l.idx_  < r.idx_); });
         }
       }
       //deep copy constructed sql
       if (OB_SUCC(ret)) {
         ObString outline_signature_str;
+        ObString outline_format_signature_str;
         if (PC_PS_MODE == pc_ctx.mode_ || PC_PL_MODE == pc_ctx.mode_) {
           outline_signature_str = pc_ctx.raw_sql_;
+          outline_format_signature_.reset();
         } else {
           outline_signature_str = pc_ctx.sql_ctx_.spm_ctx_.bl_key_.constructed_sql_;
+          outline_format_signature_str = pc_ctx.sql_ctx_.spm_ctx_.bl_key_.format_sql_;
         }
-        int64_t size = outline_signature_str.get_serialize_size();
-        if (0 == size) {
+        int64_t size1 = outline_signature_str.get_serialize_size();
+        int64_t size2 = outline_format_signature_str.get_serialize_size();
+        if (0 == size1 || 0 == size2) {
           ret = OB_ERR_UNEXPECTED;
         } else {
-          char *buf = NULL;
-          int64_t pos_s = 0;
-          if (OB_UNLIKELY(NULL == (buf = (char *)pc_alloc_->alloc(size)))) {
+          char *buf1 = NULL;
+          char *buf2 = NULL;
+          int64_t pos_s1 = 0;
+          int64_t pos_s2 = 0;
+          if (OB_UNLIKELY(NULL == (buf1 = (char *)pc_alloc_->alloc(size1)))) {
             ret = OB_ALLOCATE_MEMORY_FAILED;
             LOG_WARN("fail to alloc mem", K(ret));
-          } else if (OB_FAIL(outline_signature_str.serialize(buf, size, pos_s))) {
+          } else if (OB_UNLIKELY(NULL == (buf2 = (char *)pc_alloc_->alloc(size2)))) {
+            ret = OB_ALLOCATE_MEMORY_FAILED;
+            LOG_WARN("fail to alloc mem", K(ret));
+          } else if (OB_FAIL(outline_signature_str.serialize(buf1, size1, pos_s1))) {
+            LOG_WARN("fail to serialize constructed_sql_", K(ret));
+          } else if (OB_FAIL(outline_format_signature_str.serialize(buf2, size2, pos_s2))) {
             LOG_WARN("fail to serialize constructed_sql_", K(ret));
           } else {
-            outline_signature_.assign_ptr(buf, static_cast<ObString::obstr_size_t>(pos_s));
+            outline_signature_.assign_ptr(buf1, static_cast<ObString::obstr_size_t>(pos_s1));
+            outline_format_signature_.assign_ptr(buf2, static_cast<ObString::obstr_size_t>(pos_s2));
           }
         }
       }
@@ -470,12 +477,14 @@ int ObPlanCacheValue::choose_plan(ObPlanCacheCtx &pc_ctx,
   //检查在pcv中缓存的该sql涉及的view 及 table的version，
   //如果不为最新的,在plan cache层会删除该value，并重新add plan
   //TODO shengle 此处拷贝需要想办法处理掉
-  bool enable_baseline = false;
-  bool captrue_baseline = false;
+  int64_t spm_mode = 0;
   bool need_check_schema = (schema_array.count() != 0);
+  int64_t new_switchover_epoch = MTL_GET_SWITCHOVER_EPOCH();
   if (schema_array.count() == 0 && stored_schema_objs_.count() == 0) {
     need_check_schema = true;
   }
+  ObBasicSessionInfo::ForceRichFormatStatus orig_rich_format_status = ObBasicSessionInfo::ForceRichFormatStatus::Disable;
+  bool orig_phy_ctx_rich_format = false;
   if (stmt::T_NONE == pc_ctx.sql_ctx_.stmt_type_) {
     //sql_ctx_.stmt_type_ != stmt::T_NONE means this calling in nested sql,
     //can't cover the first stmt type in sql context
@@ -484,12 +493,11 @@ int ObPlanCacheValue::choose_plan(ObPlanCacheCtx &pc_ctx,
   if (OB_ISNULL(session = pc_ctx.exec_ctx_.get_my_session())) {
     ret = OB_ERR_UNEXPECTED;
     SQL_PC_LOG(ERROR, "got session is NULL", K(ret));
+  } else if (FALSE_IT(orig_rich_format_status = session->get_force_rich_format_status())) {
   } else if (FALSE_IT(session->set_stmt_type(stmt_type_))) {
-  } else if (OB_FAIL(session->get_use_plan_baseline(enable_baseline))) {
-    LOG_WARN("fail to get use plan baseline", K(ret));
-  } else if (OB_FAIL(session->get_capture_plan_baseline(captrue_baseline))) {
-    LOG_WARN("failed to capture plan baseline", K(ret));
-  } else if (enable_baseline || captrue_baseline) {
+  } else if (OB_FAIL(session->get_spm_mode(spm_mode))) {
+    LOG_WARN("fail to get spm mode", K(ret));
+  } else if (spm_mode > SPM_MODE_DISABLE) {
     if (OB_FAIL(ob_write_string(pc_ctx.allocator_,
                                 constructed_sql_,
                                 pc_ctx.sql_ctx_.spm_ctx_.bl_key_.constructed_sql_))) {
@@ -505,6 +513,10 @@ int ObPlanCacheValue::choose_plan(ObPlanCacheCtx &pc_ctx,
   } else if (OB_INVALID_ID == (tenant_id = session->get_effective_tenant_id())) {
     ret = OB_ERR_UNEXPECTED;
     SQL_PC_LOG(ERROR, "got effective tenant id is invalid", K(ret));
+  } else if (OB_UNLIKELY(switchover_epoch_ != new_switchover_epoch)) {
+    ret = OB_OLD_SCHEMA_VERSION;
+    switchover_epoch_ = new_switchover_epoch;
+    SQL_PC_LOG(TRACE, "switchover_epoch changed, view or table is old version", KR(ret));
   } else if (OB_FAIL(check_value_version_for_get(pc_ctx.sql_ctx_.schema_guard_,
                                                  need_check_schema,
                                                  schema_array,
@@ -529,7 +541,7 @@ int ObPlanCacheValue::choose_plan(ObPlanCacheCtx &pc_ctx,
     } else if (OB_UNLIKELY(pc_ctx.exec_ctx_.has_dynamic_values_table())) {
       if (OB_FAIL(ObValuesTableCompression::resolve_params_for_values_clause(pc_ctx, stmt_type_,
                   not_param_info_, param_charset_type_, neg_param_index_, not_param_index_,
-                  must_be_positive_idx_, params))) {
+                  must_be_positive_idx_, formalize_prec_idx_, params))) {
         LOG_WARN("failed to resolve_params_for_values_clause ", K(ret));
       }
     } else if (OB_FAIL(resolver_params(pc_ctx,
@@ -538,6 +550,7 @@ int ObPlanCacheValue::choose_plan(ObPlanCacheCtx &pc_ctx,
                                        neg_param_index_,
                                        not_param_index_,
                                        must_be_positive_idx_,
+                                       formalize_prec_idx_,
                                        pc_ctx.fp_result_.raw_params_,
                                        params))) {
       LOG_WARN("fail to resolver raw params", K(ret));
@@ -552,7 +565,12 @@ int ObPlanCacheValue::choose_plan(ObPlanCacheCtx &pc_ctx,
     if (OB_SUCC(ret)) {
       ObPhysicalPlanCtx *phy_ctx = pc_ctx.exec_ctx_.get_physical_plan_ctx();
       if (NULL != phy_ctx) {
+        orig_phy_ctx_rich_format = phy_ctx->is_rich_format();
         phy_ctx->set_original_param_cnt(phy_ctx->get_param_store().count());
+        phy_ctx->set_rich_format(enable_rich_vector_format_);
+        session->set_force_rich_format(enable_rich_vector_format_ ?
+                                         ObBasicSessionInfo::ForceRichFormatStatus::FORCE_ON :
+                                         ObBasicSessionInfo::ForceRichFormatStatus::FORCE_OFF);
         if (OB_FAIL(phy_ctx->init_datum_param_store())) {
           LOG_WARN("fail to init datum param store", K(ret));
         }
@@ -588,57 +606,86 @@ int ObPlanCacheValue::choose_plan(ObPlanCacheCtx &pc_ctx,
               SQL_PC_LOG(TRACE, "failed to select plan in plan set", K(ret));
             }
           } else if (NULL != params) {
-            // set res map rule
-            uint64_t rule_id = plan_set->res_map_rule_id_;
-            int64_t param_idx = plan_set->res_map_rule_param_idx_;
-            uint64_t tenant_id = OB_INVALID_ID;
-            ObString param_text;
-            ObCollationType cs_type = CS_TYPE_INVALID;
-            if (rule_id != OB_INVALID_ID && param_idx != OB_INVALID_INDEX
-                && pc_ctx.sql_ctx_.enable_sql_resource_manage_) {
-              if (OB_UNLIKELY(param_idx < 0 || param_idx >= params->count())) {
-                ret = OB_ERR_UNEXPECTED;
-                LOG_ERROR("unexpected res map rule param idx", K(ret), K(rule_id), K(param_idx), K(params->count()));
-              } else if (OB_FAIL(session->get_collation_connection(cs_type))) {
-                LOG_WARN("get collation connection failed", K(ret));
-              } else if (OB_INVALID_ID == (tenant_id = session->get_effective_tenant_id())) {
-                ret = OB_ERR_UNEXPECTED;
-                SQL_PC_LOG(ERROR, "got effective tenant id is invalid", K(ret));
-              } else if (OB_FAIL(ObObjCaster::get_obj_param_text(
-                                      params->at(plan_set->res_map_rule_param_idx_),
-                                      pc_ctx.raw_sql_, pc_ctx.allocator_,
-                                      cs_type, param_text))) {
-                LOG_WARN("get obj param text failed", K(ret));
-              } else {
-                uint64_t group_id = G_RES_MGR.get_col_mapping_rule_mgr().get_column_mapping_group_id(
-                                      tenant_id,
-                                      plan_set->res_map_rule_id_,
-                                      session->get_user_name(),
-                                      param_text);
-                if (OB_INVALID_ID == group_id) {
-                   // OB_INVALID_ID means current user+param_value is not defined in mapping rule,
-                   // get group_id according to current user.
+            if (pc_ctx.sql_ctx_.enable_sql_resource_manage_) {
+              uint64_t rule_id = plan_set->resource_map_rule_.get_res_map_rule_id();
+              int64_t param_idx = plan_set->resource_map_rule_.get_res_map_rule_param_idx();
+              if (plan_set->resource_map_rule_.use_hint_control_resource()
+                  || (rule_id != OB_INVALID_ID && param_idx != OB_INVALID_INDEX)) {
+                uint64_t final_choosed_group_id = OB_INVALID_ID;
+                // 1. check hint first
+                if (plan_set->resource_map_rule_.use_hint_control_resource()) {
+                  share::ObGroupName group_name;
+                  group_name.set_value(plan_set->resource_map_rule_.get_resource_group());
+                  ObResourceMappingRuleManager &rule_mgr = G_RES_MGR.get_mapping_rule_mgr();
+                  if (OB_FAIL(rule_mgr.get_group_id_by_name(tenant_id, group_name,
+                                                            final_choosed_group_id))) {
+                    if (OB_HASH_NOT_EXIST == ret) {
+                      // create directive and delete it immediately，may haven't beed flush into
+                      // disk storage group not exist, or hint is invalid，need to try to match
+                      // column rule
+                      ret = OB_SUCCESS;
+                      LOG_TRACE("resource group specified by hint did not exist",
+                                K(plan_set->resource_map_rule_.get_resource_group()), K(tenant_id));
+                    } else {
+                      LOG_WARN("fail get group id", K(ret), K(final_choosed_group_id),
+                               K(group_name));
+                    }
+                  }
+                } else {
+                  // 2. check col res map rule
+                  uint64_t tenant_id = OB_INVALID_ID;
+                  ObString param_text;
+                  ObCollationType cs_type = CS_TYPE_INVALID;
+                  if (OB_UNLIKELY(param_idx < 0 || param_idx >= params->count())) {
+                    ret = OB_ERR_UNEXPECTED;
+                    LOG_ERROR("unexpected res map rule param idx", K(ret), K(rule_id), K(param_idx),
+                              K(params->count()));
+                  } else if (OB_FAIL(session->get_collation_connection(cs_type))) {
+                    LOG_WARN("get collation connection failed", K(ret));
+                  } else if (OB_INVALID_ID == (tenant_id = session->get_effective_tenant_id())) {
+                    ret = OB_ERR_UNEXPECTED;
+                    SQL_PC_LOG(ERROR, "got effective tenant id is invalid", K(ret));
+                  } else if (OB_FAIL(ObObjCaster::get_obj_param_text(
+                               params->at(param_idx), pc_ctx.raw_sql_, pc_ctx.allocator_, cs_type,
+                               param_text))) {
+                    LOG_WARN("get obj param text failed", K(ret));
+                  } else {
+                    final_choosed_group_id =
+                      G_RES_MGR.get_col_mapping_rule_mgr().get_column_mapping_group_id(
+                        tenant_id, rule_id, session->get_user_name(), param_text);
+                  }
+                }
+                // 3.use default resource group if not match any resource group
+                // OB_INVALID_ID means current neither
+                // resource group specified by hint
+                // nor
+                // user+param_value column rule
+                // is in used
+                // get group_id according to current user.
+                if (OB_SUCC(ret) && OB_INVALID_ID == final_choosed_group_id) {
                   if (OB_FAIL(G_RES_MGR.get_mapping_rule_mgr().get_group_id_by_user(
-                                tenant_id, session->get_user_id(), group_id))) {
+                        tenant_id, session->get_user_id(), final_choosed_group_id))) {
                     LOG_WARN("get group id by user failed", K(ret));
-                  } else if (OB_INVALID_ID == group_id) {
+                  } else if (OB_INVALID_ID == final_choosed_group_id) {
                     // if not set consumer_group for current user, use OTHER_GROUP by default.
-                    group_id = 0;
+                    final_choosed_group_id = 0;
                   }
                 }
                 if (OB_SUCC(ret)) {
-                  session->set_expect_group_id(group_id);
-                  if (group_id == THIS_WORKER.get_group_id()) {
+                  if (final_choosed_group_id == THIS_WORKER.get_group_id()) {
                     // do nothing if equals to current group id.
                   } else if (session->get_is_in_retry()
-                            && OB_NEED_SWITCH_CONSUMER_GROUP
-                                == session->get_retry_info().get_last_query_retry_err()) {
-                    LOG_ERROR("use unexpected group when retry, maybe set packet retry failed before",
-                              K(group_id), K(THIS_WORKER.get_group_id()), K(rule_id), K(param_idx));
+                             && OB_NEED_SWITCH_CONSUMER_GROUP
+                                  == session->get_retry_info().get_last_query_retry_err()) {
+                    LOG_ERROR(
+                      "use unexpected group when retry, maybe set packet retry failed before",
+                      K(final_choosed_group_id), K(THIS_WORKER.get_group_id()),
+                      K(plan_set->resource_map_rule_));
                   } else {
+                    session->set_expect_group_id(final_choosed_group_id);
                     ret = OB_NEED_SWITCH_CONSUMER_GROUP;
                   }
-                  LOG_TRACE("get expect rule id", K(ret), K(group_id),
+                  LOG_TRACE("get expect rule id", K(ret), K(final_choosed_group_id),
                             K(THIS_WORKER.get_group_id()), K(session->get_expect_group_id()),
                             K(pc_ctx.raw_sql_));
                 }
@@ -673,6 +720,15 @@ int ObPlanCacheValue::choose_plan(ObPlanCacheCtx &pc_ctx,
     plan_out = plan;
     pc_ctx.sql_traits_ = sql_traits_; //used for check read only
   }
+  // reset force rich format status
+  if (NULL == plan) {
+    if (session != nullptr) {
+      session->set_force_rich_format(orig_rich_format_status);
+    }
+    if (pc_ctx.exec_ctx_.get_physical_plan_ctx() != nullptr) {
+      pc_ctx.exec_ctx_.get_physical_plan_ctx()->set_rich_format(orig_phy_ctx_rich_format);
+    }
+  }
   return ret;
 }
 
@@ -683,6 +739,7 @@ int ObPlanCacheValue::resolver_params(ObPlanCacheCtx &pc_ctx,
                                       const ObBitSet<> &neg_param_index,
                                       const ObBitSet<> &not_param_index,
                                       const ObBitSet<> &must_be_positive_idx,
+                                      const ObBitSet<> &formalize_prec_idx,
                                       ObIArray<ObPCParam *> &raw_params,
                                       ParamStore *obj_params)
 {
@@ -692,6 +749,7 @@ int ObPlanCacheValue::resolver_params(ObPlanCacheCtx &pc_ctx,
   const int64_t raw_param_cnt = raw_params.count();
   ObObjParam value;
   bool enable_decimal_int = false;
+  bool enable_mysql_compatible_dates = false;
   if (OB_ISNULL(session) || OB_ISNULL(phy_ctx)) {
     ret = OB_INVALID_ARGUMENT;
     SQL_PC_LOG(WARN, "invalid argument", K(ret), KP(session), KP(phy_ctx));
@@ -703,6 +761,9 @@ int ObPlanCacheValue::resolver_params(ObPlanCacheCtx &pc_ctx,
                K(raw_param_cnt), K(param_charset_type.count()), K(pc_ctx.raw_sql_));
   } else if (OB_FAIL(ObSQLUtils::check_enable_decimalint(session, enable_decimal_int))) {
     LOG_WARN("fail to check enable decimal int", K(ret));
+   } else if (OB_FAIL(ObSQLUtils::check_enable_mysql_compatible_dates(session, false,
+                          enable_mysql_compatible_dates))) {
+    LOG_WARN("fail to check enable mysql compatible dates", K(ret));
   } else {
     CHECK_COMPATIBILITY_MODE(session);
     ObCollationType collation_connection = static_cast<ObCollationType>(session->get_local_collation_connection());
@@ -710,8 +771,9 @@ int ObPlanCacheValue::resolver_params(ObPlanCacheCtx &pc_ctx,
     for (int64_t i = 0; OB_SUCC(ret) && i < raw_param_cnt; i++) {
       bool is_param = false;
       if (OB_FAIL(ObResolverUtils::resolver_param(pc_ctx, *session, phy_ctx->get_param_store_for_update(), stmt_type,
-                  param_charset_type.at(i), neg_param_index, not_param_index, must_be_positive_idx,
-                  raw_params.at(i), i, value, is_param, enable_decimal_int))) {
+                  param_charset_type.at(i), neg_param_index, not_param_index, must_be_positive_idx, formalize_prec_idx,
+                  raw_params.at(i), i, enable_mysql_compatible_dates, value, is_param,
+                  enable_decimal_int))) {
         SQL_PC_LOG(WARN, "failed to resolver param", K(ret), K(i));
       } else if (is_param && OB_FAIL(obj_params->push_back(value))) {
         SQL_PC_LOG(WARN, "fail to push item to array", K(ret));
@@ -763,6 +825,7 @@ int ObPlanCacheValue::resolve_multi_stmt_params(ObPlanCacheCtx &pc_ctx)
                                                  neg_param_index_,
                                                  not_param_index_,
                                                  must_be_positive_idx_,
+                                                 formalize_prec_idx_,
                                                  param_num,
                                                  *ab_params)) {
 
@@ -793,6 +856,7 @@ int ObPlanCacheValue::resolve_multi_stmt_params(ObPlanCacheCtx &pc_ctx)
                                                    neg_param_index_,
                                                    not_param_index_,
                                                    must_be_positive_idx_,
+                                                   formalize_prec_idx_,
                                                    *ab_params))) {
       LOG_WARN("failed to check multi stmt param type", K(ret));
     } else {
@@ -809,6 +873,7 @@ int ObPlanCacheValue::resolve_insert_multi_values_param(ObPlanCacheCtx &pc_ctx,
                                                         const ObBitSet<> &neg_param_index,
                                                         const ObBitSet<> &not_param_index,
                                                         const ObBitSet<> &must_be_positive_idx,
+                                                        const ObBitSet<> &formalize_prec_idx,
                                                         int64_t params_num,
                                                         ParamStore &param_store)
 {
@@ -830,6 +895,7 @@ int ObPlanCacheValue::resolve_insert_multi_values_param(ObPlanCacheCtx &pc_ctx,
                                        neg_param_index,
                                        not_param_index,
                                        must_be_positive_idx,
+                                       formalize_prec_idx,
                                        *raw_param_array,
                                        &temp_obj_params))) {
       LOG_WARN("failed to resolve parames", K(ret));
@@ -883,6 +949,7 @@ int ObPlanCacheValue::check_multi_stmt_param_type(ObPlanCacheCtx &pc_ctx,
                                                   const ObBitSet<> &neg_param_index,
                                                   const ObBitSet<> &not_param_index,
                                                   const ObBitSet<> &must_be_positive_idx,
+                                                  const ObBitSet<> &formalize_prec_idx,
                                                   ParamStore &param_store)
 {
   int ret = OB_SUCCESS;
@@ -900,6 +967,7 @@ int ObPlanCacheValue::check_multi_stmt_param_type(ObPlanCacheCtx &pc_ctx,
                                 neg_param_index,
                                 not_param_index,
                                 must_be_positive_idx,
+                                formalize_prec_idx,
                                 pc_ctx.multi_stmt_fp_results_.at(i).raw_params_,
                                 &temp_obj_params))) {
       LOG_WARN("failed to resolve parames", K(ret));
@@ -1382,6 +1450,10 @@ void ObPlanCacheValue::reset()
       pc_alloc_->free(outline_signature_.ptr());
       outline_signature_.reset();
     }
+    if (NULL != outline_format_signature_.ptr()) {
+      pc_alloc_->free(outline_format_signature_.ptr());
+      outline_format_signature_.reset();
+    }
     if (NULL != constructed_sql_.ptr()) {
       pc_alloc_->free(constructed_sql_.ptr());
       constructed_sql_.reset();
@@ -1391,6 +1463,7 @@ void ObPlanCacheValue::reset()
   not_param_index_.reset();
   not_param_var_.reset();
   neg_param_index_.reset();
+  formalize_prec_idx_.reset();
   param_charset_type_.reset();
   sql_traits_.reset();
   reset_tpl_sql_const_cons();
@@ -1418,6 +1491,7 @@ void ObPlanCacheValue::reset()
     }
   }
   stored_schema_objs_.reset();
+  enable_rich_vector_format_ = false;
   pcv_set_ = NULL; //放最后，前面可能存在需要pcv_set
 }
 
@@ -1501,7 +1575,6 @@ int ObPlanCacheValue::check_value_version(bool need_check_schema,
     if (outline_version != outline_state_.outline_version_) {
       is_old_version = true;
     } else if (OB_FAIL(check_dep_schema_version(schema_array,
-                                                stored_schema_objs_,
                                                 is_old_version))) {
       LOG_WARN("failed to check schema obj versions", K(ret));
     } else {
@@ -1513,19 +1586,21 @@ int ObPlanCacheValue::check_value_version(bool need_check_schema,
 
 //检查table schema version是否过期, get plan时使用
 int ObPlanCacheValue::check_dep_schema_version(const ObIArray<PCVSchemaObj> &schema_array,
-                                               const ObIArray<PCVSchemaObj *> &pcv_schema_objs,
                                                bool &is_old_version)
 {
   int ret = OB_SUCCESS;
   is_old_version = false;
-  int64_t table_count = pcv_schema_objs.count();
+  int64_t table_count = schema_array.count();
+  ObSEArray<PCVSchemaObj*, 4> check_stored_schema;
 
-  if (schema_array.count() != pcv_schema_objs.count()) {
+  if (OB_FAIL(remove_mv_schema(schema_array, check_stored_schema))) {
+    LOG_WARN("failed to remove mv schema", K(ret));
+  } else if (schema_array.count() != check_stored_schema.count()) {
     ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("table count do not match", K(ret), K(schema_array.count()), K(pcv_schema_objs.count()));
+    LOG_WARN("table count do not match", K(ret), K(schema_array.count()), K(check_stored_schema.count()));
   } else {
     for (int64_t i = 0; OB_SUCC(ret) && !is_old_version && i < table_count; ++i) {
-      const PCVSchemaObj *schema_obj1 = pcv_schema_objs.at(i);
+      const PCVSchemaObj *schema_obj1 = check_stored_schema.at(i);
       const PCVSchemaObj &schema_obj2 = schema_array.at(i);
       if (nullptr == schema_obj1) {
         ret = OB_ERR_UNEXPECTED;
@@ -1567,18 +1642,38 @@ int ObPlanCacheValue::get_outline_version(ObSchemaGetterGuard &schema_guard,
     //do nothing
   } else {
     const ObString &signature = outline_signature_;
+    const ObString &format_signature = outline_format_signature_;
+    // try normal
     if (OB_FAIL(schema_guard.get_outline_info_with_signature(tenant_id,
             database_id,
             signature,
+            false,
             outline_info))) {
       LOG_WARN("failed to get_outline_info", K(tenant_id), K(database_id), K(signature));
-    } else if (NULL == outline_info) {
-      if (OB_FAIL(schema_guard.get_outline_info_with_sql_id(tenant_id,
-              database_id,
-              ObString::make_string(sql_id_),
-              outline_info))) {
+    // try format
+    } else if (NULL == outline_info &&
+              OB_FAIL(schema_guard.get_outline_info_with_signature(tenant_id,
+                      database_id,
+                      format_signature,
+                      true,
+                      outline_info))) {
         LOG_WARN("failed to get_outline_info", K(tenant_id), K(database_id), K(signature));
-      }
+    // try normal
+    } else if (NULL == outline_info && !ObString::make_string(sql_id_).empty() &&
+              OB_FAIL(schema_guard.get_outline_info_with_sql_id(tenant_id,
+                      database_id,
+                      ObString::make_string(sql_id_),
+                      false,
+                      outline_info))) {
+        LOG_WARN("failed to get_outline_info", K(tenant_id), K(database_id), K(signature));
+    // try format
+    } else if (NULL == outline_info && !ObString::make_string(format_sql_id_).empty() &&
+              OB_FAIL(schema_guard.get_outline_info_with_sql_id(tenant_id,
+                      database_id,
+                      ObString::make_string(format_sql_id_),
+                      true,
+                      outline_info))) {
+        LOG_WARN("failed to get_outline_info", K(tenant_id), K(database_id), K(signature));
     }
     if (OB_SUCC(ret)) {
       if (NULL == outline_info) {
@@ -1629,7 +1724,8 @@ int ObPlanCacheValue::match(ObPlanCacheCtx &pc_ctx,
       } else if (OB_ISNULL(ps_param)) {
         ret = OB_INVALID_ARGUMENT;
         LOG_WARN("invalid argument", K(ps_param));
-      } else if (ps_param->is_pl_extend() || !not_param_var_[i].ps_param_.can_compare(*ps_param)) {
+      } else if (ps_param->is_pl_extend() || not_param_var_[i].ps_param_.is_pl_extend()
+                  || !not_param_var_[i].ps_param_.can_compare(*ps_param)) {
         is_same = false;
         LOG_WARN("can not compare", K(not_param_var_[i].ps_param_), K(*ps_param), K(i));
       } else if (not_param_var_[i].ps_param_.is_string_type()
@@ -1937,12 +2033,26 @@ int ObPlanCacheValue::get_all_dep_schema(ObPlanCacheCtx &pc_ctx,
           tenant_id = get_tenant_id_by_object_id(stored_schema_objs_.at(i)->schema_id_);
         } else if (SYNONYM_SCHEMA == pcv_schema->schema_type_) {
           const ObSimpleSynonymSchema *synonym_schema = nullptr;
-          if (OB_FAIL(schema_guard.get_synonym_info(
-                tenant_id, database_id, pcv_schema->table_name_, synonym_schema))) {
+          const ObSimpleTableSchemaV2 *sn_table_schema = nullptr; // table with the same name
+          uint64_t synonym_database_id =
+            OB_PUBLIC_SCHEMA_ID == pcv_schema->database_id_ ? database_id : pcv_schema->database_id_;
+          if (OB_FAIL(schema_guard.get_simple_table_schema(
+                tenant_id, synonym_database_id, pcv_schema->table_name_, false, sn_table_schema))) {
+            LOG_WARN("failed to get table schema", K(pcv_schema->schema_id_), K(ret));
+          } else if (nullptr != sn_table_schema) {
+            ret = OB_OLD_SCHEMA_VERSION;
+            LOG_INFO("a table with the same name exists. regenerate the plan", K(ret),
+                     K(synonym_database_id), K(pcv_schema->table_name_));
+          } else if (OB_FAIL(schema_guard.get_synonym_info(
+                       tenant_id, synonym_database_id, pcv_schema->table_name_, synonym_schema))) {
             LOG_WARN("failed to get private synonym", K(ret));
-          } else if (OB_ISNULL(synonym_schema) && OB_FAIL(schema_guard.get_synonym_info(
-                tenant_id, OB_PUBLIC_SCHEMA_ID, pcv_schema->table_name_, synonym_schema))) {
+          } else if (OB_ISNULL(synonym_schema)
+                     && OB_FAIL(schema_guard.get_synonym_info(tenant_id, OB_PUBLIC_SCHEMA_ID,
+                                                              pcv_schema->table_name_,
+                                                              synonym_schema))) {
             LOG_WARN("failed to get public synonym", K(ret));
+          }
+          if (OB_FAIL(ret)) {
           } else if (OB_NOT_NULL(synonym_schema)) {
             tmp_schema_obj.database_id_ = synonym_schema->get_database_id();
             tmp_schema_obj.schema_version_ = synonym_schema->get_schema_version();
@@ -2029,6 +2139,41 @@ int ObPlanCacheValue::get_all_dep_schema(ObPlanCacheCtx &pc_ctx,
   return ret;
 }
 
+// 针对
+// 物化视图改写会使得同一条 SQL 的不同计划依赖的表不同，导致 plan cache 进入不同的 pcv set
+// 在检查 pcv set 的时候跳过物化视图相关的表，使得改写与不改写的 SQL 进入同一个 pcv set
+int ObPlanCacheValue::remove_mv_schema(const common::ObIArray<PCVSchemaObj> &schema_array,
+                                       common::ObIArray<PCVSchemaObj*> &check_stored_schema)
+{
+  int ret = OB_SUCCESS;
+  bool need_remove = true;
+  int64_t j = 0;
+  for (int64_t i = 0; OB_SUCC(ret) && i < stored_schema_objs_.count(); ++i) {
+    if (OB_ISNULL(stored_schema_objs_.at(i))) {
+      ret = OB_INVALID_ARGUMENT;
+      LOG_WARN("invalid null table schema", K(ret), K(i), K(stored_schema_objs_.at(i)));
+    } else if (MATERIALIZED_VIEW == stored_schema_objs_.at(i)->table_type_
+        || MATERIALIZED_VIEW_LOG == stored_schema_objs_.at(i)->table_type_
+        || stored_schema_objs_.at(i)->is_mv_container_table_) {
+      if (j < schema_array.count()
+          && stored_schema_objs_.at(i)->schema_id_ == schema_array.at(j).schema_id_) {
+        if (OB_FAIL(check_stored_schema.push_back(stored_schema_objs_.at(i)))) {
+          LOG_WARN("failed to push back schema", K(ret));
+        } else {
+          ++j;
+        }
+      } else {
+        // do nothing, 仅存在于 pcv set 中的物化视图是改写出来的，抛弃
+      }
+    } else if (OB_FAIL(check_stored_schema.push_back(stored_schema_objs_.at(i)))) {
+      LOG_WARN("failed to push back schema", K(ret));
+    } else {
+      ++j;
+    }
+  }
+  return ret;
+}
+
 // 对于计划所依赖的schema进行比较，注意这里不比较table schema的version信息
 // table schema的version信息用于淘汰pcv set，在check_value_version时进行比较
 int ObPlanCacheValue::match_dep_schema(const ObPlanCacheCtx &pc_ctx,
@@ -2038,20 +2183,23 @@ int ObPlanCacheValue::match_dep_schema(const ObPlanCacheCtx &pc_ctx,
   int ret = OB_SUCCESS;
   is_same = true;
   ObSQLSessionInfo *session_info = pc_ctx.sql_ctx_.session_info_;
+  common::ObSEArray<PCVSchemaObj*, 4> check_stored_schema;
   if (OB_ISNULL(session_info)) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("invalid argument", K(ret), K(session_info));
-  } else if (schema_array.count() != stored_schema_objs_.count()) {
+  } else if (OB_FAIL(remove_mv_schema(schema_array, check_stored_schema))) {
+    LOG_WARN("failed to remove mv schema", K(ret));
+  } else if (schema_array.count() != check_stored_schema.count()) {
     // schema objs count不匹配，可能是以下情况:
     // select * from all_sequences;  // 系统视图，系统视图的dependency_table有多个
     // select * from all_sequences;  // 普通表
     is_same = false;
   } else {
     for (int64_t i = 0; OB_SUCC(ret) && is_same && i < schema_array.count(); i++) {
-      if (OB_ISNULL(stored_schema_objs_.at(i))) {
+      if (OB_ISNULL(check_stored_schema.at(i))) {
         ret = OB_INVALID_ARGUMENT;
         LOG_WARN("invalid null table schema",
-                 K(ret), K(i), K(schema_array.at(i)), K(stored_schema_objs_.at(i)));
+                 K(ret), K(i), K(schema_array.at(i)), K(check_stored_schema.at(i)));
       } else if (TMP_TABLE == schema_array.at(i).table_type_
                  && schema_array.at(i).is_tmp_table_) { // check for mysql tmp table
         // 如果包含临时表
@@ -2067,13 +2215,13 @@ int ObPlanCacheValue::match_dep_schema(const ObPlanCacheCtx &pc_ctx,
         is_same = ((session_info->get_sessid_for_table() == sessid_) &&
                    (session_info->get_sess_create_time() == sess_create_time_));
       } else if (lib::is_oracle_mode()
-                 && TABLE_SCHEMA == stored_schema_objs_.at(i)->schema_type_
-                 && !stored_schema_objs_.at(i)->match_compare(schema_array.at(i))) {
+                 && TABLE_SCHEMA == check_stored_schema.at(i)->schema_type_
+                 && !check_stored_schema.at(i)->match_compare(schema_array.at(i))) {
         // 检查oracle模式下普通表是否与系统表同名
         is_same = false;
       } else if (lib::is_oracle_mode()
-                 && SYNONYM_SCHEMA == stored_schema_objs_.at(i)->schema_type_) {
-        is_same = (stored_schema_objs_.at(i)->database_id_ == schema_array.at(i).database_id_);
+                 && SYNONYM_SCHEMA == check_stored_schema.at(i)->schema_type_) {
+        is_same = (check_stored_schema.at(i)->database_id_ == schema_array.at(i).database_id_);
       } else {
         // do nothing
       }
@@ -2091,21 +2239,36 @@ int ObPlanCacheValue::get_all_dep_schema(ObSchemaGetterGuard &schema_guard,
   int ret = OB_SUCCESS;
   schema_array.reset();
   const ObSimpleTableSchemaV2 *table_schema = nullptr;
+  const ObSimpleSynonymSchema *synonym_schema = nullptr;
   PCVSchemaObj tmp_schema_obj;
 
   for (int64_t i = 0; OB_SUCC(ret) && i < dep_schema_objs.count(); i++) {
     if (TABLE_SCHEMA != dep_schema_objs.at(i).get_schema_type()) {
-      if (OB_FAIL(tmp_schema_obj.init_with_version_obj(dep_schema_objs.at(i)))) {
+      if (SYNONYM_SCHEMA == dep_schema_objs.at(i).get_schema_type()) {
+        synonym_schema = nullptr;
+        if (OB_FAIL(schema_guard.get_simple_synonym_info(
+              MTL_ID(), dep_schema_objs.at(i).get_object_id(), synonym_schema))) {
+          LOG_WARN("failed to get synonym schema", K(ret), K(dep_schema_objs.at(i)));
+        } else if (nullptr == synonym_schema) {
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("get an unexpected null synonym schema", K(ret));
+        } else {
+          tmp_schema_obj.database_id_ = synonym_schema->get_database_id();
+          tmp_schema_obj.schema_version_ = synonym_schema->get_schema_version();
+          tmp_schema_obj.schema_id_ = synonym_schema->get_synonym_id();
+          tmp_schema_obj.schema_type_ = SYNONYM_SCHEMA;
+        }
+      } else if (OB_FAIL(tmp_schema_obj.init_with_version_obj(dep_schema_objs.at(i)))) {
         LOG_WARN("failed to init pcv schema obj", K(ret));
+      }
+      if (OB_FAIL(ret)) {
       } else if (OB_FAIL(schema_array.push_back(tmp_schema_obj))) {
         LOG_WARN("failed to push back pcv schema obj", K(ret));
       } else {
         tmp_schema_obj.reset();
       }
     } else if (OB_FAIL(schema_guard.get_simple_table_schema(
-                                     MTL_ID(),
-                                     dep_schema_objs.at(i).get_object_id(),
-                                     table_schema))) {
+                 MTL_ID(), dep_schema_objs.at(i).get_object_id(), table_schema))) {
       LOG_WARN("failed to get table schema",
                K(ret), K(dep_schema_objs.at(i)));
     } else if (nullptr == table_schema) {

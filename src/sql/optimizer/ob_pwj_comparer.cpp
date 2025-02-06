@@ -11,14 +11,8 @@
  */
 
 #define USING_LOG_PREFIX SQL_OPT
-#include "sql/optimizer/ob_pwj_comparer.h"
-#include "share/schema/ob_table_schema.h"
-#include "share/schema/ob_schema_struct.h"
-#include "sql/optimizer/ob_optimizer_context.h"
+#include "ob_pwj_comparer.h"
 #include "sql/optimizer/ob_logical_operator.h"
-#include "sql/optimizer/ob_opt_est_utils.h"
-#include "sql/resolver/dml/ob_dml_stmt.h"
-#include "sql/resolver/expr/ob_raw_expr_util.h"
 
 using namespace oceanbase::sql;
 using namespace oceanbase::common;
@@ -110,6 +104,8 @@ int PwjTable::assign(const PwjTable &other)
   return ret;
 }
 
+OB_SERIALIZE_MEMBER(GroupPWJTabletIdInfo, group_id_, tablet_id_array_);
+
 void ObPwjComparer::reset()
 {
   pwj_tables_.reset();
@@ -145,7 +141,13 @@ int ObPwjComparer::extract_all_partition_indexes(const ObCandiTableLoc &phy_tabl
       ObTabletID tablet_id = phy_partitions.at(i).get_partition_location().get_tablet_id();
       int64_t part_index = -1;
       int64_t subpart_index = -1;
-      if (OB_FAIL(table_schema.get_part_idx_by_tablet(tablet_id, part_index, subpart_index))) {
+      if (table_schema.is_external_table()) {
+        if (OB_FAIL(all_tablet_ids.push_back(tablet_id.id()))) { //mock
+        LOG_WARN("failed to push back partition id", K(ret));
+        } else if (OB_FAIL(all_partition_indexes.push_back(part_index))) {
+          LOG_WARN("failed to push back partition index", K(ret));
+        }
+      } else if (OB_FAIL(table_schema.get_part_idx_by_tablet(tablet_id, part_index, subpart_index))) {
         LOG_WARN("failed to get part idx by tablet", K(ret));
       } else if (OB_FAIL(all_tablet_ids.push_back(tablet_id.id()))) {
         LOG_WARN("failed to push back partition id", K(ret));
@@ -216,7 +218,7 @@ int ObPwjComparer::is_partition_equal(const ObPartition *l_partition,
     if (OB_FAIL(is_row_equal(l_partition->get_high_bound_val(),
                              r_partition->get_high_bound_val(),
                              is_equal))) {
-      LOG_WARN("failed to check is row equal", K(ret));
+      LOG_WARN("failed to check is row equal", K(ret), K(*l_partition), K(*r_partition));
     }
   } else if (OB_FAIL(is_list_partition_equal(l_partition, r_partition, is_equal))) {
     LOG_WARN("failed to check is list partition equal", K(ret));
@@ -753,7 +755,7 @@ int ObStrictPwjComparer::get_subpartition_indexes_by_part_index(const PwjTable &
     }
   }
   if (OB_SUCC(ret)) {
-    std::sort(&used_subpart_indexes.at(0), &used_subpart_indexes.at(0) + used_subpart_indexes.count());
+    lib::ob_sort(&used_subpart_indexes.at(0), &used_subpart_indexes.at(0) + used_subpart_indexes.count());
   }
   return ret;
 }

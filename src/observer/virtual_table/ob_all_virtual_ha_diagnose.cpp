@@ -11,9 +11,6 @@
  */
 
 #include "ob_all_virtual_ha_diagnose.h"
-#include "lib/ob_define.h"
-#include "lib/ob_errno.h"
-#include "lib/oblog/ob_log_module.h"
 #include "storage/tx_storage/ob_ls_service.h"
 
 namespace oceanbase
@@ -54,7 +51,11 @@ int ObAllVirtualHADiagnose::inner_get_next_row(common::ObNewRow *&row)
       if (NULL == ls_service) {
         SERVER_LOG(INFO, "tenant has no ObLSService", K(MTL_ID()));
       } else if (OB_FAIL(ls_service->iterate_diagnose(func_iter_ls))) {
-        SERVER_LOG(WARN, "iter ls failed", K(ret));
+        if (OB_NOT_RUNNING == ret) {
+          ret = OB_SUCCESS;
+        } else {
+          SERVER_LOG(WARN, "iter ls failed", K(ret));
+        }
       } else {
         SERVER_LOG(INFO, "iter ls succ", K(ret));
       }
@@ -257,6 +258,25 @@ int ObAllVirtualHADiagnose::insert_stat_(storage::DiagnoseInfo &diagnose_info)
 #endif
         cur_row_.cells_[i].set_collation_type(ObCharset::get_default_collation(
                                               ObCharset::get_default_charset()));
+        break;
+      case PARENT:
+        cur_row_.cells_[i].set_varchar(ObString(""));
+        if (diagnose_info.palf_diagnose_info_.parent_.is_valid()) {
+          if (OB_SUCC(diagnose_info.palf_diagnose_info_.parent_.\
+              ip_port_to_string(parent_, common::OB_IP_PORT_STR_BUFF))) {
+            cur_row_.cells_[i].set_varchar(ObString::make_string(parent_));
+          } else {
+            SERVER_LOG(WARN, "ip_port_to_string failed", K(ret), K(diagnose_info), K(parent_));
+          }
+        }
+        cur_row_.cells_[i].set_collation_type(ObCharset::get_default_collation(
+                                              ObCharset::get_default_charset()));
+        break;
+      case READ_TX:
+        cur_row_.cells_[i].set_varchar(diagnose_info.read_only_tx_info_);
+        cur_row_.cells_[i].set_collation_type(ObCharset::get_default_collation(
+                                              ObCharset::get_default_charset()));
+
         break;
       default:
         ret = OB_ERR_UNEXPECTED;

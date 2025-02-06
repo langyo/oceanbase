@@ -1,5 +1,4 @@
-/**
- * Copyright (c) 2021 OceanBase
+/** * Copyright (c) 2021 OceanBase
  * OceanBase CE is licensed under Mulan PubL v2.
  * You can use this software according to the terms and conditions of the Mulan PubL v2.
  * You may obtain a copy of Mulan PubL v2 at:
@@ -16,6 +15,7 @@
 #include "share/ob_define.h"
 #include "lib/ash/ob_active_session_guard.h"
 #include "lib/worker.h"
+#include "sql/parser/parse_malloc.h"
 
 using namespace oceanbase::sql;
 using namespace oceanbase::common;
@@ -46,10 +46,16 @@ int ObFastParser::parse(const common::ObString &stmt,
     if (OB_FAIL(fp.parse(stmt, no_param_sql, no_param_sql_len, param_list, param_num, values_token_pos))) {
       LOG_WARN("failed to fast parser", K(stmt));
     }
+    if (OB_ISNULL(fp.param_node_list_)) {
+      param_list = NULL;
+    }
   } else {
     ObFastParserOracle fp(allocator, fp_ctx);
     if (OB_FAIL(fp.parse(stmt, no_param_sql, no_param_sql_len, param_list, param_num, values_token_pos))) {
       LOG_WARN("failed to fast parser", K(stmt));
+    }
+    if (OB_ISNULL(fp.param_node_list_)) {
+      param_list = NULL;
     }
   }
   return ret;
@@ -93,19 +99,14 @@ int ObFastParser::parse(const common::ObString &stmt,
   return ret;
 }
 
-ObFastParserBase::ObFastParserBase(
-  ObIAllocator &allocator,
-  const FPContext fp_ctx) :
-  no_param_sql_(nullptr), no_param_sql_len_(0),
-  param_num_(0), is_oracle_mode_(false),
+ObFastParserBase::ObFastParserBase(ObIAllocator &allocator, const FPContext fp_ctx) :
+  no_param_sql_(nullptr), no_param_sql_len_(0), param_num_(0), is_oracle_mode_(false),
   is_batched_multi_stmt_split_on_(fp_ctx.enable_batched_multi_stmt_),
-  is_udr_mode_(fp_ctx.is_udr_mode_),
-  def_name_ctx_(fp_ctx.def_name_ctx_),
-  cur_token_begin_pos_(0), copy_begin_pos_(0), copy_end_pos_(0),
-  tmp_buf_(nullptr), tmp_buf_len_(0), last_escape_check_pos_(0),
-  param_node_list_(nullptr), tail_param_node_(nullptr),
-  cur_token_type_(INVALID_TOKEN), allocator_(allocator),
-  get_insert_(false), values_token_pos_(0),
+  is_udr_mode_(fp_ctx.is_udr_mode_), def_name_ctx_(fp_ctx.def_name_ctx_), cur_token_begin_pos_(0),
+  copy_begin_pos_(0), copy_end_pos_(0), tmp_buf_(nullptr), tmp_buf_len_(0),
+  last_escape_check_pos_(0), try_check_tick_(0), param_node_list_(nullptr),
+  tail_param_node_(nullptr), cur_token_type_(INVALID_TOKEN), allocator_(allocator),
+  found_insert_status_(NOT_FOUND_INSERT_TOKEN), values_token_pos_(0),
   parse_next_token_func_(nullptr), process_idf_func_(nullptr)
 {
 	question_mark_ctx_.count_ = 0;
@@ -115,6 +116,9 @@ ObFastParserBase::ObFastParserBase(
   question_mark_ctx_.name_ = nullptr;
   charset_type_ = ObCharset::charset_type_by_coll(fp_ctx.charsets4parser_.string_collation_);
   charset_info_ = ObCharset::get_charset(fp_ctx.charsets4parser_.string_collation_);
+  is_format_ = fp_ctx.is_format_;
+  col_type_ = fp_ctx.charsets4parser_.string_collation_;
+  alloc_len_ = 0;
 }
 
 int ObFastParserBase::parse(const ObString &stmt,
@@ -126,10 +130,14 @@ int ObFastParserBase::parse(const ObString &stmt,
 {
   int ret = OB_SUCCESS;
   int64_t len = stmt.length();
+  alloc_len_ = len + 1;
   if (OB_ISNULL(no_param_sql_ =
-      static_cast<char *>(allocator_.alloc((len + 1))))) {
+      static_cast<char *>(allocator_.alloc(alloc_len_)))) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
-    LOG_WARN("fail to alloc memory", K(ret), K(len));
+    LOG_WARN("fail to alloc memory", K(ret), K(alloc_len_));
+  } else if (OB_ISNULL(charset_info_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected error", K(ret), K(charset_info_));
   } else {
     no_param_sql_[0] = '\0';
     while (len > 0 && is_space(stmt[len - 1])) {
@@ -154,7 +162,9 @@ int ObFastParserBase::parse(const ObString &stmt,
     no_param_sql_len = no_param_sql_len_;
     param_list = param_node_list_;
     param_num = param_num_;
-    values_token_pos = values_token_pos_;
+    if (found_insert_status_ == FOUND_INSERT_TOKEN_ONCE) {
+      values_token_pos = values_token_pos_;
+    }
   }
   return ret;
 }
@@ -423,7 +433,7 @@ int ObFastParserBase::parser_insert_str(common::ObIAllocator &allocator,
       can_batch_opt = is_valid;
     }
   }
-  LOG_TRACE("after parser insert print curr_sql", K(old_no_param_sql), K(new_truncated_sql),
+  LOG_DEBUG("after parser insert print curr_sql", K(old_no_param_sql), K(new_truncated_sql),
         K(can_batch_opt), K(params_count), K(row_count));
   return ret;
 }
@@ -449,12 +459,16 @@ inline int64_t ObFastParserBase::is_identifier_flags(const int64_t pos)
     // Most of the time, if it is not an identifier character, it maybe a space,
     // comma, opening parenthesis, or closing parenthesis. This judgment logic is
     // added here to avoid the next judgment whether it is utf8 char or gbk char
+  } else if (!is_oracle_mode_) {
+    idf_pos = notascii_gb_char(pos);
   } else if (CHARSET_UTF8MB4 == charset_type_ || CHARSET_UTF16 == charset_type_) {
     idf_pos = is_utf8_char(pos);
   } else if (ObCharset::is_gb_charset(charset_type_)) {
     idf_pos = is_gbk_char(pos);
-  } else if (CHARSET_LATIN1 == charset_type_) {
-    idf_pos = is_latin1_char(pos);
+  } else if (charset_info_->mbmaxlen == 1) {
+    idf_pos = is_single_byte_char(pos);
+  } else if (CHARSET_HKSCS == charset_type_ || CHARSET_HKSCS31 == charset_type_) {
+    idf_pos = is_hk_char(pos);
   }
   return idf_pos;
 }
@@ -770,9 +784,11 @@ int ObFastParserBase::process_insert_or_replace(const char *str, const int64_t s
     raw_sql_.scan(size);
     if (OB_FAIL(process_hint())) {
       LOG_WARN("failed to process hint", K(ret), K(raw_sql_.to_string()), K_(raw_sql_.cur_pos));
-    } else {
+    } else if (found_insert_status_ == NOT_FOUND_INSERT_TOKEN) {
       // 说明是insert token
-      get_insert_ = true;
+      found_insert_status_ = FOUND_INSERT_TOKEN_ONCE;
+    } else if (found_insert_status_ == FOUND_INSERT_TOKEN_ONCE) {
+      found_insert_status_ = INVALID_TOKEN_STATUS;
     }
   }
   return ret;
@@ -921,10 +937,21 @@ int ObFastParserBase::get_one_insert_row_str(ObRawSql &raw_sql,
   return ret;
 }
 
-inline int64_t ObFastParserBase::is_latin1_char(const int64_t pos)
+inline int64_t ObFastParserBase::notascii_gb_char(const int64_t pos)
 {
   int64_t idf_pos = -1;
-  if (is_latin1(raw_sql_.char_at(pos))) {
+  if ((idf_pos = is_gbk_char(pos)) != -1) {
+    //do nothing
+  } else if (notascii(raw_sql_.char_at(pos))) {
+    idf_pos = pos + 1;
+  }
+  return idf_pos;
+}
+
+inline int64_t ObFastParserBase::is_single_byte_char(const int64_t pos)
+{
+  int64_t idf_pos = -1;
+  if (is_single_byte(raw_sql_.char_at(pos))) {
     idf_pos = pos + 1;
   }
   return idf_pos;
@@ -1046,6 +1073,47 @@ inline int64_t ObFastParserBase::is_utf8_multi_byte_right_parenthesis(
   return idf_pos;
 }
 
+inline int64_t ObFastParserBase::is_hk_multi_byte_space(const char *str, const int64_t pos)
+{
+  int64_t idf_pos = -1;
+  if (0xa1 == static_cast<uint8_t>(str[pos]) &&
+      0x40 == static_cast<uint8_t>(str[pos + 1])) {
+    idf_pos = pos + 2;
+  }
+  return idf_pos;
+}
+inline int64_t ObFastParserBase::is_hk_multi_byte_comma(const char *str, const int64_t pos)
+{
+  int64_t idf_pos = -1;
+  if (0xa1 == static_cast<uint8_t>(str[pos]) &&
+      0x41 == static_cast<uint8_t>(str[pos + 1])) {
+    idf_pos = pos + 2;
+  }
+  return idf_pos;
+}
+
+inline int64_t ObFastParserBase::is_hk_multi_byte_left_parenthesis(
+                                 const char *str, const int64_t pos)
+{
+  int64_t idf_pos = -1;
+  if (0xa1 == static_cast<uint8_t>(str[pos]) &&
+      0x5d == static_cast<uint8_t>(str[pos + 1])) {
+    idf_pos = pos + 2;
+  }
+  return idf_pos;
+}
+
+inline int64_t ObFastParserBase::is_hk_multi_byte_right_parenthesis(
+                                 const char *str, const int64_t pos)
+{
+  int64_t idf_pos = -1;
+  if (0xa1 == static_cast<uint8_t>(str[pos]) &&
+      0x5e == static_cast<uint8_t>(str[pos + 1])) {
+    idf_pos = pos + 2;
+  }
+  return idf_pos;
+}
+
 // ([\\\xa1][\\\xa1])
 inline int64_t ObFastParserBase::is_gbk_multi_byte_space(const char *str, const int64_t pos)
 {
@@ -1104,6 +1172,22 @@ inline int64_t ObFastParserBase::is_gbk_char(const int64_t pos)
       -1 != is_gbk_multi_byte_right_parenthesis(raw_sql_.raw_sql_, pos))) {
     raw_sql_.scan(2);
   } else if (is_gb1(raw_sql_.char_at(pos)) && is_gb2(raw_sql_.char_at(pos + 1))) {
+    idf_pos = pos + 2;
+  }
+  return idf_pos;
+}
+
+inline int64_t ObFastParserBase::is_hk_char(const int64_t pos)
+{
+  int64_t idf_pos = -1;
+  if (is_oracle_mode_ &&
+     pos + 2 < raw_sql_.raw_sql_len_ &&
+     (-1 != is_hk_multi_byte_space(raw_sql_.raw_sql_, pos) ||
+      -1 != is_hk_multi_byte_comma(raw_sql_.raw_sql_, pos) ||
+      -1 != is_hk_multi_byte_left_parenthesis(raw_sql_.raw_sql_, pos) ||
+      -1 != is_hk_multi_byte_right_parenthesis(raw_sql_.raw_sql_, pos))) {
+    raw_sql_.scan(2);
+  } else if (is_hk1(raw_sql_.char_at(pos)) && is_hk2(raw_sql_.char_at(pos + 1))) {
     idf_pos = pos + 2;
   }
   return idf_pos;
@@ -1181,7 +1265,7 @@ int64_t ObFastParserBase::is_hint_begin(int64_t pos)
     ch = raw_sql_.char_at(pos);
     next_ch = raw_sql_.char_at(++pos);
     // check and ignore comment
-    while (ch != '*' && next_ch != '/' && !raw_sql_.is_search_end()) {
+    while (ch != '*' && next_ch != '/' && !raw_sql_.is_search_end(pos)) {
       ch = raw_sql_.char_at(pos);
       next_ch = raw_sql_.char_at(++pos);
     }
@@ -1247,7 +1331,7 @@ inline void ObFastParserBase::reset_parser_node(ParseNode *node)
   node->pl_str_off_ = 0;
   node->raw_text_ = nullptr;
   node->text_len_ = 0;
-  node->pos_ = 0;
+  node->pos_= 0;
   node->children_ = nullptr;
   node->raw_param_idx_ = 0;
 }
@@ -1336,79 +1420,6 @@ inline char* ObFastParserBase::parse_strndup(const char *str, size_t nbyte, char
   return buf;
 }
 
-inline char* ObFastParserOracle::parse_strndup_with_trim_space_for_new_line(const char *str,
-                                                                            size_t nbyte,
-                                                                            char *buf,
-                                                                            int *connection_collation,
-                                                                            int64_t *new_len)
-{
-  MEMMOVE(buf, str, nbyte);
-  int64_t idx = 0;
-  for (int64_t i = 0; i < nbyte; ++i) {
-    if (idx > 0 && buf[i] == '\n') {
-      int64_t j = idx - 1;
-      bool is_found = false;
-      do {
-        is_found = false;
-        if (buf[j] == ' ' || buf[j] == '\t') {
-          -- j;
-          -- idx;
-          is_found = true;
-        } else {
-          switch (*connection_collation) {
-            case 28/*CS_TYPE_GBK_CHINESE_CI*/:
-            case 87/*CS_TYPE_GBK_BIN*/:
-            case 216/*CS_TYPE_GB18030_2022_BIN*/:
-            case 217/*CS_TYPE_GB18030_2022_PINYIN_CI*/:
-            case 218/*CS_TYPE_GB18030_2022_PINYIN_CS*/:
-            case 219/*CS_TYPE_GB18030_2022_RADICAL_CI*/:
-            case 220/*CS_TYPE_GB18030_2022_RADICAL_CS*/:
-            case 221/*CS_TYPE_GB18030_2022_STROKE_CI*/:
-            case 222/*CS_TYPE_GB18030_2022_STROKE_CS*/:
-            case 248/*CS_TYPE_GB18030_CHINESE_CI*/:
-            case 249/*CS_TYPE_GB18030_BIN*/: {
-              if (j - 1 >= 0) {
-                if (buf[j - 1] == (char)0xa1 &&
-                    buf[j] == (char)0xa1) {//gbk multi byte space
-                  j = j - 2;
-                  idx = idx - 2;
-                  is_found = true;
-                }
-              }
-              break;
-            }
-            case 45/*CS_TYPE_UTF8MB4_GENERAL_CI*/:
-            case 46/*CS_TYPE_UTF8MB4_BIN*/:
-            case 63/*CS_TYPE_BINARY*/:
-            case 224/*CS_TYPE_UTF8MB4_UNICODE_CI*/: {
-            //case 8/*CS_TYPE_LATIN1_SWEDISH_CI*/:
-            //case 47/*CS_TYPE_LATIN1_BIN*/:
-              if (j - 2 >= 0) {
-                if (buf[j - 2] == (char)0xe3 &&
-                    buf[j - 1] == (char)0x80 &&
-                    buf[j] == (char)0x80) {//utf8 multi byte space
-                  j = j - 3;
-                  idx = idx - 3;
-                  is_found = true;
-                }
-              }
-              break;
-            }
-            default:
-              break;
-          }
-        }
-      } while (j >= 0 && is_found);
-      buf[idx++] = buf[i];
-    } else {
-      buf[idx++] = buf[i];
-    }
-  }
-  *new_len -= (nbyte - idx);
-  buf[*new_len] = '\0';
-  return buf;
-}
-
 char *ObFastParserBase::parse_strdup_with_replace_multi_byte_char(
 	                      const char *str, const size_t dup_len, char *out_str, int64_t &out_len)
 {
@@ -1454,6 +1465,27 @@ char *ObFastParserBase::parse_strdup_with_replace_multi_byte_char(
       } else {
         out_str[len++] = str[i];
       }
+    } else if (
+       charset_type_ == 152
+       || charset_type_ == 153) {
+       if (i + 1 < dup_len) {
+         if (str[i] == (char)0xa1 && str[i+1] == (char)0x40) {//hkscs multi byte space
+           out_str[len++] = ' ';
+           ++i;
+         } else if (str[i] == (char)0xa1 && str[i+1] == (char)0x5d) {
+           //hkscs multi byte left parenthesis
+           out_str[len++] = '(';
+           ++i;
+         } else if (str[i] == (char)0xa1 && str[i+1] == (char)0x5e) {
+           //hkscs multi byte right parenthesis
+           out_str[len++] = ')';
+           ++i;
+         } else {
+           out_str[len++] = str[i];
+         }
+       } else {
+         out_str[len++] = str[i];
+       }
     } else {
       out_str[len++] = str[i];
     }
@@ -1672,12 +1704,16 @@ inline int64_t ObFastParserBase::is_first_identifier_flags(const int64_t pos)
     // Most of the time, if it is not an identifier character, it maybe a space,
     // comma, opening parenthesis, or closing parenthesis. This judgment logic is
     // added here to avoid the next judgment whether it is utf8 char or gbk char
+  } else if (!is_oracle_mode_) {
+    idf_pos = notascii_gb_char(pos);
   } else if (CHARSET_UTF8MB4 == charset_type_ || CHARSET_UTF16 == charset_type_) {
     idf_pos = is_utf8_char(pos);
   } else if (ObCharset::is_gb_charset(charset_type_)) {
     idf_pos = is_gbk_char(pos);
-  } else if (CHARSET_LATIN1 == charset_type_) {
-    idf_pos = is_latin1_char(pos);
+  } else if (charset_info_->mbmaxlen == 1) {
+    idf_pos = is_single_byte_char(pos);
+  } else if (CHARSET_HKSCS == charset_type_ || CHARSET_HKSCS31 == charset_type_) {
+    idf_pos = is_hk_char(pos);
   }
   return idf_pos;
 }
@@ -2142,6 +2178,64 @@ int ObFastParserBase::process_negative()
   return ret;
 }
 
+inline int ObFastParserBase::process_format_token() {
+  int ret = OB_SUCCESS;
+  int len = 0;
+  int token_len = raw_sql_.cur_pos_  - copy_begin_pos_;
+
+  if (IGNORE_TOKEN == cur_token_type_) {
+    // ignore this, do nothing
+  } else if (PARAM_TOKEN == cur_token_type_) {
+    if(no_param_sql_len_ + 2 >= alloc_len_ &&
+        OB_FAIL(extend_alloc_sql_buffer())) {
+      LOG_WARN("failed to alloc sql buffer", K(ret));
+    } else {
+      tail_param_node_->node_->pos_ = no_param_sql_len_;
+      no_param_sql_[no_param_sql_len_++] = '?';
+      no_param_sql_[no_param_sql_len_++] = ' ';
+      no_param_sql_[no_param_sql_len_] = '\0';
+    }
+  } else {
+    int64_t pos = copy_begin_pos_;
+    skip_invalid_charactar(pos, token_len, raw_sql_);
+    if(no_param_sql_len_ + 2 * token_len + 3 + 1 >= alloc_len_ &&
+        OB_FAIL(extend_alloc_sql_buffer())) {
+      LOG_WARN("failed to alloc sql buffer", K(ret));
+    } else {
+      if (need_caseup_) {
+        ObString str(token_len, raw_sql_.ptr(pos));
+        ObString str_dest;
+        ObArenaAllocator alloc;
+        if (OB_FAIL(ObCharset::toupper(col_type_, str, str_dest, alloc))) {
+          LOG_WARN("failed to do uppercase", K(ret));
+        } else {
+          MEMCPY(no_param_sql_ + no_param_sql_len_, str_dest.ptr(), str_dest.length());
+          len = str_dest.length();
+        }
+      } else {
+        MEMCPY(no_param_sql_ + no_param_sql_len_, raw_sql_.ptr(pos), token_len);
+        len = token_len;
+      }
+      no_param_sql_len_ += len;
+      no_param_sql_[no_param_sql_len_] = ' ';
+      no_param_sql_len_++;
+    }
+  }
+
+  if (OB_SUCC(ret)) {
+    copy_end_pos_ = raw_sql_.cur_pos_;
+    copy_begin_pos_ = raw_sql_.cur_pos_;
+  }
+
+  return ret;
+}
+
+inline int ObFastParserBase::try_check_status()
+{
+  return ((++try_check_tick_) % CHECK_STATUS_TRY_TIMES == 0) ? THIS_WORKER.check_status() :
+                                                               common::OB_SUCCESS;
+}
+
 inline void ObFastParserBase::process_token()
 {
   if (NORMAL_TOKEN == cur_token_type_) {
@@ -2160,6 +2254,41 @@ inline void ObFastParserBase::process_token()
     copy_begin_pos_ = raw_sql_.cur_pos_;
     copy_end_pos_ = raw_sql_.cur_pos_;
   }
+}
+
+inline int ObFastParserBase::extend_alloc_sql_buffer()
+{
+  int ret = OB_SUCCESS;
+  char * buf = NULL;
+  alloc_len_ = alloc_len_ * 2;
+  if (OB_ISNULL(buf = static_cast<char *>(allocator_.alloc(alloc_len_)))) {
+    ret = OB_ALLOCATE_MEMORY_FAILED;
+    LOG_WARN("fail to alloc memory", K(ret), K(alloc_len_));
+  } else {
+    MEMCPY(buf, no_param_sql_, no_param_sql_len_);
+    no_param_sql_ = buf;
+  }
+  return ret;
+}
+
+inline void ObFastParserBase::skip_invalid_charactar(int64_t& pos, int& token_len, ObRawSql &raw_sql)
+{
+  int64_t skip_len = 0;
+  while (is_invalid_character(raw_sql, pos, skip_len)) {
+    pos += skip_len;
+    token_len -= skip_len;
+  }
+}
+
+inline bool ObFastParserBase::is_invalid_character(ObRawSql &raw_sql, int64_t pos, int64_t& skip_len)
+{
+  bool b_ret = false;
+  int64_t s_len = 0;
+  if (IS_MULTI_SPACE_V2(raw_sql, pos, s_len)) {
+    skip_len = s_len;
+    b_ret = true;
+  }
+  return b_ret;
 }
 
 int ObFastParserBase::process_identifier_begin_with_l(bool &need_process_ws)
@@ -2388,7 +2517,9 @@ inline void ObFastParserBase::remove_multi_stmt_end_space()
   for (; end_pos >= 0 && is_space(raw_sql_.char_at(end_pos)); --end_pos)
     ;
   copy_end_pos_ = end_pos + 1;
-  append_no_param_sql();
+  if (copy_end_pos_ > copy_begin_pos_) {
+    append_no_param_sql();
+  }
   copy_begin_pos_ = raw_sql_.cur_pos_;
   copy_end_pos_ = raw_sql_.cur_pos_;
 }
@@ -2572,10 +2703,24 @@ int ObFastParserMysql::process_identifier_begin_with_n()
   return ret;
 }
 
+int ObFastParserMysql::process_identifier_begin_with_backslash()
+{
+  int ret = OB_SUCCESS;
+  if (raw_sql_.char_at(raw_sql_.cur_pos_) == 'N') {
+    raw_sql_.scan(1);
+    if (-1 == is_identifier_flags(raw_sql_.cur_pos_)) {
+      cur_token_type_ = PARAM_TOKEN;
+      OZ (add_null_type_node());
+    }
+  } else {
+  }
+  return ret;
+}
+
 int ObFastParserMysql::process_values(const char *str)
 {
   int ret = OB_SUCCESS;
-  if (get_insert_) {
+  if (found_insert_status_ == FOUND_INSERT_TOKEN_ONCE) {
     if (!is_oracle_mode_) {
       // mysql support: insert ... values / value (xx, ...);
       if (CHECK_EQ_STRNCASECMP("alues", 5)) {
@@ -2701,6 +2846,10 @@ int ObFastParserMysql::process_identifier(bool is_number_begin)
         }
         break;
       }
+      case '\\': {
+        OZ (process_identifier_begin_with_backslash());
+        break;
+      }
       default: {
         break;
       }
@@ -2712,6 +2861,10 @@ int ObFastParserMysql::process_identifier(bool is_number_begin)
       int64_t next_idf_pos = raw_sql_.cur_pos_;
       while (-1 != (next_idf_pos = is_identifier_flags(next_idf_pos))) {
         raw_sql_.cur_pos_ = next_idf_pos;
+        if ('.' == raw_sql_.char_at(raw_sql_.cur_pos_)) {
+          raw_sql_.scan();
+          next_idf_pos++;
+        }
       }
     }
   }
@@ -2725,6 +2878,7 @@ int ObFastParserMysql::parse_next_token()
     process_leading_space();
     char ch = raw_sql_.char_at(raw_sql_.cur_pos_);
     cur_token_begin_pos_ = raw_sql_.cur_pos_;
+    need_caseup_ = true;
     switch (ch) {
       case '0': {
         OZ (process_zero_identifier());
@@ -2750,20 +2904,31 @@ int ObFastParserMysql::parse_next_token()
       }
       case '`': {
         OZ (process_backtick());
+        need_caseup_ = false;
         break;
       }
       case '-': {
         // need to deal with sql_comment or negative sign
-        int64_t space_len = 0;
         ch = raw_sql_.scan();
-        if ('-' == ch && IS_MULTI_SPACE(raw_sql_.cur_pos_ + 1, space_len)) {
-          // "--"{space}+{non_newline}*
+        if ('-' == ch &&
+            raw_sql_.cur_pos_ + 1 < raw_sql_.raw_sql_len_ &&
+            (raw_sql_.raw_sql_[raw_sql_.cur_pos_ + 1] == ' ' ||
+             raw_sql_.raw_sql_[raw_sql_.cur_pos_ + 1] == '\t')) {
+          // "--"[ \t]+{non_newline}*
           cur_token_type_ = IGNORE_TOKEN;
           // skip the second '-' and space
-          raw_sql_.scan(1 + space_len);
+          raw_sql_.scan(1);
           while (!raw_sql_.is_search_end() && is_non_newline(ch)) {
             ch = raw_sql_.scan();
           }
+        } else if ('-' == ch &&
+                   raw_sql_.cur_pos_ + 1 < raw_sql_.raw_sql_len_ &&
+                   (raw_sql_.raw_sql_[raw_sql_.cur_pos_ + 1] == '\n' ||
+                    raw_sql_.raw_sql_[raw_sql_.cur_pos_ + 1] == '\r')) {
+          // "--"[\n\r]
+          cur_token_type_ = IGNORE_TOKEN;
+          //skip the second '-' and ('\n' or \r)
+          raw_sql_.scan(1);
         } else {
           OZ (process_negative());
         }
@@ -2820,6 +2985,7 @@ int ObFastParserMysql::parse_next_token()
       }
       case '@': {
         char next_ch = raw_sql_.peek();
+        need_caseup_ = false;
         bool is_contain_quote = false;
         if ('@' == next_ch && is_sys_var_first_char(raw_sql_.char_at(raw_sql_.cur_pos_ + 2))) {
           raw_sql_.scan(2);
@@ -2845,6 +3011,11 @@ int ObFastParserMysql::parse_next_token()
           if (OB_LIKELY(process_idf_func_ != nullptr)) {
             OZ ((this->*process_idf_func_)(false));
           }
+        } else if (is_mysql_mode() && raw_sql_.char_at(raw_sql_.cur_pos_) == '\\') {
+          raw_sql_.cur_pos_ += 1;
+          if (OB_LIKELY(process_idf_func_ != nullptr)) {
+            OZ ((this->*process_idf_func_)(false));
+          }
         } else if (is_normal_char(ch)) {
           cur_token_type_ = NORMAL_TOKEN;
           raw_sql_.scan();
@@ -2856,7 +3027,12 @@ int ObFastParserMysql::parse_next_token()
         break;
       }
     } // end switch
-    OX (process_token());
+    if (is_format_) {
+      OZ (process_format_token());
+    } else {
+      OX (process_token());
+    }
+    OZ (try_check_status());
   } // end while
   if (OB_SUCC(ret)) {
     // After processing the string, there are still parts that have not been saved, save directly
@@ -2969,10 +3145,8 @@ int ObFastParserOracle::process_string(const bool in_q_quote)
           node->text_len_ = text_len;
           node->str_len_ = str_len;
           node->raw_text_ = raw_sql_.ptr(cur_token_begin_pos_);
-          int cs_type = ObCharset::is_gb_charset(charset_type_) ? CS_TYPE_GBK_BIN :
-                         (CHARSET_UTF8MB4 == charset_type_ ? CS_TYPE_UTF8MB4_BIN : CS_TYPE_INVALID);
           if (node->str_len_ > 0) {
-            node->str_value_ = parse_strndup_with_trim_space_for_new_line(tmp_buf_, tmp_buf_len_, buf, &cs_type, &node->str_len_);
+            node->str_value_ = parse_strndup(tmp_buf_, tmp_buf_len_, buf);
           }
           // buf points to the beginning of the next available memory
           buf += str_len + 1;
@@ -3023,7 +3197,7 @@ int ObFastParserOracle::process_identifier_begin_with_n()
 int ObFastParserOracle::process_values(const char *str)
 {
   int ret = OB_SUCCESS;
-  if (get_insert_) {
+  if (found_insert_status_ == FOUND_INSERT_TOKEN_ONCE) {
     if (is_oracle_mode_) {
       if (CHECK_EQ_STRNCASECMP("alues", 5)) {
         values_token_pos_ = raw_sql_.cur_pos_;
@@ -3152,6 +3326,7 @@ int ObFastParserOracle::parse_next_token()
     process_leading_space();
     char ch = raw_sql_.char_at(raw_sql_.cur_pos_);
     cur_token_begin_pos_ = raw_sql_.cur_pos_;
+    need_caseup_ = true;
     switch (ch) {
       case '0' ... '9': {
         if (OB_FAIL(process_number(false/*has_minus*/))) {
@@ -3193,6 +3368,7 @@ int ObFastParserOracle::parse_next_token()
       }
       case '\"': {
         OZ (process_double_quote());
+        need_caseup_ = false;
         break;
       }
       case '/': {
@@ -3263,7 +3439,12 @@ int ObFastParserOracle::parse_next_token()
       }
     } // end switch
     last_ch = ch;
-    OX (process_token());
+    if (is_format_) {
+      OZ (process_format_token());
+    } else {
+      OX (process_token());
+    }
+    OZ (try_check_status());
   } // end while
   if (OB_SUCC(ret)) {
     // After processing the string, there are still parts that have not been saved, save directly

@@ -30,7 +30,7 @@ public:
   virtual ~ObDictColumnDecoder() {}
   ObDictColumnDecoder(const ObDictColumnDecoder &) = delete;
   ObDictColumnDecoder &operator=(const ObDictColumnDecoder &) = delete;
-  virtual int get_null_count(const ObColumnCSDecoderCtx &ctx, const int64_t *row_ids,
+  virtual int get_null_count(const ObColumnCSDecoderCtx &ctx, const int32_t *row_ids,
     const int64_t row_cap, int64_t &null_count) const override;
 
   virtual int pushdown_operator(
@@ -46,7 +46,13 @@ public:
     sql::ObBlackFilterExecutor &filter,
     sql::PushdownFilterInfo &pd_filter_info,
     ObBitmap &result_bitmap,
-    bool &filter_applied) const;
+    bool &filter_applied) const override;
+
+  virtual int get_aggregate_result(
+    const ObColumnCSDecoderCtx &col_ctx,
+    const int32_t *row_ids,
+    const int64_t row_cap,
+    storage::ObAggCellBase &agg_cell) const override;
 
   bool fast_decode_valid(const ObColumnCSDecoderCtx &ctx) const;
 
@@ -54,13 +60,13 @@ public:
 
   virtual int read_distinct(
     const ObColumnCSDecoderCtx &ctx,
-    storage::ObGroupByCell &group_by_cell) const;
+    storage::ObGroupByCellBase &group_by_cell) const;
 
   virtual int read_reference(
     const ObColumnCSDecoderCtx &ctx,
-    const int64_t *row_ids,
+    const int32_t *row_ids,
     const int64_t row_cap,
-    storage::ObGroupByCell &group_by_cell) const override;
+    storage::ObGroupByCellBase &group_by_cell) const override;
 
   friend class ObDictValueIterator;
 
@@ -92,10 +98,28 @@ public:
 
 protected:
   const static int64_t MAX_STACK_BUF_SIZE = 4 << 10; // 4K
+  const static int64_t CS_DICT_SKIP_THRESHOLD = 32;
+  virtual int decode_and_aggregate(
+    const ObColumnCSDecoderCtx &ctx,
+    const int64_t row_id,
+    ObStorageDatum &datum,
+    storage::ObAggCellBase &agg_cell) const
+  {
+    UNUSEDx(ctx, row_id, datum, agg_cell);
+    return OB_NOT_SUPPORTED;
+  }
+
+  static int check_skip_block(
+    const ObDictColumnDecoderCtx &ctx,
+    sql::ObBlackFilterExecutor &filter,
+    sql::PushdownFilterInfo &pd_filter_info,
+    ObBitmap &result_bitmap,
+    sql::ObBoolMask &bool_mask);
+
   static int extract_ref_and_null_count_(
     const ObConstEncodingRefDesc &ref_desc,
     const int64_t dict_count,
-    const int64_t *row_ids,
+    const int32_t *row_ids,
     const int64_t row_cap,
     common::ObDatum *datums,
     int64_t &null_count,
@@ -175,23 +199,42 @@ protected:
     const sql::PushdownFilterInfo &pd_filter_info,
     common::ObBitmap &result_bitmap);
 
-  static void integer_dict_val_in_op(
-    const ObDictColumnDecoderCtx &ctx,
-    const sql::ObWhiteFilterExecutor &filter,
-    const uint64_t dict_val_base,
-    const uint64_t dict_val_cnt,
-    bool *filter_vals_valid,
-    uint64_t *filter_vals,
-    const int64_t datums_cnt,
-    sql::ObBitVector *ref_bitset,
-    int64_t &matched_ref_cnt);
-
   static int datum_dict_val_in_op(
     const ObDictColumnDecoderCtx &ctx,
-    const uint64_t dict_val_cnt,
+    const sql::ObWhiteFilterExecutor &filter,
+    const bool is_sorted_dict,
+    sql::ObBitVector *ref_bitset,
+    bool &matched_ref_exist,
+    const bool is_const_result_set = false);
+
+  static int in_operator_merge_search(
+    const ObDictColumnDecoderCtx &ctx,
     const sql::ObWhiteFilterExecutor &filter,
     sql::ObBitVector *ref_bitset,
-    int64_t &matched_ref_cnt);
+    int64_t &matched_ref_cnt,
+    const bool is_const_result_set);
+
+  static int in_operator_binary_search_dict(
+    const ObDictColumnDecoderCtx &ctx,
+    const sql::ObWhiteFilterExecutor &filter,
+    sql::ObBitVector *ref_bitset,
+    int64_t &matched_ref_cnt,
+    const bool is_const_result_set);
+
+  static int in_operator_binary_search(
+    const ObDictColumnDecoderCtx &ctx,
+    const sql::ObWhiteFilterExecutor &filter,
+    sql::ObBitVector *ref_bitset,
+    int64_t &matched_ref_cnt,
+    const bool is_const_result_set);
+
+  template <typename ObFilterExecutor>
+  static int in_operator_hash_search(
+    const ObDictColumnDecoderCtx &ctx,
+    const ObFilterExecutor &filter,
+    sql::ObBitVector *ref_bitset,
+    int64_t &matched_ref_cnt,
+    const bool is_const_result_set);
 
   static int bt_operator(
     const ObDictColumnDecoderCtx &ctx,
@@ -240,6 +283,10 @@ protected:
     const sql::ObWhiteFilterOperatorType op_type,
     const sql::PushdownFilterInfo &pd_filter_info,
     ObBitmap &result_bitmap);
+
+  static int traverse_datum_dict_agg(
+    const ObDictColumnDecoderCtx &ctx,
+    storage::ObAggCellBase &agg_cell);
 
   static int cmp_ref_and_set_result(const uint32_t ref_width_size, const char *ref_buf,
     const int64_t dict_ref, const bool has_null, const uint64_t null_replaced_val,

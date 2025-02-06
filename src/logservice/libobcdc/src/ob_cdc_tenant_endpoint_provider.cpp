@@ -16,7 +16,6 @@
 
 #include "ob_cdc_tenant_endpoint_provider.h"
 
-#include "ob_log_mysql_connector.h"         // ObLogMySQLConnector
 #include "ob_log_config.h"                  // TCONF
 
 namespace oceanbase
@@ -166,7 +165,7 @@ int ObCDCEndpointProvider::parse_tenant_endpoint_list_(const char *tenant_endpoi
     }
 
     SpinWLockGuard guard(refresh_lock_);
-    if (OB_FAIL(endpoint_list_.assign(endpoint_list))) {
+    if (FAILEDx(endpoint_list_.assign(endpoint_list))) {
       LOG_ERROR("assign endpoint_list failed", KR(ret),
           "expected_endpoint_list", endpoint_list,
           "cur_endpoint_list", endpoint_list_);

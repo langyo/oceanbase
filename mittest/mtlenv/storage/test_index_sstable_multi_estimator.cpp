@@ -1,3 +1,6 @@
+// owner: peihan.dph
+// owner group: sql3
+
 /**
  * Copyright (c) 2021 OceanBase
  * OceanBase CE is licensed under Mulan PubL v2.
@@ -10,12 +13,10 @@
  * See the Mulan PubL v2 for more details.
  */
 
-#include <gtest/gtest.h>
 #define private public
 #define protected public
 
-#include "share/schema/ob_table_param.h"
-#include "storage/access/ob_index_sstable_estimator.h"
+#include "src/share/io/io_schedule/ob_io_mclock.h"
 #include "mtlenv/storage/blocksstable/ob_index_block_data_prepare.h"
 
 namespace oceanbase
@@ -31,7 +32,7 @@ namespace unittest
 class TestMultiVersionIndexSSTableEstimator : public TestIndexBlockDataPrepare
 {
 public:
-  TestMultiVersionIndexSSTableEstimator() : TestIndexBlockDataPrepare("Test multi version index sstable estimator", compaction::MINI_MERGE) {}
+  TestMultiVersionIndexSSTableEstimator();
   virtual ~TestMultiVersionIndexSSTableEstimator() {}
   virtual void SetUp();
   virtual void TearDown();
@@ -41,12 +42,22 @@ public:
 protected:
   void prepare_context();
   void generate_range(const int64_t start, const int64_t end, ObDatumRange &range);
+  void get_part_est(ObSSTable &sstable, const ObDatumRange &range);
 
   // ObTableParam table_param_;
 private:
   ObDatumRow start_row_;
   ObDatumRow end_row_;
 };
+
+TestMultiVersionIndexSSTableEstimator::TestMultiVersionIndexSSTableEstimator()
+  : TestIndexBlockDataPrepare("Test multi version index sstable estimator", MINI_MERGE)
+{
+  is_ddl_merge_data_ = true;
+  max_row_cnt_ = 150000;
+  max_partial_row_cnt_ = 137312;
+  partial_kv_start_idx_ = 29;
+}
 
 void TestMultiVersionIndexSSTableEstimator::SetUpTestCase()
 {
@@ -75,6 +86,8 @@ void TestMultiVersionIndexSSTableEstimator::SetUp()
 void TestMultiVersionIndexSSTableEstimator::TearDown()
 {
   destroy_query_param();
+  tablet_handle_.get_obj()->ddl_kv_count_ = 0;
+  tablet_handle_.get_obj()->ddl_kvs_ = nullptr;
   tablet_handle_.reset();
   TestIndexBlockDataPrepare::TearDown();
 }
@@ -109,82 +122,68 @@ void TestMultiVersionIndexSSTableEstimator::generate_range(
   }
 }
 
+void TestMultiVersionIndexSSTableEstimator::get_part_est(ObSSTable &sstable, const ObDatumRange &range)
+{
+  ObPartitionEst part_est;
+  ObIndexSSTableEstimateContext esti_ctx(tablet_handle_, context_.query_flag_);
+  ObIndexBlockScanEstimator estimator(esti_ctx);
+  ASSERT_EQ(OB_SUCCESS, estimator.estimate_row_count(sstable, range, part_est));
+  STORAGE_LOG(INFO, "part_est", K(part_est));
+}
+
 TEST_F(TestMultiVersionIndexSSTableEstimator, estimate_minor_sstable_whole_range)
 {
   ObDatumRange range;
   range.set_whole_range();
-  ObIndexSSTableEstimateContext esti_ctx(sstable_, tablet_handle_, context_.query_flag_, range);
+  get_part_est(sstable_, range);
+  get_part_est(ddl_kv_, range);
+  get_part_est(partial_sstable_, range);
 
-  ObPartitionEst part_est;
-  ObIndexBlockScanEstimator estimator(esti_ctx);
-
-  ASSERT_EQ(OB_SUCCESS, estimator.estimate_row_count(part_est));
-  STORAGE_LOG(INFO, "part_est", K(part_est));
 }
 
 TEST_F(TestMultiVersionIndexSSTableEstimator, estimate_minor_sstable_range)
 {
   ObDatumRange range;
   generate_range(100, -1, range);
-  ObIndexSSTableEstimateContext esti_ctx(sstable_, tablet_handle_, context_.query_flag_, range);
-
-  ObPartitionEst part_est;
-  ObIndexBlockScanEstimator estimator(esti_ctx);
-
-  ASSERT_EQ(OB_SUCCESS, estimator.estimate_row_count(part_est));
-  STORAGE_LOG(INFO, "part_est", K(part_est));
+  get_part_est(sstable_, range);
+  get_part_est(ddl_kv_, range);
+  get_part_est(partial_sstable_, range);
 }
 
 TEST_F(TestMultiVersionIndexSSTableEstimator, estimate_major_sstable_left_range)
 {
   ObDatumRange range;
   generate_range(-1, 100, range);
-  ObIndexSSTableEstimateContext esti_ctx(sstable_, tablet_handle_, context_.query_flag_, range);
-
-  ObPartitionEst part_est;
-  ObIndexBlockScanEstimator estimator(esti_ctx);
-
-  ASSERT_EQ(OB_SUCCESS, estimator.estimate_row_count(part_est));
-  STORAGE_LOG(INFO, "part_est", K(part_est));
+  get_part_est(sstable_, range);
+  get_part_est(ddl_kv_, range);
+  get_part_est(partial_sstable_, range);
 }
 
 TEST_F(TestMultiVersionIndexSSTableEstimator, estimate_major_sstable_right_range)
 {
   ObDatumRange range;
   generate_range(row_cnt_ - 100, -1, range);
-  ObIndexSSTableEstimateContext esti_ctx(sstable_, tablet_handle_, context_.query_flag_, range);
-
-  ObPartitionEst part_est;
-  ObIndexBlockScanEstimator estimator(esti_ctx);
-
-  ASSERT_EQ(OB_SUCCESS, estimator.estimate_row_count(part_est));
-  STORAGE_LOG(INFO, "part_est", K(part_est));
+  get_part_est(sstable_, range);
+  get_part_est(ddl_kv_, range);
+  get_part_est(partial_sstable_, range);
 }
 
 TEST_F(TestMultiVersionIndexSSTableEstimator, estimate_major_sstable_middle_range)
 {
   ObDatumRange range;
   generate_range(100, row_cnt_ - 100, range);
-  ObIndexSSTableEstimateContext esti_ctx(sstable_, tablet_handle_, context_.query_flag_, range);
-
-  ObPartitionEst part_est;
-  ObIndexBlockScanEstimator estimator(esti_ctx);
-
-  ASSERT_EQ(OB_SUCCESS, estimator.estimate_row_count(part_est));
-  STORAGE_LOG(INFO, "part_est", K(part_est));
+  get_part_est(sstable_, range);
+  get_part_est(ddl_kv_, range);
+  get_part_est(partial_sstable_, range);
 }
 
 TEST_F(TestMultiVersionIndexSSTableEstimator, estimate_major_sstable_noexist_range)
 {
   ObDatumRange range;
   generate_range(row_cnt_, row_cnt_, range);
-  ObIndexSSTableEstimateContext esti_ctx(sstable_, tablet_handle_, context_.query_flag_, range);
-
-  ObPartitionEst part_est;
-  ObIndexBlockScanEstimator estimator(esti_ctx);
-
-  ASSERT_EQ(OB_SUCCESS, estimator.estimate_row_count(part_est));
-  STORAGE_LOG(INFO, "part_est", K(part_est));
+  get_part_est(sstable_, range);
+  get_part_est(ddl_kv_, range);
+  get_part_est(partial_sstable_, range);
 }
 
 

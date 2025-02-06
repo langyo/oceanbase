@@ -14,7 +14,6 @@
 
 #define USING_LOG_PREFIX OBLOG
 
-#include "gtest/gtest.h"
 
 #include "log_generator.h" // must at last of header list
 #define private public
@@ -25,15 +24,12 @@
 #include "storage/tx/ob_trans_log.h"
 #include "logservice/logfetcher/ob_log_fetch_stat_info.h"
 #include "logservice/libobcdc/src/ob_log_utils.h"
-#include "logservice/libobcdc/src/ob_log_ls_fetch_ctx.h"
 #include "logservice/libobcdc/src/ob_log_ls_fetch_mgr.h"
-#include "logservice/libobcdc/src/ob_log_entry_task_pool.h"
 #include "logservice/libobcdc/src/ob_log_part_progress_controller.h"
 #include "logservice/libobcdc/src/ob_log_part_trans_resolver_factory.h"
 #include "logservice/libobcdc/src/ob_log_sys_ls_task_handler.h"
 #include "logservice/libobcdc/src/ob_log_cluster_id_filter.h"
 #include "logservice/libobcdc/src/ob_log_committer.h"
-#include "logservice/libobcdc/src/ob_log_fetcher_dispatcher.h"
 #include "logservice/libobcdc/src/ob_log_instance.h"
 #include "logservice/libobcdc/src/ob_log_resource_collector.h"
 
@@ -92,7 +88,7 @@ using namespace logfetcher;
     LSFetchCtx *ls_fetch_ctx = NULL; \
     ObLogFetcherStartParameters start_paras; \
     start_paras.reset(start_ts_ns, start_lsn); \
-    EXPECT_EQ(OB_SUCCESS, ls_fetch_mgr.add_ls(tls_id, start_paras, false, \
+    EXPECT_EQ(OB_SUCCESS, ls_fetch_mgr.add_ls(tls_id, start_paras, false, false, \
         ClientFetchingMode::FETCHING_MODE_INTEGRATED, "|")); \
     EXPECT_EQ(OB_SUCCESS, ls_fetch_mgr.get_ls_fetch_ctx(tls_id, ls_fetch_ctx)); \
     ObTxLogGenerator log_generator(tenant_id, ls_id, tx_id, cluster_id);

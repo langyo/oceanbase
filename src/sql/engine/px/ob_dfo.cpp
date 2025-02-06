@@ -11,11 +11,9 @@
  */
 
 #define USING_LOG_PREFIX SQL_ENG
-#include "sql/engine/px/ob_dfo.h"
+#include "ob_dfo.h"
 #include "sql/engine/px/ob_px_sqc_handler.h"
-#include "sql/engine/px/ob_px_util.h"
 #include "sql/engine/px/ob_px_sqc_handler.h"
-#include "share/external_table/ob_external_table_file_mgr.h"
 
 using namespace oceanbase::common;
 using namespace oceanbase::sql;
@@ -66,7 +64,10 @@ OB_SERIALIZE_MEMBER(ObPxSqcMeta,
                     px_detectable_ids_,
                     p2p_dh_map_info_,
                     sqc_count_,
-                    monitoring_info_);
+                    monitoring_info_,
+                    branch_id_base_,
+                    partition_random_affinitize_,
+                    locations_order_);
 OB_SERIALIZE_MEMBER(ObPxTask,
                     qc_id_,
                     dfo_id_,
@@ -79,7 +80,8 @@ OB_SERIALIZE_MEMBER(ObPxTask,
                     exec_addr_,
                     execution_id_,
                     px_int_id_,
-                    is_fulltree_);
+                    is_fulltree_,
+                    branch_id_);
 OB_SERIALIZE_MEMBER(ObPxRpcInitTaskResponse,
                     task_co_id_);
 
@@ -97,14 +99,12 @@ OB_SERIALIZE_MEMBER(ObSqcTableLocationKey,
 OB_SERIALIZE_MEMBER(ObPxCleanDtlIntermResInfo, ch_total_info_, sqc_id_, task_count_);
 OB_SERIALIZE_MEMBER(ObPxCleanDtlIntermResArgs, info_, batch_size_);
 
-int ObQCMonitoringInfo::init(const ObExecContext &exec_ctx) {
+int ObQCMonitoringInfo::init(const ObDfo &dfo) {
   int ret = OB_SUCCESS;
   qc_tid_ = GETTID();
-  if (OB_NOT_NULL(exec_ctx.get_my_session())) {
-    cur_sql_ = exec_ctx.get_my_session()->get_current_query_string();
-  }
-  if (cur_sql_.length() > ObQCMonitoringInfo::LIMIT_LENGTH) {
-    cur_sql_.assign(cur_sql_.ptr(), ObQCMonitoringInfo::LIMIT_LENGTH);
+  cur_sql_ = dfo.query_sql();
+  if (cur_sql_.length() > OB_TINY_SQL_LENGTH) {
+    cur_sql_.assign(cur_sql_.ptr(), OB_TINY_SQL_LENGTH);
   }
   return ret;
 }
@@ -150,11 +150,14 @@ int ObPxSqcMeta::assign(const ObPxSqcMeta &other)
     LOG_WARN("fail to assign p2p dh map info", K(ret));
   } else if (OB_FAIL(monitoring_info_.assign(other.monitoring_info_))) {
     LOG_WARN("fail to assign qc monitoring info", K(ret));
+  } else if (OB_FAIL(locations_order_.assign(other.locations_order_))) {
+    LOG_WARN("fail to assign qc locations order", K(ret));
   } else {
     execution_id_ = other.execution_id_;
     qc_id_ = other.qc_id_;
     dfo_id_ = other.dfo_id_;
     sqc_id_ = other.sqc_id_;
+    branch_id_base_ = other.branch_id_base_;
     thread_inited_ = other.thread_inited_;
     thread_finish_ = other.thread_finish_;
     exec_addr_ = other.exec_addr_;
@@ -183,15 +186,14 @@ int ObPxSqcMeta::assign(const ObPxSqcMeta &other)
     px_detectable_ids_ = other.px_detectable_ids_;
     interrupt_by_dm_ = other.interrupt_by_dm_;
     sqc_count_ = other.sqc_count_;
+    partition_random_affinitize_ = other.partition_random_affinitize_;
   }
   access_external_table_files_.reuse();
   for (int i = 0; OB_SUCC(ret) && i < other.access_external_table_files_.count(); i++) {
     const ObExternalFileInfo &other_file = other.access_external_table_files_.at(i);
     ObExternalFileInfo temp_file;
-    temp_file.file_id_ = other_file.file_id_;
-    temp_file.file_addr_ = other_file.file_addr_;
-    if (OB_FAIL(ob_write_string(allocator_, other_file.file_url_, temp_file.file_url_))) {
-      LOG_WARN("fail to write string", K(ret));
+    if (OB_FAIL(temp_file.deep_copy(allocator_, other_file))) {
+      LOG_WARN("fail to deep copy ObExternalFileInfo", K(ret));
     } else if (OB_FAIL(access_external_table_files_.push_back(temp_file))) {
       LOG_WARN("fail to push back", K(ret));
     }
@@ -292,7 +294,7 @@ int ObDfo::fill_channel_info_by_sqc(
   ch_servers.total_task_cnt_ = 0;
   OZ(ch_servers.prefix_task_counts_.push_back(ch_servers.total_task_cnt_));
   OZ(ch_servers.add_exec_addr(sqc.get_exec_addr()));
-  ch_servers.total_task_cnt_ = 1;
+  ch_servers.total_task_cnt_ = sqc.get_task_count();
   return ret;
 }
 
@@ -649,6 +651,9 @@ OB_DEF_SERIALIZE(ObPxRpcInitSqcArgs)
   // can reuse cache from now on
   (const_cast<ObSqcSerializeCache &>(ser_cache_)).cache_serialized_ = ser_cache_.enable_serialize_cache_;
   LST_DO_CODE(OB_UNIS_ENCODE, qc_order_gi_tasks_);
+  if (OB_SUCC(ret) && sqc_.is_fulltree()) {
+    ret = exec_ctx_->serialize_group_pwj_map(buf, buf_len, pos);
+  }
   LOG_TRACE("serialize sqc", K_(sqc));
   LOG_DEBUG("end trace sqc args", K(pos), K(buf_len), K(this->get_serialize_size()));
   return ret;
@@ -673,6 +678,7 @@ OB_DEF_SERIALIZE_SIZE(ObPxRpcInitSqcArgs)
   int ret = OB_SUCCESS;
   int64_t len = 0;
   if (OB_ISNULL(exec_ctx_) || OB_ISNULL(ser_phy_plan_) || OB_ISNULL(op_spec_root_)) {
+    ret = OB_ERR_UNEXPECTED;
     LOG_ERROR("task not init", K_(exec_ctx), K_(ser_phy_plan), K(ret));
   } else {
     ObPhyOpSeriCtx seri_ctx;
@@ -699,6 +705,9 @@ OB_DEF_SERIALIZE_SIZE(ObPxRpcInitSqcArgs)
     // always serialize
     LST_DO_CODE(OB_UNIS_ADD_LEN, sqc_);
     LST_DO_CODE(OB_UNIS_ADD_LEN, qc_order_gi_tasks_);
+  }
+  if (OB_SUCC(ret) && sqc_.is_fulltree()) {
+    len += exec_ctx_->get_group_pwj_map_serialize_size();
   }
   return len;
 }
@@ -784,6 +793,9 @@ int ObPxRpcInitSqcArgs::do_deserialize(int64_t &pos, const char *net_buf, int64_
     // if version of qc is old, qc_order_gi_tasks_ will not be serialized and the value will be false.
     qc_order_gi_tasks_ = false;
     LST_DO_CODE(OB_UNIS_DECODE, qc_order_gi_tasks_);
+    if (OB_SUCC(ret) && sqc_.is_fulltree() && pos < data_len) {
+      ret = exec_ctx_->deserialize_group_pwj_map(buf, data_len, pos);
+    }
     LOG_TRACE("deserialize qc order gi tasks", K(qc_order_gi_tasks_), K(sqc_), K(this));
   }
   return ret;
@@ -864,7 +876,8 @@ OB_DEF_DESERIALIZE(ObPxRpcInitTaskArgs)
   pos = 0;
   char *tmp_buf = (char *)des_allocator_->alloc(data_len);
 
-  if (OB_ISNULL(tmp_buf)) {
+  if (OB_FAIL(ret)) {
+  } else if (OB_ISNULL(tmp_buf)) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
     LOG_WARN("allocate memory failed", K(ret), K(tmp_buf));
   } else {
@@ -911,6 +924,7 @@ OB_DEF_SERIALIZE_SIZE(ObPxRpcInitTaskArgs)
   int ret = OB_SUCCESS;
   int64_t len = 0;
   if (OB_ISNULL(exec_ctx_) || OB_ISNULL(ser_phy_plan_) || OB_ISNULL(op_spec_root_)) {
+    ret = OB_ERR_UNEXPECTED;
     LOG_ERROR("task not init", K_(exec_ctx), K_(ser_phy_plan));
   } else {
     uint64_t sqc_task_ptr_val = reinterpret_cast<uint64_t>(sqc_task_ptr_);
@@ -1000,11 +1014,13 @@ int ObPxRpcInitTaskArgs::deep_copy_assign(ObPxRpcInitTaskArgs &src,
   } else if (ser_pos != des_pos) {
     ret = OB_DESERIALIZE_ERROR;
     LOG_WARN("data_len and pos mismatch", K(ser_arg_len), K(ser_pos), K(des_pos), K(ret));
-  } else {
-    // PLACE_HOLDER: if want multiple px worker share trans_desc
-    // set exec_ctx_->session->set_effective_trans_desc(src.exec_ctx_->session->get_effective_trans_desc());
   }
-
+  if (OB_SUCC(ret)) {
+    if (sqc_handler_->get_sqc_init_arg().sqc_.is_fulltree()
+        && nullptr != src.exec_ctx_->get_group_pwj_map()) {
+      exec_ctx_->deep_copy_group_pwj_map(src.exec_ctx_->get_group_pwj_map());
+    }
+  }
   return ret;
 }
 

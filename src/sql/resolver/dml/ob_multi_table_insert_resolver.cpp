@@ -12,21 +12,8 @@
 
 #define USING_LOG_PREFIX SQL_RESV
 #include "sql/resolver/dml/ob_multi_table_insert_resolver.h"
-#include "share/ob_define.h"
-#include "share/schema/ob_schema_struct.h"
-#include "share/schema/ob_column_schema.h"
-#include "share/ob_autoincrement_param.h"
-#include "common/sql_mode/ob_sql_mode_utils.h"
-#include "sql/resolver/dml/ob_select_stmt.h"
 #include "sql/resolver/dml/ob_select_resolver.h"
-#include "sql/resolver/expr/ob_raw_expr_info_extractor.h"
-#include "sql/session/ob_sql_session_info.h"
-#include "sql/resolver/ob_resolver_utils.h"
-#include "sql/parser/parse_malloc.h"
 #include "ob_default_value_utils.h"
-#include "observer/ob_server.h"
-#include "pl/ob_pl_resolver.h"
-#include "common/ob_smart_call.h"
 
 namespace oceanbase
 {
@@ -83,7 +70,10 @@ int ObMultiTableInsertResolver::resolve(const ParseNode &parse_tree)
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("get unexpected error", K(ret), K(insert_all_stmt->get_table_items().count() - 1),
                                      K(insert_all_stmt->get_insert_all_table_info().count()));
+  } else {
+    LOG_DEBUG("check insert all table info", KPC(insert_all_stmt));
   }
+
   return ret;
 }
 
@@ -205,16 +195,26 @@ int ObMultiTableInsertResolver::resolve_multi_table_insert(const ParseNode &node
     }
     //4.解析insert values
     for (int64_t i = 0; OB_SUCC(ret) && i < multi_insert_values_node.count(); ++i) {
-      set_is_oracle_tmp_table(get_is_oracle_tmp_table_array().at(i));
-      ObInsertAllTableInfo* table_info = insert_all_stmt->get_insert_all_table_info().at(i);
-      if (OB_UNLIKELY(i != multi_insert_values_node.at(i).table_idx_) || OB_ISNULL(table_info)) {
+      ObInsertAllTableInfo *table_info;
+      if (OB_UNLIKELY(i >= insert_all_stmt->get_insert_all_table_info().count()
+                      || i >= get_is_oracle_tmp_table_array().count()
+                      || i >= get_oracle_tmp_table_type_array().count())) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("array size does not match", K(ret));
+      } else {
+        set_is_oracle_tmp_table(get_is_oracle_tmp_table_array().at(i));
+        set_oracle_tmp_table_type(get_oracle_tmp_table_type_array().at(i));
+        table_info = insert_all_stmt->get_insert_all_table_info().at(i);
+      }
+      if (OB_FAIL(ret)) {
+      } else if (OB_UNLIKELY(i != multi_insert_values_node.at(i).table_idx_) || OB_ISNULL(table_info)) {
         ret = OB_ERR_UNEXPECTED;
         LOG_WARN("get unexpected error", K(i), K(multi_insert_values_node.at(i).table_idx_));
       } else if (OB_FAIL(resolve_insert_values_node(
                                            multi_insert_values_node.at(i).insert_value_node_, i))) {
         LOG_WARN("failed to resolve insert values node", K(ret));
       //插入oracle临时表需要添加session_id
-      } else if (OB_FAIL(add_new_column_for_oracle_temp_table(table_info->ref_table_id_))) {
+      } else if (OB_FAIL(add_column_for_oracle_temp_table(*table_info, insert_all_stmt))) {
         LOG_WARN("failed to resolve insert values node", K(ret));
       //处理oracle label security
       } else if (get_the_missing_label_se_columns_array().at(i).count() <= 0) {
@@ -224,6 +224,7 @@ int ObMultiTableInsertResolver::resolve_multi_table_insert(const ParseNode &node
         LOG_WARN("failed to add new column for oracle label securitytable", K(ret));
       }
       set_is_oracle_tmp_table(false);
+      set_oracle_tmp_table_type(0);
     }
   }
   return ret;
@@ -277,13 +278,6 @@ int ObMultiTableInsertResolver::resolve_multi_insert_subquey(const ParseNode &su
     } else if (select_stmt->has_sequence()) {//多表插入不允许子查询中使用sequence
       ret = OB_ERR_SEQ_NOT_ALLOWED_HERE;
       LOG_WARN("sequence number not allowed here", K(ret));
-    } else if (is_oracle_tmp_table() &&
-               OB_FAIL(add_new_sel_item_for_oracle_temp_table(*select_stmt))) {
-      LOG_WARN("add session id value to select item failed", K(ret));
-    } else if (OB_FAIL(add_new_sel_item_for_oracle_label_security_table(*select_stmt))) {
-      LOG_WARN("add label security columns to select item failed", K(ret));
-    } else if (OB_FAIL(insert_all_stmt->generate_anonymous_view_name(*allocator_, view_name))) {
-      LOG_WARN("failed to generate view name", K(ret));
     } else if (OB_FAIL(resolve_generate_table_item(select_stmt, view_name, sub_select_table))) {
       LOG_WARN("failed to resolve generate table item", K(ret));
     } else if (OB_FAIL(resolve_all_generated_table_columns(*sub_select_table, column_items))) {
@@ -347,6 +341,7 @@ int ObMultiTableInsertResolver::resolve_insert_table_node(const ParseNode &inser
   const ParseNode *table_node = NULL;
   TableItem *table_item = NULL;
   bool is_oracle_tmp_table = false;
+  int oracle_tmp_table_type = 0;
   ObInsertAllTableInfo* table_info = nullptr;
   if (OB_ISNULL(insert_all_stmt) || OB_ISNULL(session_info_) ||
       OB_ISNULL(table_node = insert_table_node.children_[0])) {
@@ -362,8 +357,8 @@ int ObMultiTableInsertResolver::resolve_insert_table_node(const ParseNode &inser
     LOG_WARN("a view is not appropriate here", K(ret));
   } else if (OB_FAIL(column_namespace_checker_.add_reference_table(table_item))) {
     LOG_WARN("failed to resolve basic table");
-  } else if (OB_FAIL(resolve_foreign_key_constraint(table_item))) {
-    LOG_WARN("failed to resolve foreign key constraint", K(ret), K(table_item->ref_id_));
+  } else if (OB_FAIL(check_need_fired_trigger(table_item))) {
+    LOG_WARN("failed to check has need fired trigger", K(ret), K(table_item->ref_id_));
   } else {
     //提前设置好解析参数，对于多表插入会出现相同的表的场景，因此检查时需要提前设置好参数
     if (OB_FAIL(generate_insert_all_table_info(*table_item, when_conds_idx, table_info))) {
@@ -377,32 +372,24 @@ int ObMultiTableInsertResolver::resolve_insert_table_node(const ParseNode &inser
     } else {
       current_scope_ = T_INSERT_SCOPE;
       const ObTableSchema *table_schema = NULL;
-      if (TableItem::ALIAS_TABLE == table_item->type_) {
-        if (OB_FAIL(schema_checker_->get_table_schema(session_info_->get_effective_tenant_id(), table_item->get_base_table_item().ref_id_,
-                                                      table_schema))) {
-          LOG_WARN("failed to get table schema", K(ret));
-        }
-      } else {
-        if (OB_FAIL(schema_checker_->get_table_schema(session_info_->get_effective_tenant_id(), table_item->get_base_table_item().ref_id_,
-                                                      table_schema))) {
-          LOG_WARN("failed to get table schema", K(ret));
-        }
+      if (OB_FAIL(schema_checker_->get_table_schema(session_info_->get_effective_tenant_id(),
+                                                    table_item->get_base_table_item().ref_id_,
+                                                    table_schema))) {
+        LOG_WARN("failed to get table schema", K(ret));
       }
       if (OB_SUCC(ret)) {
-        if (table_schema->is_oracle_tmp_table()) {
+        if (table_schema->is_oracle_tmp_table() && !params_.is_prepare_stage_) {
           //oracle临时表各session不会创建自己的私有对象只能在数据增加时设置标记
           session_info_->set_has_temp_table_flag();
-          set_is_oracle_tmp_table(true);//这里直接标记在解析子查询时输出行中需要包括sess_id，而不需要去数组中寻找
+          set_is_oracle_tmp_table(true);
           is_oracle_tmp_table = true;
-          //目前临时表功能有问题，multi dml subplan 子计划插入临时表有问题，显示插入成功，但是查询结果为空，因此
-          //暂时禁掉，但所有的主体逻辑保留，等临时表功能完善之后在打开支持(直接移除报错就完成) TODO,@jiangxiu.wt
-          ret = OB_NOT_SUPPORTED;
-          LOG_WARN("insert all not support temp table", K(ret));
-          LOG_USER_ERROR(OB_NOT_SUPPORTED, "temp table in insert all");
+          oracle_tmp_table_type = table_schema->is_oracle_sess_tmp_table() ? 0 : 1;
         }
         if (OB_SUCC(ret)) {
           if (OB_FAIL(get_is_oracle_tmp_table_array().push_back(is_oracle_tmp_table))) {
-             LOG_WARN("failed to push back value", K(ret));
+            LOG_WARN("failed to push back value", K(ret));
+          } else if (OB_FAIL(get_oracle_tmp_table_type_array().push_back(oracle_tmp_table_type))) {
+            LOG_WARN("failed to push back value", K(ret));
           } else if (OB_FAIL(remove_dup_dep_cols_for_heap_table(table_info->part_generated_col_dep_cols_,
                                                                 table_info->values_desc_))) {
             LOG_WARN("failed to remove dup dep cols for heap table", K(ret));
@@ -468,7 +455,9 @@ int ObMultiTableInsertResolver::resolve_insert_table_columns(const ParseNode *no
         LOG_WARN("check insert column duplicate failed", K(ret));
       } else if (is_duplicate) {
         ret = OB_ERR_FIELD_SPECIFIED_TWICE;
-        LOG_USER_ERROR(OB_ERR_FIELD_SPECIFIED_TWICE, to_cstring(column_expr->get_column_name()));
+        ObCStringHelper helper;
+        LOG_USER_ERROR(OB_ERR_FIELD_SPECIFIED_TWICE,
+            helper.convert(column_expr->get_column_name()));
       } else if (OB_HIDDEN_SESSION_ID_COLUMN_ID == column_expr->get_column_id()) {
         ret = OB_NOT_SUPPORTED;
         LOG_USER_ERROR(OB_NOT_SUPPORTED, "specify __session_id value");
@@ -498,7 +487,9 @@ int ObMultiTableInsertResolver::resolve_insert_table_columns(const ParseNode *no
           LOG_WARN("check insert column duplicate failed", K(ret));
         } else if (is_duplicate) {
           ret = OB_ERR_FIELD_SPECIFIED_TWICE;
-          LOG_USER_ERROR(OB_ERR_FIELD_SPECIFIED_TWICE, to_cstring(column_items.at(i).column_name_));
+          ObCStringHelper helper;
+          LOG_USER_ERROR(OB_ERR_FIELD_SPECIFIED_TWICE,
+              helper.convert(column_items.at(i).column_name_));
         } else if (OB_FAIL(mock_values_column_ref(column_items.at(i).expr_, table_info))) {
           LOG_WARN("mock values column reference failed", K(ret));
         }
@@ -569,7 +560,7 @@ int ObMultiTableInsertResolver::resolve_insert_table_columns(const ParseNode *no
 }
 
 int ObMultiTableInsertResolver::mock_values_column_ref(const ObColumnRefRawExpr *column_ref,
-                                                       ObInsertAllTableInfo& table_info)
+                                                       ObInsertTableInfo &table_info)
 {
   int ret = OB_SUCCESS;
   ObColumnRefRawExpr *value_desc = NULL;
@@ -602,7 +593,8 @@ int ObMultiTableInsertResolver::mock_values_column_ref(const ObColumnRefRawExpr 
       value_desc->set_ref_id(table_info.table_id_, column_ref->get_column_id());
       value_desc->set_column_attr(ObString::make_string(OB_VALUES), column_ref->get_column_name());
       value_desc->set_udt_set_id(column_ref->get_udt_set_id());
-      if (ob_is_enumset_tc(column_ref->get_result_type().get_type ())
+      if ((ob_is_enumset_tc(column_ref->get_result_type().get_type())
+           || ob_is_collection_sql_type(column_ref->get_result_type().get_type()))
           && OB_FAIL(value_desc->set_enum_set_values(column_ref->get_enum_set_values()))) {
         LOG_WARN("failed to set_enum_set_values", K(*column_ref), K(ret));
       }
@@ -629,11 +621,13 @@ int ObMultiTableInsertResolver::resolve_insert_values_node(const ParseNode *node
       OB_UNLIKELY(table_offset < 0) ||
       OB_UNLIKELY(table_offset >= insert_all_stmt->get_insert_all_table_info().count() ||
                   table_offset >= get_is_oracle_tmp_table_array().count() ||
+                  table_offset >= get_oracle_tmp_table_type_array().count() ||
                   table_offset >= get_the_missing_label_se_columns_array().count()) ||
       OB_ISNULL(table_info = insert_all_stmt->get_insert_all_table_info().at(table_offset))) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("get unexpected null", K(insert_all_stmt), K(table_offset), K(table_info),
                                     K(get_is_oracle_tmp_table_array().count()),
+                                    K(get_oracle_tmp_table_type_array().count()),
                                     K(get_the_missing_label_se_columns_array().count()), K(ret));
   } else if (node != NULL) {
     ObIArray<ObColumnRefRawExpr*>& values_desc = table_info->values_desc_;
@@ -733,18 +727,6 @@ int ObMultiTableInsertResolver::resolve_insert_values_node(const ParseNode *node
         }
       } //end else
     } //end for
-    if (OB_SUCC(ret)) {
-      set_is_oracle_tmp_table(get_is_oracle_tmp_table_array().at(table_offset));
-      if (OB_FAIL(add_new_value_for_oracle_temp_table(value_row))) {
-        LOG_WARN("failed to add __session_id value", K(ret));
-      } else if (OB_FAIL(add_new_value_for_oracle_label_security_table(*table_info,
-                                                                       get_the_missing_label_se_columns_array().at(table_offset),
-                                                                       value_row))) {
-        LOG_WARN("fail to add new value for oracle label security table", K(ret));
-      } else {
-        set_is_oracle_tmp_table(false);
-      }
-    }
   } else {
     //未指定value时,默认将subquery输出的所有列做为输出
     ObSelectStmt *ref_stmt = NULL;
@@ -781,9 +763,14 @@ int ObMultiTableInsertResolver::resolve_insert_values_node(const ParseNode *node
       }
     }
   }
-
   if (OB_SUCC(ret)) {
-    if (OB_FAIL(table_info->values_vector_.assign(value_row))) {
+    if (OB_FAIL(add_new_value_for_oracle_temp_table(value_row))) {
+      LOG_WARN("failed to add __session_id value", K(ret));
+    } else if (OB_FAIL(add_new_value_for_oracle_label_security_table(*table_info,
+                                                                     get_the_missing_label_se_columns_array().at(table_offset),
+                                                                     value_row))) {
+      LOG_WARN("fail to add new value for oracle label security table", K(ret));
+    } else if (OB_FAIL(table_info->values_vector_.assign(value_row))) {
       LOG_WARN("failed to assign vector desc", K(ret));
     }
   }

@@ -14,8 +14,6 @@
 #include "sql/optimizer/ob_log_granule_iterator.h"
 
 #include "sql/optimizer/ob_log_table_scan.h"
-#include "ob_opt_est_cost.h"
-#include "ob_select_log_plan.h"
 
 using namespace oceanbase;
 using namespace sql;
@@ -142,16 +140,11 @@ int ObLogGranuleIterator::compute_op_ordering()
 int ObLogGranuleIterator::set_range_order()
 {
   int ret = OB_SUCCESS;
+  const ObDMLStmt *stmt = NULL;
   common::ObIArray<OrderItem> &op_ordering = get_op_ordering();
-  if (!op_ordering.empty()) {
-    // Suppose (range) partition order is asc, so first order is same partition order
-    bool is_asc_order = is_ascending_direction(op_ordering.at(0).order_type_);
-    if (is_asc_order) {
-      add_flag(GI_ASC_ORDER);
-    } else {
-      add_flag(GI_DESC_ORDER);
-    }
-    LOG_TRACE("partition order", K(is_asc_order), K(gi_attri_flag_), K(ret));
+  if (OB_ISNULL(stmt = get_plan()->get_stmt()) || OB_ISNULL(stmt->get_query_ctx())) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected null param", K(ret));
   } else if (affinitize()) {
     ObLogicalOperator *child = get_child(first_child);
     if (OB_ISNULL(child)) {
@@ -169,6 +162,22 @@ int ObLogGranuleIterator::set_range_order()
       }
       LOG_TRACE("affinitize partition order", K(is_asc_order), K(gi_attri_flag_), K(ret));
     }
+  } else if (!op_ordering.empty()) {
+    // Suppose (range) partition order is asc, so first order is same partition order
+    bool is_asc_order = is_ascending_direction(op_ordering.at(0).order_type_);
+    bool used = true;
+    if (stmt->get_query_ctx()->check_opt_compat_version(COMPAT_VERSION_4_2_3, COMPAT_VERSION_4_3_0,
+                                                        COMPAT_VERSION_4_3_2) &&
+        OB_FAIL(check_op_orderding_used_by_parent(used))) {
+      LOG_WARN("failed to check op ordering used by parent", K(ret));
+    } else if (!used) {
+      //do nothing
+    } else if (is_asc_order) {
+      add_flag(GI_ASC_ORDER);
+    } else {
+      add_flag(GI_DESC_ORDER);
+    }
+    LOG_TRACE("partition order", K(is_asc_order), K(gi_attri_flag_), K(ret));
   }
   return ret;
 }

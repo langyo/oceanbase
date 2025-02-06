@@ -15,6 +15,7 @@
 
 #include "lib/ob_define.h"
 #include "lib/utility/ob_print_utils.h"
+#include "lib/time/ob_time_utility.h"
 
 namespace oceanbase
 {
@@ -49,6 +50,8 @@ public:
   int64_t get_trx_timeout_us() const;
   // return previous timeout context or an initialized one if no previous context.
   static const ObTimeoutCtx &get_ctx();
+
+  void reset_timeout_us();
 
   TO_STRING_KV(K_(abs_timeout_us));
 

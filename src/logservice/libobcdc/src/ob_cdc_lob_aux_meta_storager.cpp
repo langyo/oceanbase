@@ -15,9 +15,6 @@
 #include "ob_cdc_lob_aux_meta_storager.h"
 #include "ob_log_store_service.h"                   // IObStoreService
 #include "ob_log_utils.h"                           // get_timestamp
-#include "ob_log_config.h"                          // ObLogConfig
-#include "logservice/libobcdc/src/ob_log_part_trans_task.h"
-#include "logservice/libobcdc/src/ob_log_tenant.h"
 #include "logservice/libobcdc/src/ob_log_instance.h"
 
 using namespace oceanbase::common;
@@ -380,7 +377,6 @@ int ObCDCLobAuxMetaStorager::del(
   int64_t commit_version = OB_INVALID_VERSION;
   const uint64_t tenant_id = lob_data_out_row_ctx_list.get_tenant_id();
   const transaction::ObTransID &trans_id = lob_data_out_row_ctx_list.get_trans_id();
-  const uint64_t aux_lob_meta_tid = lob_data_out_row_ctx_list.get_aux_lob_meta_table_id();
   ObLobDataGetCtxList &lob_data_get_ctx_list = lob_data_out_row_ctx_list.get_lob_data_get_ctx_list();
   ObLobDataGetCtx *cur_lob_data_get_ctx = lob_data_get_ctx_list.head_;
 
@@ -392,8 +388,9 @@ int ObCDCLobAuxMetaStorager::del(
   }
 
   while (OB_SUCC(ret) && ! stop_flag && cur_lob_data_get_ctx) {
-    if (OB_FAIL(del_lob_col_value_(commit_version, tenant_id, trans_id, aux_lob_meta_tid, *cur_lob_data_get_ctx, stop_flag))) {
-      LOG_ERROR("[OBCDC][LOB_AUX][DEL][COL] del_lob_col_value_ failed", KR(ret), K(tenant_id), K(trans_id), K(aux_lob_meta_tid));
+    const uint64_t table_id = lob_data_out_row_ctx_list.get_table_id_of_lob_aux_meta_key(*cur_lob_data_get_ctx);
+    if (OB_FAIL(del_lob_col_value_(commit_version, tenant_id, trans_id, table_id, *cur_lob_data_get_ctx, stop_flag))) {
+      LOG_ERROR("[OBCDC][LOB_AUX][DEL][COL] del_lob_col_value_ failed", KR(ret), K(tenant_id), K(trans_id), K(table_id));
     } else {
       cur_lob_data_get_ctx = cur_lob_data_get_ctx->get_next();
     }
@@ -426,16 +423,18 @@ int ObCDCLobAuxMetaStorager::del_lob_col_value_(
     const uint64_t seq_no_start = lob_data_out_row_ctx->seq_no_st_;
     const uint32_t seq_no_cnt = lob_data_out_row_ctx->seq_no_cnt_;
     auto seq_no = transaction::ObTxSEQ::cast_from_int(seq_no_start);
-    const ObLobId &lob_id = lob_data_get_ctx.get_new_lob_data()->id_;
-
-    for (int64_t idx = 0; OB_SUCC(ret) && idx < seq_no_cnt; ++idx, ++seq_no) {
-      LobAuxMetaKey key(commit_version, tenant_id, trans_id, aux_lob_meta_tid, lob_id, seq_no);
-      if (OB_FAIL(del(key))) {
-        LOG_ERROR("del fail", KR(ret), K(key));
-      }
-    } // for
+    ObLobId lob_id;
+    if (OB_FAIL(lob_data_get_ctx.get_lob_id(true/*is_new_col*/, lob_id))) {
+      LOG_ERROR("lob_data_get_ctx get_lob_id failed", KR(ret), K(lob_data_get_ctx));
+    } else {
+      for (int64_t idx = 0; OB_SUCC(ret) && idx < seq_no_cnt; ++idx, ++seq_no) {
+        LobAuxMetaKey key(commit_version, tenant_id, trans_id, aux_lob_meta_tid, lob_id, seq_no);
+        if (OB_FAIL(del(key))) {
+          LOG_ERROR("del fail", KR(ret), K(key));
+        }
+      } // for
+    }
   }
-
   return ret;
 }
 

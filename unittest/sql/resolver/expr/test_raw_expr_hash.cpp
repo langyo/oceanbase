@@ -10,19 +10,14 @@
  * See the Mulan PubL v2 for more details.
  */
 
-#define USING_LOG_PREFIX SQL_OPTIMIZER
+
 
 #include <gtest/gtest.h>
-#include "lib/json/ob_json.h"
-#include "lib/allocator/ob_mod_define.h"
-#include "lib/allocator/page_arena.h"
-#include "lib/oblog/ob_log.h"
 #include "sql/resolver/expr/ob_raw_expr_util.h"
-#include "sql/engine/expr/ob_expr_operator.h"
 #define private public
 #include "observer/ob_server.h"
 #undef private
-
+#define USING_LOG_PREFIX SQL_OPTIMIZER
 using namespace oceanbase::sql;
 using namespace oceanbase::common;
 namespace test
@@ -86,6 +81,10 @@ TEST_F(TestRawExprToStr, basic)
   ObSQLSessionInfo session;
   ctx.session_info_ = &session;
   OBSERVER.init_version();
+
+  EXPECT_TRUE(OB_SUCCESS == oceanbase::ObPreProcessSysVars::init_sys_var());
+  EXPECT_TRUE(OB_SUCCESS == session.test_init(0, 0, 0, NULL));
+  EXPECT_TRUE(OB_SUCCESS == session.load_default_sys_variable(false, true));
 
   // const int64_t buf_len = 1024;
   //int64_t pos = 0;

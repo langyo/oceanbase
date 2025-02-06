@@ -12,9 +12,6 @@
 
 #define USING_LOG_PREFIX SQL_RESV
 #include "sql/resolver/ddl/ob_rename_table_resolver.h"
-#include "share/ob_define.h"
-#include "share/ob_rpc_struct.h"
-#include "sql/session/ob_sql_session_info.h"
 
 namespace oceanbase
 {
@@ -128,6 +125,20 @@ int ObRenameTableResolver::resolve_rename_action(const ParseNode &rename_action_
       rename_table_item.origin_table_id_ = NULL != table_schema ? table_schema->get_table_id() : common::OB_INVALID_ID;
       if (OB_FAIL(rename_table_stmt->add_rename_table_item(rename_table_item))) {
         LOG_WARN("failed to add rename table item", K(rename_table_item), K(ret));
+      } else if (OB_NOT_NULL(table_schema)) {
+        if (table_schema->is_materialized_view()) {
+          ret = OB_NOT_SUPPORTED;
+          LOG_WARN("rename materialized view is not supported", KR(ret));
+          LOG_USER_ERROR(OB_NOT_SUPPORTED, "rename materialized view is");
+        } else if (table_schema->is_mlog_table()) {
+          ret = OB_NOT_SUPPORTED;
+          LOG_WARN("rename materialized view log is not supported", KR(ret));
+          LOG_USER_ERROR(OB_NOT_SUPPORTED, "rename materialized view log is");
+        } else if (table_schema->required_by_mview_refresh()) {
+          ret = OB_NOT_SUPPORTED;
+          LOG_WARN("rename table required by materialized view refresh is not supported", KR(ret));
+          LOG_USER_ERROR(OB_NOT_SUPPORTED, "rename table required by materialized view refresh is");
+        }
       }
     }
   }

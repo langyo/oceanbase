@@ -13,7 +13,6 @@
 
 #include "ob_string_stream_decoder.h"
 #include "ob_cs_decoding_util.h"
-#include "storage/blocksstable/encoding/ob_encoding_query_util.h"
 
 namespace oceanbase
 {
@@ -33,7 +32,7 @@ static void process(
     const ObStringStreamDecoderCtx &str_ctx,
     const char *offset_arr_buf,
     const char *ref_data,
-    const int64_t *row_ids,
+    const int32_t *row_ids,
     const int64_t row_cap,
     common::ObDatum *datums)
 {
@@ -55,7 +54,7 @@ static void process(
     const ObStringStreamDecoderCtx &str_ctx,
     const char *offset_data,
     const char *ref_data,
-    const int64_t *row_ids,
+    const int32_t *row_ids,
     const int64_t row_cap,
     common::ObDatum *datums)
 {
@@ -105,7 +104,7 @@ static void process(
     const ObStringStreamDecoderCtx &str_ctx,
     const char *offset_data,
     const char *ref_data,
-    const int64_t *row_ids,
+    const int32_t *row_ids,
     const int64_t row_cap,
     common::ObDatum *datums)
 {
@@ -151,7 +150,7 @@ static void process(
     const ObStringStreamDecoderCtx &str_ctx,
     const char *offset_data,
     const char *ref_data,
-    const int64_t *row_ids,
+    const int32_t *row_ids,
     const int64_t row_cap,
     common::ObDatum *datums)
 {
@@ -196,7 +195,7 @@ static void process(
     const ObStringStreamDecoderCtx &str_ctx,
     const char *offset_data,
     const char *ref_data,
-    const int64_t *row_ids,
+    const int32_t *row_ids,
     const int64_t row_cap,
     common::ObDatum *datums)
 {
@@ -251,7 +250,7 @@ static void process(
     const ObStringStreamDecoderCtx &str_ctx,
     const char *offset_data,
     const char *ref_data,
-    const int64_t *row_ids,
+    const int32_t *row_ids,
     const int64_t row_cap,
     common::ObDatum *datums)
 {
@@ -293,7 +292,7 @@ static void process(
     const ObStringStreamDecoderCtx &str_ctx,
     const char *offset_data,
     const char *ref_data,
-    const int64_t *row_ids,
+    const int32_t *row_ids,
     const int64_t row_cap,
     common::ObDatum *datums)
 {
@@ -332,7 +331,7 @@ static void process(
     const ObStringStreamDecoderCtx &str_ctx,
     const char *offset_data,
     const char *ref_data,
-    const int64_t *row_ids,
+    const int32_t *row_ids,
     const int64_t row_cap,
     common::ObDatum *datums)
 {
@@ -354,7 +353,7 @@ static void process(
     const ObStringStreamDecoderCtx &str_ctx,
     const char *offset_data,
     const char *ref_data,
-    const int64_t *row_ids,
+    const int32_t *row_ids,
     const int64_t row_cap,
     common::ObDatum *datums)
 {

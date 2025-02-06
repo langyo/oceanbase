@@ -10,14 +10,8 @@
  * See the Mulan PubL v2 for more details.
  */
 
-#include "lib/allocator/ob_malloc.h"
-#include "lib/checksum/ob_crc64.h"
-#include "lib/utility/serialization.h"
-#include "common/rowkey/ob_rowkey.h"
+#include "ob_rowkey.h"
 #include "common/rowkey/ob_store_rowkey.h"
-#include "common/rowkey/ob_rowkey_info.h"
-#include "common/object/ob_object.h"
-#include "common/object/ob_obj_type.h"
 #include "common/object/ob_obj_compare.h"
 
 namespace oceanbase
@@ -89,6 +83,7 @@ int ObRowkey::equal(const ObRowkey &rhs, bool &is_equal) const
         case ObIntTC:
         case ObUIntTC:
         case ObDateTimeTC:
+        case ObMySQLDateTimeTC:
         case ObTimeTC:
         case ObExtendTC:
         case ObBitTC:
@@ -96,6 +91,7 @@ int ObRowkey::equal(const ObRowkey &rhs, bool &is_equal) const
           is_equal = (obj.v_.int64_ == rhs_obj.v_.int64_);
           break;
         case ObDateTC:
+        case ObMySQLDateTC:
           is_equal = (obj.v_.date_ == rhs_obj.v_.date_);
           break;
         case ObYearTC:
@@ -203,6 +199,7 @@ bool ObRowkey::simple_equal(const ObRowkey &rhs) const
         case ObIntTC:
         case ObUIntTC:
         case ObDateTimeTC:
+        case ObMySQLDateTimeTC:
         case ObTimeTC:
         case ObExtendTC:
         case ObBitTC:
@@ -210,6 +207,7 @@ bool ObRowkey::simple_equal(const ObRowkey &rhs) const
           ret = (obj.v_.int64_ == rhs_obj.v_.int64_);
           break;
         case ObDateTC:
+        case ObMySQLDateTC:
           ret = (obj.v_.date_ == rhs_obj.v_.date_);
           break;
         case ObYearTC:
@@ -542,10 +540,12 @@ int64_t ObRowkey::to_plain_string(char *buffer, const int64_t length) const
 {
   int64_t pos = 0;
   int ret = OB_SUCCESS;
+  ObObjPrintParams print_params;
+  print_params.refine_range_max_value_ = true;
   for (int i = 0; OB_SUCC(ret) && i < obj_cnt_; ++i) {
     if (pos < length) {
       if (!obj_ptr_[i].is_max_value() && !obj_ptr_[i].is_min_value()) {
-        if (OB_FAIL(obj_ptr_[i].print_plain_str_literal(buffer, length, pos))) {
+        if (OB_FAIL(obj_ptr_[i].print_plain_str_literal(buffer, length, pos, print_params))) {
           COMMON_LOG(WARN, "Failed to print", K(obj_ptr_[i]), K(ret));
         }
       } else if (obj_ptr_[i].is_min_value()) {

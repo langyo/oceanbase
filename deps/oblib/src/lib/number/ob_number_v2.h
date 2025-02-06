@@ -123,6 +123,8 @@ struct ObCompactNumber
   uint32_t digits_[0];
 
   bool is_zero() const { return 0 == desc_.len_; }
+
+  TO_STRING_KV(K_(digits), K(desc_.desc_));
 };
 
 static_assert(sizeof(ObCompactNumber) == sizeof(uint32_t), "wrong compact number size");
@@ -295,6 +297,9 @@ public:
   //strict_mode = true, means only alloc necessary size. otherwise alloc max fixed-length
   int add_v3(const ObNumber &other, ObNumber &value, ObIAllocator &allocator,
              const bool strict_mode = true, const bool do_rounding = true) const;
+
+  static inline int add_v3(const ObNumber &left, const ObNumber &right, ObNumber &result,
+          ObIAllocator &allocator);
   template <class T>
   int add(const T param1, const T param2, ObNumber &result, ObIAllocator &allocator) const;
   template <class T>
@@ -304,6 +309,8 @@ public:
   //strict_mode = true, means only alloc necessary size. otherwise alloc max fixed-length
   int sub_v3(const ObNumber &other, ObNumber &value, ObIAllocator &allocator,
              const bool strict_mode = true, const bool do_rounding = true) const;
+  static inline int sub_v3(const ObNumber &left, const ObNumber &right, ObNumber &result,
+                           ObIAllocator &allocator);
   template <class T>
   int sub_v1(const ObNumber &other, ObNumber &value, T &allocator) const;
   template <class T>
@@ -314,6 +321,10 @@ public:
   int mul_v2(const ObNumber &other, ObNumber &value, T &allocator) const;
   int mul_v3(const ObNumber &other, ObNumber &value, ObIAllocator &allocator,
       const bool strict_mode = true, const bool do_rounding = true) const;
+
+  static inline int mul_v3(const ObNumber &left, const ObNumber &right, ObNumber &result,
+          ObIAllocator &allocator);
+
   template <class T>
   int div(const ObNumber &other, ObNumber &value, T &allocator,
           const int32_t qscale = OB_MAX_DECIMAL_DIGIT, const bool do_rounding = true) const;
@@ -1704,6 +1715,12 @@ int ObNumber::add_v2(const ObNumber &other, ObNumber &value, T &allocator) const
   return add_v2_(other, value, ta);
 }
 
+inline int ObNumber::add_v3(const ObNumber &left, const ObNumber &right, ObNumber &result,
+                  ObIAllocator &allocator)
+{
+  return left.add_v3(right, result, allocator);
+}
+
 template <class T>
 int ObNumber::add(const ObNumber &other, ObNumber &value, T &allocator) const
 {
@@ -1736,6 +1753,12 @@ int ObNumber::add(const IntegerT param1, const IntegerT param2, ObNumber &result
   return ret;
 }
 
+inline int ObNumber::sub_v3(const ObNumber &left, const ObNumber &right, ObNumber &result,
+                  ObIAllocator &allocator)
+{
+  return left.sub_v3(right, result, allocator);
+}
+
 template <class T>
 int ObNumber::sub_v1(const ObNumber &other, ObNumber &value, T &allocator) const
 {
@@ -1757,6 +1780,12 @@ int ObNumber::sub(const ObNumber &other, ObNumber &value, T &allocator) const
   TAllocator<T> ta(allocator);
   return sub_v2_(other, value, ta);
 
+}
+
+inline int ObNumber::mul_v3(const ObNumber &left, const ObNumber &right, ObNumber &result,
+                  ObIAllocator &allocator)
+{
+  return left.mul_v3(right, result, allocator);
 }
 
 template <class T>
@@ -2201,7 +2230,7 @@ inline int ObNumber::decode(const char *buf, const int64_t buf_size, int64_t &po
       const int64_t copy_size = d_.len_ * static_cast<int64_t>(sizeof(uint32_t));
       if (OB_UNLIKELY(buf_size - pos < copy_size)) {
         ret = OB_BUF_NOT_ENOUGH;
-        LIB_LOG(ERROR, "buff is not enough", K(copy_size), K(buf_size - pos), K(buf_size), K(pos), K(ret));
+        LIB_LOG(WARN, "buff is not enough", K(copy_size), K(buf_size - pos), K(buf_size), K(pos), K(ret));
       } else {
         digits_ = (uint32_t *)(buf + pos);
         pos += copy_size;
@@ -2911,16 +2940,19 @@ int knuth_probe_quotient(
   if (OB_FAIL(qq_mul_v.ensure(v.size() + 1))) {
     _OB_LOG(WARN, "ensure qq_mul_v fail, ret=%d size=%ld", ret, v.size() + 1);
   } else if (OB_FAIL(poly_mono_mul(v, qq, qq_mul_v))) {
-    _OB_LOG(WARN, "%lu mul %s u=%s fail, ret=%d", qq, to_cstring(v), to_cstring(u), ret);
+    ObCStringHelper helper;
+    _OB_LOG(WARN, "%lu mul %s u=%s fail, ret=%d", qq, helper.convert(v), helper.convert(u), ret);
   } else if (OB_FAIL(u_sub.ensure(n + 1))) {
     _OB_LOG(WARN, "ensure u_sub fail, ret=%d size=%ld", ret, n + 1);
   } else if (OB_FAIL(poly_poly_sub(u.ref(j, j + n), qq_mul_v.ref(1, n + 1), u_sub,
                                                 negative, truevalue))) {
-    _OB_LOG(WARN, "%s sub %s fail, ret=%d", to_cstring(u.ref(j, j + n)),
-            to_cstring(qq_mul_v), ret);
+    ObCStringHelper helper;
+    _OB_LOG(WARN, "%s sub %s fail, ret=%d", helper.convert(u.ref(j, j + n)),
+            helper.convert(qq_mul_v), ret);
   } else if (!negative
              && OB_FAIL(u.assign(u_sub, j, j + n))) {
-    _OB_LOG(WARN, "assign %s to u[%ld,%ld] fail, ret=%d", to_cstring(u_sub), j, j + n, ret);
+    ObCStringHelper helper;
+    _OB_LOG(WARN, "assign %s to u[%ld,%ld] fail, ret=%d", helper.convert(u_sub), j, j + n, ret);
   } else {
     // do nothing
   }
@@ -2938,10 +2970,12 @@ int knuth_probe_quotient(
     if (OB_FAIL(u_add.ensure(n + 2))) {
       _OB_LOG(WARN, "ensure u_add fail, ret=%d size=%ld", ret, n + 2);
     } else if (OB_FAIL(poly_poly_add(u_sub, v, u_add))) {
-      _OB_LOG(WARN, "%s add %s fail, ret=%d", to_cstring(u_sub), to_cstring(v), ret);
+      ObCStringHelper helper;
+      _OB_LOG(WARN, "%s add %s fail, ret=%d", helper.convert(u_sub), helper.convert(v), ret);
     } else if (OB_FAIL(u.assign(u_add.ref(1, n + 1), j, j + n))) {
+      ObCStringHelper helper;
       _OB_LOG(WARN, "assign %s to u[%ld,%ld] fail, ret=%d",
-              to_cstring(u_add.ref(1, n + 1)), j, j + n, ret);
+              helper.convert(u_add.ref(1, n + 1)), j, j + n, ret);
     } else {
       // do nothing
     }
@@ -2997,9 +3031,11 @@ int knuth_probe_quotient(
 //      _OB_LOG(WARN, "ensure divisor fail ret=%d size=%ld", ret, divisor_size + 1);
 //    }
 //    if (OB_FAIL(poly_mono_mul(dividend, d, u))) {
-//      _OB_LOG(WARN, "%s mul %lu fail, ret=%d", to_cstring(dividend), d, ret);
+//      ObCStringHelper helper;
+//      _OB_LOG(WARN, "%s mul %lu fail, ret=%d", helper.convert(dividend), d, ret);
 //    } else if (OB_FAIL(poly_mono_mul(divisor, d, v))) {
-//      _OB_LOG(WARN, "%s mul %lu fail, ret=%d", to_cstring(divisor), d, ret);
+//      ObCStringHelper helper;
+//      _OB_LOG(WARN, "%s mul %lu fail, ret=%d", helper.convert(divisor), d, ret);
 //    } else {
 //      LIB_LOG(DEBUG, "Knuth Algo start",
 //              K(dividend), K(divisor), K(d), K(u), K(v), K(n), K(m));
@@ -3030,13 +3066,15 @@ int knuth_probe_quotient(
 //      if (OB_SUCC(ret)) {
 //        uint64_t r = 0;
 //        if (OB_FAIL(poly_mono_div(u.ref(m + 1, m + n), d, remainder, r))) {
-//          _OB_LOG(WARN, "%s div %lu fail, ret=%d", to_cstring(u.ref(m + 1, m + n)), d, ret);
+//          ObCStringHelper helper;
+//          _OB_LOG(WARN, "%s div %lu fail, ret=%d", helper.convert(u.ref(m + 1, m + n)), d, ret);
 //        }
 //      }
 //
+//      ObCStringHelper helper;
 //      _OB_LOG(DEBUG, "Knuth Algo end, %s / %s = %s ... %s",
-//              to_cstring(dividend), to_cstring(divisor),
-//              to_cstring(quotient), to_cstring(remainder));
+//              helper.convert(dividend), helper.convert(divisor),
+//              helper.convert(quotient), helper.convert(remainder));
 //    }
 //  }
 //  return ret;

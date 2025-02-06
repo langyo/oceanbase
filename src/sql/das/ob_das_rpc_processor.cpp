@@ -13,12 +13,6 @@
 #define USING_LOG_PREFIX SQL_DAS
 #include "sql/das/ob_das_rpc_processor.h"
 #include "sql/das/ob_data_access_service.h"
-#include "sql/das/ob_das_utils.h"
-#include "sql/engine/ob_exec_context.h"
-#include "observer/ob_server_struct.h"
-#include "storage/tx/ob_trans_service.h"
-#include "observer/ob_srv_network_frame.h"
-#include "lib/ash/ob_active_session_guard.h"
 
 namespace oceanbase
 {
@@ -30,6 +24,9 @@ int ObDASBaseAccessP<pcode>::init()
   int ret = OB_SUCCESS;
   ObDASTaskArg &task = RpcProcessor::arg_;
   ObDASBaseAccessP<pcode>::get_das_factory() = &das_factory_;
+  memset(monitor_val_, 0, sizeof(monitor_val_));
+  tsc_monitor_info_.init(&monitor_val_[0], &monitor_val_[1], &monitor_val_[2], &monitor_val_[3]);
+  das_remote_info_.tsc_monitor_info_ = &tsc_monitor_info_;
   das_remote_info_.exec_ctx_ = &exec_ctx_;
   das_remote_info_.frame_info_ = &frame_info_;
   task.set_remote_info(&das_remote_info_);
@@ -47,15 +44,34 @@ int ObDASBaseAccessP<pcode>::before_process()
   mem_attr.tenant_id_ = task.get_task_op()->get_tenant_id();
   mem_attr.label_ = "DASRpcPCtx";
   exec_ctx_.get_allocator().set_attr(mem_attr);
-  ObActiveSessionGuard::setup_thread_local_ash();
-  ObActiveSessionGuard::get_stat().in_das_remote_exec_ = true;
-  ObActiveSessionGuard::get_stat().tenant_id_ = task.get_task_op()->get_tenant_id();
-  ObActiveSessionGuard::get_stat().trace_id_ = *ObCurTraceId::get_trace_id();
-  ObActiveSessionGuard::get_stat().user_id_ = das_remote_info_.user_id_;
-  ObActiveSessionGuard::get_stat().session_id_ = das_remote_info_.session_id_;
-  ObActiveSessionGuard::get_stat().plan_id_ = das_remote_info_.plan_id_;
-  MEMCPY(ObActiveSessionGuard::get_stat().sql_id_, das_remote_info_.sql_id_,
-      min(sizeof(ObActiveSessionGuard::get_stat().sql_id_), sizeof(das_remote_info_.sql_id_)));
+  // ash stat should be setted already in rpc thread.
+  ObDiagnosticInfo *di = ObLocalDiagnosticInfo::get();
+  if (OB_NOT_NULL(di)) {
+    di->get_ash_stat().in_das_remote_exec_ = true;
+    di->get_ash_stat().tenant_id_ = task.get_task_op()->get_tenant_id();
+    di->get_ash_stat().trace_id_ = *ObCurTraceId::get_trace_id();
+    di->get_ash_stat().user_id_ = das_remote_info_.user_id_;
+    di->get_ash_stat().plan_id_ = das_remote_info_.plan_id_;
+    di->get_ash_stat().plan_hash_ = das_remote_info_.plan_hash_;
+    MEMCPY(di->get_ash_stat().sql_id_, das_remote_info_.sql_id_,
+        min(sizeof(di->get_ash_stat().sql_id_), sizeof(das_remote_info_.sql_id_)));
+  }
+
+  {
+    omt::ObTenantConfigGuard tenant_config(TENANT_CONF(task.get_task_op()->get_tenant_id()));
+    if (tenant_config.is_valid()) {
+      is_enable_sqlstat_ = tenant_config->_ob_sqlstat_enable && lib::is_diagnose_info_enabled();
+      // sqlstat has a dependency on the statistics mechanism, so turning off perf event will turn off sqlstat at the same time.
+    }
+  }
+
+  if (is_enable_sqlstat_) {
+    sqlstat_record_.record_sqlstat_start_value();
+    sqlstat_key_.set_sql_id(ObString::make_string(das_remote_info_.sql_id_));
+    sqlstat_key_.set_plan_hash(das_remote_info_.plan_hash_);
+    sqlstat_key_.set_source_addr(ObRpcProcessorBase::get_peer());
+  }
+
   if (OB_FAIL(RpcProcessor::before_process())) {
     LOG_WARN("do rpc processor before_process failed", K(ret));
   } else if (das_remote_info_.need_calc_expr_ &&
@@ -76,6 +92,7 @@ int ObDASBaseAccessP<pcode>::process()
   LOG_DEBUG("DAS base access remote process", K_(RpcProcessor::arg));
   ObDASTaskArg &task = RpcProcessor::arg_;
   ObDASTaskResp &task_resp = RpcProcessor::result_;
+  SQL_INFO_GUARD(ObString("DAS REMOTE PROCESS"), task.get_remote_info()->sql_id_);
   const common::ObSEArray<ObIDASTaskOp*, 2> &task_ops = task.get_task_ops();
   common::ObSEArray<ObIDASTaskResult*, 2> &task_results = task_resp.get_op_results();
   ObDASTaskFactory *das_factory = ObDASBaseAccessP<pcode>::get_das_factory();
@@ -98,6 +115,8 @@ int ObDASBaseAccessP<pcode>::process()
   } else {
     for (int i = 0; OB_SUCC(ret) && i < task_ops.count(); i++) {
       task_op = task_ops.at(i);
+      GET_DIAGNOSTIC_INFO->get_ash_stat().plan_line_id_ = task_op->plan_line_id_;
+      ACTIVE_SESSION_RETRY_DIAG_INFO_SETTER(ls_id_, task_op->get_ls_id().id());
       if (OB_FAIL(das_factory->create_das_task_result(task_op->get_type(), op_result))) {
         LOG_WARN("create das task result failed", K(ret));
       } else if (OB_FAIL(task_resp.add_op_result(op_result))) {
@@ -118,6 +137,10 @@ int ObDASBaseAccessP<pcode>::process()
           //ignore the errcode of storing warning msg
           (void)task_resp.store_warning_msg(*wb);
         }
+      }
+      if (OB_FAIL(ret) && OB_NOT_NULL(op_result)) {
+        // accessing failed das task result is undefined behavior.
+        op_result->reuse();
       }
       //因为end_task还有可能失败，需要通过RPC将end_task的返回值带回到scheduler上
       int tmp_ret = task_op->end_das_task();
@@ -174,6 +197,11 @@ int ObDASBaseAccessP<pcode>::after_process(int error_code)
   } else if (elapsed_time >= ObServerConfig::get_instance().trace_log_slow_query_watermark) {
     //slow das task, print trace info
     FORCE_PRINT_TRACE(THE_TRACE, "[slow das rpc process]");
+  } else {
+    if (is_enable_sqlstat_) {
+      sqlstat_record_.record_sqlstat_end_value();
+      sqlstat_record_.move_to_sqlstat_cache(sqlstat_key_);
+    }
   }
   //执行相关的错误信息不用传递给RPC框架，RPC框架不处理具体的RPC执行错误信息，始终返回OB_SUCCESS
   return OB_SUCCESS;
@@ -182,8 +210,7 @@ int ObDASBaseAccessP<pcode>::after_process(int error_code)
 template<obrpc::ObRpcPacketCode pcode>
 void ObDASBaseAccessP<pcode>::cleanup()
 {
-  ObActiveSessionGuard::get_stat().reuse();
-  ObActiveSessionGuard::setup_default_ash();
+  GET_DIAGNOSTIC_INFO->get_ash_stat().in_das_remote_exec_ = false;
   das_factory_.cleanup();
   ObDASBaseAccessP<pcode>::get_das_factory() = nullptr;
   if (das_remote_info_.trans_desc_ != nullptr) {
@@ -229,17 +256,19 @@ void ObRpcDasAsyncAccessCallBack::on_timeout()
   LOG_WARN("das async task timeout", KR(ret), K(get_task_ops()));
   result_.set_err_code(ret);
   result_.get_op_results().reuse();
-  context_->get_das_ref().inc_concurrency_limit_with_signal();
+  context_->get_ref_count_ctx().inc_concurrency_limit_with_signal();
 }
 
 void ObRpcDasAsyncAccessCallBack::on_invalid()
 {
   int ret = OB_SUCCESS;
   // a valid packet on protocol level, but can't decode it.
+  ret = get_error() == OB_ALLOCATE_MEMORY_FAILED ?
+        OB_ALLOCATE_MEMORY_FAILED : OB_INVALID_ERROR;
   LOG_WARN("das async task invalid", K(get_task_ops()));
-  result_.set_err_code(OB_INVALID_ERROR);
+  result_.set_err_code(ret);
   result_.get_op_results().reuse();
-  context_->get_das_ref().inc_concurrency_limit_with_signal();
+  context_->get_ref_count_ctx().inc_concurrency_limit_with_signal();
 }
 
 void ObRpcDasAsyncAccessCallBack::set_args(const Request &arg)
@@ -257,7 +286,7 @@ int ObRpcDasAsyncAccessCallBack::process()
     result_.get_op_results().reuse();
     LOG_WARN("das async rpc execution failed", K(get_rcode()), K_(result));
   }
-  context_->get_das_ref().inc_concurrency_limit_with_signal();
+  context_->get_ref_count_ctx().inc_concurrency_limit_with_signal();
   return ret;
 }
 
@@ -283,8 +312,6 @@ int ObDASSyncFetchP::process()
   ObDataAccessService *das = NULL;
   const uint64_t tenant_id = req.get_tenant_id();
   const int64_t task_id = req.get_task_id();
-  ObChunkDatumStore &datum_store = res.get_datum_store();
-  bool has_more = false;
   if (tenant_id != MTL_ID()) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("wrong tenant id", KR(ret), K(req));
@@ -293,9 +320,11 @@ int ObDASSyncFetchP::process()
   } else if (OB_ISNULL(das = MTL(ObDataAccessService *))) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("das is null", KR(ret), KP(das));
-  } else if (OB_FAIL(das->get_task_res_mgr().iterator_task_result(task_id,
-                                                                  datum_store,
-                                                                  has_more))) {
+  } else if (OB_FAIL(das->get_task_res_mgr().iterator_task_result(res,
+                                                                  res.io_read_bytes_,
+                                                                  res.ssstore_read_bytes_,
+                                                                  res.ssstore_read_row_cnt_,
+                                                                  res.memstore_read_row_cnt_))) {
     if (OB_UNLIKELY(OB_ENTRY_NOT_EXIST == ret)) {
       // After server reboot, the hash map containing task results was gone.
       // We need to retry for such cases.
@@ -304,8 +333,6 @@ int ObDASSyncFetchP::process()
     } else {
       LOG_WARN("get task result failed", KR(ret), K(res));
     }
-  } else {
-    res.set_has_more(has_more);
   }
   return ret;
 }

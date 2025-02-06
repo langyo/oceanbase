@@ -13,14 +13,8 @@
 #define USING_LOG_PREFIX STORAGE
 
 #include "ob_cs_micro_block_transformer.h"
-#include "lib/compress/ob_compressor_pool.h"
-#include "ob_int_dict_column_encoder.h"
-#include "ob_str_dict_column_encoder.h"
-#include "ob_cs_encoding_util.h"
-#include "ob_cs_decoding_util.h"
 #include "storage/blocksstable/ob_sstable_printer.h"
 #include "ob_string_stream_decoder.h"
-#include "ob_integer_stream_decoder.h"
 
 namespace oceanbase
 {
@@ -1001,17 +995,18 @@ int ObCSMicroBlockTransformer::dump_cs_encoding_info(char *hex_print_buf, const 
     ret = OB_NOT_INIT;
     LOG_WARN("not init", K(ret));
   } else {
-    ObSSTablePrinter::print_cs_encoding_all_column_header(*all_column_header_);
+    ObSSTablePrinter printer;
+    printer.print_cs_encoding_all_column_header(*all_column_header_);
     const uint32_t col_cnt = header_->column_count_;
     const uint32_t stream_cnt = all_column_header_->stream_count_;
     uint16_t col_first_stream_idx = 0;
     uint16_t col_end_stream_idx = 0;
     for (int64_t i = 0; i < col_cnt; i++) {
-      ObSSTablePrinter::print_cs_encoding_column_header(column_headers_[i], i);
+      printer.print_cs_encoding_column_header(column_headers_[i], i);
       ObMicroBlockTransformDesc::Pos &meta_pos = original_desc_.column_meta_pos_arr_[i];
       const char *meta_buf = payload_buf_ + meta_pos.offset_;
       const int64_t meta_len = meta_pos.len_;
-      ObSSTablePrinter::print_cs_encoding_column_meta(
+      printer.print_cs_encoding_column_meta(
           meta_buf, meta_len, (ObCSColumnHeader::Type)column_headers_[i].type_, i, hex_print_buf, hex_buf_size);
 
       col_first_stream_idx = original_desc_.column_first_stream_idx_arr_[i];
@@ -1025,16 +1020,16 @@ int ObCSMicroBlockTransformer::dump_cs_encoding_info(char *hex_print_buf, const 
         if (original_desc_.is_integer_stream(col_first_stream_idx)) {
           ObIntegerStreamDecoderCtx *ctx = reinterpret_cast<ObIntegerStreamDecoderCtx *>(stream_decoding_ctx_buf_ + decoding_ctx_offset);
           decoding_ctx_offset += sizeof(ObIntegerStreamDecoderCtx);
-          ObSSTablePrinter::print_integer_stream_decoder_ctx(col_first_stream_idx, *ctx, hex_print_buf, hex_buf_size);
+          printer.print_integer_stream_decoder_ctx(col_first_stream_idx, *ctx, hex_print_buf, hex_buf_size);
         } else { // is string stream
           ObStringStreamDecoderCtx *ctx = reinterpret_cast<ObStringStreamDecoderCtx *>(stream_decoding_ctx_buf_ + decoding_ctx_offset);
           decoding_ctx_offset += sizeof(ObStringStreamDecoderCtx);
-          ObSSTablePrinter::print_string_stream_decoder_ctx(col_first_stream_idx, *ctx, hex_print_buf, hex_buf_size);
+          printer.print_string_stream_decoder_ctx(col_first_stream_idx, *ctx, hex_print_buf, hex_buf_size);
         }
         col_first_stream_idx++;
       }
     }
-    ObSSTablePrinter::print_cs_encoding_orig_stream_data(
+    printer.print_cs_encoding_orig_stream_data(
         stream_cnt, original_desc_, payload_buf_, all_string_data_offset_, all_column_header_->all_string_data_length_);
   }
   return ret;
@@ -1276,7 +1271,7 @@ int ObCSMicroBlockTransformHelper::build_integer_column_decoder_ctx_(
         ctx.null_flag_ = ObBaseColumnDecoderCtx::HAS_NO_NULL;
         ctx.null_desc_ = nullptr;
       }
-      LOG_DEBUG("build_integer_column_decoder_ctx", K(col_first_stream_idx), K(col_end_stream_idx), K(col_idx), K(ctx));
+      LOG_TRACE("build_integer_column_decoder_ctx", K(col_first_stream_idx), K(col_end_stream_idx), K(col_idx), K(ctx));
     }
   }
   return ret;
@@ -1332,7 +1327,7 @@ int ObCSMicroBlockTransformHelper::build_string_column_decoder_ctx_(
           ctx.offset_data_ = buf + transform_desc_.stream_data_pos_arr_[col_second_stream_idx].offset_;
         }
       }
-      LOG_DEBUG("build_string_column_decoder_ctx", K(col_first_stream_idx), K(col_end_stream_idx), K(col_idx), K(ctx));
+      LOG_TRACE("build_string_column_decoder_ctx", K(col_first_stream_idx), K(col_end_stream_idx), K(col_idx), K(ctx));
     }
   }
 
@@ -1381,7 +1376,7 @@ int ObCSMicroBlockTransformHelper::build_integer_dict_decoder_ctx_(const ObObjMe
               sizeof(ObIntegerStreamDecoderCtx));
           ctx.ref_data_ = buf + transform_desc_.stream_data_pos_arr_[col_second_stream_idx].offset_;
 
-          LOG_DEBUG("build_integer_dict_decoder_ctx",
+          LOG_TRACE("build_integer_dict_decoder_ctx",
               K(col_first_stream_idx), K(col_end_stream_idx), K(col_idx), K(ctx));
         }
       }
@@ -1443,7 +1438,7 @@ int ObCSMicroBlockTransformHelper::build_string_dict_decoder_ctx_(const ObObjMet
               sizeof(ObStringStreamDecoderCtx));
           ctx.ref_data_ = buf + transform_desc_.stream_data_pos_arr_[col_second_stream_idx].offset_;
 
-          LOG_DEBUG("build_string_dict_decoder_ctx",
+          LOG_TRACE("build_string_dict_decoder_ctx",
               K(col_first_stream_idx), K(col_end_stream_idx), K(col_idx), K(ctx));
         }
       }
@@ -1474,7 +1469,7 @@ int ObCSMicroBlockTransformHelper::build_string_dict_decoder_ctx_(const ObObjMet
                 sizeof(ObStringStreamDecoderCtx) + sizeof(ObIntegerStreamDecoderCtx));
             ctx.ref_data_ = buf + transform_desc_.stream_data_pos_arr_[col_third_stream_idx].offset_;
 
-            LOG_DEBUG("build_string_dict_decoder_ctx",
+            LOG_TRACE("build_string_dict_decoder_ctx",
                 K(col_first_stream_idx), K(col_end_stream_idx), K(col_idx), K(ctx));
           }
         }

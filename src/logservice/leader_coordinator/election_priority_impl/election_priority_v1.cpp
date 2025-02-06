@@ -10,21 +10,8 @@
  * See the Mulan PubL v2 for more details.
  */
 
-#include "lib/utility/ob_macro_utils.h"
 #include "logservice/ob_log_service.h"
-#include "share/ob_errno.h"
-#include "share/ob_occam_time_guard.h"
-#include "election_priority_impl.h"
-#include "lib/list/ob_dlist.h"
-#include "lib/lock/ob_spin_lock.h"
-#include "lib/ob_errno.h"
-#include "logservice/leader_coordinator/ob_leader_coordinator.h"
 #include "logservice/leader_coordinator/common_define.h"
-#include "share/rc/ob_tenant_base.h"
-#include "share/ob_table_access_helper.h"
-#include "storage/tx_storage/ob_ls_service.h"
-#include "storage/tx_storage/ob_ls_handle.h"
-#include "logservice/palf/lsn.h"
 #include "observer/ob_server.h"
 
 namespace oceanbase
@@ -102,6 +89,7 @@ int PriorityV1::get_scn_(const share::ObLSID &ls_id, SCN &scn)
   int64_t unused_pid = -1;
   const bool is_cluster_already_4200 = GET_MIN_CLUSTER_VERSION() >= CLUSTER_VERSION_4_2_0_0;
   if (OB_ISNULL(log_service)) {
+    ret = OB_ERR_UNEXPECTED;
     COORDINATOR_LOG_(ERROR, "ObLogService is nullptr");
   } else if (CLICK_FAIL(log_service->open_palf(ls_id, palf_handle_guard))) {
     COORDINATOR_LOG_(WARN, "open_palf failed");
@@ -189,6 +177,7 @@ int PriorityV1::get_role_(const share::ObLSID &ls_id, common::ObRole &role) cons
   role = FOLLOWER;
 
   if (OB_ISNULL(ls_srv)) {
+    ret = OB_ERR_UNEXPECTED;
     COORDINATOR_LOG_(ERROR, "ObLSService is nullptr");
   } else if (OB_FAIL(ls_srv->get_ls(ls_id, ls_handle, ObLSGetMod::LOG_MOD))) {
     COORDINATOR_LOG_(WARN, "get_ls failed", K(ls_id));
@@ -284,14 +273,20 @@ int PriorityV1::compare_in_blacklist_flag_(int &ret, const PriorityV1&rhs, ObStr
     if (is_in_blacklist_ == rhs.is_in_blacklist_) {
       compare_result = 0;
     } else if (!is_in_blacklist_ && rhs.is_in_blacklist_) {
-      if (CLICK_FAIL(databuff_printf(remove_reason, 64, pos, "IN BLACKLIST(%s)", to_cstring(rhs.in_blacklist_reason_)))) {
+      if (CLICK_FAIL({ret = databuff_printf(remove_reason, 64, pos, "IN BLACKLIST(");
+                      OB_SUCCESS != ret ? : databuff_printf(remove_reason, 64, pos, rhs.in_blacklist_reason_);
+                      OB_SUCCESS != ret ? : databuff_printf(remove_reason, 64, pos, ")");
+                      ret;})) {
         COORDINATOR_LOG(WARN, "data buf printf failed");
       } else if (CLICK_FAIL(reason.assign(remove_reason))) {
         COORDINATOR_LOG(WARN, "assign reason failed");
       }
       compare_result = 1;
     } else {
-      if (CLICK_FAIL(databuff_printf(remove_reason, 64, pos, "IN BLACKLIST(%s)", to_cstring(in_blacklist_reason_)))) {
+      if (CLICK_FAIL({ret = databuff_printf(remove_reason, 64, pos, "IN BLACKLIST(");
+                      OB_SUCCESS != ret ? : databuff_printf(remove_reason, 64, pos, in_blacklist_reason_);
+                      OB_SUCCESS != ret ? : databuff_printf(remove_reason, 64, pos, ")");
+                      ret;})) {
         COORDINATOR_LOG(WARN, "data buf printf failed");
       } else if (CLICK_FAIL(reason.assign(remove_reason))) {
         COORDINATOR_LOG(WARN, "assign reason failed");

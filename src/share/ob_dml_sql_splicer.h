@@ -100,6 +100,7 @@ public:
   int add_uint64_column(const char *col_name, const uint64_t value);
   int add_time_column(const char *col_name, const int64_t now, bool is_pk = false);
   int add_raw_time_column(const char *col_name, const int64_t now);
+  int add_long_double_column(const char *col_name, const double value);
   // mark end of one row
   int finish_row();
 
@@ -127,6 +128,7 @@ public:
 
   // functions to splice batch sql statement
   int splice_batch_insert_sql(const char *table_name, common::ObSqlString &sql) const;
+  int splice_batch_insert_ignore_sql(const char *table_name, common::ObSqlString &sql) const;
   int splice_batch_insert_update_sql(
       const char *table_name,
       common::ObSqlString &sql) const;

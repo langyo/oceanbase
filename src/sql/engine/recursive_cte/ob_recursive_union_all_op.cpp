@@ -12,7 +12,6 @@
 
 #define USING_LOG_PREFIX SQL_ENG
 #include "sql/engine/recursive_cte/ob_recursive_union_all_op.h"
-#include "sql/engine/expr/ob_expr_operator.h"
 #include "sql/engine/expr/ob_datum_cast.h"
 
 
@@ -25,10 +24,7 @@ const int64_t ObRecursiveUnionAllSpec::UNUSED_POS = -2;
 int ObRecursiveUnionAllOp::inner_close()
 {
   int ret = OB_SUCCESS;
-  inner_data_.result_output_.reset();
-  inner_data_.pump_operator_ = nullptr;
-  inner_data_.left_op_ = nullptr;
-  inner_data_.right_op_ = nullptr;
+  inner_data_.destroy();
   return ret;
 }
 
@@ -42,7 +38,8 @@ ObRecursiveUnionAllSpec::ObRecursiveUnionAllSpec(ObIAllocator &alloc, const ObPh
       cycle_expr_(nullptr),
       strategy_(ObRecursiveInnerDataOp::SearchStrategyType::BREADTH_FRIST),
       cycle_value_(nullptr),
-      cycle_default_value_(nullptr)
+      cycle_default_value_(nullptr),
+      identify_seq_offset_(-1)
 {
 }
 
@@ -59,7 +56,8 @@ OB_SERIALIZE_MEMBER((ObRecursiveUnionAllSpec, ObOpSpec),
                     cycle_expr_,
                     strategy_,
                     cycle_value_,
-                    cycle_default_value_);
+                    cycle_default_value_,
+                    identify_seq_offset_);
 
 int ObRecursiveUnionAllOp::inner_rescan()
 {
@@ -90,7 +88,7 @@ int ObRecursiveUnionAllOp::inner_open()
   } else if (OB_ISNULL(op_kit = ctx_.get_operator_kit(MY_SPEC.pump_operator_id_))
               || OB_ISNULL(op_kit->op_)) {
     ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("get ObOperater from exec ctx failed", K(MY_SPEC.pump_operator_id_), K(op_kit), K(MY_SPEC.search_expr_), K(MY_SPEC.strategy_));
+    LOG_WARN("get ObOperator from exec ctx failed", K(MY_SPEC.pump_operator_id_), K(op_kit), K(MY_SPEC.search_expr_), K(MY_SPEC.strategy_));
   } else {
     inner_data_.set_left_child(left_);
     inner_data_.set_right_child(right_);
@@ -134,9 +132,10 @@ int ObRecursiveUnionAllOp::inner_get_next_batch(const int64_t max_row_cnt)
 {
   int ret = OB_SUCCESS;
   clear_evaluated_flag();
+  int64_t batch_size = std::min(max_row_cnt, MY_SPEC.max_batch_size_);
   if (OB_FAIL(try_check_status())) {
     LOG_WARN("Failed to check physical plan status", K(ret));
-  } else if (OB_FAIL(inner_data_.get_next_batch(max_row_cnt, brs_))) {
+  } else if (OB_FAIL(inner_data_.get_next_batch(batch_size, brs_))) {
     LOG_WARN("Failed to get next sort row from recursive inner data", K(ret));
   }
   return ret;

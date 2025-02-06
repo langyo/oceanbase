@@ -11,8 +11,6 @@
  */
 
 #include "lib/thread/thread_mgr.h"
-#include "lib/alloc/memory_dump.h"
-#include "lib/lock/ob_latch.h"
 
 namespace oceanbase {
 using namespace common;
@@ -44,10 +42,12 @@ void __attribute__((weak)) init_create_func()
 
 void lib_init_create_func()
 {
-  #define TG_DEF(id, name, type, args...)              \
+  #define TG_DEF(id, name, type, args...)                           \
     create_funcs_[TGDefIDs::id] = []() {                            \
-      auto ret = OB_NEW(TG_##type, SET_USE_500("tg"), args); \
-      ret->attr_ = {#name, TGType::type};     \
+      TG_##type *ret = OB_NEW(TG_##type, SET_USE_500("tg"), args);  \
+      if (NULL != ret) {                                            \
+        ret->attr_ = {#name, TGType::type};                         \
+      }                                                             \
       return ret;                                                   \
     };
   #include "lib/thread/thread_define.h"

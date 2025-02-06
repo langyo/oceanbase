@@ -13,13 +13,8 @@
 #include <gtest/gtest.h>
 #define private public
 #include "lib/alloc/ob_tenant_ctx_allocator.h"
-#include "lib/alloc/object_mgr.h"
 #undef private
-#include "lib/alloc/alloc_func.h"
-#include "lib/resource/ob_resource_mgr.h"
 #include "lib/coro/testing.h"
-#include "lib/random/ob_random.h"
-#include "lib/atomic/ob_atomic.h"
 #include "lib/container/ob_array.h"
 
 using namespace std;
@@ -28,6 +23,7 @@ using namespace oceanbase::common;
 
 TEST(TestTenantAllocator, CtxAlloc)
 {
+  CHUNK_MGR.set_max_chunk_cache_size(1<<20);
   ObTenantCtxAllocator ta(123, 1);
   ta.set_tenant_memory_mgr();
   ta.set_limit(INT64_MAX);
@@ -391,12 +387,26 @@ TEST(TestTenantAllocator, sub_ctx_id)
   ASSERT_NE(OB_SUCCESS, malloc_allocator->recycle_tenant_allocator(tenant_id_1));
 }
 
+TEST(TestTenantAllocator, MERGE_RESERVE_CTX)
+{
+  const uint64_t tenant_id = 1002;
+  ObMallocAllocator* malloc_allocator = ObMallocAllocator::get_instance();
+  ASSERT_EQ(OB_SUCCESS, malloc_allocator->create_and_add_tenant_allocator(tenant_id));
+  void *ptr_0 = ob_malloc(100L<<10, ObMemAttr(tenant_id, "Test", 0));
+  void *ptr_1 = ob_malloc(100L<<10, ObMemAttr(tenant_id, "Test", ObCtxIds::MERGE_RESERVE_CTX_ID));
+  malloc_allocator->sync_wash(tenant_id, 0, INT64_MAX);
+  AChunk *chunk_0 = AChunk::ptr2chunk(ptr_0);
+  AChunk *chunk_1 = AChunk::ptr2chunk(ptr_1);
+  ASSERT_NE(0, chunk_0->washed_size_);
+  ASSERT_EQ(0, chunk_1->washed_size_);
+}
+
 int main(int argc, char *argv[])
 {
   signal(49, SIG_IGN);
   OB_LOGGER.set_file_name("t.log", true, true);
   OB_LOGGER.set_log_level("INFO");
-
+  OB_LOGGER.set_disable_logging(true);
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
 }

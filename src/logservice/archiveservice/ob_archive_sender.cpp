@@ -11,37 +11,13 @@
  */
 
 #include "ob_archive_sender.h"
-#include <algorithm>
-#include <cstdint>
-#include "lib/alloc/alloc_assist.h"
-#include "lib/ob_errno.h"
-#include "lib/restore/ob_storage.h"
-#include "lib/string/ob_string.h"    // ObString
-#include "lib/thread/threads.h"
-#include "lib/time/ob_time_utility.h"
-#include "lib/utility/ob_macro_utils.h"
-#include "share/backup/ob_archive_piece.h"    // ObArchivePiece
-#include "lib/thread/ob_thread_name.h"
-#include "share/backup/ob_archive_struct.h"
-#include "share/backup/ob_backup_struct.h"
-#include "share/ob_debug_sync.h"
-#include "share/ob_errno.h"
-#include "share/ob_ls_id.h"          // ObLSID
-#include "share/rc/ob_tenant_base.h"    // MTL_ID
+#include "logservice/palf/log_io_context.h"  // LogIOContext
 #include "observer/ob_server_struct.h"                   // GCTX
 #include "ob_ls_mgr.h"               // ObArchiveLSMgr
-#include "ob_archive_round_mgr.h"    // ObArchiveRoundMgr
-#include "ob_archive_define.h"
 #include "ob_archive_allocator.h"    // ObArchiveAllocator
-#include "ob_archive_define.h"       // ARCHIVE_N
-#include "ob_archive_util.h"         // cal_archive_file_id
-#include "ob_archive_task.h"         // ObArchiveSendTask
-#include "ob_ls_task.h"              // ObLSArchiveTask
 #include "ob_archive_task_queue.h"   // ObArchiveTaskStatus
 #include "ob_archive_io.h"           // ObArchiveIO
-#include "share/backup/ob_backup_path.h"   // ObBackupPath
 #include "share/backup/ob_archive_path.h"   // ObArchivePathUtil
-#include "share/scn.h"   // ObArchivePathUtil
 
 namespace oceanbase
 {
@@ -421,13 +397,17 @@ bool ObArchiveSender::in_normal_status_(const ArchiveKey &key) const
   return round_mgr_->is_in_archive_status(key) || round_mgr_->is_in_suspend_status(key);
 }
 
+ERRSIM_POINT_DEF(ERRSIM_OB_ARCHIVE_SENDER_ERROR);
 // 仅有需要重试的任务返回错误码
 void ObArchiveSender::handle(ObArchiveSendTask &task, TaskConsumeStatus &consume_status)
 {
   int ret = OB_SUCCESS;
   const ObLSID id = task.get_ls_id();
+  palf::LogIOContext io_ctx(MTL_ID(), id.id(), palf::LogIOUser::ARCHIVE);
+  CONSUMER_GROUP_FUNC_GUARD(io_ctx.get_function_type());
   const ArchiveWorkStation &station = task.get_station();
   share::ObBackupDest backup_dest;
+  int64_t dest_id = -1;
   if (OB_UNLIKELY(! task.is_valid())) {
     ret = OB_INVALID_ARGUMENT;
     ARCHIVE_LOG(WARN, "invalid argument", K(ret), K(task));
@@ -436,7 +416,7 @@ void ObArchiveSender::handle(ObArchiveSendTask &task, TaskConsumeStatus &consume
     // normal status include DOING / SUSPEND
     // other status include INTERRUPT / STOP
     consume_status = TaskConsumeStatus::STALE_TASK;
-  } else if (OB_FAIL(round_mgr_->get_backup_dest(station.get_round(), backup_dest))) {
+  } else if (OB_FAIL(round_mgr_->get_backup_dest_and_id(station.get_round(), backup_dest, dest_id))) {
     ARCHIVE_LOG(WARN, "get backup dest failed", K(ret), K(task));
   } else {
     int64_t next_compensate_piece_id = 0;
@@ -456,7 +436,7 @@ void ObArchiveSender::handle(ObArchiveSendTask &task, TaskConsumeStatus &consume
                                          backup_dest, *ls_archive_task))) {
           ARCHIVE_LOG(WARN, "do compensate piece failed", K(ret), K(task), KPC(ls_archive_task));
         }
-      } else if (OB_FAIL(archive_log_(backup_dest, arg, task, *ls_archive_task))) {
+      } else if (OB_FAIL(archive_log_(backup_dest, dest_id, arg, task, *ls_archive_task))) {
         ARCHIVE_LOG(WARN, "archive log failed", K(ret), K(task), KPC(ls_archive_task));
       } else {
         consume_status = TaskConsumeStatus::DONE;
@@ -464,6 +444,10 @@ void ObArchiveSender::handle(ObArchiveSendTask &task, TaskConsumeStatus &consume
         ARCHIVE_LOG(INFO, "archive log succ", K(id));
       }
     }
+  }
+
+  if (OB_SUCC(ret) && OB_UNLIKELY(ERRSIM_OB_ARCHIVE_SENDER_ERROR)) {
+    ret = ERRSIM_OB_ARCHIVE_SENDER_ERROR;
   }
 
   if (OB_FAIL(ret)) {
@@ -523,8 +507,10 @@ int ObArchiveSender::check_piece_continuous_(const ObArchiveSendTask &task,
     if (persist_piece_id != piece.get_piece_id() && info.lsn_ != task.get_start_lsn().val_) {
       // more lsn need to persist, just wait
       operation = DestSendOperator::WAIT;
-      ARCHIVE_LOG(INFO, "persist lsn not equal with send task "
-          "and persist piece id not equal with send task, just wait", K(info), K(task));
+      if (REACH_TIME_INTERVAL(10 * 1000 * 1000L)) {
+        ARCHIVE_LOG(INFO, "persist lsn not equal with send task "
+            "and persist piece id not equal with send task, just wait", K(info), K(task));
+      }
     } else if (piece.get_piece_id() > persist_piece_id + 1
         && info.lsn_ == task.get_start_lsn().val_) {
       operation = DestSendOperator::COMPENSATE;
@@ -560,6 +546,7 @@ int ObArchiveSender::do_compensate_piece_(const ObLSID &id,
 }
 
 int ObArchiveSender::archive_log_(const ObBackupDest &backup_dest,
+    const int64_t backup_dest_id,
     const ObArchiveSendDestArg &arg,
     ObArchiveSendTask &task,
     ObLSArchiveTask &ls_archive_task)
@@ -581,6 +568,7 @@ int ObArchiveSender::archive_log_(const ObBackupDest &backup_dest,
   char *filled_data = NULL;
   int64_t filled_data_len = 0;
   const bool is_full_file = (task.get_end_lsn() - task.get_start_lsn()) == MAX_ARCHIVE_FILE_SIZE;
+  const bool is_can_seal = 0 == task.get_end_lsn().val_ % MAX_ARCHIVE_FILE_SIZE;
   const int64_t start_ts = common::ObTimeUtility::current_time();
   // 1. decide archive file
   if (OB_FAIL(decide_archive_file_(task, arg.cur_file_id_, arg.cur_file_offset_,
@@ -610,8 +598,8 @@ int ObArchiveSender::archive_log_(const ObBackupDest &backup_dest,
     ARCHIVE_LOG(WARN, "fill file header if needed failed", K(ret));
   }
   // 6. push log
-  else if (OB_FAIL(push_log_(id, path.get_obstr(), backup_dest.get_storage_info(), is_full_file, new_file ?
-          file_offset : file_offset + ARCHIVE_FILE_HEADER_SIZE,
+  else if (OB_FAIL(push_log_(id, path.get_obstr(), backup_dest.get_storage_info(), backup_dest_id, is_full_file,
+          is_can_seal, new_file ? file_offset : file_offset + ARCHIVE_FILE_HEADER_SIZE,
           new_file ? filled_data : origin_data, new_file ? filled_data_len : origin_data_len))) {
     ARCHIVE_LOG(WARN, "push log failed", K(ret), K(task));
   // 7. 更新日志流归档任务archive file info
@@ -720,7 +708,9 @@ int ObArchiveSender::fill_file_header_if_needed_(const ObArchiveSendTask &task,
 int ObArchiveSender::push_log_(const ObLSID &id,
     const ObString &uri,
     const share::ObBackupStorageInfo *storage_info,
+    const int64_t backup_dest_id,
     const bool is_full_file,
+    const bool is_can_seal,
     const int64_t offset,
     char *data,
     const int64_t data_len)
@@ -728,7 +718,7 @@ int ObArchiveSender::push_log_(const ObLSID &id,
   int ret = OB_SUCCESS;
   ObArchiveIO archive_io;
 
-  if (OB_FAIL(archive_io.push_log(uri, storage_info, data, data_len, offset, is_full_file))) {
+  if (OB_FAIL(archive_io.push_log(uri, storage_info, backup_dest_id, data, data_len, offset, is_full_file, is_can_seal))) {
     ARCHIVE_LOG(WARN, "push log failed", K(ret));
   } else {
     ARCHIVE_LOG(INFO, "push log succ", K(id));
@@ -766,8 +756,71 @@ void ObArchiveSender::handle_archive_ret_code_(const ObLSID &id,
     // skip it
   } else if (OB_BACKUP_DEVICE_OUT_OF_SPACE == ret_code) {
     // ret code should report to user
-    if (REACH_TIME_INTERVAL(10 * 1000 * 1000L)) {
+    if (REACH_TIME_INTERVAL(ARCHIVE_DBA_ERROR_LOG_PRINT_INTERVAL)) {
       LOG_DBA_ERROR(OB_BACKUP_DEVICE_OUT_OF_SPACE, "msg", "archive device is full", "ret", ret_code,
+          "archive_dest_id", key.dest_id_,
+          "archive_round", key.round_);
+    }
+  } else if (OB_SERVER_OUTOF_DISK_SPACE == ret_code) {
+    // server out of disk space
+    if (REACH_TIME_INTERVAL(ARCHIVE_DBA_ERROR_LOG_PRINT_INTERVAL)) {
+      LOG_DBA_ERROR(OB_SERVER_OUTOF_DISK_SPACE, "msg", "archive device is full", "ret", ret_code,
+          "archive_dest_id", key.dest_id_,
+          "archive_round", key.round_);
+    }
+  } else if (OB_OBJECT_STORAGE_PERMISSION_DENIED == ret_code) {
+    // backup permission denied
+    if (REACH_TIME_INTERVAL(ARCHIVE_DBA_ERROR_LOG_PRINT_INTERVAL)) {
+      LOG_DBA_ERROR(OB_OBJECT_STORAGE_PERMISSION_DENIED, "msg", "archive dest permission denied", "ret", ret_code,
+          "archive_dest_id", key.dest_id_,
+          "archive_round", key.round_);
+    }
+  } else if (OB_ERR_AES_ENCRYPT == ret_code) {
+    // archive dest encrypt failed
+    if (REACH_TIME_INTERVAL(ARCHIVE_DBA_ERROR_LOG_PRINT_INTERVAL)) {
+      LOG_DBA_ERROR(OB_ERR_AES_ENCRYPT, "msg", "archive dest encrypt failed", "ret", ret_code,
+          "archive_dest_id", key.dest_id_,
+          "archive_round", key.round_);
+    }
+  } else if (OB_ERR_AES_DECRYPT == ret_code) {
+    // archive desc decrypt failed
+    if (REACH_TIME_INTERVAL(ARCHIVE_DBA_ERROR_LOG_PRINT_INTERVAL)) {
+      LOG_DBA_ERROR(OB_ERR_AES_DECRYPT, "msg", "archive dest decrypt failed", "ret", ret_code,
+          "archive_dest_id", key.dest_id_,
+          "archive_round", key.round_);
+    }
+  } else if (OB_TIMEOUT == ret_code) {
+    // archive push log timeout
+    if (REACH_TIME_INTERVAL(ARCHIVE_DBA_ERROR_LOG_PRINT_INTERVAL)) {
+      LOG_DBA_ERROR(OB_TIMEOUT, "msg", "archive push log time out", "ret", ret_code,
+          "archive_dest_id", key.dest_id_,
+          "archive_round", key.round_);
+    }
+  } else if (OB_FILE_OR_DIRECTORY_PERMISSION_DENIED == ret_code) {
+    // file or directory permission denied
+    if (REACH_TIME_INTERVAL(ARCHIVE_DBA_ERROR_LOG_PRINT_INTERVAL)) {
+      LOG_DBA_ERROR(OB_FILE_OR_DIRECTORY_PERMISSION_DENIED, "msg", "file or directory permission denied", "ret", ret_code,
+          "archive_dest_id", key.dest_id_,
+          "archive_round", key.round_);
+    }
+  } else if (OB_NO_SUCH_FILE_OR_DIRECTORY == ret_code) {
+    // file or directory not exist
+    if (REACH_TIME_INTERVAL(ARCHIVE_DBA_ERROR_LOG_PRINT_INTERVAL)) {
+      LOG_DBA_ERROR(OB_NO_SUCH_FILE_OR_DIRECTORY, "msg", "file or directory not exist", "ret", ret_code,
+          "archive_dest_id", key.dest_id_,
+          "archive_round", key.round_);
+    }
+  } else if (OB_FILE_OR_DIRECTORY_EXIST == ret_code) {
+    // file or directory exist
+    if (REACH_TIME_INTERVAL(ARCHIVE_DBA_ERROR_LOG_PRINT_INTERVAL)) {
+      LOG_DBA_ERROR(OB_FILE_OR_DIRECTORY_EXIST, "msg", "file or directory already exist", "ret", ret_code,
+          "archive_dest_id", key.dest_id_,
+          "archive_round", key.round_);
+    }
+  } else if (OB_DATA_OUT_OF_RANGE == ret_code) {
+    // data out of range
+    if (REACH_TIME_INTERVAL(ARCHIVE_DBA_ERROR_LOG_PRINT_INTERVAL)) {
+      LOG_DBA_ERROR(OB_DATA_OUT_OF_RANGE, "msg", "data out of range", "ret", ret_code,
           "archive_dest_id", key.dest_id_,
           "archive_round", key.round_);
     }
@@ -786,8 +839,23 @@ bool ObArchiveSender::is_retry_ret_code_(const int ret_code) const
   return is_io_error(ret_code)
     || OB_ALLOCATE_MEMORY_FAILED == ret_code
     || OB_BACKUP_DEVICE_OUT_OF_SPACE == ret_code
-    || OB_BACKUP_PWRITE_OFFSET_NOT_MATCH == ret_code
-    || OB_IO_LIMIT == ret_code;
+    || OB_OBJECT_STORAGE_PWRITE_OFFSET_NOT_MATCH == ret_code
+    || OB_IO_LIMIT == ret_code
+    || OB_OSS_ERROR == ret_code
+    || OB_COS_ERROR == ret_code
+    || OB_S3_ERROR == ret_code
+    || OB_OBJECT_STORAGE_PERMISSION_DENIED == ret_code
+    || OB_ERR_AES_ENCRYPT == ret_code
+    || OB_ERR_AES_DECRYPT == ret_code
+    || OB_TIMEOUT == ret_code
+    || OB_FILE_OR_DIRECTORY_PERMISSION_DENIED == ret_code
+    || OB_NO_SUCH_FILE_OR_DIRECTORY == ret_code
+    || OB_FILE_OR_DIRECTORY_EXIST == ret_code
+    || OB_SERVER_OUTOF_DISK_SPACE == ret_code
+    || OB_DATA_OUT_OF_RANGE == ret_code
+    || OB_EAGAIN == ret_code
+    || OB_CANCELED == ret_code;
+    ;
 }
 
 bool ObArchiveSender::is_ignore_ret_code_(const int ret_code) const

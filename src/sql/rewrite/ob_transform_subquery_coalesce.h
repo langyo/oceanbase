@@ -172,13 +172,6 @@ private:
                               ObIArray<int64_t> &index_map, 
                               ObSelectStmt *coalesce_query,
                               const bool is_first_subquery);
-
-  int get_map_table_id(ObSelectStmt *subquery,
-                      ObSelectStmt *coalesce_subquery,
-                      ObStmtMapInfo& map_info,
-                      const uint64_t &subquery_table_id,
-                      uint64_t &table_id);
-
   int adjust_assign_exprs(ObUpdateStmt *upd_stmt,
                           StmtCompareHelper *helper, 
                           ObIArray<ObRawExpr*> &select_exprs, 
@@ -236,12 +229,6 @@ private:
   int add_coalesce_stmts(const ObIArray<ObSelectStmt*> &stms);
 
   int sort_coalesce_stmts(Ob2DArray<CoalesceStmts *> &coalesce_stmts);
-
-  int check_select_items_same(const ObDMLStmt *first,
-                              const ObDMLStmt *second,
-                              ObStmtMapInfo &map_info,
-                              bool &is_same);
-
 private:
 
   ObQueryRefRawExpr * get_exists_query_expr(ObRawExpr *expr);

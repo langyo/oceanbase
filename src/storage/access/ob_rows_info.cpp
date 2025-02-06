@@ -11,10 +11,8 @@
  */
 
 #include "ob_rows_info.h"
-#include "storage/ob_storage_struct.h"
 #include "storage/ob_relative_table.h"
-#include "storage/ob_storage_schema.h"
-#include "ob_store_row_iterator.h"
+#include "storage/blocksstable/ob_datum_row_utils.h"
 
 namespace oceanbase
 {
@@ -32,6 +30,13 @@ ObRowsInfo::ExistHelper::ExistHelper()
 
 ObRowsInfo::ExistHelper::~ExistHelper()
 {
+}
+
+void ObRowsInfo::ExistHelper::reset()
+{
+  table_iter_param_.reset();
+  table_access_context_.reset();
+  is_inited_ = false;
 }
 
 int ObRowsInfo::ExistHelper::init(const ObRelativeTable &table,
@@ -67,6 +72,7 @@ int ObRowsInfo::ExistHelper::init(const ObRelativeTable &table,
       table_iter_param_.tablet_id_ = table.get_tablet_id();
       table_iter_param_.out_cols_project_ = NULL;
       table_iter_param_.read_info_ = &rowkey_read_info;
+      table_iter_param_.set_tablet_handle(table.get_tablet_handle());
       is_inited_ = true;
     }
   }
@@ -85,6 +91,7 @@ ObRowsInfo::ObRowsInfo()
     tablet_id_(),
     datum_utils_(nullptr),
     min_key_(),
+    col_descs_(nullptr),
     conflict_rowkey_idx_(-1),
     error_code_(0),
     delete_count_(0),
@@ -98,7 +105,29 @@ ObRowsInfo::~ObRowsInfo()
 {
 }
 
+void ObRowsInfo::reset()
+{
+  exist_helper_.reset();
+  min_key_.set_max_rowkey();
+  rows_ = nullptr;
+  delete_count_ = 0;
+  rowkey_column_num_ = 0;
+  rows_ = nullptr;
+  datum_utils_ = nullptr;
+  tablet_id_.reset();
+  permutation_.reset();
+  rowkeys_.reset();
+  scan_mem_allocator_.reset();
+  key_allocator_.reset();
+  delete_count_ = 0;
+  error_code_ = 0;
+  conflict_rowkey_idx_ = -1;
+  is_inited_ = false;
+  col_descs_ = nullptr;
+}
+
 int ObRowsInfo::init(
+    const ObColDescIArray &column_descs,
     const ObRelativeTable &table,
     ObStoreCtx &store_ctx,
     const ObITableReadInfo &rowkey_read_info)
@@ -111,6 +140,7 @@ int ObRowsInfo::init(
   } else if (OB_FAIL(exist_helper_.init(table, store_ctx, rowkey_read_info, exist_allocator_, scan_mem_allocator_))) {
     STORAGE_LOG(WARN, "Failed to init exist helper", K(ret));
   } else {
+    col_descs_ = &column_descs;
     datum_utils_ = &rowkey_read_info.get_datum_utils();
     tablet_id_ = table.get_tablet_id();
     rowkey_column_num_ = table.get_rowkey_column_num();
@@ -132,7 +162,7 @@ void ObRowsInfo::reuse()
 }
 
 //not only checking duplicate, but also assign rowkeys
-int ObRowsInfo::check_duplicate(ObStoreRow *rows, const int64_t row_count, ObRelativeTable &table)
+int ObRowsInfo::check_duplicate(ObDatumRow *rows, const int64_t row_count, ObRelativeTable &table, bool check_dup)
 {
   int ret = OB_SUCCESS;
   int tmp_ret = OB_SUCCESS;
@@ -164,10 +194,9 @@ int ObRowsInfo::check_duplicate(ObStoreRow *rows, const int64_t row_count, ObRel
       } else {
         ObMarkedRowkeyAndLockState marked_rowkey_and_lock_state;
         marked_rowkey_and_lock_state.row_idx_ = i;
-        ObRowkey rowkey(rows_[i].row_val_.cells_, rowkey_column_num_);
-        if (OB_FAIL(marked_rowkey_and_lock_state.marked_rowkey_.get_rowkey().from_rowkey(rowkey,
-                                                                                         key_allocator_))) {
-          STORAGE_LOG(WARN, "Failed to transfer rowkey", K(ret), K(rowkey));
+        ObDatumRowkey &datum_rowkey = marked_rowkey_and_lock_state.marked_rowkey_.get_rowkey();
+        if (OB_FAIL(blocksstable::ObDatumRowUtils::prepare_rowkey(rows[i], rowkey_column_num_, *col_descs_, key_allocator_, datum_rowkey))) {
+          STORAGE_LOG(WARN, "Failed to prepare rowkey", K(ret), K(rowkey_column_num_), K(rows_[i]));
         } else if (OB_FAIL(rowkeys_.push_back(marked_rowkey_and_lock_state))) {
           STORAGE_LOG(WARN, "Failed to push back rowkey", K(ret), K(marked_rowkey_and_lock_state));
         }
@@ -175,13 +204,15 @@ int ObRowsInfo::check_duplicate(ObStoreRow *rows, const int64_t row_count, ObRel
     }
     if (OB_SUCC(ret)) {
       if (row_count > 1) {
-        RowsCompare rows_cmp(*datum_utils_, min_key_, true, ret);
-        std::sort(rowkeys_.begin(), rowkeys_.end(), rows_cmp);
+        RowsCompare rows_cmp(*datum_utils_, min_key_, check_dup, ret);
+        lib::ob_sort(rowkeys_.begin(), rowkeys_.end(), rows_cmp);
       }
-      for (int64_t i = 0; i < row_count; i++) {
-        permutation_[rowkeys_[i].row_idx_] = i;
+      if (OB_SUCC(ret)) {
+        for (int64_t i = 0; i < row_count; i++) {
+          permutation_[rowkeys_[i].row_idx_] = i;
+        }
+        min_key_ = rowkeys_.at(0).marked_rowkey_.get_rowkey();
       }
-      min_key_ = rowkeys_.at(0).marked_rowkey_.get_rowkey();
     }
   }
 
@@ -232,8 +263,9 @@ void ObRowsInfo::return_exist_iter(ObStoreRowIterator *exist_iter)
     ret = OB_ERR_UNEXPECTED;
     STORAGE_LOG(ERROR, "Unexpected not init rowsinfo", K_(delete_count), KP_(rows), K(ret));
   } else if (OB_LIKELY(nullptr != exist_iter)) {
-    if (exist_helper_.table_access_context_.iter_pool_ != nullptr) {
-      exist_helper_.table_access_context_.iter_pool_->return_iter(exist_iter);
+    exist_iter->reuse();
+    if (exist_helper_.table_access_context_.get_stmt_iter_pool() != nullptr) {
+      exist_helper_.table_access_context_.get_stmt_iter_pool()->return_iter(exist_iter);
     } else {
       exist_iter->~ObStoreRowIterator();
       exist_helper_.table_access_context_.stmt_allocator_->free(exist_iter);

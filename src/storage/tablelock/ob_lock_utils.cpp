@@ -13,10 +13,7 @@
 #define USING_LOG_PREFIX TABLELOCK
 
 #include "storage/tablelock/ob_lock_utils.h"
-#include "storage/tablelock/ob_table_lock_rpc_struct.h" // ObLockObjRequest
-#include "lib/mysqlclient/ob_mysql_transaction.h" // ObMysqlTransaction
 #include "observer/ob_inner_sql_connection.h" // ObInnerSQLConnection
-#include "share/ob_share_util.h" // ObShareUtil
 #include "storage/tablelock/ob_lock_inner_connection_util.h"
 
 namespace oceanbase
@@ -32,7 +29,8 @@ int ObInnerTableLockUtil::lock_inner_table_in_trans(
     common::ObMySQLTransaction &trans,
     const uint64_t tenant_id,
     const uint64_t inner_table_id,
-    const ObTableLockMode &lock_mode)
+    const ObTableLockMode &lock_mode,
+    const bool is_from_sql)
 {
   int ret = OB_SUCCESS;
   ObInnerSQLConnection *conn = NULL;
@@ -54,6 +52,7 @@ int ObInnerTableLockUtil::lock_inner_table_in_trans(
     table_lock_arg.timeout_us_ = ctx.get_timeout();
     table_lock_arg.table_id_ = inner_table_id;
     table_lock_arg.op_type_ = IN_TRANS_COMMON_LOCK;
+    table_lock_arg.is_from_sql_ = is_from_sql;
     if (OB_FAIL(ObInnerConnectionLockUtil::lock_table(tenant_id, table_lock_arg, conn))) {
       LOG_WARN("lock table failed", KR(ret), K(table_lock_arg));
     }

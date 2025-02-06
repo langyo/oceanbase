@@ -12,8 +12,6 @@
 
 #define USING_LOG_PREFIX SQL_RESV
 #include "sql/resolver/dcl/ob_revoke_stmt.h"
-#include "share/schema/ob_schema_struct.h"
-#include "share/ob_errno.h"
 using namespace oceanbase::common;
 using namespace oceanbase::sql;
 using namespace oceanbase::share::schema;
@@ -39,7 +37,10 @@ ObRevokeStmt::ObRevokeStmt(ObIAllocator *name_pool)
       obj_id_(),
       obj_type_(),
       grantor_id_(),
-      revoke_all_ora_(false)
+      revoke_all_ora_(false),
+      has_warning_(false),
+      column_names_priv_(),
+      table_schema_version_(0)
 {
 }
 
@@ -58,7 +59,10 @@ ObRevokeStmt::ObRevokeStmt()
       obj_id_(),
       obj_type_(),
       grantor_id_(),
-      revoke_all_ora_(false)
+      revoke_all_ora_(false),
+      has_warning_(false),
+      column_names_priv_(),
+      table_schema_version_(0)
 {
 }
 

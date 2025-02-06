@@ -133,13 +133,19 @@ public:
       const int64_t new_transfer_seq,
       const ObLSID &new_ls_id,
       const int32_t group_id);
+  static int update_table_to_tablet_id_mapping(
+      common::ObISQLClient &sql_proxy,
+      const uint64_t tenant_id,
+      const uint64_t table_id,
+      const common::ObTabletID &tablet_id);
   // Get rows from __all_tablet_to_ls according to ObTableIDs
   //
   // @param [in] sql_proxy, ObMySQLProxy or ObMySQLTransaction
   // @param [in] tenant_id, tenant for query
   // @param [in] tablet_ids, ObTabletIDs for query
   //             (should exist in __all_tablet_to_ls and have no duplicate values)
-  // @param [out] infos, ObTabletToLSInfo corresponding to tablet_ids (same order)
+  // @param [out] infos, ObTabletToLSInfo corresponding to tablet_ids (not same order)
+  //              not same order, not same order, not same order
   // @return OB_SUCCESS if success;
   //         OB_ITEM_NOT_MATCH if tablet_ids have duplicates or nonexistent tablets;
   //         Other error according to unexpected situation
@@ -190,7 +196,10 @@ public:
       const uint64_t tenant_id,
       const ObIArray<common::ObTabletID> &tablet_ids,
       ObIArray<ObTabletLSPair> &tablet_ls_pairs);
-
+  static int get_tablet_ls_pairs_cnt(
+      common::ObISQLClient &sql_proxy,
+      const uint64_t tenant_id,
+      int64_t &input_cnt);
   const static int64_t MAX_BATCH_COUNT = 200;
 private:
   static int inner_batch_get_(

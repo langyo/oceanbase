@@ -12,7 +12,6 @@
 
 #define USING_LOG_PREFIX SQL_OPT
 #include "sql/optimizer/ob_log_link.h"
-#include "sql/ob_sql_utils.h"
 
 using namespace oceanbase::sql;
 using namespace oceanbase::common;
@@ -208,41 +207,29 @@ int ObLogLink::set_link_stmt(const ObDMLStmt* stmt)
   ObString sql;
   ObObjPrintParams print_param;
   print_param.for_dblink_ = 1;
+  //print_param.cs_type_ = ObCollationType::CS_TYPE_UTF8MB4_BIN;
   // only link scan need print flashback query for dblink table
   ObOptimizerContext *opt_ctx = NULL;
-  ObQueryCtx *query_ctx = NULL;
   ObSQLSessionInfo *session = NULL;
-  int64_t session_query_timeout_us = 0;
-  int64_t hint_query_timeout_us = 0;
+  ObCollationType spell_coll = CS_TYPE_INVALID;
   if (OB_ISNULL(stmt) || OB_ISNULL(plan) ||
       OB_ISNULL(opt_ctx = &get_plan()->get_optimizer_context()) ||
       OB_ISNULL(session = opt_ctx->get_session_info()) ||
       OB_ISNULL(print_param.exec_ctx_ = opt_ctx->get_exec_ctx())) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("get unexpected null", KP(opt_ctx), KP(stmt), KP(session), KP(plan), K(ret));
-  } else if (NULL == (query_ctx = stmt->get_query_ctx())) {
-    ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("get unexpected null", K(ret));
-  } else if (FALSE_IT(hint_query_timeout_us = query_ctx->get_query_hint_for_update().get_global_hint().query_timeout_)) {
-  } else if (OB_FAIL(session->get_query_timeout(session_query_timeout_us))) {
-    LOG_WARN("failed to get session query timeout", K(ret));
-  } else if (-1 == hint_query_timeout_us &&
-             FALSE_IT(query_ctx->get_query_hint_for_update().get_global_hint().merge_query_timeout_hint(session_query_timeout_us))) {
-    // do nothing
-  } else if (FALSE_IT(query_ctx->get_query_hint_for_update().get_global_hint().set_flashback_read_tx_uncommitted(true))) {
+  } else if (OB_FAIL(ObDblinkService::get_spell_collation_type(session, spell_coll))) {
+    LOG_WARN("failed to get spell collation type", K(ret));
+  } else if (FALSE_IT(print_param.cs_type_ = spell_coll)) {
   } else if (OB_FAIL(mark_exec_params(const_cast<ObDMLStmt*>(stmt)))) {
     LOG_WARN("failed to mark exec params", K(ret));
-  } else if (OB_FAIL(ObSQLUtils::reconstruct_sql(plan->get_allocator(), stmt, sql, opt_ctx->get_schema_guard(), print_param))) {
+  } else if (OB_FAIL(ObSQLUtils::reconstruct_sql(plan->get_allocator(), stmt, sql, opt_ctx->get_schema_guard(), print_param, NULL, session))) {
     LOG_WARN("failed to reconstruct link sql", KP(stmt), KP(plan), K(get_dblink_id()), K(ret));
   } else {
     stmt_fmt_buf_ = sql.ptr();
     stmt_fmt_len_ = sql.length();
-    LOG_DEBUG("loglink succ to reconstruct link sql", K(sql));
+    LOG_TRACE("succ to reconstruct dblink sql", K(sql), KP(stmt_fmt_buf_), K(stmt_fmt_len_),  K(ret), K(spell_coll));
   }
-  if (-1 == hint_query_timeout_us) { // restore query_timeout_hint
-    query_ctx->get_query_hint_for_update().get_global_hint().reset_query_timeout_hint();
-  }
-  query_ctx->get_query_hint_for_update().get_global_hint().set_flashback_read_tx_uncommitted(false);
   return ret;
 }
 

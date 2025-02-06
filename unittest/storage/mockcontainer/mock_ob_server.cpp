@@ -11,19 +11,12 @@
  */
 
 #define USING_LOG_PREFIX STORAGE
-#include "storage/tx/ob_trans_service.h"
 #include "observer/ob_server.h"
 #define private public
 #include "mock_ob_server.h"
 
-#include "lib/string/ob_sql_string.h"
-#include "lib/net/ob_net_util.h"
-#include "rpc/obrpc/ob_rpc_proxy.h"
-#include "share/schema/ob_multi_version_schema_service.h"
-#include "storage/blocksstable/ob_block_sstable_struct.h"
-#include "storage/tx/ob_ts_mgr.h"
-#include "share/ob_tenant_mgr.h"
 #include "share/ob_simple_mem_limit_getter.h"
+#include "share/ob_device_manager.h"
 
 namespace oceanbase
 {
@@ -85,13 +78,18 @@ int MockObServer::init(const char *schema_file,
       }
     }
 
-    int32_t local_ip = ntohl(obsys::ObNetUtil::get_local_addr_ipv4(config_.devname));
-    int32_t local_port = static_cast<int32_t>(config_.rpc_port);
-
     config_.print();
 
-    // initialize self address
-    self_addr_.set_ipv4_addr(local_ip, local_port);
+    uint32_t ipv4_net = 0;
+    if (OB_FAIL(obsys::ObNetUtil::get_local_addr_ipv4(config_.devname, ipv4_net))) {
+      LOG_ERROR("get ipv4 address by devname failed", "devname",
+          config_.devname.get_value(), KR(ret));
+    } else {
+      int32_t local_ip = ntohl(ipv4_net);
+      int32_t local_port = static_cast<int32_t>(config_.rpc_port);
+      // initialize self address
+      self_addr_.set_ipv4_addr(local_ip, local_port);
+    }
   }
   // init env
   if (OB_SUCC(ret)) {
@@ -195,7 +193,9 @@ int MockObServer::init(const char *schema_file,
 
   // init io
   if (OB_SUCC(ret)) {
-    if (OB_FAIL(ObIOManager::get_instance().init())) {
+    if (OB_FAIL(ObDeviceManager::get_instance().init_devices_env())) {
+      STORAGE_LOG(WARN, "init device manager failed", K(ret));
+    } else if (OB_FAIL(ObIOManager::get_instance().init())) {
       STORAGE_LOG(WARN, "io manager init failead", K(ret));
     }
   }
@@ -222,7 +222,6 @@ int MockObServer::init(const char *schema_file,
   }
 
   //init multi tenant
-  GCTX = gctx_;
   if (OB_SUCC(ret)) {
     if (OB_SUCCESS != (ret = init_multi_tenant())) {
       STORAGE_LOG(WARN, "init multi tenant failed", K(ret));

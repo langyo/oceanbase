@@ -12,17 +12,9 @@
 
 #define USING_LOG_PREFIX SHARE
 
-#include "share/config/ob_config_manager.h"
 
-#include "lib/file/file_directory_utils.h"
-#include "lib/profile/ob_trace_id.h"
-#include "lib/thread/thread_mgr.h"
-#include "share/ob_cluster_version.h"
-#include "lib/worker.h"
+#include "ob_config_manager.h"
 #include "observer/ob_sql_client_decorator.h"
-#include "observer/ob_server_struct.h"
-#include "observer/omt/ob_tenant_config_mgr.h"
-#include "lib/utility/ob_tracepoint.h"
 #include "observer/ob_server.h"
 
 namespace oceanbase
@@ -105,6 +97,8 @@ int ObConfigManager::reload_config()
     LOG_WARN("reload config for tde encrypt engine fail", K(ret));
   } else if (OB_FAIL(GCTX.omt_->update_hidden_sys_tenant())) {
     LOG_WARN("update hidden sys tenant failed", K(ret));
+  } else {
+    g_enable_ob_error_msg_style = GCONF.enable_ob_error_msg_style;
   }
   return ret;
 }
@@ -207,7 +201,7 @@ int ObConfigManager::check_header_change(const char* path, const char* buf) cons
   return ret;
 }
 
-int ObConfigManager::dump2file(const char* path) const
+int ObConfigManager::dump2file_unsafe(const char* path) const
 {
   int ret = OB_SUCCESS;
   int fd = 0;
@@ -231,19 +225,23 @@ int ObConfigManager::dump2file(const char* path) const
       char *hist_path = nullptr;
       int64_t pos = 0;
       need_retry = false;
+      int tmp_ret = OB_SUCCESS;
+      int tmp_ret_2 = OB_SUCCESS;
       if (OB_ISNULL(buf = pa.alloc(buf_size))) {
         ret = OB_ALLOCATE_MEMORY_FAILED;
         LOG_ERROR("ob tc malloc memory for buf failed", K(ret));
       }
       if (OB_ISNULL(tmp_path = pa.alloc(MAX_PATH_SIZE))) {
-        ret = OB_ALLOCATE_MEMORY_FAILED;
-        LOG_ERROR("ob tc malloc memory for tmp configure path failed", K(ret));
+        tmp_ret = OB_ALLOCATE_MEMORY_FAILED;
+        ret = OB_SUCC(ret) ? tmp_ret : ret;
+        LOG_ERROR("ob tc malloc memory for tmp configure path failed", K(ret), K(tmp_ret));
       } else {
         snprintf(tmp_path, MAX_PATH_SIZE, "%s.tmp", path);
       }
       if (OB_ISNULL(hist_path = pa.alloc(MAX_PATH_SIZE))) {
-        ret = OB_ALLOCATE_MEMORY_FAILED;
-        LOG_ERROR("ob tc malloc memory for history configure path fail", K(ret));
+        tmp_ret_2 = OB_ALLOCATE_MEMORY_FAILED;
+        ret = OB_SUCC(ret) ? tmp_ret_2 : ret;
+        LOG_ERROR("ob tc malloc memory for history configure path fail", K(ret), K(tmp_ret_2));
       } else {
         snprintf(hist_path, MAX_PATH_SIZE, "%s.history", path);
       }
@@ -310,6 +308,12 @@ int ObConfigManager::dump2file(const char* path) const
   return ret;
 }
 
+int ObConfigManager::dump2file(const char* path) const
+{
+  DRWLock::RDLockGuard guard(OTC_MGR.rwlock_);
+  return dump2file_unsafe(path);
+}
+
 int ObConfigManager::config_backup()
 {
   int ret = OB_SUCCESS;
@@ -323,7 +327,7 @@ int ObConfigManager::config_backup()
           LOG_ERROR("create additional configure directory fail", K(path), K(ret));
         } else if (STRLEN(path) + STRLEN(CONF_COPY_NAME) < static_cast<uint64_t>(MAX_PATH_SIZE)) {
           strcat(path, CONF_COPY_NAME);
-          if (OB_FAIL(dump2file(path))) {
+          if (OB_FAIL(dump2file_unsafe(path))) {
             LOG_WARN("make additional configure file copy fail", K(path), K(ret));
             ret = OB_SUCCESS;  // ignore ret code.
           }
@@ -352,8 +356,13 @@ int ObConfigManager::update_local(int64_t expected_version)
           "from __all_sys_parameter";
       if (OB_FAIL(sql_client_retry_weak.read(result, sqlstr))) {
         LOG_WARN("read config from __all_sys_parameter failed", K(sqlstr), K(ret));
-      } else if (OB_FAIL(system_config_.update(result))) {
-        LOG_WARN("failed to load system config", K(ret));
+      } else {
+        DRWLock::WRLockGuard guard(OTC_MGR.rwlock_);
+        if (OB_FAIL(system_config_.update(result))) {
+          LOG_WARN("failed to load system config", K(ret));
+        }
+      }
+      if (OB_FAIL(ret)) {
       } else if (expected_version != ObSystemConfig::INIT_VERSION && (system_config_.get_version() < current_version_
                  || system_config_.get_version() < expected_version)) {
         ret = OB_EAGAIN;
@@ -378,7 +387,7 @@ int ObConfigManager::update_local(int64_t expected_version)
       LOG_WARN("Reload configuration failed", K(ret));
     } else {
       DRWLock::RDLockGuard guard(OTC_MGR.rwlock_); // need protect tenant config because it will also serialize tenant config
-      if (OB_FAIL(dump2file())) {
+      if (OB_FAIL(dump2file_unsafe())) {
         LOG_WARN("Dump to file failed", K_(dump_path), K(ret));
       } else {
         GCONF.cluster.set_dumped_version(GCONF.cluster.version());
@@ -450,7 +459,7 @@ int ObConfigManager::got_version(int64_t version, const bool remove_repeat/* = f
 
     if (schedule) {
       update_task_.version_ = version;
-      update_task_.scheduled_time_ = ObTimeUtility::current_monotonic_raw_time();
+      update_task_.scheduled_time_ = ObClockGenerator::getClock();
       if (OB_FAIL(TG_SCHEDULE(lib::TGDefIDs::CONFIG_MGR, update_task_, 0, false))) {
         LOG_WARN("Update local config failed, may try later", K(ret));
       } else {

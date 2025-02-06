@@ -10,22 +10,15 @@
  * See the Mulan PubL v2 for more details.
  */
 
-#include "lib/ob_errno.h"
-#include "logservice/palf/log_writer_utils.h"
 #include "logservice/palf/log_io_task_cb_utils.h"
 #include <gtest/gtest.h>
-#include <random>
-#include <string>
 #define private public
-#include "logservice/palf/log_sliding_window.h"
 #include "mock_logservice_container/mock_log_config_mgr.h"
 #include "mock_logservice_container/mock_log_mode_mgr.h"
 #include "mock_logservice_container/mock_log_engine.h"
 #include "mock_logservice_container/mock_log_state_mgr.h"
 #include "mock_logservice_container/mock_palf_fs_cb_wrapper.h"
-#include "share/allocator/ob_tenant_mutil_allocator.h"
 #undef private
-#include "logservice/palf/palf_options.h"
 
 namespace oceanbase
 {
@@ -50,6 +43,11 @@ public:
   public:
     MockPublicLogSlidingWindow() {}
     virtual ~MockPublicLogSlidingWindow() {}
+    virtual bool is_handle_thread_lease_expired(const int64_t thread_lease_begin_ts) const override final
+    {
+      UNUSED(thread_lease_begin_ts);
+      return false;
+    }
   };
   class MockLocCb : public PalfLocationCacheCb
   {
@@ -68,6 +66,16 @@ public:
     virtual int nonblock_renew_leader(const int64_t id)
     {
       UNUSED(id);
+      return OB_SUCCESS;
+    }
+    virtual int nonblock_get_leader(const uint64_t tenant_id, int64_t id, common::ObAddr &leader)
+    {
+      UNUSEDx(tenant_id, id, leader);
+      return OB_SUCCESS;
+    }
+    virtual int nonblock_renew_leader(const uint64_t tenant_id, int64_t id)
+    {
+      UNUSEDx(tenant_id, id);
       return OB_SUCCESS;
     }
   };

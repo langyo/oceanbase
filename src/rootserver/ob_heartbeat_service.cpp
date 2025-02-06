@@ -13,29 +13,14 @@
 #define USING_LOG_PREFIX RS
 #include "ob_heartbeat_service.h"
 
-#include "share/ob_define.h"
 #include "share/ob_service_epoch_proxy.h"
-#include "share/ob_version.h"
 #include "share/ob_zone_table_operation.h"
-#include "lib/thread/threads.h"               // set_run_wrapper
-#include "lib/mysqlclient/ob_mysql_transaction.h"  // ObMySQLTransaction
-#include "lib/utility/ob_unify_serialize.h"
-#include "lib/time/ob_time_utility.h"
-#include "observer/ob_server_struct.h"              // GCTX
-#include "logservice/ob_log_base_header.h"          // ObLogBaseHeader
-#include "logservice/ob_log_handler.h"
-#include "storage/tx_storage/ob_ls_service.h"
-#include "storage/tx_storage/ob_ls_handle.h"
-#include "rootserver/ob_root_utils.h"            // get_proposal_id_from_sys_ls
-#include "rootserver/ob_rs_event_history_table_operator.h" // ROOTSERVICE_EVENT_ADD
 #include "rootserver/ob_root_service.h"
-#include "lib/utility/utility.h"
 
 namespace oceanbase
 {
 using namespace common;
 using namespace share;
-using observer::ObServerHealthStatus;
 namespace rootserver
 {
 #define HBS_LOG_INFO(fmt, args...) FLOG_INFO("[HEARTBEAT_SERVICE] " fmt, ##args)
@@ -254,6 +239,7 @@ int ObHeartbeatService::send_heartbeat_()
             timeout,
             GCONF.cluster_id,
             OB_SYS_TENANT_ID,
+            share::OBCG_HB_SERVICE,
             hb_requests.at(i)))) {
           // error code will be ignored here.
           // send rpc to some offline servers will return error, however, it's acceptable
@@ -285,22 +271,28 @@ int ObHeartbeatService::set_hb_responses_(const int64_t whitelist_epoch_id, ObSe
   } else if (OB_ISNULL(proxy)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("proxy is null", KR(ret), KP(proxy));
+  } else if (OB_UNLIKELY(proxy->get_dests().count() != proxy->get_results().count())) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("dest addr count != result count", KR(ret), "dest addr count", proxy->get_dests().count(),
+        "result count", proxy->get_results().count());
   } else {
     int tmp_ret = OB_SUCCESS;
     SpinWLockGuard guard_for_hb_responses(hb_responses_rwlock_);
     need_process_hb_responses_ = true;
     hb_responses_epoch_id_ = whitelist_epoch_id;
     hb_responses_.reset();
+    // don't use arg/dest here because call() may has failue.
     ARRAY_FOREACH_X(proxy->get_results(), idx, cnt, OB_SUCC(ret)) {
       const ObHBResponse *hb_response = proxy->get_results().at(idx);
+      const ObAddr &dest_addr = proxy->get_dests().at(idx);
       if (OB_ISNULL(hb_response)) {
         tmp_ret = OB_ERR_UNEXPECTED;
         LOG_WARN("hb_response is null", KR(ret), KR(tmp_ret), KP(hb_response));
       } else if (OB_UNLIKELY(!hb_response->is_valid())) {
         // if an observer does not reply the rpc, we will get an invalid hb_response.
         tmp_ret = OB_INVALID_ARGUMENT;
-        LOG_WARN("there might be servers which haven't replied to heartbeat requests",
-            KR(ret), KR(tmp_ret), KPC(hb_response));
+        LOG_WARN("There exists a server not responding to the hb service",
+            KR(ret), KR(tmp_ret), KPC(hb_response), K(dest_addr));
       } else if (OB_FAIL(hb_responses_.push_back(*hb_response))) {
         LOG_WARN("fail to push an element into hb_responses_", KR(ret), KPC(hb_response));
       } else {
@@ -707,7 +699,8 @@ int ObHeartbeatService::end_trans_and_refresh_server_(
           K(server), K(commit));
     }
     //ignore error of refresh and on server_status_change
-    if (OB_TMP_FAIL(SVR_TRACER.refresh())) {
+    bool allow_broadcast = true;
+    if (OB_TMP_FAIL(SVR_TRACER.refresh(allow_broadcast))) {
       LOG_WARN("fail to refresh server tracer", KR(ret), KR(tmp_ret));
     }
     if (OB_ISNULL(GCTX.root_service_)) {

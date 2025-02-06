@@ -13,12 +13,9 @@
 
 #include "ob_ls_all_part_builder.h"
 
-#include "lib/container/ob_se_array.h"                        // ObSEArray
-#include "share/ob_ls_id.h"                                   // ObLSID
 #include "share/schema/ob_schema_getter_guard.h"              // ObSchemaGetterGuard
 #include "share/schema/ob_multi_version_schema_service.h"     // ObMultiVersionSchemaService
 #include "share/tablet/ob_tablet_to_ls_iterator.h"            // ObTenantTabletToLSIterator
-#include "share/ob_balance_define.h"                          // need_balance_table()
 
 namespace oceanbase
 {
@@ -146,7 +143,7 @@ int ObLSAllPartBuilder::build_part_info_(
 
     // compute part object id based on table schema and tablet id
     if (PARTITION_LEVEL_ZERO == table_schema->get_part_level()) {
-      part_object_id = 0;
+      part_object_id = table_schema->get_object_id();
     } else if (OB_FAIL(table_schema->get_part_id_by_tablet(tablet_id, part_id, subpart_id))) {
       if (OB_TABLET_NOT_EXIST == ret) {
         LOG_WARN("tablet not exist in table schema, need retry", KR(ret), K(tablet_id), KPC(table_schema));

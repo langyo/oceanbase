@@ -13,23 +13,9 @@
 #define USING_LOG_PREFIX SHARE
 
 #include "ob_log_restore_proxy.h"
-#include "lib/ob_define.h"
-#include "lib/ob_errno.h"
-#include "lib/utility/ob_macro_utils.h"
-#include "lib/oblog/ob_log_module.h"
-#include "lib/net/ob_addr.h"
-#include "observer/ob_sql_client_decorator.h"  //ObSQLClientRetryWeak
-#include "common/ob_smart_var.h"
-#include "lib/mysqlclient/ob_mysql_connection_pool.h"
-#include "lib/mysqlclient/ob_mysql_result.h"
-#include "lib/string/ob_sql_string.h"
-#include "lib/string/ob_string.h"
-#include "share/inner_table/ob_inner_table_schema_constants.h"
-#include "share/backup/ob_backup_struct.h"     // COMPATIBILITY_MODE
-#include "share/ob_thread_mgr.h"
-#include "logservice/palf/palf_options.h"
+#include "observer/ob_server_struct.h"
 #include "share/oracle_errno.h"
-#include <mysql.h>
+#include "share/backup/ob_log_restore_struct.h"
 
 namespace oceanbase
 {
@@ -68,6 +54,9 @@ namespace share
       break;                                                                                           \
     case OB_ERR_TENANT_IS_LOCKED:                                                                      \
       LOG_USER_ERROR(OB_INVALID_ARGUMENT, "get primary " args ", primary tenant is locked");           \
+      break;                                                                                           \
+    case OB_CONNECT_ERROR:                                                                             \
+      LOG_USER_ERROR(OB_INVALID_ARGUMENT, "get primary " args ", all servers are unreachable");        \
       break;                                                                                           \
     default:                                                                                           \
       LOG_USER_ERROR(OB_INVALID_ARGUMENT, "get primary " args);                                        \
@@ -260,6 +249,32 @@ int ObLogRestoreProxyUtil::init(const uint64_t tenant_id,
   }
   return ret;
 }
+int ObLogRestoreProxyUtil::init_with_service_attr(
+    const uint64_t tenant_id,
+    const ObRestoreSourceServiceAttr *service_attr)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(service_attr)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("service_attr is null", KR(ret), KP(service_attr));
+  } else if (OB_UNLIKELY(!service_attr->is_valid() || !is_valid_tenant_id(tenant_id))) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("service attr or tenant id is invalid", KR(ret), KPC(service_attr), K(tenant_id));
+  } else {
+    const char *db_name = service_attr->user_.mode_ == common::ObCompatibilityMode::MYSQL_MODE ? OB_SYS_DATABASE_NAME : OB_ORA_SYS_SCHEMA_NAME;
+    ObSqlString user;
+    char passwd[OB_MAX_PASSWORD_LENGTH + 1] = {0};
+    if (OB_FAIL(service_attr->get_password(passwd, sizeof(passwd)))) {
+      LOG_WARN("fail to get password", KR(ret), K(service_attr));
+    } else if (OB_FAIL(service_attr->get_user_str_(user))) {
+      LOG_WARN("fail to get user str", KR(ret), K(service_attr));
+    } else if (OB_FAIL(init(tenant_id, service_attr->addr_,
+        user.ptr(), passwd, db_name))) {
+      LOG_WARN("fail to init proxy_util", KR(ret), KPC(service_attr));
+    }
+  }
+  return ret;
+}
 
 int ObLogRestoreProxyUtil::get_sql_proxy(common::ObMySQLProxy *&proxy)
 {
@@ -324,13 +339,16 @@ int ObLogRestoreProxyUtil::try_init(const uint64_t tenant_id,
   int ret = OB_SUCCESS;
   const char *db_name = nullptr;
   ObLogRestoreMySQLProvider tmp_server_prover;
+  common::ObArray<common::ObAddr> fixed_server_list;
 
-  if (OB_FAIL(tmp_server_prover.init(server_list))) {
-    LOG_WARN("server_prover_ init failed", K(tenant_id), K(server_list));
-  } else if (OB_FAIL(detect_tenant_mode_(&tmp_server_prover, user_name, user_password))) {
+  if (OB_FAIL(fixed_server_list.assign(server_list))) {
+    LOG_WARN("fail to assign fixed server list", K(tenant_id), K(server_list));
+  } else if (OB_FAIL(tmp_server_prover.init(server_list))) {
+    LOG_WARN("tmp_server_prover_ init failed", K(tenant_id), K(server_list));
+  } else if (OB_FAIL(detect_tenant_mode_(&tmp_server_prover, user_name, user_password, &fixed_server_list))) {
     LOG_WARN("detect tenant mode failed", KR(ret), K_(user_name));
   } else if (OB_FALSE_IT(db_name = is_oracle_mode_ ? OB_ORA_SYS_SCHEMA_NAME : OB_SYS_DATABASE_NAME)) {
-  } else if (OB_FAIL(init(tenant_id, server_list, user_name, user_password, db_name))) {
+  } else if (OB_FAIL(init(tenant_id, fixed_server_list, user_name, user_password, db_name))) {
     LOG_WARN("[RESTORE PROXY] fail to init restore proxy");
   }
 
@@ -402,6 +420,56 @@ int ObLogRestoreProxyUtil::get_cluster_id(uint64_t tenant_id, int64_t &cluster_i
     LOG_WARN("fail to get cluster id result");
     RESTORE_PROXY_USER_ERROR("cluster id");
   }
+  return ret;
+}
+
+int ObLogRestoreProxyUtil::check_different_cluster_with_same_cluster_id(
+    const int64_t source_cluster_id, bool &res)
+{
+  int ret = OB_SUCCESS;
+  res = false;
+
+  if (OB_UNLIKELY(!inited_)) {
+    ret = OB_NOT_INIT;
+  } else if (GCONF.cluster_id == source_cluster_id) {
+    // get one machine ip from the source cluster, then check if that machine is in current
+    // cluster's __all_server table
+    SMART_VAR(ObMySQLProxy::MySQLResult, result) {
+      ObSqlString sql;
+      char svr_ip_buf[common::OB_IP_STR_BUFF] = {0};
+      common::ObAddr primary_server;
+      if (OB_FAIL(server_prover_.get_server(0, primary_server))) {
+        LOG_WARN("fail to get primary server", K(ret));
+      } else if (!primary_server.ip_to_string(svr_ip_buf, common::OB_IP_STR_BUFF)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("fail to convert ip to string", K(ret));
+      } else if (OB_FAIL(sql.assign_fmt(
+                     "SELECT COUNT(*) AS cnt FROM %s WHERE svr_ip='%s' AND inner_port=%d",
+                     OB_ALL_SERVER_TNAME, svr_ip_buf, primary_server.get_port()))) {
+        LOG_WARN("fail to generate sql", K(ret));
+      } else if (OB_ISNULL(GCTX.sql_proxy_)) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("sql proxy is null", K(ret));
+      } else if (OB_FAIL(GCTX.sql_proxy_->read(result, sql.ptr()))) {
+        LOG_WARN("fail to get __all_server", K(ret), K(sql));
+      } else if (OB_ISNULL(result.get_result())) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("query result is null", K(sql));
+      } else if (OB_FAIL(result.get_result()->next())) {
+        LOG_WARN("get result next failed", K(sql));
+      } else {
+        int64_t cnt = 0;
+        EXTRACT_INT_FIELD_MYSQL(*result.get_result(), "cnt", cnt, int64_t);
+        if (OB_FAIL(ret)) {
+          LOG_WARN("fail to get sql result", K(ret), K(sql));
+        } else if (0 == cnt) {
+          res = true;
+        }
+        LOG_INFO("check if cluster_id duplicated", K(res), K(cnt), K(sql));
+      }
+    }
+  }
+
   return ret;
 }
 
@@ -531,7 +599,7 @@ int ObLogRestoreProxyUtil::construct_server_ip_list(const common::ObSqlString &s
     LOG_WARN("sql is empty", KR(ret), K(sql));
   } else {
     RESTORE_RETRY(SMART_VAR(ObMySQLProxy::MySQLResult, result) {
-      ObMySQLResult *res = NULL;
+      common::sqlclient::ObMySQLResult *res = NULL;
       if (OB_FAIL(sql_proxy_.read(result, OB_INVALID_TENANT_ID, sql.ptr()))) {
         LOG_WARN("read value from DBA_OB_ACCESS_POINT failed", K(tenant_id_), K(sql));
       } else if (OB_ISNULL(res = result.get_result())) {
@@ -582,11 +650,12 @@ bool ObLogRestoreProxyUtil::is_user_changed_(const char *user_name, const char *
   return changed;
 }
 
-int ObLogRestoreProxyUtil::get_tenant_info(ObTenantRole &role, schema::ObTenantStatus &status)
+int ObLogRestoreProxyUtil::get_tenant_info(ObTenantRole &role, schema::ObTenantStatus &status, ObTenantSwitchoverStatus &switchover_status)
 {
   int ret = OB_SUCCESS;
   const char *TENANT_ROLE = "TENANT_ROLE";
   const char *TENANT_STATUS = "STATUS";
+  const char *SWITCHOVER_STATUS = "SWITCHOVER_STATUS";
   common::ObMySQLProxy *proxy = &sql_proxy_;
   if (OB_UNLIKELY(!inited_)) {
     ret = OB_NOT_INIT;
@@ -595,8 +664,8 @@ int ObLogRestoreProxyUtil::get_tenant_info(ObTenantRole &role, schema::ObTenantS
       SMART_VAR(common::ObMySQLProxy::MySQLResult, res) {
         common::sqlclient::ObMySQLResult *result = NULL;
         common::ObSqlString sql;
-        const char *GET_TENANT_INFO_SQL = "SELECT %s, %s FROM %s";
-        if (OB_FAIL(sql.append_fmt(GET_TENANT_INFO_SQL, TENANT_ROLE, TENANT_STATUS, OB_DBA_OB_TENANTS_TNAME))) {
+        const char *GET_TENANT_INFO_SQL = "SELECT %s, %s, %s FROM %s";
+        if (OB_FAIL(sql.append_fmt(GET_TENANT_INFO_SQL, TENANT_ROLE, TENANT_STATUS, SWITCHOVER_STATUS, OB_DBA_OB_TENANTS_TNAME))) {
           LOG_WARN("append_fmt failed");
         } else if (OB_FAIL(proxy->read(res, sql.ptr()))) {
           LOG_WARN("excute sql failed", K(sql));
@@ -606,13 +675,20 @@ int ObLogRestoreProxyUtil::get_tenant_info(ObTenantRole &role, schema::ObTenantS
         } else if (OB_FAIL(result->next())) {
           LOG_WARN("next failed");
         } else {
+          ObString switchover_status_str;
           ObString status_str;
           ObString role_str;
           EXTRACT_VARCHAR_FIELD_MYSQL(*result, TENANT_ROLE, role_str);
           EXTRACT_VARCHAR_FIELD_MYSQL(*result, TENANT_STATUS, status_str);
+          EXTRACT_VARCHAR_FIELD_MYSQL(*result, SWITCHOVER_STATUS, switchover_status_str);
+          ObTenantSwitchoverStatus so_status(switchover_status_str);
+          switchover_status = so_status;
           if (OB_SUCC(ret)) {
             if (OB_FAIL(schema::get_tenant_status(status_str, status))) {
               LOG_WARN("get tenant status failed");
+            } else if (OB_UNLIKELY(!switchover_status.is_valid())) {
+              ret = OB_ERR_UNEXPECTED;
+              LOG_WARN("invalid switchover status", KR(ret), K(switchover_status_str), K(so_status), K(switchover_status));
             } else {
               role = ObTenantRole(role_str.ptr());
             }
@@ -726,10 +802,12 @@ void ObLogRestoreProxyUtil::destroy_tg_()
 
 int ObLogRestoreProxyUtil::detect_tenant_mode_(common::sqlclient::ObMySQLServerProvider *server_provider,
                                                const char *user_name,
-                                               const char *user_password)
+                                               const char *user_password,
+                                               common::ObIArray<common::ObAddr> *fixed_server_list)
 {
+  LOG_INFO("start to detec tenant mode");
   int ret = OB_SUCCESS;
-
+  common::ObArray<int64_t> invalid_ip_array;
   if (OB_ISNULL(server_provider)) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("[RESTORE PROXY] invalid server_provider", KR(ret));
@@ -740,8 +818,7 @@ int ObLogRestoreProxyUtil::detect_tenant_mode_(common::sqlclient::ObMySQLServerP
       LOG_WARN("[RESTORE PROXY] expect valid svr_cnt", K(svr_cnt));
     } else {
       bool detect_succ = false;
-
-      for (int idx = 0; OB_SUCC(ret) && ! detect_succ && idx < svr_cnt; idx++) {
+      for (int idx = 0; idx < svr_cnt; idx++) {
         MYSQL *mysql;
         common::ObAddr server;
         if (OB_FAIL(server_provider->get_server(idx, server))) {
@@ -756,11 +833,17 @@ int ObLogRestoreProxyUtil::detect_tenant_mode_(common::sqlclient::ObMySQLServerP
             ret = OB_BUF_NOT_ENOUGH;
             LOG_WARN("fail to get host.", K(server), K(ret));
           } else if (NULL == (mysql = mysql_init(NULL))) {
-            LOG_ERROR("mysql_init fail", KR(ret));
             ret = OB_ERR_UNEXPECTED;
+            LOG_ERROR("mysql_init fail", KR(ret));
           } else {
+            int64_t final_timeout = cal_timeout_();
+            mysql_options(mysql, MYSQL_OPT_CONNECT_TIMEOUT, &final_timeout);
             if (mysql != mysql_real_connect(mysql, host, user_name, user_password, default_db_name, port, NULL, 0)) {
-              LOG_WARN("mysql connect failed", "mysql_error", mysql_error(mysql), K(host), K(port));
+              int mysql_error_code = mysql_errno(mysql);   // remove invalid ip if mysql error code is ER_CONNECT_FAILED
+              if ((ER_CONNECT_FAILED == mysql_error_code) && OB_FAIL(invalid_ip_array.push_back(idx))) {
+                LOG_WARN("[RESTORE PROXY] fail to push back invalid_ip_array", K(invalid_ip_array), K(idx));
+              }
+              LOG_WARN("[RESTORE PROXY] mysql connect failed", "mysql_error", mysql_error(mysql), K(mysql_error_code), K(host), K(port));
             } else {
  #ifdef OB_BUILD_ORACLE_PARSER
               is_oracle_mode_ = mysql->oracle_mode;
@@ -768,23 +851,47 @@ int ObLogRestoreProxyUtil::detect_tenant_mode_(common::sqlclient::ObMySQLServerP
               is_oracle_mode_ = false;
  #endif
               detect_succ = true;
-              LOG_INFO("[RESTORE PROXY][DETECT_TENANT_MODE] detect tenant mode success", KR(ret));
+              LOG_INFO("[RESTORE PROXY] detect tenant mode success", KR(ret), K(host), K(port));
+            }
+            if (OB_NOT_NULL(mysql)) {
+              mysql_close(mysql);
             }
           }
         }
-        if (OB_SUCC(ret) && OB_NOT_NULL(mysql)) {
-          mysql_close(mysql);
-          mysql = NULL;
-        }
+        mysql = NULL;
       }
       if (OB_UNLIKELY(!detect_succ)) {
         ret = OB_CONNECT_ERROR;
         LOG_WARN("[RESTORE PROXY][DETECT_TENANT_MODE] connect to all server in tenant endpoint list failed", KR(ret), K(svr_cnt));
+      } else if (!invalid_ip_array.empty()) {
+        for (int64_t idx = invalid_ip_array.count() - 1; idx >= 0; idx--) {
+          if (OB_FAIL(fixed_server_list->remove(invalid_ip_array.at(idx)))) {
+            LOG_WARN("[RESTORE PROXY] fail to remove from fixed_server_list", K(invalid_ip_array), K(*fixed_server_list), K(idx));
+          }
+        }
+        LOG_INFO("[RESTORE PROXY] fixed server list", K_(tenant_id), K(*fixed_server_list));
+      }
+      if (fixed_server_list->count() <= 0) {
+        ret = OB_CONNECT_ERROR;
+        LOG_WARN("[RESTORE PROXY] all servers are unreachable", K_(tenant_id), K(ret));
       }
     }
   }
-
   return ret;
+}
+
+int64_t ObLogRestoreProxyUtil::cal_timeout_() {
+  const int64_t DEFAULT_MAX_TIMEOUT = 10; // default max time is 10s
+  int64_t final_timeout = DEFAULT_MAX_TIMEOUT;
+  int64_t abs_timeout_ts = THIS_WORKER.get_timeout_ts();
+  int64_t curr_ts = ObTimeUtility::fast_current_time();
+  int64_t abs_timeout = (abs_timeout_ts - curr_ts) /1000 /1000 /2; // half of the total timeout
+  if (abs_timeout > 0) {
+    final_timeout = abs_timeout < DEFAULT_MAX_TIMEOUT ? abs_timeout : DEFAULT_MAX_TIMEOUT;
+  }
+  LOG_INFO("[RESTORE PROXY] set time out,",
+    K(abs_timeout_ts), K(curr_ts), K(abs_timeout), K(final_timeout), K(DEFAULT_MAX_TIMEOUT));
+  return final_timeout;
 }
 
 } // namespace share

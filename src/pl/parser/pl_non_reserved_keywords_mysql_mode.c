@@ -11,7 +11,6 @@
  */
 
 #include <stdio.h>
-#include "lib/alloc/alloc_assist.h"
 #include "sql/parser/ob_non_reserved_keywords.h"
 #include "pl/parser/pl_parser_mysql_mode_tab.h"
 
@@ -36,6 +35,7 @@ static const NonReservedKeyword Mysql_pl_none_reserved_keywords[] =
   {"column_name", COLUMN_NAME},
   {"comment", COMMENT},
   {"commit", COMMIT},
+  {"compile", COMPILE},
   {"condition", CONDITION},
   {"constraint_catalog", CONSTRAINT_CATALOG},
   {"constraint_name", CONSTRAINT_NAME},
@@ -92,9 +92,11 @@ static const NonReservedKeyword Mysql_pl_none_reserved_keywords[] =
   {"resignal", RESIGNAL},
   {"return", RETURN},
   {"returns", RETURNS},
+  {"reuse", REUSE},
   {"rollback", ROLLBACK},
   {"row", ROW},
   {"rowtype", ROWTYPE},
+  {"role", ROLE},
   {"schema_name", SCHEMA_NAME},
   {"signal", SIGNAL},
   {"sqlexception", SQLEXCEPTION},
@@ -103,6 +105,7 @@ static const NonReservedKeyword Mysql_pl_none_reserved_keywords[] =
   {"subclass_origin", SUBCLASS_ORIGIN},
   {"until", UNTIL},
   {"update", UPDATE},
+  {"user", USER},
   {"using", USING},
   {"when", WHEN},
   {"while", WHILE},
@@ -122,6 +125,7 @@ static const NonReservedKeyword Mysql_pl_none_reserved_keywords[] =
   {"middleint", MEDIUMINT},
   {"integer", INTEGER},
   {"int", INTEGER},
+  {"int1", TINYINT},
   {"int2", SMALLINT},
   {"int3", MEDIUMINT},
   {"int4", INTEGER},
@@ -134,9 +138,9 @@ static const NonReservedKeyword Mysql_pl_none_reserved_keywords[] =
   {"follows", FOLLOWS},
   {"double", DOUBLE},
   {"precision", PRECISION},
-  {"dec", NUMBER},
-  {"decimal", NUMBER},
-  {"numeric", NUMBER},
+  {"dec", DEC},
+  {"decimal", DECIMAL},
+  {"numeric", NUMERIC},
   {"real", DOUBLE},
   {"bit", BIT},
   {"datetime", DATETIME},
@@ -144,6 +148,7 @@ static const NonReservedKeyword Mysql_pl_none_reserved_keywords[] =
   {"time", TIME},
   {"date", DATE},
   {"year", YEAR},
+  {"settings", SETTINGS},
   {"character", CHARACTER},
   {"char", CHARACTER},
   {"text", TEXT},
@@ -167,13 +172,28 @@ static const NonReservedKeyword Mysql_pl_none_reserved_keywords[] =
   {"tinyblob", TINYBLOB},
   {"mediumblob", MEDIUMBLOB},
   {"longblob", LONGBLOB},
-  {"fixed", NUMBER},
+  {"fixed", FIXED},
   {"authid", AUTHID},
   {"or", OR},
   {"replace", REPLACE},
   {"pragma", PRAGMA},
   {"interface", INTERFACE},
   {"c", C},
+  {"submit", SUBMIT},
+  {"job", JOB},
+  {"cancel", CANCEL},
+  {"xa", XA},
+  {"recover", RECOVER},
+  {"polygon", POLYGON},
+  {"multipoint", MULTIPOINT},
+  {"point", POINT},
+  {"linestring", LINESTRING},
+  {"geometry", GEOMETRY},
+  {"multilinestring", MULTILINESTRING},
+  {"multipolygon", MULTIPOLYGON},
+  {"geometrycollection", GEOMETRYCOLLECTION},
+  {"geomcollection", GEOMCOLLECTION},
+  {"roaringbitmap", ROARINGBITMAP}
 };
 
 const NonReservedKeyword *mysql_pl_non_reserved_keyword_lookup(const char *word)

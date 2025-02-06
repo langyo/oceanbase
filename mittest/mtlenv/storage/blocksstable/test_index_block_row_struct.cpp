@@ -1,3 +1,6 @@
+// owner: baichangmin.bcm
+// owner group: storage
+
 /**
  * Copyright (c) 2021 OceanBase
  * OceanBase CE is licensed under Mulan PubL v2.
@@ -12,8 +15,8 @@
 
 #include <gtest/gtest.h>
 #define private public
-#include "storage/blocksstable/index_block/ob_index_block_row_struct.h"
-#include "storage/blocksstable/ob_macro_block.h"
+#define protected public
+#include "src/storage/ob_i_store.h"
 #include "mtlenv/mock_tenant_module_env.h"
 
 namespace oceanbase
@@ -30,7 +33,7 @@ class TestIndexBlockRowStruct : public ::testing::Test
 public:
   static const int64_t rowkey_column_count = 2;
 public:
-  TestIndexBlockRowStruct() : allocator_(), index_data_allocator_(), desc_(), data_desc_()  {}
+  TestIndexBlockRowStruct() : allocator_(), desc_(), data_desc_()  {}
   virtual ~TestIndexBlockRowStruct() {}
   static void SetUpTestCase();
   static void TearDownTestCase();
@@ -38,7 +41,6 @@ public:
   virtual void TearDown();
 public:
   ObArenaAllocator allocator_;
-  ObArenaAllocator index_data_allocator_;
   ObWholeDataStoreDesc desc_;
   ObWholeDataStoreDesc data_desc_;
 };
@@ -65,6 +67,7 @@ void TestIndexBlockRowStruct::SetUp()
   static_desc.ls_id_.id_ = 1;
   static_desc.tablet_id_.id_ = 1;
   static_desc.compressor_type_ = ObCompressorType::NONE_COMPRESSOR;
+  static_desc.tablet_transfer_seq_ = 0;
   data_desc.micro_block_size_ = 8 * 1024;
   static_desc.micro_block_size_limit_ = 8 * 1024;
   col_desc.row_column_count_ = rowkey_column_count + 1;
@@ -98,7 +101,6 @@ void TestIndexBlockRowStruct::SetUp()
 void TestIndexBlockRowStruct::TearDown()
 {
   allocator_.reset();
-  index_data_allocator_.reset();
 }
 
 TEST_F(TestIndexBlockRowStruct, test_invalid)
@@ -113,9 +115,9 @@ TEST_F(TestIndexBlockRowStruct, test_invalid)
   EXPECT_EQ(OB_SUCCESS, row_key.assign(obj, 2));
 
   ObIndexBlockRowBuilder row_builder;
-  ret = row_builder.init(allocator_, index_data_allocator_, data_desc_.get_desc(), data_desc_.get_desc());
+  ret = row_builder.init(allocator_, data_desc_.get_desc(), data_desc_.get_desc());
   EXPECT_EQ(OB_SUCCESS, ret);
-  ret = row_builder.init(allocator_, index_data_allocator_, data_desc_.get_desc(), data_desc_.get_desc());
+  ret = row_builder.init(allocator_, data_desc_.get_desc(), data_desc_.get_desc());
   EXPECT_NE(OB_SUCCESS, ret);
 
   const ObDatumRow *row;
@@ -137,7 +139,7 @@ TEST_F(TestIndexBlockRowStruct, test_normal)
   EXPECT_EQ(OB_SUCCESS, row_key.assign(obj, 2));
 
   ObIndexBlockRowBuilder row_builder;
-  ret = row_builder.init(allocator_, index_data_allocator_, data_desc_.get_desc(), data_desc_.get_desc());
+  ret = row_builder.init(allocator_, data_desc_.get_desc(), data_desc_.get_desc());
   ASSERT_EQ(OB_SUCCESS, ret);
 
   ObIndexBlockRowDesc row_desc;
@@ -169,7 +171,7 @@ TEST_F(TestIndexBlockRowStruct, test_parser_normal)
   }
 
   ObIndexBlockRowBuilder row_builder;
-  ASSERT_EQ(OB_SUCCESS, row_builder.init(allocator_, index_data_allocator_, data_desc_.get_desc(), data_desc_.get_desc()));
+  ASSERT_EQ(OB_SUCCESS, row_builder.init(allocator_, data_desc_.get_desc(), data_desc_.get_desc()));
 
   ObIndexBlockRowDesc row_desc;
   row_desc.block_size_ = 1024;
@@ -239,7 +241,7 @@ TEST_F(TestIndexBlockRowStruct, test_set_rowkey)
   EXPECT_EQ(OB_SUCCESS, row_key.assign(obj, 2));
 
   ObIndexBlockRowBuilder row_builder;
-  ret = row_builder.init(allocator_, index_data_allocator_, data_desc_.get_desc(), data_desc_.get_desc());
+  ret = row_builder.init(allocator_, data_desc_.get_desc(), data_desc_.get_desc());
   EXPECT_EQ(OB_SUCCESS, ret);
 
   ObIndexBlockRowDesc row_desc;

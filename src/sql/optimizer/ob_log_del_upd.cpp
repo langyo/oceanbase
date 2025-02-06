@@ -11,15 +11,10 @@
  */
 
 #define USING_LOG_PREFIX SQL_OPT
-#include "sql/resolver/expr/ob_raw_expr.h"
+#include "ob_log_del_upd.h"
 #include "sql/optimizer/ob_del_upd_log_plan.h"
-#include "sql/optimizer/ob_log_del_upd.h"
-#include "sql/optimizer/ob_log_plan.h"
 #include "sql/optimizer/ob_log_table_scan.h"
 #include "sql/optimizer/ob_log_exchange.h"
-#include "share/schema/ob_schema_getter_guard.h"
-#include "common/ob_smart_call.h"
-#include "sql/rewrite/ob_transform_utils.h"
 #include "sql/optimizer/ob_log_join.h"
 
 using namespace oceanbase;
@@ -41,6 +36,7 @@ int IndexDMLInfo::deep_copy(ObIRawExprCopier &expr_copier, const IndexDMLInfo &o
   is_primary_index_ = other.is_primary_index_;
   is_update_unique_key_ = other.is_update_unique_key_;
   is_update_part_key_ = other.is_update_part_key_;
+  is_update_primary_key_ = other.is_update_primary_key_;
   assignments_.reset();
   if (OB_FAIL(expr_copier.copy(other.column_exprs_, column_exprs_))) {
     LOG_WARN("failed to assign column exprs", K(ret));
@@ -83,6 +79,7 @@ int IndexDMLInfo::assign_basic(const IndexDMLInfo &other)
   is_primary_index_ = other.is_primary_index_;
   is_update_unique_key_ = other.is_update_unique_key_;
   is_update_part_key_ = other.is_update_part_key_;
+  is_update_primary_key_ = other.is_update_primary_key_;
   trans_info_expr_ = other.trans_info_expr_;
   if (OB_FAIL(column_exprs_.assign(other.column_exprs_))) {
     LOG_WARN("failed to assign column exprs", K(ret));
@@ -305,7 +302,10 @@ ObLogDelUpd::ObLogDelUpd(ObDelUpdLogPlan &plan)
     need_barrier_(false),
     is_first_dml_op_(false),
     table_location_uncertain_(false),
+    is_pdml_update_split_(false),
+    das_dop_(0),
     pdml_partition_id_expr_(NULL),
+    ddl_slice_id_expr_(NULL),
     pdml_is_returning_(false),
     err_log_define_(),
     need_alloc_part_id_expr_(false),
@@ -484,7 +484,8 @@ int ObLogDelUpd::generate_pdml_partition_id_expr()
   // 2. 如果当前pdml op对应的表是分区表，就分配partition id expr
   uint64_t table_id = OB_INVALID_ID;
   ObOpPseudoColumnRawExpr *partition_id_expr = nullptr;
-  ObLogicalOperator *producer = NULL;
+  ObLogExchange *producer = NULL;
+  ObLogTableScan *src_tsc = NULL;
   if (OB_UNLIKELY(!is_pdml()) ||
       OB_UNLIKELY(index_dml_infos_.count() != 1) ||
       OB_ISNULL(index_dml_infos_.at(0))) {
@@ -492,83 +493,101 @@ int ObLogDelUpd::generate_pdml_partition_id_expr()
     LOG_WARN("index info array is empty", K(ret));
   } else if (OB_FAIL(ObLogicalOperator::generate_pseudo_partition_id_expr(partition_id_expr))) {
     LOG_WARN("fail allocate part id expr", K(table_id), K(ret));
-  } else if (OB_FAIL(find_pdml_part_id_producer(*this,
+  } else if (OB_FAIL(find_pdml_part_id_producer(get_child(ObLogicalOperator::first_child),
+                                                index_dml_infos_.at(0)->loc_table_id_,
                                                 index_dml_infos_.at(0)->ref_table_id_,
-                                                producer))) {
+                                                producer,
+                                                src_tsc))) {
     LOG_WARN("find pdml partition id expr producer failed", K(ret));
-  } else if (NULL == producer) {
-    ret = OB_ERR_UNEXPECTED;
-    LOG_WARN("can not found pdml partition id expr producer", K(ret));
-  } else {
+  } else if (NULL != src_tsc && NULL != producer) {
     pdml_partition_id_expr_ = partition_id_expr;
-    if (producer->get_type() == log_op_def::LOG_EXCHANGE) {
-      static_cast<ObLogExchange *>(producer)->set_partition_id_expr(partition_id_expr);
-    } else if (producer->get_type() == log_op_def::LOG_TABLE_SCAN) {
-      static_cast<ObLogTableScan *>(producer)->set_tablet_id_expr(partition_id_expr);
-    } else {
-      ret = OB_ERR_UNEXPECTED;
-      LOG_WARN("unexpected type of pdml partition id producer", K(ret), K(producer));
-    }
+    producer->set_partition_id_expr(partition_id_expr);
+  } else if (NULL != src_tsc) {
+    pdml_partition_id_expr_ = partition_id_expr;
+    src_tsc->set_tablet_id_expr(partition_id_expr);
+  } else if (NULL != producer) {
+    pdml_partition_id_expr_ = partition_id_expr;
+    producer->set_partition_id_expr(partition_id_expr);
+  } else {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("can not found pdml partition id expr producer", K(ret), K(producer), K(src_tsc));
   }
   return ret;
 }
 
-int ObLogDelUpd::find_pdml_part_id_producer(ObLogicalOperator &op,
-                                            const uint64_t tid,
-                                            ObLogicalOperator *&producer)
+int ObLogDelUpd::generate_ddl_slice_id_expr()
 {
   int ret = OB_SUCCESS;
-  producer = NULL;
-  OZ(check_stack_overflow());
-  if (OB_SUCC(ret)) {
-    if (op.get_type() == log_op_def::LOG_EXCHANGE) {
-      ObLogExchange &log_ex = static_cast<ObLogExchange &>(op);
-      if (log_ex.is_producer() && log_ex.get_repartition_ref_table_id() == tid) {
-        producer = &op;
-      }
-    } else if (op.get_type() == log_op_def::LOG_TABLE_SCAN) {
-      // PDML partition id expr在table scan分配的逻辑
-      // pdml table scan分配partition id expr的producer
-      // table scan中分配partition id expr的producer的逻辑比较特殊：
-      //  分配partition id的时候，需要保证partition id expr对应的table id与table
-      // scan的table id是相同的
-      //  对应insert的dml操作，例如：insert into t1 select from t1，
-      //  产生的计划如下：
-      //      insert
-      //        subplan
-      //          GI
-      //            TSC
-      //            ....
-      //
-      // 这种情况下，如果给TSC算子分配partition idexpr，那么根据表达式分配的框架，
-      // 其会被裁剪掉，因此目前insert与subplan之间会添加一个EX算子.
-      // 后期会进行优化，如果insert与subplan是一个full partition wise
-      // join，那么就在insert算子上分配一个GI算子，目前先使用在subplan上分配EX算子的方式实现
-      ObLogTableScan &tsc = static_cast<ObLogTableScan &>(op);
-      if (tid
-          == (tsc.get_is_index_global() ? tsc.get_index_table_id() : tsc.get_ref_table_id())) {
-        producer = &op;
-      }
+  ObRawExpr *ddl_slice_expr = nullptr;
+  ObLogicalOperator *sort_op = nullptr;
+  ObLogicalOperator *consumer = nullptr;
+  ObLogExchange *producer = nullptr;
+  ObOptimizerContext &ctx = get_plan()->get_optimizer_context();
+  if (OB_FAIL(ObRawExprUtils::build_pseudo_ddl_slice_id(ctx.get_expr_factory(), *ctx.get_session_info(), ddl_slice_expr))) {
+    LOG_WARN("build pseudo ddl slice id expr failed", K(ret));
+  } else if (OB_ISNULL(sort_op = get_child(ObLogicalOperator::first_child)) || sort_op->get_type() != log_op_def::LOG_SORT // sort op
+      || OB_ISNULL(consumer = sort_op->get_child(ObLogicalOperator::first_child)) || consumer->get_type() != log_op_def::LOG_EXCHANGE // exchange consumer
+      || OB_ISNULL(producer = static_cast<ObLogExchange *>(consumer->get_child(ObLogicalOperator::first_child))) || !producer->is_producer()) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("get ddl slice id producer failed", K(ret), KPC(sort_op), KPC(consumer), KPC(producer));
+  } else {
+    ddl_slice_id_expr_ = ddl_slice_expr;
+    producer->set_ddl_slice_id_expr(ddl_slice_expr);
+  }
+  return ret;
+}
+
+int ObLogDelUpd::find_pdml_part_id_producer(ObLogicalOperator *op,
+                                            const uint64_t loc_tid,
+                                            const uint64_t ref_tid,
+                                            ObLogExchange *&producer,
+                                            ObLogTableScan *&src_tsc)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(op)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected null", K(ret), K(op));
+  } else if (op->is_dml_operator()) {
+    // for pdml insert split by update, generate partition id by exchange above delete
+  } else if (op->get_type() == log_op_def::LOG_TABLE_SCAN) {
+    // PDML partition id expr在table scan分配的逻辑
+    // pdml table scan分配partition id expr的producer
+    // table scan中分配partition id expr的producer的逻辑比较特殊：
+    //  分配partition id的时候，需要保证partition id expr对应的table id与table
+    // scan的table id是相同的
+    //  对应insert的dml操作，例如：insert into t1 select from t1，
+    //  产生的计划如下：
+    //      insert
+    //        subplan
+    //          GI
+    //            TSC
+    //            ....
+    //
+    // 这种情况下，如果给TSC算子分配partition idexpr，那么根据表达式分配的框架，
+    // 其会被裁剪掉，因此目前insert与subplan之间会添加一个EX算子.
+    // 后期会进行优化，如果insert与subplan是一个full partition wise
+    // join，那么就在insert算子上分配一个GI算子，目前先使用在subplan上分配EX算子的方式实现
+    ObLogTableScan *tsc = static_cast<ObLogTableScan*>(op);
+    if (loc_tid == tsc->get_table_id() &&
+        ref_tid == (tsc->get_is_index_global() ? tsc->get_index_table_id() : tsc->get_ref_table_id())) {
+      src_tsc = tsc;
+      producer = NULL;
     }
-    for (int64_t i = 0; OB_SUCC(ret) && NULL == producer && i < op.get_num_of_child(); i++) {
-      if (OB_ISNULL(op.get_child(i))) {
-        ret = OB_ERR_UNEXPECTED;
-        LOG_WARN("null child", K(ret));
-      } else if (log_op_def::LOG_JOIN == op.get_type()) {
-        ObLogJoin &join_op = static_cast<ObLogJoin&>(op);
-        if (IS_LEFT_SEMI_ANTI_JOIN(join_op.get_join_type()) &&
-            second_child == i) {
-          continue;
-        } else if (IS_RIGHT_SEMI_ANTI_JOIN(join_op.get_join_type()) &&
-                   first_child == i) {
-          continue;
-        }
-        if (OB_FAIL(find_pdml_part_id_producer(*op.get_child(i), tid, producer))) {
-          LOG_WARN("find pdml part id producer failed", K(ret));
-        }
-      } else if (OB_FAIL(find_pdml_part_id_producer(*op.get_child(i), tid, producer))) {
+  } else {
+    if (OB_SUCC(ret) && NULL == producer && op->get_type() == log_op_def::LOG_EXCHANGE
+        && static_cast<ObLogExchange*>(op)->is_producer()) {
+      // find the first exchange below dml, use this exchange generate partition id for pdml insert
+      producer = static_cast<ObLogExchange*>(op);
+    }
+    for (int64_t i = 0; OB_SUCC(ret) && NULL == src_tsc && i < op->get_num_of_child(); i++) {
+      if (OB_FAIL(SMART_CALL(find_pdml_part_id_producer(op->get_child(i), loc_tid, ref_tid, producer, src_tsc)))) {
         LOG_WARN("find pdml part id producer failed", K(ret));
       }
+    }
+    if (OB_SUCC(ret) && NULL != src_tsc && op->get_type() == log_op_def::LOG_EXCHANGE
+        && static_cast<ObLogExchange*>(op)->is_producer()) {
+      // generate partition id by exchange above dml target table scan
+      producer = static_cast<ObLogExchange*>(op);
     }
   }
   return ret;
@@ -656,6 +675,11 @@ int ObLogDelUpd::inner_get_op_exprs(ObIArray<ObRawExpr*> &all_exprs, bool need_c
   } else if (is_pdml() && need_alloc_part_id_expr_ &&
              OB_FAIL(generate_pdml_partition_id_expr())) {
     LOG_WARN("failed to allocate partition id expr", K(ret));
+  } else if (get_plan()->get_optimizer_context().is_online_ddl()
+      && !get_plan()->get_optimizer_context().is_heap_table_ddl()
+      && GCTX.is_shared_storage_mode()
+      && OB_FAIL(generate_ddl_slice_id_expr())) {
+    LOG_WARN("failed to allocate ddl slice id expr", K(ret));
   } else if (OB_FAIL(find_trans_info_producer())) {
     LOG_WARN("failed to find trasn info producer", K(ret));
   } else if (OB_FAIL(generate_rowid_expr_for_trigger())) {
@@ -667,6 +691,8 @@ int ObLogDelUpd::inner_get_op_exprs(ObIArray<ObRawExpr*> &all_exprs, bool need_c
   } else if (OB_FAIL(append(all_exprs, view_check_exprs_))) {
     LOG_WARN("failed to append exprs", K(ret));
   } else if (NULL != pdml_partition_id_expr_ && OB_FAIL(all_exprs.push_back(pdml_partition_id_expr_))) {
+    LOG_WARN("failed to push back exprs", K(ret));
+  } else if (NULL != ddl_slice_id_expr_ && OB_FAIL(all_exprs.push_back(ddl_slice_id_expr_))) {
     LOG_WARN("failed to push back exprs", K(ret));
   } else if (OB_FAIL(append_array_no_dup(all_exprs, produced_trans_exprs_))) {
     LOG_WARN("failed to push back exprs", K(ret), K(produced_trans_exprs_));
@@ -819,7 +845,7 @@ int ObLogDelUpd::est_cost()
   } else {
     ObOptimizerContext &opt_ctx = get_plan()->get_optimizer_context();
     card_ = child->get_card();
-    op_cost_ = ObOptEstCost::cost_get_rows(child->get_card(), opt_ctx.get_cost_model_type());
+    op_cost_ = ObOptEstCost::cost_get_rows(child->get_card(), opt_ctx);
     cost_ = op_cost_ + child->get_cost();
   }
   return ret;
@@ -837,7 +863,7 @@ int ObLogDelUpd::compute_sharding_info()
   } else if (OB_ISNULL(get_sharding())) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("get unexpected null", K(ret));
-  } else if (!is_pdml()) {
+  } else if (!(is_pdml() || get_das_dop() > 0)) {
     is_partition_wise_ = !is_multi_part_dml_ && !child->is_exchange_allocated() &&
                          get_sharding()->is_distributed() &&
                          NULL != get_sharding()->get_phy_table_location_info();
@@ -880,12 +906,16 @@ int ObLogDelUpd::build_rowid_expr(uint64_t table_id,
   ObSchemaGetterGuard *schema_guard = NULL;
   ObSQLSessionInfo *session_info = NULL;
   const ObTableSchema *tbl_schema = NULL;
-  if (OB_ISNULL(get_plan()) ||
+  ObRawExpr *part_expr = NULL;
+  ObRawExpr *subpart_expr = NULL;
+  if (OB_ISNULL(get_plan()) || OB_ISNULL(get_stmt()) ||
       OB_ISNULL(schema_guard = get_plan()->get_optimizer_context().get_schema_guard()) ||
       OB_ISNULL(get_plan()->get_optimizer_context().get_session_info()) ||
       OB_ISNULL(session_info = get_plan()->get_optimizer_context().get_session_info())) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("invalid params", K(ret), KP(schema_guard), KP(get_plan()));
+  } else if (OB_FALSE_IT(part_expr = get_stmt()->get_part_expr(table_id, table_ref_id))) {
+  } else if (OB_FALSE_IT(subpart_expr = get_stmt()->get_subpart_expr(table_id, table_ref_id))) {
   } else if (OB_FAIL(schema_guard->get_table_schema(
              session_info->get_effective_tenant_id(),
              table_ref_id, tbl_schema))) {
@@ -893,13 +923,13 @@ int ObLogDelUpd::build_rowid_expr(uint64_t table_id,
   } else if (OB_ISNULL(tbl_schema)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("table schema is NULL", K(ret));
-  } else if (OB_FAIL(ObRawExprUtils::build_rowid_expr(get_stmt(),
-                                                      get_plan()->get_optimizer_context().get_expr_factory(),
+  } else if (OB_FAIL(ObRawExprUtils::build_rowid_expr(get_plan()->get_optimizer_context().get_expr_factory(),
                                                       get_plan()->get_optimizer_context().get_allocator(),
                                                       *(get_plan()->get_optimizer_context().get_session_info()),
                                                       *tbl_schema,
-                                                      table_id,
                                                       rowkeys,
+                                                      part_expr,
+                                                      subpart_expr,
                                                       rowid_sysfun_expr))) {
     LOG_WARN("failed to build rowid col expr", K(ret));
   } else if (OB_ISNULL(rowid_sysfun_expr)) {
@@ -1361,7 +1391,7 @@ int ObLogDelUpd::generate_fk_lookup_part_id_expr(IndexDMLInfo &index_dml_info)
         } else if (OB_FAIL(parent_table_schema->get_fk_check_index_tid(*schema_guard, fk_info.parent_column_ids_, scan_index_tid))) {
           LOG_WARN("failed to get index tid used to build scan das task for foreign key checks", K(ret));
         } else if (OB_INVALID_ID == scan_index_tid) {
-          ret = OB_ERR_UNEXPECTED;
+          ret = OB_ERR_CANNOT_ADD_FOREIGN;
           LOG_WARN("get invalid table id to build das scan task for foreign key checks", K(ret));
         } else {
           ObRawExpr* fk_look_up_part_id_expr = nullptr;
@@ -1592,6 +1622,9 @@ int ObLogDelUpd::inner_replace_op_exprs(ObRawExprReplacer &replacer)
   } else if (NULL != pdml_partition_id_expr_ &&
     OB_FAIL(replace_expr_action(replacer, pdml_partition_id_expr_))) {
     LOG_WARN("failed to replace pdml partition id expr", K(ret));
+  } else if (NULL != ddl_slice_id_expr_ &&
+    OB_FAIL(replace_expr_action(replacer, ddl_slice_id_expr_))) {
+    LOG_WARN("failed to replace ddl slice id expr", K(ret));
   }
   return ret;
 }
@@ -1624,8 +1657,18 @@ int ObLogDelUpd::replace_dml_info_exprs(
     } else if (NULL != index_dml_info->new_rowid_expr_ &&
       OB_FAIL(replace_expr_action(replacer, index_dml_info->new_rowid_expr_))) {
       LOG_WARN("failed to replace new rowid expr", K(ret));
-    } else if (OB_FAIL(replace_exprs_action(replacer, index_dml_info->column_old_values_exprs_))) {
-      LOG_WARN("failed to replace column old values exprs ", K(ret));
+    }
+    for (int64_t i = 0; OB_SUCC(ret) && i < index_dml_info->column_old_values_exprs_.count(); ++i) {
+      ObRawExpr *&expr = index_dml_info->column_old_values_exprs_.at(i);
+      if (expr->is_column_ref_expr() && static_cast<ObColumnRefRawExpr *>(expr)->is_doc_id_column()) {
+        // just skip, nothing to do.
+      } else if (expr->is_column_ref_expr() && static_cast<ObColumnRefRawExpr *>(expr)->is_vec_hnsw_vid_column()) {
+        // just skip, nothing to do.
+      } else if (expr->is_column_ref_expr() && static_cast<ObColumnRefRawExpr *>(expr)->is_vec_cid_column()) {
+        // just skip, nothing to do.
+      } else if (OB_FAIL(replace_expr_action(replacer, index_dml_info->column_old_values_exprs_.at(i)))) {
+        LOG_WARN("fail to replace expr", K(ret), K(i), K(index_dml_info->column_old_values_exprs_));
+      }
     }
     for (int64_t i = 0; OB_SUCC(ret) && i < index_dml_info->assignments_.count(); ++i) {
       if (OB_FAIL(replace_expr_action(replacer, index_dml_info->assignments_.at(i).expr_))) {
@@ -1655,17 +1698,33 @@ int ObLogDelUpd::print_used_hint(PlanText &plan_text)
   return ret;
 }
 
-int ObLogDelUpd::is_my_fixed_expr(const ObRawExpr *expr, bool &is_fixed)
+int ObLogDelUpd::is_dml_fixed_expr(const ObRawExpr *expr,
+                                   const ObIArray<IndexDMLInfo *> &index_dml_infos,
+                                   bool &is_fixed)
 {
   int ret = OB_SUCCESS;
-  const ObIArray<IndexDMLInfo *> &index_dml_infos = get_index_dml_infos();
+  if (OB_ISNULL(expr)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected null", K(ret));
+  }
   for (int64_t i = 0; OB_SUCC(ret) && !is_fixed && i < index_dml_infos.count(); ++i) {
-    if (OB_ISNULL(index_dml_infos.at(i))) {
+    const IndexDMLInfo *index_dml_info = index_dml_infos.at(i);
+    if (OB_ISNULL(index_dml_info)) {
       ret = OB_ERR_UNEXPECTED;
-      LOG_WARN("index dml info is null", K(ret));
-    } else if (OB_FAIL(index_dml_infos.at(i)->is_new_row_expr(expr, is_fixed))) {
+      LOG_WARN("get unexpected null", K(ret));
+    } else if (OB_FAIL(index_dml_info->is_new_row_expr(expr, is_fixed))) {
       LOG_WARN("failed to check is new row expr", K(ret));
+    } else if (!is_fixed) {
+      is_fixed = ObOptimizerUtil::find_item(index_dml_info->column_exprs_, expr);
     }
   }
+  return ret;
+}
+
+int ObLogDelUpd::check_use_child_ordering(bool &used, int64_t &inherit_child_ordering_index)
+{
+  int ret = OB_SUCCESS;
+  used = false;
+  inherit_child_ordering_index = -1;
   return ret;
 }

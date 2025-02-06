@@ -112,10 +112,14 @@ int64_t ObFixedArrayImpl<T, BlockAllocatorT>::get_serialize_size() const
 template <typename T,
           int max_block_size,
           typename BlockAllocatorT, bool auto_free,
-          typename BlockPointerArrayT>
+          typename BlockPointerArrayT,
+          bool use_trivial_ctor,
+          bool need_construct_items>
 int Ob2DArray<T, max_block_size,
               BlockAllocatorT, auto_free,
-              BlockPointerArrayT>::serialize(
+              BlockPointerArrayT,
+              use_trivial_ctor,
+              need_construct_items>::serialize(
                                              char *buf,
                                              const int64_t buf_len,
                                              int64_t &pos) const
@@ -135,12 +139,16 @@ int Ob2DArray<T, max_block_size,
 template <typename T,
           int max_block_size,
           typename BlockAllocatorT, bool auto_free,
-          typename BlockPointerArrayT>
+          typename BlockPointerArrayT,
+          bool use_trivial_ctor,
+          bool need_construct_items>
 int64_t Ob2DArray<T,
                   max_block_size,
                   BlockAllocatorT,
                   auto_free,
-                  BlockPointerArrayT>::get_serialize_size() const
+                  BlockPointerArrayT,
+                  use_trivial_ctor,
+                  need_construct_items>::get_serialize_size() const
 {
   int64_t len = 0;
   len += serialization::encoded_length_vi64(count());
@@ -153,12 +161,16 @@ int64_t Ob2DArray<T,
 template <typename T,
           int max_block_size,
           typename BlockAllocatorT, bool auto_free,
-          typename BlockPointerArrayT>
+          typename BlockPointerArrayT,
+          bool use_trivial_ctor,
+          bool need_construct_items>
 int Ob2DArray<T,
               max_block_size,
               BlockAllocatorT,
               auto_free,
-              BlockPointerArrayT>::deserialize(const char *buf,
+              BlockPointerArrayT,
+              use_trivial_ctor,
+              need_construct_items>::deserialize(const char *buf,
                                                int64_t data_len, int64_t &pos)
 {
   int ret = OB_SUCCESS;

@@ -12,10 +12,8 @@
 
 #define USING_LOG_PREFIX SHARE
 
-#include "share/config/ob_server_config.h"
-#include "lib/container/ob_array_iterator.h"
-#include "lib/utility/ob_defer.h"
-#include "common/ob_record_header.h"
+#include "ob_common_config.h"
+#include "lib/utility/ob_sort.h"
 #include "observer/omt/ob_tenant_config_mgr.h"
 
 namespace oceanbase
@@ -92,7 +90,7 @@ void ObBaseConfig::get_sorted_config_items(ConfigItemArray &configs) const
     ConfigItem item(it->first.str(), NULL == it->second ? "" : it->second->str());
     (void)configs.push_back(item);
   }
-  std::sort(configs.begin(), configs.end());
+  lib::ob_sort(configs.begin(), configs.end());
 }
 int ObBaseConfig::load_from_buffer(const char *config_str, const int64_t config_str_len,
                               const int64_t version, const bool check_name)
@@ -145,7 +143,7 @@ int ObBaseConfig::load_from_buffer(const char *config_str, const int64_t config_
             ret = OB_INVALID_ARGUMENT;
           }
         } else {
-          (*pp_item)->set_value(value);
+          (*pp_item)->set_value_unsafe(value);
           (*pp_item)->set_version(version);
           if (need_print_config(name)) {
             _LOG_INFO("load config succ, %s=%s", name, value);
@@ -207,8 +205,11 @@ int ObBaseConfig::load_from_file(const char *config_file,
     } else {
       // end with '\0'
       config_file_buf[read_len] = '\0';
-
-      if (OB_FAIL(load_from_buffer(config_file_buf, read_len, version, check_name))) {
+      {
+        DRWLock::WRLockGuard guard(OTC_MGR.rwlock_);
+        ret = load_from_buffer(config_file_buf, read_len, version, check_name);
+      }
+      if (OB_FAIL(ret)) {
         LOG_ERROR("load config fail", KR(ret), K(config_file), K(version), K(check_name),
             K(read_len));
       } else {
@@ -285,9 +286,9 @@ ObCommonConfig::~ObCommonConfig()
 {
 }
 
-int ObCommonConfig::add_extra_config(const char *config_str,
-                                     int64_t version /* = 0 */ ,
-                                     bool check_config /* = true */)
+int ObCommonConfig::add_extra_config_unsafe(const char *config_str,
+                                     int64_t version,
+                                     bool check_config)
 {
   int ret = OB_SUCCESS;
   const int64_t MAX_OPTS_LENGTH = sysconf(_SC_ARG_MAX);
@@ -316,6 +317,8 @@ int ObCommonConfig::add_extra_config(const char *config_str,
     }
     const ObString external_kms_info_cfg(EXTERNAL_KMS_INFO);
     const ObString ssl_external_kms_info_cfg(SSL_EXTERNAL_KMS_INFO);
+    const ObString compatible_cfg(COMPATIBLE);
+    const ObString enable_compatible_monotonic_cfg(ENABLE_COMPATIBLE_MONOTONIC);
     auto func = [&]() {
       char *saveptr_one = NULL;
       const char *name = NULL;
@@ -353,7 +356,7 @@ int ObCommonConfig::add_extra_config(const char *config_str,
           }
         }
         if (OB_FAIL(ret) || OB_ISNULL(pp_item)) {
-        } else if (!(*pp_item)->set_value(value)) {
+        } else if (!(*pp_item)->set_value_unsafe(value)) {
           ret = OB_INVALID_CONFIG;
           LOG_ERROR("Invalid config value", K(name), K(value), K(ret));
         } else if (check_config && (!(*pp_item)->check_unit(value) || !(*pp_item)->check())) {
@@ -367,6 +370,27 @@ int ObCommonConfig::add_extra_config(const char *config_str,
         } else {
           (*pp_item)->set_version(version);
           LOG_INFO("Load config succ", K(name), K(value));
+          if (0 == compatible_cfg.case_compare(name)) {
+            const uint64_t tenant_id = get_tenant_id();
+            uint64_t data_version = 0;
+            int tmp_ret = 0;
+            if (OB_TMP_FAIL(ObClusterVersion::get_version(value, data_version))) {
+              LOG_ERROR("parse data_version failed", KR(tmp_ret), K(value));
+            } else if (OB_TMP_FAIL(ODV_MGR.set(tenant_id, data_version))) {
+              LOG_WARN("fail to set data_version", KR(tmp_ret), K(tenant_id), K(data_version));
+            }
+            FLOG_INFO("[COMPATIBLE] [DATA_VERSION] load data_version from config file",
+                      KR(ret), "tenant_id", get_tenant_id(),
+                      "version", (*pp_item)->version(),
+                      "value", (*pp_item)->str(),
+                      "value_updated", (*pp_item)->value_updated(),
+                      "dump_version", (*pp_item)->dumped_version(),
+                      "dump_value", (*pp_item)->spfile_str(),
+                      "dump_value_updated", (*pp_item)->dump_value_updated());
+          } else if (0 == enable_compatible_monotonic_cfg.case_compare(name)) {
+            ObString v_str((*pp_item)->str());
+            ODV_MGR.set_enable_compatible_monotonic(0 == v_str.case_compare("True") ? true : false);
+          }
         }
       }
     };
@@ -410,12 +434,14 @@ OB_DEF_SERIALIZE(ObCommonConfig)
   ObConfigContainer::const_iterator it = container_.begin();
   const ObString external_kms_info_cfg(EXTERNAL_KMS_INFO);
   const ObString ssl_external_kms_info_cfg(SSL_EXTERNAL_KMS_INFO);
+  const ObString compatible_cfg(COMPATIBLE);
   HEAP_VAR(char[OB_MAX_CONFIG_VALUE_LEN], external_info_val) {
     external_info_val[0] = '\0';
     for (; OB_SUCC(ret) && it != container_.end(); ++it) {
       if (OB_ISNULL(it->second)) {
         ret = OB_ERR_UNEXPECTED;
-      } else if (it->second->value_updated()) {
+      } else if (it->second->value_updated()
+                 || it->second->dump_value_updated()) {
         if (external_kms_info_cfg.case_compare(it->first.str()) == 0
             || ssl_external_kms_info_cfg.case_compare(it->first.str()) == 0) {
           int64_t hex_pos = 0, hex_c_str_pos = 0;
@@ -430,6 +456,16 @@ OB_DEF_SERIALIZE(ObCommonConfig)
         } else {
           ret = databuff_printf(buf, buf_len, pos, "%s=%s\n",
               it->first.str(), it->second->spfile_str());
+        }
+        if (OB_SUCC(ret) && 0 == compatible_cfg.case_compare(it->first.str())) {
+          FLOG_INFO("[COMPATIBLE] [DATA_VERSION] dump data_version",
+                    KR(ret), "tenant_id", get_tenant_id(),
+                    "version", it->second->version(),
+                    "value", it->second->str(),
+                    "value_updated", it->second->value_updated(),
+                    "dump_version", it->second->dumped_version(),
+                    "dump_value", it->second->spfile_str(),
+                    "dump_value_updated", it->second->dump_value_updated());
         }
       }
     } // for
@@ -460,8 +496,11 @@ OB_DEF_DESERIALIZE(ObCommonConfig)
     } else {
       MEMSET(copy_buf, '\0', data_len + 1);
       MEMCPY(copy_buf, buf + pos, data_len);
-      if (OB_FAIL(ObCommonConfig::add_extra_config(copy_buf, 0, false))) {
-        LOG_ERROR("Read server config failed", K(ret));
+      {
+        DRWLock::WRLockGuard guard(OTC_MGR.rwlock_);
+        if (OB_FAIL(ObCommonConfig::add_extra_config_unsafe(copy_buf, 0, false))) {
+          LOG_ERROR("Read server config failed", K(ret));
+        }
       }
 
       if (nullptr != copy_buf) {
@@ -484,7 +523,9 @@ OB_DEF_SERIALIZE_SIZE(ObCommonConfig)
     for (; OB_SUCC(ret) && it != container_.end(); ++it) {
       MEMSET(kv_str, '\0', OB_MAX_CONFIG_NAME_LEN + OB_MAX_CONFIG_VALUE_LEN + 1);
       int64_t pos = 0;
-      if (OB_NOT_NULL(it->second) && it->second->value_updated()) {
+      if (OB_NOT_NULL(it->second)
+          && (it->second->value_updated()
+              || it->second->dump_value_updated())) {
         if (OB_FAIL(databuff_printf(kv_str, OB_MAX_CONFIG_NAME_LEN + OB_MAX_CONFIG_VALUE_LEN,
                         pos, "%s=%s\n", it->first.str(), it->second->spfile_str()))) {
           LOG_WARN("write data buff failed", K(ret));

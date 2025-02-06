@@ -31,12 +31,16 @@ namespace sql
         : ObLogicalOperator(plan),
         algo_(WinDistAlgo::WIN_DIST_INVALID),
         use_hash_sort_(false),
+        use_topn_sort_(false),
         single_part_parallel_(false),
         range_dist_parallel_(false),
         role_type_(WindowFunctionRoleType::NORMAL),
         rd_sort_keys_cnt_(0),
         rd_pby_sort_cnt_(0),
-        wf_aggr_status_expr_(NULL)
+        wf_aggr_status_expr_(NULL),
+        origin_sort_card_(0.0),
+        input_rows_mem_bound_ratio_(0.0),
+        estimated_part_cnt_(0.0)
     {}
     virtual ~ObLogWindowFunction() {}
     virtual int get_explain_name_internal(char *buf,
@@ -53,6 +57,8 @@ namespace sql
     virtual int est_cost() override;
     virtual int est_width() override;
     virtual int do_re_est_cost(EstimateCostInfo &param, double &card, double &op_cost, double &cost) override;
+    int get_child_est_info(double &child_card, double &child_width, double &selectivity);
+    int inner_est_cost(double child_card, double child_width, double &op_cost);
     virtual int get_op_exprs(ObIArray<ObRawExpr*> &all_exprs) override;
     virtual int is_my_fixed_expr(const ObRawExpr *expr, bool &is_fixed) override;
     virtual int compute_op_ordering() override;
@@ -98,6 +104,10 @@ namespace sql
     WinDistAlgo get_win_dist_algo() const { return algo_; }
     void set_use_hash_sort(const bool use_hash_sort)  { use_hash_sort_ = use_hash_sort; }
     bool get_use_hash_sort() const { return use_hash_sort_; }
+    void set_use_topn_sort(const bool use_topn_sort)  { use_topn_sort_ = use_topn_sort; }
+    bool get_use_topn_sort() const { return use_topn_sort_; }
+    void set_origin_sort_card(double origin_sort_card) { origin_sort_card_ = origin_sort_card; }
+    double get_origin_sort_card() { return origin_sort_card_; }
     virtual int get_plan_item_info(PlanText &plan_text,
                                 ObSqlPlanItem &plan_item) override;
     virtual int print_outline_data(PlanText &plan_text) override;
@@ -105,12 +115,20 @@ namespace sql
     int add_win_dist_options(const ObLogicalOperator *op,
                              const ObIArray<ObWinFunRawExpr*> &all_win_funcs,
                              ObWindowDistHint &win_dist_hint);
+    double get_input_rows_mem_bound_ratio() const { return input_rows_mem_bound_ratio_; }
+    double get_estimated_part_cnt() const { return estimated_part_cnt_; }
+    int est_input_rows_mem_bound_ratio();
+    int est_window_function_part_cnt();
+    virtual int compute_property() override;
+    virtual int check_use_child_ordering(bool &used, int64_t &inherit_child_ordering_index)override;
+    virtual int compute_op_parallel_and_server_info() override;
   private:
     ObSEArray<ObWinFunRawExpr *, 4, common::ModulePageAllocator, true> win_exprs_;
 
     // for print PQ_DISTRIBUTE_WINDOW hint outline
     WinDistAlgo algo_;
     bool use_hash_sort_;
+    bool use_topn_sort_;
 
     // Single partition (no partition by) window function parallel process, need the PX COORD
     // to collect the partial result and broadcast the final result to each worker.
@@ -143,6 +161,12 @@ namespace sql
     // for reporting window function adaptive pushdown
     ObOpPseudoColumnRawExpr *wf_aggr_status_expr_;
     common::ObSEArray<bool, 8, common::ModulePageAllocator, true> pushdown_info_;
+
+    //for est_cost when use topn sort
+    double origin_sort_card_;
+    // for auto memory management
+    double input_rows_mem_bound_ratio_;
+    double estimated_part_cnt_;
   };
 }
 }

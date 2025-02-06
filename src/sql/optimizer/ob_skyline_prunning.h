@@ -17,6 +17,7 @@
 #include "lib/utility/ob_macro_utils.h"
 #include "lib/oblog/ob_log.h"
 #include "lib/container/ob_array.h"
+#include "sql/optimizer/ob_sharding_info.h"
 
 namespace oceanbase
 {
@@ -36,6 +37,7 @@ public:
     INDEX_BACK = 0,
     INTERESTING_ORDER,
     QUERY_RANGE,
+    SHARDING_INFO,
     MAX_DIM //max dimension
   };
   enum CompareStat {
@@ -53,7 +55,7 @@ public:
   virtual int compare(const ObSkylineDim &other, CompareStat &status) const = 0;
   Dimension get_dim_type() const { return dim_type_; }
   static const int64_t DIM_COUNT = static_cast<int64_t>(MAX_DIM);;
-  TO_STRING_KV(K(dim_type_));
+  VIRTUAL_TO_STRING_KV(K(dim_type_));
 private:
   const Dimension dim_type_;
 };
@@ -61,31 +63,16 @@ private:
 class ObIndexBackDim : public ObSkylineDim
 {
 public:
-  ObIndexBackDim() : ObSkylineDim(INDEX_BACK), need_index_back_(false),
-    has_interesting_order_(true),
-    can_extract_range_(true),
-    index_column_cnt_(0),
-    filter_column_cnt_(0)
-  { MEMSET(filter_column_ids_, 0, sizeof(uint64_t) * common::OB_USER_MAX_ROWKEY_COLUMN_NUMBER); }
+  friend class ObOptimizerTraceImpl;
+  ObIndexBackDim() : ObSkylineDim(INDEX_BACK), need_index_back_(false)
+  {}
 
   virtual ~ObIndexBackDim() {}
   void set_index_back(const bool index_back) { need_index_back_ = index_back; }
-  void set_interesting_order(const bool has) { has_interesting_order_ = has; }
-  void set_extract_range(const bool can) { can_extract_range_ = can;}
-  void set_index_column_cnt(const int64_t size) { index_column_cnt_ = size; }
-  int add_filter_column_ids(const common::ObIArray<uint64_t> &filter_column_ids);
   virtual int compare(const ObSkylineDim &other, CompareStat &status) const;
-  TO_STRING_KV(K_(need_index_back), K_(has_interesting_order), K_(can_extract_range),
-               K_(index_column_cnt),
-               "restrcit_ids", common::ObArrayWrap<uint64_t>(filter_column_ids_, filter_column_cnt_));
+  VIRTUAL_TO_STRING_KV(K_(need_index_back));
 private:
   bool need_index_back_;
-  bool has_interesting_order_;
-  bool can_extract_range_;
-  int64_t index_column_cnt_;
-  //some filter conditions on index columns
-  int64_t filter_column_cnt_;
-  uint64_t filter_column_ids_[common::OB_USER_MAX_ROWKEY_COLUMN_NUMBER];
 };
 
 
@@ -100,6 +87,7 @@ private:
 class ObInterestOrderDim : public ObSkylineDim
 {
 public:
+  friend class ObOptimizerTraceImpl;
   ObInterestOrderDim() : ObSkylineDim(INTERESTING_ORDER),
     is_interesting_order_(false),
     column_cnt_(0),
@@ -116,7 +104,7 @@ public:
   void set_extract_range(const bool can) { can_extract_range_ = can; }
   int add_filter_column_ids(const common::ObIArray<uint64_t> &filter_column_ids);
   virtual int compare(const ObSkylineDim &other, CompareStat &status) const;
-  TO_STRING_KV(K_(is_interesting_order),
+  VIRTUAL_TO_STRING_KV(K_(is_interesting_order),
                K_(column_cnt),
                "column_ids", common::ObArrayWrap<uint64_t>(column_ids_, column_cnt_),
                K_(need_index_back),
@@ -145,17 +133,34 @@ private:
 class ObQueryRangeDim: public ObSkylineDim
 {
 public:
+  friend class ObOptimizerTraceImpl;
   ObQueryRangeDim() : ObSkylineDim(QUERY_RANGE),
-    column_cnt_(0)
+    column_cnt_(0),
+    contain_always_false_(false)
   { MEMSET(column_ids_, 0, sizeof(uint64_t) * common::OB_USER_MAX_ROWKEY_COLUMN_NUMBER);}
   virtual ~ObQueryRangeDim() {}
   virtual int compare(const ObSkylineDim &other, CompareStat &status) const;
   int add_rowkey_ids(const common::ObIArray<uint64_t> &column_ids);
-  TO_STRING_KV(K_(column_cnt),
+  void set_contain_always_false(bool contain_always_false) { contain_always_false_ = contain_always_false; }
+  VIRTUAL_TO_STRING_KV(K_(column_cnt), K_(contain_always_false),
                "rowkey_ids", common::ObArrayWrap<uint64_t>(column_ids_, column_cnt_));
 private:
   int64_t column_cnt_;
   uint64_t column_ids_[common::OB_USER_MAX_ROWKEY_COLUMN_NUMBER];
+  bool contain_always_false_;
+};
+
+class ObShardingInfoDim: public ObSkylineDim
+{
+public:
+  ObShardingInfoDim() : ObSkylineDim(SHARDING_INFO),
+    sharding_info_(NULL)
+  {}
+  virtual ~ObShardingInfoDim() {}
+  void set_sharding_info(ObShardingInfo *sharding_info) { sharding_info_ = sharding_info; }
+  virtual int compare(const ObSkylineDim &other, CompareStat &status) const;
+private:
+  ObShardingInfo *sharding_info_;
 };
 
 struct KeyPrefixComp
@@ -201,10 +206,6 @@ public:
   int add_skyline_dim(const ObSkylineDim &dim);
   void set_index_id(const uint64_t index_id) { index_id_ = index_id; }
   int add_index_back_dim(const bool is_index_back,
-                         const bool has_interest_order,
-                         const bool can_extract_range,
-                         const int64_t index_column_cnt,
-                         const common::ObIArray<uint64_t> &restrict_ids,
                          common::ObIAllocator &allocator);
   int add_interesting_order_dim(const bool is_index_back,
                                 const bool can_extract_range,
@@ -213,7 +214,9 @@ public:
                                 const common::ObIArray<bool> &const_column_info,
                                 common::ObIAllocator &allocator);
   int add_query_range_dim(const common::ObIArray<uint64_t> &prefix_range_ids,
-                          common::ObIAllocator &allocator);
+                          common::ObIAllocator &allocator,
+                          bool contain_always_false);
+  int add_sharding_info_dim(ObShardingInfo *sharding_info, ObIAllocator &allocator);
   bool can_prunning() const { return can_prunning_; }
   void set_can_prunning(const bool can) { can_prunning_ = can; }
   TO_STRING_KV(K_(index_id), K_(dim_count),

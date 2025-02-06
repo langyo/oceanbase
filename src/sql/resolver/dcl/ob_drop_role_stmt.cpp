@@ -13,10 +13,6 @@
 #define USING_LOG_PREFIX SQL_RESV
 #include "sql/resolver/dcl/ob_drop_role_stmt.h"
 
-#include "share/ob_define.h"
-#include "lib/string/ob_string.h"
-#include "lib/string/ob_strings.h"
-#include "lib/utility/ob_print_utils.h"
 
 using namespace oceanbase;
 using namespace oceanbase::common;
@@ -25,14 +21,16 @@ using namespace oceanbase::sql;
 ObDropRoleStmt::ObDropRoleStmt(ObIAllocator *name_pool)
     : ObDDLStmt(name_pool, stmt::T_DROP_ROLE),
       tenant_id_(OB_INVALID_ID),
-      role_name_()
+      role_name_(),
+      if_exists_(false)
 {
 }
 
 ObDropRoleStmt::ObDropRoleStmt()
     : ObDDLStmt(NULL, stmt::T_DROP_ROLE),
       tenant_id_(OB_INVALID_ID),
-      role_name_()
+      role_name_(),
+      if_exists_(false)
 {
 }
 

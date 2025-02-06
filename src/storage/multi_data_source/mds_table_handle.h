@@ -15,6 +15,9 @@
 #include "lib/ob_errno.h"
 #include "mds_table_impl.h"
 #include "lib/guard/ob_light_shared_gaurd.h"
+#include "storage/multi_data_source/runtime_utility/common_define.h"
+#include "storage/multi_data_source/compile_utility/mds_dummy_key.h"
+#include "storage/tablet/ob_tablet_create_delete_mds_user_data.h"
 
 namespace oceanbase
 {
@@ -38,6 +41,7 @@ public:
   int init(ObIAllocator &allocator,
            const ObTabletID tablet_id,
            const share::ObLSID ls_id,
+           const share::SCN mds_ckpt_scn_from_tablet,// this is used to filter replayed nodes after removed action
            ObTabletPointer *pointer,
            ObMdsTableMgr *mgr_handle = nullptr);
   template <typename UnitKey, typename UnitValue>
@@ -46,24 +50,31 @@ public:
   int mark_removed_from_t3m(ObTabletPointer *pointer) const;
   int mark_switched_to_empty_shell() const;
   template <int N>
-  int forcely_reset_mds_table(const char (&reason)[N]);
+  int forcely_remove_nodes(const char (&reason)[N], share::SCN redo_scn_limit);
   /******************************Single Key Unit Access Interface**********************************/
   template <typename T>
   int set(T &&data, MdsCtx &ctx, const int64_t lock_timeout_us = 0);
   template <typename T>
   int replay(T &&data, MdsCtx &ctx, const share::SCN &scn);
+  template <typename OP, ENABLE_IF_LIKE_FUNCTION(OP, int(const UserMdsNode<DummyKey, ObTabletCreateDeleteMdsUserData>&))>
+  int get_tablet_status_node(OP &&read_op, const int64_t read_seq = 0) const;
   template <typename T, typename OP, ENABLE_IF_LIKE_FUNCTION(OP, int(const T&))>
-  int get_latest(OP &&read_op, bool &is_committed, const int64_t read_seq = 0) const;
+  int get_latest(OP &&read_op,
+                 MdsWriter &writer,// FIXME(xuwang.txw): should not exposed, will be removed later
+                 TwoPhaseCommitState &trans_stat,// FIXME(xuwang.txw): should not exposed, will be removed later
+                 share::SCN &trans_version,// FIXME(xuwang.txw): should not exposed, will be removed later
+                 const int64_t read_seq = 0) const;
+  template <typename T, typename OP, ENABLE_IF_LIKE_FUNCTION(OP, int(const T&))>
+  int get_latest_committed(OP &&read_op) const;
   template <typename T, typename OP, ENABLE_IF_LIKE_FUNCTION(OP, int(const T&))>
   int get_snapshot(OP &&read_op,
                    const share::SCN snapshot = share::SCN::max_scn(),
-                   const int64_t read_seq = 0,
                    const int64_t timeout_us = 0) const;
   template <typename T, typename OP, ENABLE_IF_LIKE_FUNCTION(OP, int(const T&))>
   int get_by_writer(OP &&read_op,
                     const MdsWriter &writer,
                     const share::SCN snapshot = share::SCN::max_scn(),
-                    const int64_t read_seq = 0,
+                    const transaction::ObTxSEQ read_seq = transaction::ObTxSEQ::MAX_VAL(),
                     const int64_t timeout_us = 0) const;
   template <typename T>
   int is_locked_by_others(bool &is_locked, const MdsWriter &self = MdsWriter()) const;
@@ -79,30 +90,40 @@ public:
   template <typename Key, typename Value>
   int replay_remove(const Key &key, MdsCtx &ctx, share::SCN &scn);
   template <typename Key, typename Value, typename OP>
-  int get_latest(const Key &key, OP &&read_op, bool &is_committed, const int64_t read_seq = 0) const;
+  int get_latest(const Key &key,
+                 OP &&read_op,
+                 MdsWriter &writer,// FIXME(xuwang.txw): should not exposed, will be removed later
+                 TwoPhaseCommitState &trans_stat,// FIXME(xuwang.txw): should not exposed, will be removed later
+                 share::SCN &trans_version,// FIXME(xuwang.txw): should not exposed, will be removed later
+                 const int64_t read_seq = 0) const;
+  template <typename Key, typename Value, typename OP>
+  int get_latest_committed(const Key &key,
+                           OP &&read_op) const;
   template <typename Key, typename Value, typename OP>
   int get_snapshot(const Key &key,
                    OP &&read_op,
                    const share::SCN snapshot = share::SCN::max_scn(),
-                   const int64_t read_seq = 0,
                    const int64_t timeout_us = 0) const;
   template <typename Key, typename Value, typename OP>
   int get_by_writer(const Key &key,
                     OP &&read_op,
                     const MdsWriter &writer,
-                    const share::SCN snapshot = share::SCN::max_scn(),
-                    const int64_t read_seq = 0,
+                    const share::SCN snapshot,// if readed node's writer is not input writer, compared with snapshot
+                    const transaction::ObTxSEQ read_seq = transaction::ObTxSEQ::MAX_VAL(),// if readed node's writer is input writer, compared with read_seq
                     const int64_t timeout_us = 0) const;
   template <typename Key, typename Value>
   int is_locked_by_others(const Key &key,
                           bool &is_locked,
                           const MdsWriter &self = MdsWriter()) const;
   /************************************************************************************************/
-  template <typename DUMP_OP, ENABLE_IF_LIKE_FUNCTION(DUMP_OP, int(const MdsDumpKV &))>
-  int for_each_unit_from_small_key_to_big_from_old_node_to_new_to_dump(DUMP_OP &&for_each_op,
-                                                                       const int64_t mds_construct_sequence,
-                                                                       const bool for_flush) const;
-  int flush(share::SCN need_advanced_rec_scn_lower_limit);
+  template <ScanRowOrder SCAN_ROW_ORDER,
+            ScanNodeOrder SCAN_NODE_ORDER,
+            typename DUMP_OP,
+            ENABLE_IF_LIKE_FUNCTION(DUMP_OP, int(const MdsDumpKV &))>
+  int scan_all_nodes_to_dump(DUMP_OP &&for_each_op,
+                             const int64_t mds_construct_sequence,
+                             const bool for_flush) const;
+  int flush(share::SCN need_advanced_rec_scn_lower_limit, share::SCN max_decided_scn);
   int is_flushing(bool &is_flushing) const;
   void on_flush(const share::SCN &flush_scn, const int flush_ret);
   int try_recycle(const share::SCN &recycle_scn);// release nodes
@@ -115,10 +136,13 @@ public:
   MdsTableBase *get_mds_table_ptr() { return p_mds_table_base_.ptr(); }
   TO_STRING_KV(K_(p_mds_table_base), K_(mds_table_id));
 public:// compile error message
-  template <typename DUMP_OP, ENABLE_IF_NOT_LIKE_FUNCTION(DUMP_OP, int(const MdsDumpKV &))>
-  int for_each_unit_from_small_key_to_big_from_old_node_to_new_to_dump(DUMP_OP &&for_each_op,
-                                                                       const int64_t mds_construct_sequence,
-                                                                       const bool for_flush) const {
+  template <ScanRowOrder SCAN_ROW_ORDER,
+            ScanNodeOrder SCAN_NODE_ORDER,
+            typename DUMP_OP,
+            ENABLE_IF_NOT_LIKE_FUNCTION(DUMP_OP, int(const MdsDumpKV &))>
+  int scan_all_nodes_to_dump(DUMP_OP &&for_each_op,
+                             const int64_t mds_construct_sequence,
+                             const bool for_flush) const {
     static_assert(OB_TRAIT_IS_FUNCTION_LIKE(DUMP_OP, int(const MdsDumpKV &)),
                   "for_each_op required to be used like: int for_each_op(const MdsDumpKV &)");
     return OB_NOT_SUPPORTED;
@@ -126,66 +150,6 @@ public:// compile error message
 private:
   uint8_t mds_table_id_;
   ObLightSharedPtr<MdsTableBase> p_mds_table_base_;
-};
-
-inline void construct_lock_guard(mds::MdsRLockGuard &guard, mds::MdsLock &lock) {
-  guard.~MdsRLockGuard();
-  new (&guard) mds::MdsRLockGuard(lock);
-}
-
-template <typename UnitKey, typename UnitValue>
-struct ObMdsKvRowScanIterator {// will lock unit when init, but won't lock row when get_next_kv_row()
-  using KvRowIter = typename mds::MdsUnit<UnitKey, UnitValue>::iterator;
-  using KvRow = mds::KvPair<UnitKey, mds::Row<UnitKey, UnitValue>>;
-  ObMdsKvRowScanIterator();
-  int init(mds::MdsTableHandle &mds_table_handle);
-  int get_next_kv_row(KvRow *&p_kv_row);
-  TO_STRING_KV(KP(this), K_(is_inited), K_(is_first_scan),\
-               K(typeid(UnitKey).name()), K(typeid(UnitValue).name()))
-private:
-  bool is_inited_;
-  bool is_first_scan_;
-  mds::MdsUnit<UnitKey, UnitValue> *p_mds_unit_;
-  KvRowIter kv_row_iter_;
-  mds::MdsRLockGuard unit_guard_;
-};
-
-template <typename UnitKey, typename UnitValue>
-struct ObMdsNodeScanIterator {// will lock row when init, but won't lock node when get_next()
-  using KvRow = mds::KvPair<UnitKey, mds::Row<UnitKey, UnitValue>>;
-  using KvRowIter = typename mds::MdsUnit<UnitKey, UnitValue>::iterator;
-  using NodeIter = typename KvRowIter::row_type::iterator;
-  ObMdsNodeScanIterator();
-  int init(KvRow *&p_kv_row);
-  int get_next_kv_node(UnitKey &key, mds::UserMdsNode<UnitKey, UnitValue> *&p_node);
-  bool is_valid() const;
-  void reset();
-  TO_STRING_KV(KP(this), K_(is_inited), K_(is_first_scan),\
-               K(typeid(UnitKey).name()), K(typeid(UnitValue).name()))
-private:
-  bool is_inited_;
-  bool is_first_scan_;
-  KvRow *p_mds_kv_row_;
-  NodeIter node_iter_;
-  mds::MdsRLockGuard row_guard_;
-};
-
-template <typename UnitKey, typename UnitValue>
-struct ObMdsUnitRowNodeScanIterator {// will add mds table ref when init to make sure inner iter safe
-  using KvRow = mds::KvPair<UnitKey, mds::Row<UnitKey, UnitValue>>;
-  using KvRowIter = typename mds::MdsUnit<UnitKey, UnitValue>::iterator;
-  using NodeIter = typename KvRowIter::row_type::iterator;
-  ObMdsUnitRowNodeScanIterator();
-  int init(mds::MdsTableHandle &mds_table_handle);
-  int get_next(UnitKey &key, mds::UserMdsNode<UnitKey, UnitValue> *&p_node);
-  TO_STRING_KV(KP(this), K_(is_inited), K_(is_first_scan), K_(mds_table_handle),\
-               K(typeid(UnitKey).name()), K(typeid(UnitValue).name()))
-private:
-  bool is_inited_;
-  bool is_first_scan_;
-  mds::MdsTableHandle mds_table_handle_;
-  ObMdsKvRowScanIterator<UnitKey, UnitValue> row_scan_iter_;
-  ObMdsNodeScanIterator<UnitKey, UnitValue> node_scan_iter_;
 };
 
 }

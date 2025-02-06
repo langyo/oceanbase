@@ -12,14 +12,8 @@
 
 #define USING_LOG_PREFIX STORAGE
 #include "ob_ls_remove_member_dag.h"
-#include "observer/ob_server.h"
-#include "share/rc/ob_tenant_base.h"
 #include "share/scheduler/ob_dag_warning_history_mgr.h"
-#include "storage/tx_storage/ob_ls_handle.h"
-#include "storage/tx_storage/ob_ls_service.h"
 #include "logservice/ob_log_service.h"
-#include "lib/hash/ob_hashset.h"
-#include "storage/high_availability/ob_storage_ha_utils.h"
 
 using namespace oceanbase;
 using namespace share;
@@ -132,10 +126,13 @@ int ObLSRemoveMemberDag::fill_info_param(compaction::ObIBasicInfoParam *&out_par
   if (!is_inited_) {
     ret = OB_NOT_INIT;
     LOG_WARN("ls remove member dag do not init", K(ret));
-  } else if (OB_FAIL(ADD_DAG_WARN_INFO_PARAM(out_param, allocator, get_type(),
-                                  ctx_.arg_.ls_id_.id(),
-                                  "remove_member", to_cstring(ctx_.arg_.remove_member_.get_server())))) {
-    LOG_WARN("failed to fill info param", K(ret));
+  } else {
+    ObCStringHelper helper;
+    if (OB_FAIL(ADD_DAG_WARN_INFO_PARAM(out_param, allocator, get_type(),
+        ctx_.arg_.ls_id_.id(),
+        "remove_member", helper.convert(ctx_.arg_.remove_member_.get_server())))) {
+      LOG_WARN("failed to fill info param", K(ret));
+    }
   }
   return ret;
 }
@@ -146,9 +143,13 @@ int ObLSRemoveMemberDag::fill_dag_key(char *buf, const int64_t buf_len) const
   if (!is_inited_) {
     ret = OB_NOT_INIT;
     LOG_WARN("ls remove member dag do not init", K(ret));
-  } else if (OB_FAIL(databuff_printf(buf, buf_len,
-       "ObLSRemoveMemberDag: ls_id = %s", to_cstring(ctx_.arg_.ls_id_)))) {
-    LOG_WARN("failed to fill dag key", K(ret), K(ctx_));
+  } else {
+    int64_t pos = 0;
+    ret = databuff_printf(buf, buf_len, pos, "ObLSRemoveMemberDag: ls_id = ");
+    OB_SUCCESS != ret ? : ret = databuff_printf(buf, buf_len, pos, ctx_.arg_.ls_id_);
+    if (OB_FAIL(ret)) {
+      LOG_WARN("failed to fill dag key", K(ret), K(ctx_));
+    }
   }
   return ret;
 }

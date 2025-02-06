@@ -14,17 +14,12 @@
 
 #include "ob_tenant_weak_read_service.h"
 
-#include "lib/allocator/ob_mod_define.h"                        // ObModIds
-#include "lib/rc/ob_rc.h"
-#include "share/ob_thread_mgr.h"                                // TG
-#include "observer/ob_server_struct.h"                          // GCTX
 
 #include "ob_weak_read_service_rpc.h"                           // ObIWrsRpc
 #include "ob_weak_read_util.h"                                  // ObWeakReadUtil
-#include "storage/ob_super_block_struct.h"
 #include "rpc/obrpc/ob_rpc_net_handler.h"
-#include "share/location_cache/ob_location_service.h"
 #include "storage/tx_storage/ob_ls_service.h"
+#include "lib/ash/ob_active_session_guard.h"
 
 #define MOD_STR "[WRS] [TENANT_WEAK_READ_SERVICE] "
 
@@ -208,7 +203,9 @@ int ObTenantWeakReadService::get_cluster_version_internal_(SCN &version,
   if (OB_UNLIKELY(! inited_)) {
     ret = OB_NOT_INIT;
   } else if (OB_FAIL(cluster_service_.get_cluster_version(version))) {
-    LOG_WARN("get weak read cluster version fail", KR(ret), K(version), K(tenant_id_));
+    if (REACH_TIME_INTERVAL(5 * 1000 * 1000)) {
+      LOG_WARN("get weak read cluster version fail", KR(ret), K(version), K(tenant_id_));
+    }
     if (OB_NEED_RETRY == ret) {
       // self may be WRS Leader while not ready, need retry
     } else if (OB_NOT_IN_SERVICE == ret || OB_NOT_MASTER == ret) {
@@ -706,6 +703,7 @@ void ObTenantWeakReadService::run1()
     int64_t wait_interval = std::min(ObWeakReadUtil::replica_keepalive_interval(),
                                      weak_read_refresh_interval - (end_tstamp - begin_tstamp));
     if (wait_interval > 0) {
+      common::ObBKGDSessInActiveGuard inactive_guard;
       thread_cond_.timedwait(wait_interval);
     }
   }

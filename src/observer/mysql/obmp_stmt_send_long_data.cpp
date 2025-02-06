@@ -14,17 +14,8 @@
 
 #include "observer/mysql/obmp_stmt_send_long_data.h"
 
-#include "lib/worker.h"
-#include "lib/oblog/ob_log.h"
-#include "lib/stat/ob_session_stat.h"
-#include "rpc/ob_request.h"
-#include "share/schema/ob_schema_getter_guard.h"
-#include "sql/ob_sql_context.h"
-#include "sql/session/ob_sql_session_info.h"
 #include "sql/ob_sql.h"
-#include "observer/ob_req_time_service.h"
 #include "observer/omt/ob_tenant.h"
-#include "observer/mysql/obsm_utils.h"
 #include "observer/mysql/obmp_stmt_send_piece_data.h"
 #include "sql/plan_cache/ob_ps_cache.h"
 
@@ -46,7 +37,7 @@ ObMPStmtSendLongData::ObMPStmtSendLongData(const ObGlobalContext &gctx)
       exec_start_timestamp_(0),
       exec_end_timestamp_(0),
       stmt_id_(0),
-      param_id_(-1),
+      param_id_(OB_MAX_PARAM_ID),
       buffer_len_(0),
       buffer_(),
       need_disconnect_(false)
@@ -69,20 +60,29 @@ int ObMPStmtSendLongData::before_process()
   } else {
     const ObMySQLRawPacket &pkt = reinterpret_cast<const ObMySQLRawPacket&>(req_->get_packet());
     const char* pos = pkt.get_cdata();
-    // stmt_id
-    ObMySQLUtil::get_int4(pos, stmt_id_);
-    ObMySQLUtil::get_int2(pos, param_id_);
-    if (stmt_id_ < 1 || param_id_ < 0) {
-      ret = OB_ERR_PARAM_INVALID;
-      LOG_WARN("send long data get error info.", K(stmt_id_), K(param_id_));
-    } else {
-      buffer_len_ = pkt.get_clen()-7;
-      buffer_.assign_ptr(pos, static_cast<ObString::obstr_size_t>(buffer_len_));
-      LOG_INFO("get info success in send long data protocol.", 
-                  K(stmt_id_), K(param_id_), K(buffer_len_), K(buffer_));
+    defender_.init(pos, pkt.get_clen() - 1);  // pkt.get_cdata() do not include 1 byte for `request command code`
+
+    PS_STATIC_DEFENSE_CHECK(&defender_, 4 + 2)
+    {
+      ObMySQLUtil::get_int4(pos, stmt_id_);
+      ObMySQLUtil::get_uint2(pos, param_id_);
     }
-    LOG_INFO("send long data get param",K(stmt_id_), K(param_id_), 
-                K(buffer_len_), K(buffer_.length()), K(buffer_));
+
+    if (OB_SUCC(ret) && stmt_id_ < 1) {
+      ret = OB_ERR_PARAM_INVALID;
+      LOG_WARN("send_long_data receive unexpected stmt_id_", K(ret), K(stmt_id_), K(param_id_));
+    } else if (param_id_ >= OB_PARAM_ID_OVERFLOW_RISK_THRESHOLD) {
+      LOG_WARN("param_id_ has the risk of overflow", K(ret), K(stmt_id_), K(param_id_));
+    }
+    if (OB_SUCC(ret)) {
+      buffer_len_ = pkt.get_clen() - 7;
+      buffer_.assign_ptr(pos, static_cast<ObString::obstr_size_t>(buffer_len_));
+      LOG_INFO("resolve send_long_data protocol packet successfully",
+               K(stmt_id_), K(param_id_), K(buffer_len_));
+      LOG_DEBUG("send_long_data packet content", K(buffer_));
+    }
+    LOG_INFO("resolve send_long_data protocol packet",
+             K(ret), K(stmt_id_), K(param_id_), K(buffer_len_), K(buffer_.length()));
   }
   return ret;
 }
@@ -120,6 +120,7 @@ int ObMPStmtSendLongData::process()
     THIS_WORKER.set_session(sess);
     ObSQLSessionInfo::LockGuard lock_guard(session.get_query_lock());
     session.set_current_trace_id(ObCurTraceId::get_trace_id());
+    session.init_use_rich_format();
     session.get_raw_audit_record().request_memory_used_ = 0;
     observer::ObProcessMallocCallback pmcb(0,
           session.get_raw_audit_record().request_memory_used_);
@@ -131,6 +132,8 @@ int ObMPStmtSendLongData::process()
     if (OB_UNLIKELY(!session.is_valid())) {
       ret = OB_ERR_UNEXPECTED;
       LOG_ERROR("invalid session", K_(stmt_id), K_(param_id), K(ret));
+    } else if (OB_FAIL(process_kill_client_session(session))) {
+      LOG_WARN("client session has been killed", K(ret));
     } else if (OB_UNLIKELY(session.is_zombie())) {
       ret = OB_ERR_SESSION_INTERRUPTED;
       LOG_WARN("session has been killed", K(session.get_session_state()), K_(stmt_id), K_(param_id),
@@ -150,6 +153,11 @@ int ObMPStmtSendLongData::process()
                && OB_FAIL(session.update_sys_variable(SYS_VAR_OB_TRACE_INFO,
                                                       pkt.get_trace_info()))) {
       LOG_WARN("fail to update trace info", K(ret));
+    } else if (FALSE_IT(session.set_txn_free_route(pkt.txn_free_route()))) {
+    } else if (OB_FAIL(process_extra_info(session, pkt, need_response_error))) {
+      LOG_WARN("fail get process extra info, will disconnect", K(ret));
+      need_disconnect_ = true;
+    } else if (FALSE_IT(session.post_sync_session_info())) {
     } else {
       THIS_WORKER.set_timeout_ts(get_receive_timestamp() + query_timeout);
       session.partition_hit().reset();
@@ -169,7 +177,7 @@ int ObMPStmtSendLongData::process()
 
       if (!need_disconnect_) {
         ObPiece *piece = NULL;
-        ObPieceCache *piece_cache = static_cast<ObPieceCache*>(session.get_piece_cache(false));
+        ObPieceCache *piece_cache = session.get_piece_cache(false);
         if (OB_ISNULL(piece_cache)) {
           need_disconnect_ = true;
           LOG_WARN("piece cache is null.", K(ret), K(stmt_id_), K(param_id_));
@@ -204,15 +212,9 @@ int ObMPStmtSendLongData::process_send_long_data_stmt(ObSQLSessionInfo &session)
   setup_wb(session);
 
   ObVirtualTableIteratorFactory vt_iter_factory(*gctx_.vt_iter_creator_);
-  ObSessionStatEstGuard stat_est_guard(get_conn()->tenant_->id(), session.get_sessid());
-  const bool enable_trace_log = lib::is_trace_log_enabled();
-  if (enable_trace_log) {
-    ObThreadLogLevelUtils::init(session.get_log_id_level_map());
-  }
+  ObThreadLogLevelUtils::init(session.get_log_id_level_map());
   ret = do_process(session);
-  if (enable_trace_log) {
-    ObThreadLogLevelUtils::clear();
-  }
+  ObThreadLogLevelUtils::clear();
 
   //对于tracelog的处理，不影响正常逻辑，错误码无须赋值给ret
   int tmp_ret = OB_SUCCESS;
@@ -225,22 +227,28 @@ int ObMPStmtSendLongData::process_send_long_data_stmt(ObSQLSessionInfo &session)
 int ObMPStmtSendLongData::do_process(ObSQLSessionInfo &session)
 {
   int ret = OB_SUCCESS;
+  ObExecutingSqlStatRecord sqlstat_record;
   ObAuditRecordData &audit_record = session.get_raw_audit_record();
   audit_record.try_cnt_++;
   const bool enable_perf_event = lib::is_diagnose_info_enabled();
   const bool enable_sql_audit = GCONF.enable_sql_audit
                                 && session.get_local_ob_enable_sql_audit();
+  const bool enable_sqlstat = session.is_sqlstat_enabled();
   single_process_timestamp_ = ObTimeUtility::current_time();
   bool is_diagnostics_stmt = false;
 
   ObWaitEventStat total_wait_desc;
-  ObDiagnoseSessionInfo *di = ObDiagnoseSessionInfo::get_local_diagnose_info();
   {
     ObMaxWaitGuard max_wait_guard(enable_perf_event
-                                    ? &audit_record.exec_record_.max_wait_event_ : NULL, di);
-    ObTotalWaitGuard total_wait_guard(enable_perf_event ? &total_wait_desc : NULL, di);
+                                    ? &audit_record.exec_record_.max_wait_event_ : nullptr);
+    ObTotalWaitGuard total_wait_guard(enable_perf_event ? &total_wait_desc : nullptr);
     if (enable_perf_event) {
-      audit_record.exec_record_.record_start(di);
+      audit_record.exec_record_.record_start();
+    }
+    if (enable_sqlstat) {
+      sqlstat_record.record_sqlstat_start_value();
+      sqlstat_record.set_is_in_retry(session.get_is_in_retry());
+      session.sql_sess_record_sql_stat_start_value(sqlstat_record);
     }
     int64_t execution_id = 0;
     ObString sql = "send long data";
@@ -266,13 +274,17 @@ int ObMPStmtSendLongData::do_process(ObSQLSessionInfo &session)
       audit_record.exec_timestamp_.update_stage_time();
 
       if (enable_perf_event) {
-        audit_record.exec_record_.record_end(di);
+        audit_record.exec_record_.record_end();
         audit_record.exec_record_.wait_time_end_ = total_wait_desc.time_waited_;
         audit_record.exec_record_.wait_count_end_ = total_wait_desc.total_waits_;
         audit_record.update_event_stage_state();
         const int64_t time_cost = exec_end_timestamp_ - get_receive_timestamp();
         EVENT_INC(SQL_PS_PREPARE_COUNT);
         EVENT_ADD(SQL_PS_PREPARE_TIME, time_cost);
+      }
+      if (enable_sqlstat) {
+        sqlstat_record.record_sqlstat_end_value();
+
       }
     }
   } // diagnose end
@@ -316,7 +328,7 @@ int ObMPStmtSendLongData::do_process(ObSQLSessionInfo &session)
 int ObMPStmtSendLongData::store_piece(ObSQLSessionInfo &session)
 {
   int ret = OB_SUCCESS;
-  ObPieceCache *piece_cache = static_cast<ObPieceCache*>(session.get_piece_cache(true));
+  ObPieceCache *piece_cache = session.get_piece_cache(true);
   if (OB_ISNULL(piece_cache)) {
     ret = OB_ERR_UNEXPECTED;
     need_disconnect_ = true;
@@ -340,6 +352,8 @@ int ObMPStmtSendLongData::store_piece(ObSQLSessionInfo &session)
       LOG_WARN("add piece buffer fail.", K(ret), K(stmt_id_));
     } else {
       // send long data do not response.
+      LOG_INFO("store piece successfully", K(ret), K(session.get_sessid()),
+                                           K(stmt_id_), K(param_id_));
     }
   }
   return ret;

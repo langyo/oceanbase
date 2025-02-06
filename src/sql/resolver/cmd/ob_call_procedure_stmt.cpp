@@ -13,7 +13,6 @@
 #define USING_LOG_PREFIX SQL_RESV
 
 #include "ob_call_procedure_stmt.h"
-#include "pl/ob_pl_type.h"
 #include "sql/resolver/expr/ob_raw_expr_util.h"
 #include "sql/code_generator/ob_expr_generator_impl.h"
 
@@ -41,7 +40,7 @@ int ObCallProcedureInfo::add_out_param(
     LOG_WARN("failed to deep copy name", K(ret), K(name));
   } else if (OB_FAIL(out_name_.push_back(store_name))) {
     LOG_WARN("push back error", K(i), K(name), K(type), K(ret));
-  } else if (OB_FAIL(pl_data_type.deep_copy(allocator_, type))) {
+  } else if (OB_FAIL(pl_data_type.deep_copy(enum_set_ctx_, type))) {
     LOG_WARN("fail to deep copy pl data type", K(type), K(ret));
   } else if (OB_FAIL(out_type_.push_back(pl_data_type))) {
     LOG_WARN("push back error", K(i), K(name), K(type), K(ret));

@@ -10,8 +10,6 @@
  * See the Mulan PubL v2 for more details.
  */
 
-#include <sys/prctl.h>
-#include "lib/thread/ob_async_task_queue.h"
 #include "ob_ddl_task_executor.h"
 #include "share/ob_thread_mgr.h"
 
@@ -214,7 +212,7 @@ int ObDDLTaskExecutor::init(const int64_t task_num, int tg_id)
 {
   int ret = OB_SUCCESS;
   if (OB_UNLIKELY(is_inited_)) {
-    ret = common::OB_NOT_INIT;
+    ret = common::OB_INIT_TWICE;
     STORAGE_LOG(WARN, "ObDDLTaskExecutor has already been inited", K(ret));
   } else if (OB_UNLIKELY(task_num <= 0)) {
     ret = common::OB_INVALID_ARGUMENT;
@@ -251,6 +249,7 @@ void ObDDLTaskExecutor::run1()
           break;
         }
       } else if (OB_ISNULL(task)) {
+        ret = OB_ERR_SYS;
         STORAGE_LOG(WARN, "error unexpected, task must not be NULL", K(ret));
       } else if (task == first_retry_task) {
         // add the task back to the queue
@@ -274,7 +273,10 @@ void ObDDLTaskExecutor::run1()
       }
     }
     cond_.lock();
-    cond_.wait(CHECK_TASK_INTERVAL);
+    {
+      ObBKGDSessInActiveGuard inactive_guard;
+      cond_.wait(CHECK_TASK_INTERVAL);
+    }
     cond_.unlock();
     executed_task_count = 0;
     first_retry_task = NULL;

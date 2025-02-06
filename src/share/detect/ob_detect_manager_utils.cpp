@@ -9,14 +9,11 @@
  * MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
  * See the Mulan PubL v2 for more details.
  */
+#define USING_LOG_PREFIX SHARE
 
 #include "share/detect/ob_detect_manager_utils.h"
 #include "share/detect/ob_detect_manager.h"
-#include "sql/engine/px/ob_dfo.h"
-#include "share/interrupt/ob_global_interrupt_call.h"
-#include "sql/dtl/ob_dtl_interm_result_manager.h"
 #include "sql/engine/px/ob_px_sqc_handler.h"
-#include "sql/engine/px/p2p_datahub/ob_p2p_dh_msg.h"
 #include "sql/engine/px/ob_px_scheduler.h"
 
 using namespace oceanbase::sql;
@@ -48,6 +45,7 @@ int ObDetectManagerUtils::qc_register_detectable_id_into_dm(ObDetectableId &dete
   } else {
     ObDetectManager* dm = MTL(ObDetectManager*);
     if (OB_ISNULL(dm)) {
+      // ignore ret
       LIB_LOG(WARN, "[DM] dm is null", K(tenant_id));
     } else if (OB_FAIL(dm->register_detectable_id(detectable_id))) {
       LIB_LOG(WARN, "[DM] QC fail to register detectable_id", K(ret), K(detectable_id), K(tenant_id));
@@ -88,6 +86,7 @@ int ObDetectManagerUtils::qc_register_check_item_into_dm(ObDfo &dfo,
   uint64_t node_sequence_id = 0;
   ObDetectManager* dm = MTL(ObDetectManager*);
   if (OB_ISNULL(dm)) {
+    // ignore ret
     LIB_LOG(WARN, "[DM] dm is null", K(sqc_detectable_id));
   } else if (OB_SUCC(dm->register_check_item(
       sqc_detectable_id, cb, node_sequence_id, true,
@@ -136,6 +135,7 @@ void ObDetectManagerUtils::qc_unregister_all_check_items_from_dm(const ObIArray<
   int ret = OB_SUCCESS;
   ObDetectManager* dm = MTL(ObDetectManager*);
   if (OB_ISNULL(dm)) {
+    // ignore ret
     LIB_LOG(WARN, "[DM] dm is null");
   } else {
     for (int64_t idx = 0; idx < dfos.count(); ++idx) {
@@ -156,6 +156,7 @@ int ObDetectManagerUtils::sqc_register_into_dm(ObPxSqcHandler *sqc_handler, ObPx
   // must be success or sql being interrupted unexpectedly
   ObDetectManager* dm = MTL(ObDetectManager*);
   if (OB_ISNULL(dm)) {
+    // ignore ret
     LIB_LOG(WARN, "[DM] dm is null");
   } else if (OB_FAIL(dm->register_detectable_id(sqc_detectable_id))) {
     LIB_LOG(WARN, "[DM] sqc failed to register_detectable_id", K(ret), K(sqc_detectable_id), K(qc_detectable_id));
@@ -231,6 +232,7 @@ int ObDetectManagerUtils::single_dfo_register_check_item_into_dm(const common::O
       MTL_SWITCH(tenant_id) {
         ObDetectManager* dm = MTL(ObDetectManager*);
         if (OB_ISNULL(dm)) {
+          // ignore ret
           LIB_LOG(WARN, "[DM] dm is null", K(tenant_id));
         } else if (OB_FAIL(dm->register_check_item(
                           register_dm_info.detectable_id_, cb, node_sequence_id, false,
@@ -262,6 +264,7 @@ int ObDetectManagerUtils::temp_table_register_check_item_into_dm(const common::O
   if (OB_SUCC(ret)) {
     ObDetectManager* dm = MTL(ObDetectManager*);
     if (OB_ISNULL(dm)) {
+      // ignore ret
       LIB_LOG(WARN, "[DM] dm is null", K(qc_detectable_id));
     } else if (OB_FAIL(dm->register_check_item(
           qc_detectable_id, cb, node_sequence_id, false,
@@ -311,6 +314,7 @@ int ObDetectManagerUtils::p2p_datahub_register_check_item_into_dm(const common::
   } else {
     ObDetectManager* dm = MTL(ObDetectManager*);
     if (OB_ISNULL(dm)) {
+      // ignore ret
       LIB_LOG(WARN, "[DM] dm is null", K(qc_detectable_id));
     } else if (OB_SUCC(dm->register_check_item(
         qc_detectable_id, cb, node_sequence_id, false,

@@ -10,15 +10,11 @@
  * See the Mulan PubL v2 for more details.
  */
 
-#define USING_LOG_PREFIX  SQL_ENG
+#define USING_LOG_PREFIX SQL_ENG
 
 #include "ob_expr_from_unix_time.h"
-#include "lib/allocator/ob_allocator.h"
-#include "lib/timezone/ob_time_convert.h"
-#include "sql/session/ob_sql_session_info.h"
 #include "sql/engine/ob_exec_context.h"
 #include "sql/engine/expr/ob_datum_cast.h"
-#include "share/config/ob_server_config.h"
 
 namespace oceanbase
 {
@@ -28,7 +24,7 @@ namespace sql
 
 ObExprFromUnixTime::ObExprFromUnixTime(ObIAllocator &alloc)
     : ObFuncExprOperator(alloc, T_FUN_SYS_FROM_UNIX_TIME,
-                         N_FROM_UNIX_TIME, ONE_OR_TWO, NOT_VALID_FOR_GENERATED_COL, NOT_ROW_DIMENSION)
+                         N_FROM_UNIX_TIME, ONE_OR_TWO, VALID_FOR_GENERATED_COL, NOT_ROW_DIMENSION)
 {
 }
 
@@ -49,7 +45,11 @@ int ObExprFromUnixTime::calc_result_typeN(ObExprResType &type,
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("Invalid argument!", K(ret), K(params), K(params_count));
   } else if (1 == params_count) {
-    type.set_datetime();
+    if (type_ctx.enable_mysql_compatible_dates()) {
+      type.set_mysql_datetime();
+    } else {
+      type.set_datetime();
+    }
     ret = set_scale_for_single_param(type, params[0]);
 
     ObObjType param_calc_type = calc_one_param_type(params);
@@ -117,7 +117,8 @@ int ObExprFromUnixTime::cg_expr(ObExprCGCtx &op_cg_ctx,
 ObObjType ObExprFromUnixTime::calc_one_param_type(ObExprResType *params) const
 {
   ObObjType calc_param_type = params[0].get_type();
-  if (calc_param_type >= ObDateTimeType && calc_param_type <= ObYearType) {
+  if ((calc_param_type >= ObDateTimeType && calc_param_type <= ObYearType) ||
+        ob_is_mysql_compact_dates_type(calc_param_type)) {
     // do nothing
   } else {
     calc_param_type = ObNumberType;
@@ -143,6 +144,9 @@ int ObExprFromUnixTime::eval_one_param_fromtime(const ObExpr &expr,
   int ret = OB_SUCCESS;
   ObDatum *param_datum = NULL;
   const ObSQLSessionInfo *session = ctx.exec_ctx_.get_my_session();
+  ObSolidifiedVarsGetter helper(expr, ctx, ctx.exec_ctx_.get_my_session());
+  ObSQLMode sql_mode = 0;
+  const common::ObTimeZoneInfo *tz_info = NULL;
   if (OB_UNLIKELY(expr.arg_cnt_ != 1)
       || OB_ISNULL(expr.args_)
       || OB_ISNULL(expr.args_[0])
@@ -153,6 +157,10 @@ int ObExprFromUnixTime::eval_one_param_fromtime(const ObExpr &expr,
     LOG_WARN("failed to eval", K(ret));
   } else if (param_datum->is_null()) {
     expr_datum.set_null();
+  } else if (OB_FAIL(helper.get_sql_mode(sql_mode))) {
+    LOG_WARN("get sql mode failed", K(ret));
+  } else if (OB_FAIL(helper.get_time_zone_info(tz_info))) {
+    LOG_WARN("get tz info failed", K(ret));
   } else {
     int64_t usec_val;
     ObEvalCtx::TempAllocGuard alloc_guard(ctx);
@@ -160,22 +168,35 @@ int ObExprFromUnixTime::eval_one_param_fromtime(const ObExpr &expr,
       LOG_WARN("failed to get_usec_from_datum", K(ret));
       // if warn on failed
       ObCastMode cast_mode = CM_NONE;
-      ObSQLUtils::get_default_cast_mode(session->get_stmt_type(), session, cast_mode);
+      ObSQLUtils::get_default_cast_mode(session->get_stmt_type(),
+                                        session->is_ignore_stmt(),
+                                        sql_mode, cast_mode);
       if (CM_IS_WARN_ON_FAIL(cast_mode)) {
         ret = OB_SUCCESS;
         expr_datum.set_null();
       }
     } else if (usec_val < 0) {
       expr_datum.set_null();
-    } else if (OB_FAIL(ObTimeConverter::timestamp_to_datetime(
-                                          usec_val,
-                                          get_timezone_info(session),
-                                          usec_val))) {
-      LOG_WARN("failed to convert timestamp to datetime", K(ret));
-    } else if (OB_UNLIKELY(ObTimeConverter::is_valid_datetime(usec_val))) {
-      expr_datum.set_datetime(usec_val);
+    } else if (ObMySQLDateTimeType == expr.datum_meta_.type_) {
+      ObMySQLDateTime res_datetime = 0;
+      if (OB_FAIL(ObTimeConverter::timestamp_to_mdatetime(usec_val, tz_info, res_datetime))) {
+        LOG_WARN("failed to convert timestamp to mdatetime", K(ret));
+      } else if (OB_UNLIKELY(ObTimeConverter::is_valid_mdatetime(res_datetime))) {
+        expr_datum.set_mysql_datetime(res_datetime);
+      } else {
+        expr_datum.set_null();
+      }
     } else {
-      expr_datum.set_null();
+      if (OB_FAIL(ObTimeConverter::timestamp_to_datetime(
+                                            usec_val,
+                                            tz_info,
+                                            usec_val))) {
+        LOG_WARN("failed to convert timestamp to datetime", K(ret));
+      } else if (OB_UNLIKELY(ObTimeConverter::is_valid_datetime(usec_val))) {
+        expr_datum.set_datetime(usec_val);
+      } else {
+        expr_datum.set_null();
+      }
     }
   }
   return ret;
@@ -190,6 +211,10 @@ int ObExprFromUnixTime::eval_fromtime_normal(const ObExpr &expr,
   ObDatum *param2 = NULL;
   bool res_null = false;
   const ObSQLSessionInfo *session = ctx.exec_ctx_.get_my_session();
+  ObSolidifiedVarsGetter helper(expr, ctx, ctx.exec_ctx_.get_my_session());
+  ObSQLMode sql_mode = 0;
+  const common::ObTimeZoneInfo *tz_info = NULL;
+  ObString locale_name;
   if (OB_ISNULL(session)) {
     ret = OB_INVALID_ARGUMENT;
     LOG_WARN("session is null", K(ret));
@@ -207,6 +232,10 @@ int ObExprFromUnixTime::eval_fromtime_normal(const ObExpr &expr,
     LOG_WARN("unexpected null param2", K(ret));
   } else if (param2->is_null() || param2->get_string().empty()) { // 需要运行时cast
     expr_datum.set_null();
+  } else if (OB_FAIL(helper.get_sql_mode(sql_mode))) {
+    LOG_WARN("get sql mode failed", K(ret));
+  } else if (OB_FAIL(helper.get_time_zone_info(tz_info))) {
+    LOG_WARN("get tz info failed", K(ret));
   } else {
     int64_t usec_val;
     ObEvalCtx::TempAllocGuard alloc_guard(ctx);
@@ -217,10 +246,10 @@ int ObExprFromUnixTime::eval_fromtime_normal(const ObExpr &expr,
       LOG_WARN("failed to get_usec_from_datum", K(ret));
       // warn on fail mode
       ObCastMode cast_mode = CM_NONE;
-      int tmp_ret = OB_SUCCESS;
-      if (OB_UNLIKELY(OB_SUCCESS != (tmp_ret = ObSQLUtils::get_default_cast_mode(session->get_stmt_type(), session, cast_mode)))) {
-        LOG_WARN("get_default_cast_mode failed", K(tmp_ret), K(session->get_stmt_type()));
-      } else if (CM_IS_WARN_ON_FAIL(cast_mode)) {
+      ObSQLUtils::get_default_cast_mode(session->get_stmt_type(),
+                                        session->is_ignore_stmt(),
+                                        sql_mode, cast_mode);
+      if (CM_IS_WARN_ON_FAIL(cast_mode)) {
         ret = OB_SUCCESS;
       }
       expr_datum.set_null();
@@ -239,15 +268,20 @@ int ObExprFromUnixTime::eval_fromtime_normal(const ObExpr &expr,
         LOG_WARN("no more memory to alloc for buf", K(ret));
       } else if (OB_FAIL(ob_datum_to_ob_time_with_date(
                            expr_datum, ObTimestampType, NUMBER_SCALE_UNKNOWN_YET,
-                           get_timezone_info(session),
+                           tz_info,
                            ob_time,
-                           get_cur_time(ctx.exec_ctx_.get_physical_plan_ctx()), false, 0, false))) {
+                           get_cur_time(ctx.exec_ctx_.get_physical_plan_ctx()), 0, false))) {
         LOG_WARN("failed to cast datum to obtime with date", K(ret));
-      } else if (OB_FAIL(ObTimeConverter::ob_time_to_str_format(
-                                            ob_time,
-                                            param2->get_string(),
-                                            buf, BUF_LEN, pos, res_null))) {
-        LOG_WARN("failed to convert str", K(ret));
+      } else if (OB_FAIL(session->get_locale_name(locale_name))) {
+          LOG_WARN("failed to get locale time name", K(expr), K(expr_datum));
+      } else if (OB_FAIL(ObTimeConverter::ob_time_to_str_format(ob_time,
+                                                                param2->get_string(),
+                                                                buf,
+                                                                BUF_LEN,
+                                                                pos,
+                                                                res_null,
+                                                                locale_name))) {
+        LOG_WARN("failed to convert ob time to str with format");
       } else if (res_null) {
         expr_datum.set_null();
       } else {
@@ -296,11 +330,26 @@ int ObExprFromUnixTime::get_usec_from_datum(const common::ObDatum &param_datum,
     LOG_WARN("failed to get number", K(ret));
   } else if (OB_FAIL(param1.mul(param2, res, alloc))) {
     LOG_WARN("failed to mul", K(ret));
-  } else if (OB_LIKELY(res.is_valid_int64(tmp))) {
-    usec_val = tmp;
+  } else if (OB_FAIL(res.extract_valid_int64_with_round(tmp))) {
+    if (OB_DATA_OUT_OF_RANGE == ret) {
+      ret = OB_ERR_TRUNCATED_WRONG_VALUE;
+      ObString dec("DECIMAL");
+      const char *num_str = param2_tmp.format();
+      LOG_USER_ERROR(OB_ERR_TRUNCATED_WRONG_VALUE, dec.length(), dec.ptr(),
+                     static_cast<int>(strlen(num_str)), num_str);
+    }
+    LOG_WARN("extract valid int64 with round failed", K(ret), K(res));
   } else {
-    ret = OB_ERR_TRUNCATED_WRONG_VALUE;
+    usec_val = tmp;
   }
+  return ret;
+}
+
+DEF_SET_LOCAL_SESSION_VARS(ObExprFromUnixTime, raw_expr) {
+  int ret = OB_SUCCESS;
+  SET_LOCAL_SYSVAR_CAPACITY(2);
+  EXPR_ADD_LOCAL_SYSVAR(SYS_VAR_SQL_MODE);
+  EXPR_ADD_LOCAL_SYSVAR(SYS_VAR_TIME_ZONE);
   return ret;
 }
 }

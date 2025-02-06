@@ -13,12 +13,7 @@
 #define USING_LOG_PREFIX SQL_ENG
 
 #include "sql/engine/expr/ob_expr_sys_context.h"
-#include "sql/engine/expr/ob_expr_util.h"
-#include "lib/ob_errno.h"
-#include "lib/utility/ob_fast_convert.h"
-#include "sql/session/ob_sql_session_info.h"
 #include "sql/engine/ob_exec_context.h"
-#include "share/schema/ob_schema_struct.h"
 #include "sql/engine/ob_exec_context.h"
 #include "share/ob_global_context_operator.h"
 
@@ -101,6 +96,9 @@ ObExprSysContext::UserEnvParameter ObExprSysContext::userenv_parameters_[] =
   {"CLIENT_INFO", eval_client_info},
   {"MODULE", eval_module},
   {"CLIENT_IDENTIFIER", eval_client_identifier},
+  {"PROXY_USER", eval_proxy_user},
+  {"PROXY_USERID", eval_proxy_user_id},
+  {"AUTHENTICATED_IDENTITY", eval_auth_identity},
 };
 ObExprSysContext::NLS_Lang ObExprSysContext::lang_map_[] =
 {
@@ -402,7 +400,7 @@ int ObExprSysContext::eval_sessionid(const ObExpr &expr, ObDatum &res, const ObD
   const ObSQLSessionInfo *session = ctx.exec_ctx_.get_my_session();
   CK(OB_NOT_NULL(session));
   if (OB_SUCC(ret)) {
-    const uint64_t sid = session->get_sessid();
+    const uint64_t sid = session->get_compatibility_sessid();
     char out_id[256];
     sprintf(out_id, "%lu", sid);
     ObString out_id_str(strlen(out_id), out_id);
@@ -457,7 +455,7 @@ int ObExprSysContext::eval_instance(const ObExpr &expr, common::ObDatum &res,
   int ret = OB_SUCCESS;
   UNUSED(arg1);
   UNUSED(arg2);
-  uint64_t instance_id = GCTX.server_id_;
+  uint64_t instance_id = GCTX.get_server_id();
   //OZ(uint_string(expr, ctx, instance_id, res));
   char out_id[256];
   sprintf(out_id, "%lu", instance_id);
@@ -776,6 +774,7 @@ int ObExprSysContext::eval_sys_context(const ObExpr &expr, ObEvalCtx &ctx,
                                        ObDatum &res)
 {
   int ret = OB_SUCCESS;
+  DISABLE_SQL_MEMLEAK_GUARD;
   ObDatum *ns = NULL;
   ObDatum *para = NULL;
   eval_fun fun = NULL;
@@ -872,6 +871,81 @@ int ObExprSysContext::get_schema_guard(share::schema::ObSchemaGetterGuard &schem
     LOG_WARN("failed to get schema_service", K(ret));
   } else if (OB_FAIL(GCTX.schema_service_->get_tenant_schema_guard(tenant_id, schema_guard))) {
     LOG_WARN("failed to get schema guard", K(ret));
+  }
+  return ret;
+}
+
+int ObExprSysContext::eval_proxy_user(const ObExpr &expr, ObDatum &res, const ObDatum &arg1,
+                                const ObDatum &arg2, ObEvalCtx &ctx)
+{
+  int ret = OB_SUCCESS;
+  UNUSED(arg1);
+  UNUSED(arg2);
+
+  const ObSQLSessionInfo *session = ctx.exec_ctx_.get_my_session();
+  CK(OB_NOT_NULL(session));
+  if (OB_SUCC(ret)) {
+    const ObString &user_name = session->get_proxy_user_name();
+    ObString out_user_name;
+    ObExprStrResAlloc res_alloc(expr, ctx);
+    ObEvalCtx::TempAllocGuard alloc_guard(ctx);
+    ObIAllocator &calc_alloc = alloc_guard.get_allocator();
+    OZ(ObExprUtil::convert_string_collation(user_name, ObCharset::get_system_collation(),
+                                            out_user_name, expr.datum_meta_.cs_type_,
+                                            calc_alloc));
+    OZ(deep_copy_ob_string(res_alloc, out_user_name, out_user_name));
+    OX(res.set_string(out_user_name));
+  }
+  return ret;
+}
+
+int ObExprSysContext::eval_proxy_user_id(const ObExpr &expr, ObDatum &res,
+                                    const ObDatum &arg1, const ObDatum &arg2,
+                                    ObEvalCtx &ctx)
+{
+  int ret = OB_SUCCESS;
+  UNUSED(arg1);
+  UNUSED(arg2);
+
+  const ObSQLSessionInfo *session = ctx.exec_ctx_.get_my_session();
+  CK(OB_NOT_NULL(session));
+  if (OB_SUCC(ret)) {
+    uint64_t id = session->get_proxy_user_id();
+    char out_id[256];
+    sprintf(out_id, "%lu", id);
+    ObString out_id_str(strlen(out_id), out_id);
+    ObExprStrResAlloc res_alloc(expr, ctx);
+    ObEvalCtx::TempAllocGuard alloc_guard(ctx);
+    ObIAllocator &calc_alloc = alloc_guard.get_allocator();
+    OZ(ObExprUtil::convert_string_collation(out_id_str, ObCharset::get_system_collation(),
+                                            out_id_str, expr.datum_meta_.cs_type_,
+                                            calc_alloc));
+    OZ(deep_copy_ob_string(res_alloc, out_id_str, out_id_str));
+    OX(res.set_string(out_id_str));
+  }
+  return ret;
+}
+
+int ObExprSysContext::eval_auth_identity(const ObExpr &expr, ObDatum &res, const ObDatum &arg1,
+                                const ObDatum &arg2, ObEvalCtx &ctx)
+{
+  int ret = OB_SUCCESS;
+  UNUSED(arg1);
+  UNUSED(arg2);
+
+  const ObSQLSessionInfo *session = ctx.exec_ctx_.get_my_session();
+  CK(OB_NOT_NULL(session));
+  if (OB_SUCC(ret)) {
+    const ObString user_name = session->get_user_name();
+    ObString out_user_name;
+    ObExprStrResAlloc res_alloc(expr, ctx);
+    ObEvalCtx::TempAllocGuard alloc_guard(ctx);
+    ObIAllocator &calc_alloc = alloc_guard.get_allocator();
+    OZ(ObExprUtil::convert_string_collation(user_name, ObCharset::get_system_collation(),
+                                            out_user_name, expr.datum_meta_.cs_type_,
+                                            calc_alloc));
+    OZ(deep_copy_ob_string(res_alloc, out_user_name, out_user_name));
+    OX(res.set_string(out_user_name));
   }
   return ret;
 }

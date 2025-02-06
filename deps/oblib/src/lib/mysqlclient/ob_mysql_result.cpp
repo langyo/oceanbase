@@ -12,7 +12,6 @@
 
 #define USING_LOG_PREFIX LIB_MYSQLC
 #include "lib/mysqlclient/ob_mysql_result.h"
-#include "lib/timezone/ob_time_convert.h"
 
 namespace oceanbase
 {
@@ -150,6 +149,7 @@ int ObMySQLResult::format_precision_scale_length(int16_t &precision, int16_t &sc
       case ObLongTextType: {
         precision = -1;
         scale = -1;
+        length = 0;
         break;
       }
       default:
